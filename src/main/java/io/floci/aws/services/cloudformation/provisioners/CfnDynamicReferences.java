@@ -11,6 +11,8 @@ import io.floci.aws.services.ssm.model.ParameterHistory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.List;
+import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,6 +41,11 @@ public class CfnDynamicReferences {
     }
 
     private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.*?)\\}\\}");
+    /** The dynamic reference texts a string holds, without the text around them; never a resolved value. */
+    public static List<String> referencesIn(String value) {
+        return DYNAMIC_REF.matcher(value).results().map(MatchResult::group).toList();
+    }
+
     private static final Pattern SSM_DYNAMIC_REF_BODY =
             Pattern.compile("([a-zA-Z0-9_.\\-/]+)(?::([0-9]+))?");
 

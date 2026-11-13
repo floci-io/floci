@@ -69,7 +69,6 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
-import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -924,20 +923,12 @@ public class CloudFormationService implements ResourceProvider {
                 // What CfnDynamicReferences cannot resolve fails the operation when it runs; until
                 // then it is something to change. Only the reference text is logged, never a value.
                 LOG.warnv("Stack {0}: a dynamic reference did not resolve ({1}): {2}", stack.getStackName(),
-                        referencesIn(value), e.getMessage());
+                        String.join(", ", CfnDynamicReferences.referencesIn(value)), e.getMessage());
                 String form = UNRESOLVABLE_PREFIX + UUID.randomUUID();
                 unresolvable.add(form);
                 return form;
             }
         };
-    }
-
-    private static final Pattern DYNAMIC_REFERENCE_TEXT = Pattern.compile("\\{\\{resolve:[^}]*}}");
-
-    /** The dynamic references a string holds, without whatever text surrounds them. */
-    private static String referencesIn(String value) {
-        return DYNAMIC_REFERENCE_TEXT.matcher(value).results().map(MatchResult::group)
-                .collect(Collectors.joining(", "));
     }
 
     /**
@@ -1635,14 +1626,17 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * Whether a create-only property resolves differently now than the previous template resolved
-     * to against the state the update started from. The preview cannot see this for a resource the
-     * update itself changed after the preview was computed. A value that cannot be resolved is no
-     * evidence of a change.
+     * to under the previous deployment: its own parameters, conditions and mappings, and the ids
+     * and attributes the update started from ({@code previous}). The preview cannot see this for a
+     * resource the update itself changed after the preview was computed. A value that cannot be
+     * resolved, or a previous deployment that is not known ({@code previous} null), is no evidence
+     * of a change.
      */
     private static boolean resolvedCreateOnlyChanged(String resourceType, String logicalId, JsonNode priorProps,
                                                      JsonNode props, CloudFormationTemplateEngine current,
                                                      CloudFormationTemplateEngine previous) {
-        if (priorProps == null || props == null || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
+        if (previous == null || priorProps == null || props == null
+                || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
             return false;
         }
         boolean dynamic = false;
@@ -2684,9 +2678,16 @@ public class CloudFormationService implements ResourceProvider {
                     ? Set.of()
                     : changedResourceIds(stack, templateBody, params, region, comparedProperties,
                             replacedResourceIds);
-            JsonNode previousResources = isCreate
-                    ? objectMapper.missingNode()
-                    : previousResources(stack, previousState, region, accountId);
+            // The previous deployment: its template, parameters (as the change-set preview takes
+            // them: raw ones for a stack persisted before resolvedParameters existed) and conditions.
+            Map<String, String> previousParams = previousState.resolvedParameters().isEmpty()
+                    ? previousState.parameters() : previousState.resolvedParameters();
+            JsonNode parsedPrevious = isCreate ? objectMapper.missingNode()
+                    : parsePreviousTemplate(stack, previousState.templateBody());
+            Map<String, Boolean> previousConditions = parsedPrevious.isMissingNode() ? null
+                    : previousConditions(stack, parsedPrevious, previousParams, region, accountId);
+            JsonNode previousTemplate = previousConditions == null ? objectMapper.missingNode() : parsedPrevious;
+            JsonNode previousResources = previousResources(previousTemplate, previousConditions);
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
@@ -2728,8 +2729,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Boolean> conditions = resolveConditions(template, resolvedParams, stack, region, accountId);
 
             // Mappings
-            Map<String, JsonNode> mappings = new HashMap<>();
-            template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+            Map<String, JsonNode> mappings = templateMappings(template);
 
             // Process resources in order
             JsonNode resources = template.path("Resources");
@@ -2758,16 +2758,14 @@ public class CloudFormationService implements ResourceProvider {
             resourceAttrs.forEach((id, attrs) -> startResourceAttrs.put(id, new HashMap<>(attrs)));
 
             BiFunction<Map<String, String>, Map<String, Map<String, String>>, CloudFormationTemplateEngine> engineFor =
-                    (ids, attributes) -> new CloudFormationTemplateEngine(
-                            accountId, region, stack.getStackName(),
-                            stack.getStackId(), resolvedParams, ids, attributes, conditions, mappings, objectMapper,
-                            name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
-                            value -> dynamicReferences.resolveDynamicReferences(value, region, false),
-                            (name, output, outputRegion, roleArn) ->
-                                    resolveStackOutput(accountId, name, output, outputRegion, roleArn),
-                            parameterTypes,
-                            (id, attribute, value) -> dispatcher.attributeValue(
-                                    resources.path(id).path("Type").asText(), attribute, value));
+                    (ids, attributes) -> deploymentEngine(stack, region, accountId, resolvedParams, ids, attributes,
+                            conditions, mappings, parameterTypes, resources);
+            // What the previous template resolved to under the deployment it ran in, over the state
+            // the update started from; null when that deployment is not known.
+            CloudFormationTemplateEngine previousEngine = previousTemplate.isMissingNode() ? null
+                    : deploymentEngine(stack, region, accountId, previousParams, startPhysicalIds,
+                            startResourceAttrs, previousConditions, templateMappings(previousTemplate),
+                            parameterTypes(previousTemplate), previousTemplate.path("Resources"));
 
             StackResource failedResource = null;
             if (resources.isObject()) {
@@ -2851,7 +2849,7 @@ public class CloudFormationService implements ResourceProvider {
                         // after the preview was computed (a GetAtt of a resource whose attributes moved).
                         boolean replaces = replacedResourceIds.contains(logicalId)
                                 || (updating && resolvedCreateOnlyChanged(type, logicalId, priorProps, provisionProps, engine,
-                                        engineFor.apply(startPhysicalIds, startResourceAttrs)));
+                                        previousEngine));
                         PropertyChanges changes = PropertyChanges.between(type,
                                 updating, priorProps,
                                 provisionProps,
@@ -3824,34 +3822,72 @@ public class CloudFormationService implements ResourceProvider {
      * was never applied and is left out. Missing when there is no previous template, and when it no
      * longer parses: the update then proceeds as if nothing had been declared.
      */
-    private JsonNode previousResources(Stack stack, StackUpdateSnapshot previousState, String region,
-                                       String accountId) {
-        if (previousState.templateBody() == null) {
+    private JsonNode previousResources(JsonNode previousTemplate, Map<String, Boolean> conditions) {
+        if (previousTemplate.isMissingNode()) {
+            return previousTemplate;
+        }
+        ObjectNode resources = objectMapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> entry : previousTemplate.path("Resources").properties()) {
+            JsonNode definition = entry.getValue();
+            ObjectNode applied = resources.putObject(entry.getKey());
+            applied.set("Type", definition.path("Type"));
+            if (definition.path("Properties").isObject()) {
+                applied.set("Properties", appliedProperties(definition.path("Properties"), conditions));
+            }
+        }
+        return resources;
+    }
+
+    /** The previous template, or a missing node when the stack has none or it no longer parses. */
+    private JsonNode parsePreviousTemplate(Stack stack, String body) {
+        if (body == null) {
             return objectMapper.missingNode();
         }
         try {
-            JsonNode previousTemplate = parseTemplate(previousState.templateBody());
-            // As the change-set preview does: raw parameters for a stack persisted before
-            // resolvedParameters existed.
-            Map<String, String> previousParams = previousState.resolvedParameters().isEmpty()
-                    ? previousState.parameters() : previousState.resolvedParameters();
-            Map<String, Boolean> conditions = resolveConditions(previousTemplate, previousParams, stack, region,
-                    accountId);
-            ObjectNode resources = objectMapper.createObjectNode();
-            for (Map.Entry<String, JsonNode> entry : previousTemplate.path("Resources").properties()) {
-                JsonNode definition = entry.getValue();
-                ObjectNode applied = resources.putObject(entry.getKey());
-                applied.set("Type", definition.path("Type"));
-                if (definition.path("Properties").isObject()) {
-                    applied.set("Properties", appliedProperties(definition.path("Properties"), conditions));
-                }
-            }
-            return resources;
+            return parseTemplate(body);
         } catch (Exception e) {
             LOG.warnv("Previous template of stack {0} could not be evaluated ({1}); its updated resources see no prior properties",
                     stack.getStackName(), e.getMessage());
             return objectMapper.missingNode();
         }
+    }
+
+    /** The previous template's conditions under its own parameters; null when they do not evaluate. */
+    private Map<String, Boolean> previousConditions(Stack stack, JsonNode previousTemplate,
+                                                    Map<String, String> previousParams, String region,
+                                                    String accountId) {
+        try {
+            return resolveConditions(previousTemplate, previousParams, stack, region, accountId);
+        } catch (Exception e) {
+            LOG.warnv("Previous template of stack {0} could not be evaluated ({1}); its updated resources see no prior properties",
+                    stack.getStackName(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static Map<String, JsonNode> templateMappings(JsonNode template) {
+        Map<String, JsonNode> mappings = new HashMap<>();
+        template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        return mappings;
+    }
+
+    /** An engine for one deployment's template: its parameters, conditions, mappings and resource types. */
+    private CloudFormationTemplateEngine deploymentEngine(Stack stack, String region, String accountId,
+                                                          Map<String, String> params, Map<String, String> ids,
+                                                          Map<String, Map<String, String>> attributes,
+                                                          Map<String, Boolean> conditions,
+                                                          Map<String, JsonNode> mappings,
+                                                          Map<String, String> parameterTypes, JsonNode resources) {
+        return new CloudFormationTemplateEngine(
+                accountId, region, stack.getStackName(),
+                stack.getStackId(), params, ids, attributes, conditions, mappings, objectMapper,
+                name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                value -> dynamicReferences.resolveDynamicReferences(value, region, false),
+                (name, output, outputRegion, roleArn) ->
+                        resolveStackOutput(accountId, name, output, outputRegion, roleArn),
+                parameterTypes,
+                (id, attribute, value) -> dispatcher.attributeValue(
+                        resources.path(id).path("Type").asText(), attribute, value));
     }
 
     /**
