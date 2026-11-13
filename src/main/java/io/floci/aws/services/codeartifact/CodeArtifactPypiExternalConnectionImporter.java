@@ -294,7 +294,8 @@ public class CodeArtifactPypiExternalConnectionImporter {
                 importedRequested = importedAny;
                 return importedRequested;
             }
-            String importLockKey = repoId + "|" + packageName.get() + "|" + version.get();
+            String importLockKey = repoId + "|" + PypiserverSidecarClient.normalizePackageName(packageName.get())
+                    + "|" + version.get();
 
             // Splits the version's own files into the one filename actually requested (imported
             // synchronously below, so downloadFile's own proxy retry has real bytes to serve the

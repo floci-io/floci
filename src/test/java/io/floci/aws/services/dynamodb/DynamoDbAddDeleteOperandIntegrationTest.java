@@ -25,7 +25,7 @@ class DynamoDbAddDeleteOperandIntegrationTest {
     private static final String TABLE = "add-delete-operands";
     private static final String KEY = "{\"pk\":{\"S\":\"a\"}}";
     private static final String REFUSED = "Invalid UpdateExpression: Incorrect operand type for operator or function;"
-            + " operator: %s, operand type: %s, typeSet: ALLOWED_FOR_ADD_OPERAND";
+            + " operator: %1$s, operand type: %2$s, typeSet: ALLOWED_FOR_%1$s_OPERAND";
 
     @BeforeAll
     static void configureRestAssured() {

@@ -220,6 +220,12 @@ READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
 
+_SSM_TAGS = ("SSM tagging: a request names its resource by ResourceType and ResourceId, or tags the document or "
+             "association it creates, which the rule reads, while ResourceArnBuilder keeps building the parameter ARNs")
+READ_IN_HAND_BUILT.update({f"ssm:{operation}": _SSM_TAGS
+                           for operation in ("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
+                                             "CreateDocument", "CreateAssociation")})
+
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
          "matched in the vendored REST routes (regen_rest_routes.MODELS), which do not have its model yet")
@@ -898,26 +904,33 @@ def enum_members(models: dict[str, dict], operation: str) -> dict[str, set[str]]
 def picked_by_enum(types: list[str], formats: dict[str, str], members: dict[str, str],
                    enums: dict[str, set[str]]) -> list[dict] | None:
     """The resources of a request a member of which picks the type: one whose enum lists two or more of the action's
-    types (Route 53's tag calls name a `ResourceType` of `healthcheck` or `hostedzone`). Each type it lists is filled
-    from the member naming whatever the action acts on (`ResourceId`) when the request holds that type; None when no
-    member picks a type, or no member names the resource."""
+    types, a value naming a type when it matches it ignoring case and hyphens (Route 53's tag calls name a
+    `ResourceType` of `healthcheck` or `hostedzone`, SSM's a `Document` or a `ManagedInstance`). Each type it lists is
+    filled from the member naming whatever the action acts on (`ResourceId`), whatever kind of value the type's
+    variable is, when the request holds that value; None when no member picks a type, or no member names the
+    resource."""
     for picker, values in sorted(enums.items()):
-        kinds = [kind for kind in types if kind in values and kind in formats]
+        kinds = {kind: value for kind in types if kind in formats for value in values
+                 if _enum_key(value) == _enum_key(kind)}
         if len(kinds) < 2:
             continue
         picked = []
-        for kind in kinds:
+        for kind, value in kinds.items():
             variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
             if len(variables) != 1:
                 return None
-            named = [member for member in members if member != picker and stem(member) == "resource"
-                     and compatible(member, variables[0])]
+            named = [member for member in members if member != picker and stem(member) == "resource"]
             if not named:
                 return None
             member = min(named, key=lambda m: (members[m].endswith("[]"), len(m), m))
-            picked.append({"type": kind, "fill": {variables[0]: members[member]}, "when": {picker: [kind]}})
+            picked.append({"type": kind, "fill": {variables[0]: members[member]}, "when": {picker: [value]}})
         return picked
     return None
+
+
+def _enum_key(value: str) -> str:
+    """An enum value or a resource type as the two are compared: lowercased, without hyphens."""
+    return value.lower().replace("-", "")
 
 
 def string_patterns(models: dict[str, dict], operation: str) -> dict[str, set[str | None]]:

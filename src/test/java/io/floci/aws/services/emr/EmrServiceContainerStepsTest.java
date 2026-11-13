@@ -394,6 +394,21 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aFleetListedBeforeThePrimaryOneIsNamedAsListInstancesNamesIt() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("core-first", true, sparkStep("report", "CONTINUE"));
+        requested.setInstanceFleets(new ArrayList<>(List.of(fleet("CORE", 1, 0), fleet("MASTER", 1, 0),
+                fleet("TASK", 0, 1))));
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(new ClusterStorage.Node("1-1", "ip-10-1-0-1.ec2.internal", true),
+                new ClusterStorage.Node("2-1", "ip-10-2-0-1.ec2.internal", false)),
+                fixture.clusterStorage.yarns.get(0).nodes());
+    }
+
+    @Test
     void noMoreNodesRunThanTheSettingAllowsCoreNodesFirst() {
         fixture.clusterStorage.ownNetwork = true;
         EmrCluster requested = cluster("capped", true, sparkStep("report", "CONTINUE"));
