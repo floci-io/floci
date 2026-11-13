@@ -57,6 +57,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -403,6 +404,7 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        List<ContainerTeardown> prepared = ContainerTeardowns.prepareAll(containerTeardowns, LOG);
         // Flush persisted state to disk FIRST, before the slow proxy/container teardown below.
         // Stopping Docker sidecars (RDS/ElastiCache/etc.) can block long enough to exhaust the
         // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
@@ -440,7 +442,7 @@ public class EmulatorLifecycle {
         // Centralized teardown for process-bound containers (Lambda warm pool, ECS tasks,
         // EC2 instances, in-flight build/job containers). Runs before shutdownAll() so any
         // state written while stopping is captured by the final flush.
-        ContainerTeardowns.stopAll(containerTeardowns, LOG);
+        ContainerTeardowns.stopPrepared(prepared, LOG);
         runCleanup("DynamoDB backend", dynamoDbRuntime::stop);
         runCleanup("storage shutdown", storageFactory::shutdownAll);
 

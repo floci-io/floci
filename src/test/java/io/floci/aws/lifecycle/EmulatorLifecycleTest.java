@@ -187,6 +187,27 @@ class EmulatorLifecycleTest {
                 .thenReturn(Collections.emptyIterator());
     }
 
+    @Test
+    void preparesContainerOwnersBeforeRetiringSharedCredentials() {
+        ContainerTeardown first = Mockito.mock(ContainerTeardown.class);
+        ContainerTeardown second = Mockito.mock(ContainerTeardown.class);
+        when(containerTeardowns.iterator()).thenReturn(List.of(first, second).iterator());
+        when(ecsTaskRoleCredentialsConfig.enabled()).thenReturn(true);
+
+        emulatorLifecycle.onStop(new ShutdownEvent());
+
+        InOrder order = Mockito.inOrder(first, second, storageFactory, ecsTaskRoleCredentialsServer);
+        order.verify(first).beginTeardown();
+        order.verify(second).beginTeardown();
+        order.verify(storageFactory).flushAll();
+        order.verify(ecsTaskRoleCredentialsServer).stop();
+        order.verify(first).stopManagedContainers();
+        order.verify(second).stopManagedContainers();
+        order.verify(storageFactory).shutdownAll();
+        verify(first).beginTeardown();
+        verify(second).beginTeardown();
+    }
+
     private void stubStorageConfig() {
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.mode()).thenReturn("in-memory");

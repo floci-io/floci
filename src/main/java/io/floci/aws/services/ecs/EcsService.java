@@ -447,24 +447,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         stopManagedContainers();
     }
 
-    /**
-     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
-     * state reset. Task state is transient (memory-only), so without this the containers
-     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
-     * tick awaited, so it cannot restart drained tasks between this teardown and the final
-     * storage flush. A reset brings it back in {@link #afterReset()}. The task launcher is then
-     * interrupted and its launches awaited, so each lands its task before the sweep below. The
-     * stops the task stopper already has are let finish, since each owns its task's handle until
-     * it lands. The remaining handles are claimed atomically to avoid racing an explicit StopTask.
-     */
+    /** Stops task producers before any owner retires shared credentials or networking. */
     @Override
-    public void stopManagedContainers() {
-        ScheduledExecutorService current = reconciler;
-        current.shutdownNow();
-        try {
-            current.awaitTermination(2, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+    public void beginTeardown() {
+        synchronized (reconciliationPassLock) {
+            reconciler.shutdownNow();
         }
         // An interrupted launch fails into its own catch block, which lands the task STOPPED and
         // keeps a partial launch's handle, so the sweep below claims what it started.
@@ -477,6 +464,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
+     * state reset. Task state is transient (memory-only), so without this the containers
+     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
+     * tick awaited, so it cannot restart drained tasks between this teardown and the final
+     * storage flush. A reset brings it back in {@link #afterReset()}. The task launcher is then
+     * interrupted and its launches awaited, so each lands its task before the sweep below. The
+     * stops the task stopper already has are let finish, since each owns its task's handle until
+     * it lands. The remaining handles are claimed atomically to avoid racing an explicit StopTask.
+     */
+    @Override
+    public void stopManagedContainers() {
+        beginTeardown();
         drainTaskStopper();
         for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
             if (taskStops.containsKey(taskArn)) {
@@ -5261,6 +5263,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     void reconcile() {
         synchronized (reconciliationPassLock) {
+            if (reconciler.isShutdown()) {
+                return;
+            }
             try {
                 retryPreviousRunTaskVolumes();
             } catch (Exception e) {
@@ -5725,6 +5730,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     void reconcileServices() {
         synchronized (reconciliationPassLock) {
+            if (reconciler.isShutdown()) {
+                return;
+            }
             for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
                 try {
                     reconcileService(entry.getKey(), entry.getValue());

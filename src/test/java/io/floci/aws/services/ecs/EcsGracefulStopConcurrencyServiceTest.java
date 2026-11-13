@@ -10,12 +10,14 @@ import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -333,6 +335,65 @@ class EcsGracefulStopConcurrencyServiceTest {
         assertEquals("STOPPED", stopped.getLastStatus());
         assertEquals(137, stopped.getContainers().getFirst().getExitCode());
         assertEquals(2, stops.get());
+    }
+
+    @Test
+    void teardownPreparationPausesReconciliationUntilReset() throws Exception {
+        EcsService service = newService();
+        createService(service, "draining", 1);
+        tick(service);
+        EcsTask original = onlyRunningTask(service, "draining");
+
+        service.beginTeardown();
+        assertTrue(service.isReconcilerShutdown(), "preparation stops the scheduler before other owners drain");
+        service.updateService(CLUSTER, "draining", null, 2, null, REGION);
+        tick(service);
+        service.reconcileServices();
+        verify(containerManager, times(1)).startTask(any(), any(), any(), anyString());
+
+        service.stopManagedContainers();
+        verify(containerManager).stopTask(handleOf(original));
+        service.clear();
+        service.afterReset();
+        tick(service);
+        assertEquals(2, runningTasks(service, "draining").size(), "reset resumes the desired service count");
+    }
+
+    @Test
+    void teardownPreparationWaitsForTaskLaunchBeforeStoppingContainers() throws Exception {
+        EcsService service = newService();
+        createService(service, "launching", 1);
+        CountDownLatch launchEntered = new CountDownLatch(1);
+        CountDownLatch releaseLaunch = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            launchEntered.countDown();
+            assertTrue(releaseLaunch.await(30, TimeUnit.SECONDS), "test must release the in-flight launch");
+            Container container = new Container();
+            container.setName("app");
+            container.setRuntimeId("launching-container");
+            task.setContainers(List.of(container));
+            return new EcsTaskHandle(task.getTaskArn(), Map.of("app", container.getRuntimeId()), Map.of());
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        FutureTask<Void> launch = startTick(service);
+        FutureTask<Void> preparation = new FutureTask<>(service::beginTeardown, null);
+        Thread preparationThread = new Thread(preparation, "test-ecs-teardown-preparation");
+        preparationThread.setDaemon(true);
+        try {
+            assertTrue(launchEntered.await(5, TimeUnit.SECONDS), "the task launch must be in flight");
+            preparationThread.start();
+            Thread.State state = ThreadStates.awaitState(preparationThread,
+                    EnumSet.of(Thread.State.BLOCKED, Thread.State.TERMINATED), TICK_BUDGET,
+                    "teardown preparation");
+            assertEquals(Thread.State.BLOCKED, state, "preparation must wait for the admitted task launch");
+        } finally {
+            releaseLaunch.countDown();
+        }
+        launch.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+        preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+        EcsTask launched = onlyRunningTask(service, "launching");
+        service.stopManagedContainers();
+        verify(containerManager).stopTask(handleOf(launched));
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────

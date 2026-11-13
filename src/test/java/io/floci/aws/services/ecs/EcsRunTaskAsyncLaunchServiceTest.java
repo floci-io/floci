@@ -316,6 +316,38 @@ class EcsRunTaskAsyncLaunchServiceTest {
     }
 
     @Test
+    void preparationInterruptsAPullBeforeOtherOwnersDrainAndResetLaunchesAgain() throws Exception {
+        doAnswer(invocation -> {
+            startEntered.countDown();
+            try {
+                // A pull that only the teardown's interrupt ends.
+                new CountDownLatch(1).await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("image pull interrupted", e);
+            }
+            throw new IllegalStateException("the pull ended without an interrupt");
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        EcsService service = newService(false);
+        registerTaskDefinition(service, "teardown");
+        EcsTask response = run(service, "teardown");
+        assertTrue(startEntered.await(5, TimeUnit.SECONDS));
+
+        assertTimeoutPreemptively(LAUNCH_BUDGET, service::beginTeardown);
+
+        verify(containerManager, never()).stopTask(any());
+        EcsTask stopped = describe(service, response);
+        assertEquals("STOPPED", stopped.getLastStatus());
+        assertEquals("TaskFailedToStart", stopped.getStopCode());
+
+        doAnswer(invocation -> started(invocation.getArgument(0)))
+                .when(containerManager).startTask(any(), any(), any(), anyString());
+        service.afterReset();
+        EcsTask again = run(service, "teardown");
+        awaitLastStatus(() -> describe(service, again), EcsTask::getLastStatus, LAUNCH_BUDGET, "RUNNING");
+    }
+
+    @Test
     void teardownInterruptsAPullAndAfterResetLaunchesAgain() throws Exception {
         doAnswer(invocation -> {
             startEntered.countDown();
