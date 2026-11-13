@@ -432,6 +432,38 @@ class LambdaDurableProtocolIntegrationTest {
     }
 
     @Test
+    void aNewlyStartedStepAnswersAttemptZero() throws Exception {
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "step-attempt-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(invocation.payload());
+        String arn = event.get("DurableExecutionArn").asText();
+        String token = given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("""
+                {
+                    "CheckpointToken": "%s",
+                    "Updates": [{"Id": "s1", "Type": "STEP", "SubType": "Step", "Action": "START"}]
+                }
+                """.formatted(event.get("CheckpointToken").asText()))
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint")
+        .then()
+            .statusCode(200)
+            .body("NewExecutionState.Operations[0].Status", equalTo("STARTED"))
+            .body("NewExecutionState.Operations[0].StepDetails.Attempt", equalTo(0))
+            .extract().jsonPath().getString("CheckpointToken");
+        checkpoint(arn, token, """
+                {"Id": "x", "Type": "EXECUTION", "Action": "SUCCEED", "Payload": "\\"done\\""}
+                """);
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
+    }
+
+    @Test
     void aCallbackCompletedOverTheApiResumesTheExecution() throws Exception {
         Response accepted = given()
                 .header("X-Amz-Invocation-Type", "Event")
