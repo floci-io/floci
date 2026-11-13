@@ -35,6 +35,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -2072,6 +2074,24 @@ class NativeDynamoDbJsonHandlerTest {
         return (ObjectNode) mapper.createObjectNode().set(placeholder, attributeValue("S", "x"));
     }
 
+    // Defines each placeholder the expression uses: :v and :s a string, :n a number, :l a list,
+    // :ss a string set and :m a map.
+    private ObjectNode valuesFor(String expression) {
+        ObjectNode values = mapper.createObjectNode();
+        Matcher placeholder = Pattern.compile(":[a-z]+").matcher(expression);
+        while (placeholder.find()) {
+            switch (placeholder.group()) {
+                case ":v", ":s" -> values.set(placeholder.group(), attributeValue("S", "x"));
+                case ":n" -> values.set(":n", attributeValue("N", "1"));
+                case ":l" -> values.putObject(":l").putArray("L");
+                case ":ss" -> values.putObject(":ss").putArray("SS").add("x");
+                case ":m" -> values.putObject(":m").putObject("M");
+                default -> { }
+            }
+        }
+        return values;
+    }
+
     @Test
     void updateItemRejectsAnUpdateExpressionOver4096BytesBeforeTheTableLookup() {
         ObjectNode request = updateUserRequest();
@@ -2142,12 +2162,12 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SET a = :v REMOVE b, c", "SET a = if_not_exists(b, :v), c = :v", "SET a = b + :v, c = :v"})
+    @ValueSource(strings = {"SET a = :v REMOVE b, c", "SET a = if_not_exists(b, :v), c = :v", "SET a = b + :n, c = :n"})
     void updateItemReadsACommaOutsideASetTargetAsASeparator(String expression) {
         ObjectNode request = updateUserRequest();
         request.put("TableName", "Missing");
         request.put("UpdateExpression", expression);
-        request.set("ExpressionAttributeValues", singleValue(":v"));
+        request.set("ExpressionAttributeValues", valuesFor(expression));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateItem", request, "eu-west-1"));
@@ -2235,16 +2255,16 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SET a = (:v) + (:v)", "SET a = ((:v) + :v)", "SET a = (:v + :v)", "SET a = (b)",
-            "SET a = list_append((:v), :v)", "SET a = list_append(if_not_exists(b, :v), :v)",
-            "SET a = (if_not_exists(b, :v) + :v)", "SET a[ 1 ] = :v", "SET a[0].b[10] = :v",
+    @ValueSource(strings = {"SET a = (:n) + (:n)", "SET a = ((:n) + :n)", "SET a = (:n + :n)", "SET a = (b)",
+            "SET a = list_append((:l), :l)", "SET a = list_append(if_not_exists(b, :l), :l)",
+            "SET a = (if_not_exists(b, :n) + :n)", "SET a[ 1 ] = :v", "SET a[0].b[10] = :v",
             "REMOVE a[0], b.c", "set a = :v remove b", "SET\ta = :v\nREMOVE b"})
     void updateItemAcceptsTheUpdateExpressionGrammar(String expression) {
         ObjectNode request = updateUserRequest();
         request.put("TableName", "Missing");
         request.put("UpdateExpression", expression);
-        if (expression.contains(":v")) {
-            request.set("ExpressionAttributeValues", singleValue(":v"));
+        if (expression.contains(":")) {
+            request.set("ExpressionAttributeValues", valuesFor(expression));
         }
 
         AwsException ex = assertThrows(AwsException.class,
@@ -2294,6 +2314,109 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:n)                                  | Invalid function name; function: foo
+            SET a = IF_NOT_EXISTS(b, :n)                     | Invalid function name; function: IF_NOT_EXISTS
+            SET a = size(b)                                  | The function is not allowed in an update expression; function: size
+            SET a = begins_with(b, :s)                       | The function is not allowed in an update expression; function: begins_with
+            SET a = size(b, c)                               | The function is not allowed in an update expression; function: size
+            SET a = if_not_exists(b)                         | Incorrect number of operands for operator or function; operator or function: if_not_exists, number of operands: 1
+            SET a = if_not_exists(b, :n, :n)                 | Incorrect number of operands for operator or function; operator or function: if_not_exists, number of operands: 3
+            SET a = list_append(:l)                          | Incorrect number of operands for operator or function; operator or function: list_append, number of operands: 1
+            SET a = if_not_exists(:n, b)                     | Operator or function requires a document path; operator or function: if_not_exists
+            SET a = if_not_exists(if_not_exists(b, :n), :n)  | Operator or function requires a document path; operator or function: if_not_exists
+            SET a = list_append(:l, :l) + :n                 | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = (list_append(:l, :l)) + :n               | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(:n, :l) + :n                 | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = if_not_exists(b, list_append(:l, :l))    | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(list_append(:l, :l), :l)     | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(:n, :l)                      | Incorrect operand type for operator or function; operator or function: list_append, operand type: N
+            SET a = list_append(b, :s)                       | Incorrect operand type for operator or function; operator or function: list_append, operand type: S
+            SET a = :s + :n                                  | Incorrect operand type for operator or function; operator or function: +, operand type: S
+            SET a = :n - :l                                  | Incorrect operand type for operator or function; operator or function: -, operand type: L
+            SET a = b + (:ss)                                | Incorrect operand type for operator or function; operator or function: +, operand type: SS
+            ADD a :l                                         | Incorrect operand type for operator or function; operator: ADD, operand type: LIST, typeSet: ALLOWED_FOR_ADD_OPERAND
+            DELETE a :n                                      | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
+            """)
+    void updateItemChecksTheFunctionsAndOperandTypesBeforeTheTableLookup(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:u)                  | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = foo(#u)                  | An expression attribute name used in the document path is not defined; attribute name: #u
+            SET a = foo(:n), b = :u          | Invalid function name; function: foo
+            SET a = :u, b = foo(:n)          | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = if_not_exists(:n, :u)    | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = list_append(:l, :l) + :u | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = :s + :u                  | An expression attribute value used in expression is not defined; attribute value: :u
+            SET out = foo(:n)                | Attribute name is a reserved keyword; reserved word: out
+            SET a = foo(:n), out = :n        | Invalid function name; function: foo
+            SET out = :u                     | Attribute name is a reserved keyword; reserved word: out
+            ADD c :u SET a = foo(:n)         | An expression attribute value used in expression is not defined; attribute value: :u
+            ADD b :s SET a = foo(:n)         | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            SET a = foo(:n) ADD b :s         | Invalid function name; function: foo
+            SET a = foo(:n) SET b = :n       | Invalid function name; function: foo
+            """)
+    void updateItemChecksNamesValuesAndCallsInWrittenOrder(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = if_not_exists(b, :n) + :n", "SET a = :n - if_not_exists(b, :s)",
+            "SET a = (list_append(:l, :l))", "SET a = list_append(:l, if_not_exists(b, :n))",
+            "SET a = if_not_exists(b, if_not_exists(c, :n))", "SET a = if_not_exists((b), :n)",
+            "SET a = list_append(b, c)", "SET size = :n", "SET a = size", "ADD a :n, b :ss", "DELETE a :ss"})
+    void updateItemAcceptsTheUpdateFunctionsAndOperandTypes(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:n)           | Invalid function name; function: foo
+            SET out = :n              | Attribute name is a reserved keyword; reserved word: out
+            SET a = foo(:n), out = :n | Invalid function name; function: foo
+            DELETE a :n               | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
+            """)
+    void transactWriteItemsChecksTheFunctionsAndReservedWordsBeforeTheTableLookup(String expression,
+                                                                                    String message) {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", expression);
+        update.set("ExpressionAttributeValues", valuesFor(expression));
+        ObjectNode request = transactWrite("Update", update);
+        update.put("TableName", "Missing");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: " + message, ex.getMessage());
     }
 
     @ParameterizedTest
