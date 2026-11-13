@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -40,10 +41,14 @@ public final class StepFunctionsExecutions {
      * the terminal status: asserting which one is the caller's business.
      */
     public static Response waitForTerminalState(String executionArn) {
+        return waitForTerminalState(executionArn, () -> describeExecution(executionArn));
+    }
+
+    private static Response waitForTerminalState(String executionArn, Supplier<Response> describe) {
         return await("execution " + executionArn + " to leave RUNNING")
                 .atMost(TERMINAL_STATE_TIMEOUT)
                 .pollInterval(POLL_INTERVAL)
-                .until(() -> describeExecution(executionArn),
+                .until(describe::get,
                         response -> !"RUNNING".equals(response.jsonPath().getString("status")));
     }
 
@@ -60,7 +65,10 @@ public final class StepFunctionsExecutions {
         String executionArn = callInRegion(region, "StartExecution", MAPPER.createObjectNode()
                 .put("stateMachineArn", stateMachineArn).put("input", "{}").toString())
                 .then().statusCode(200).extract().path("executionArn");
-        return waitForTerminalState(executionArn);
+        return waitForTerminalState(executionArn, () ->
+                callInRegion(region, "DescribeExecution", MAPPER.createObjectNode()
+                        .put("executionArn", executionArn).toString())
+                        .then().statusCode(200).extract().response());
     }
 
     /** The history events of an execution that {@link #runInRegion} ran in {@code region}. */
