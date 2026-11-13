@@ -1204,8 +1204,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     }
 
     /**
-     * The name without its leading and trailing spaces, as {@code PutParameter} stores it. Only the space character
-     * is removed; a tab, newline or other whitespace stays and fails name validation.
+     * Removes leading and trailing ASCII spaces. Other whitespace is preserved for the operation's validation.
      */
     public static String withoutSurroundingSpaces(String name) {
         if (name == null) {

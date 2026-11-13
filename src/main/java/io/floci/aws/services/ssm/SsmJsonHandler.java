@@ -164,7 +164,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParameter(JsonNode request, String region, String authorization) {
-        String name = request.path("Name").asText();
+        String name = normalizeReadName(request.path("Name").asText());
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(List.of(name), withDecryption, region, authorization);
         Parameter param = ssmService.getParameter(name, withDecryption, region);
@@ -175,9 +175,18 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static String normalizeReadName(String name) {
+        String normalized = SsmService.withoutSurroundingSpaces(name);
+        if (normalized.indexOf(' ') >= 0) {
+            throw new AwsException("ValidationException",
+                    "Parameter names cannot contain spaces between characters.", 400);
+        }
+        return normalized;
+    }
+
     private Response handleGetParameters(JsonNode request, String region, String authorization) {
         List<String> names = new ArrayList<>();
-        request.path("Names").forEach(n -> names.add(n.asText()));
+        request.path("Names").forEach(n -> names.add(normalizeReadName(n.asText())));
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(names, withDecryption, region, authorization);
 
