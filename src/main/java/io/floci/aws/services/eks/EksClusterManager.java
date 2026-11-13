@@ -116,6 +116,8 @@ public class EksClusterManager
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
     private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
     private static final String ENDPOINT_HOST_LABEL = "io.floci.eks.endpoint-host";
+    /** Marks a node started behind {@link #RSHARE_ENTRYPOINT}, whose mounts are shared. */
+    private static final String SHARED_MOUNTS_LABEL = "io.floci.eks.shared-mounts";
     private static final Pattern HOSTNAME = Pattern.compile(
             "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*");
 
@@ -680,6 +682,7 @@ public class EksClusterManager
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
         labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
+        labels.put(SHARED_MOUNTS_LABEL, "true");
         if (!"localhost".equals(endpointHost)) {
             labels.put(ENDPOINT_HOST_LABEL, endpointHost);
         }
@@ -861,7 +864,10 @@ public class EksClusterManager
             startCluster(cluster);
             return;
         }
-        if (capacityChanged || onAnotherNetwork(existing.get())
+        // A node started before its mounts were shared keeps private mounts, on which a CSI node plugin's
+        // Bidirectional mounts fail: it is replaced on the same data volume, as one with another capacity is.
+        boolean privateMounts = existingLabels == null || !"true".equals(existingLabels.get(SHARED_MOUNTS_LABEL));
+        if (capacityChanged || privateMounts || onAnotherNetwork(existing.get())
                 || !endpointHost.equals(certificateHost(existingLabels))) {
             replaceClusterContainer(cluster, null);
         }

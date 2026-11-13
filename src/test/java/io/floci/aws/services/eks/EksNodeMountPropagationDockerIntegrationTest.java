@@ -60,7 +60,7 @@ class EksNodeMountPropagationDockerIntegrationTest {
             try {
                 eksClusterManager.stopCluster(cluster);
             } catch (Exception e) {
-                LOG.warnv("Failed to stop test cluster: {0}", e.getMessage());
+                LOG.warnv(e, "Failed to stop test cluster {0}", cluster.getName());
             }
         }
     }
