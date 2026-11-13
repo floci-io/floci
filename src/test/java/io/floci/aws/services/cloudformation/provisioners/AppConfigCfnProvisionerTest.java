@@ -271,7 +271,7 @@ class AppConfigCfnProvisionerTest {
     }
 
     @Test
-    void aProfileWithoutTypeDefaultsToFreeformAndChangingItKeepsTheProfile() {
+    void aProfileWithoutTypeDefaultsToFreeformAndChangingItKeepsTheProfileAndItsStoredType() {
         String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
         StackResource profile = create(PROFILE, props("ApplicationId", appId, "Name", "settings",
                 "LocationUri", "hosted"));
@@ -285,7 +285,8 @@ class AppConfigCfnProvisionerTest {
         assertEquals(oldId, profile.getPhysicalId(), "Type is not create-only in AWS, so the profile keeps its id");
         assertFalse(provisioner.hasReplacementUpdate(profile));
         ConfigurationProfile updated = service.getConfigurationProfile(appId, oldId);
-        assertEquals("AWS.AppConfig.FeatureFlags", updated.getType());
+        assertEquals("AWS.Freeform", updated.getType(),
+                "UpdateConfigurationProfile has no Type member, so an update cannot change the stored type");
         assertEquals("flags", updated.getName());
     }
 

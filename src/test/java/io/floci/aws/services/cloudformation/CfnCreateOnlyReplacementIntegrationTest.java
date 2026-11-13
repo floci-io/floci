@@ -10,6 +10,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.ChangeSetType;
+import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 
 import java.util.List;
 import java.util.stream.Stream;
@@ -28,43 +29,61 @@ class CfnCreateOnlyReplacementIntegrationTest {
     private static final String APP = """
             "App": {"Type": "AWS::AppConfig::Application", "Properties": {"Name": "replacement-orders"}}""";
 
-    private record Row(String label, String extraResources, String type, String before, String after,
-                       String replacement, boolean needsDocker) {
+    private record Row(String label, String extraResources, String parameters, String type, String before,
+                       String after, String replacement, boolean needsDocker, String clusterSubnetGroupAfter) {
 
         @Override
         public String toString() {
             return label;
         }
 
-        String template(String properties) {
+        /** The template with {@code properties} on the subject; {@code @V@} becomes b once {@code after}. */
+        String template(String properties, boolean after) {
             String extra = extraResources.isEmpty() ? "" : extraResources + ",";
-            return "{\"Resources\": {" + extra + "\"Subject\": {\"Type\": \"" + type
-                    + "\", \"Properties\": {" + properties + "}}}}";
+            String params = parameters.isEmpty() ? "" : "\"Parameters\": {" + parameters + "}, ";
+            return ("{" + params + "\"Resources\": {" + extra + "\"Subject\": {\"Type\": \"" + type
+                    + "\", \"Properties\": {" + properties + "}}}}").replace("@V@", after ? "b" : "a");
         }
     }
 
     private static final String PROFILE = "\"ApplicationId\": {\"Ref\": \"App\"}, \"Name\": \"settings\", ";
     private static final String CLUSTER = "\"Engine\": \"redis\", \"NumCacheNodes\": 1, ";
 
+    /** The cluster names a subnet group whose own name comes from a parameter that changes in the update. */
+    private static final Row SUBNET_GROUP_REPLACED = new Row("ElastiCache cluster in a replaced subnet group",
+            """
+            "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.73.0.0/16"}},
+            "Subnet": {"Type": "AWS::EC2::Subnet",
+                       "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.73.0.0/24"}},
+            "SubnetGroup": {"Type": "AWS::ElastiCache::SubnetGroup",
+                            "Properties": {"CacheSubnetGroupName": {"Ref": "Sg"}, "Description": "example",
+                                           "SubnetIds": [{"Ref": "Subnet"}]}}""",
+            "\"Sg\": {\"Type\": \"String\", \"Default\": \"repl-sng-@V@\"}",
+            "AWS::ElastiCache::CacheCluster",
+            CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
+            CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
+            "True", true, "repl-sng-b");
+
     static Stream<Row> rows() {
         return Stream.of(
-                new Row("AppConfig profile Type", APP, "AWS::AppConfig::ConfigurationProfile",
+                new Row("AppConfig profile Type", APP, "", "AWS::AppConfig::ConfigurationProfile",
                         PROFILE + "\"LocationUri\": \"hosted\", \"Type\": \"AWS.Freeform\"",
                         PROFILE + "\"LocationUri\": \"hosted\", \"Type\": \"AWS.AppConfig.FeatureFlags\"",
-                        "False", false),
-                new Row("AppConfig profile LocationUri", APP, "AWS::AppConfig::ConfigurationProfile",
+                        "False", false, null),
+                new Row("AppConfig profile LocationUri", APP, "", "AWS::AppConfig::ConfigurationProfile",
                         PROFILE + "\"LocationUri\": \"hosted\", \"Type\": \"AWS.Freeform\"",
                         PROFILE + "\"LocationUri\": \"ssm-parameter://replacement-settings\","
                                 + " \"Type\": \"AWS.Freeform\"",
-                        "True", false),
-                new Row("ElastiCache cluster Port", "", "AWS::ElastiCache::CacheCluster",
+                        "True", false, null),
+                new Row("ElastiCache cluster Port", "", "", "AWS::ElastiCache::CacheCluster",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"Port\": 6379",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"Port\": 6380",
-                        "True", true),
-                new Row("ElastiCache cluster CacheNodeType", "", "AWS::ElastiCache::CacheCluster",
+                        "True", true, null),
+                new Row("ElastiCache cluster CacheNodeType", "", "", "AWS::ElastiCache::CacheCluster",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\"",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.small\"",
-                        "False", true));
+                        "False", true, null),
+                SUBNET_GROUP_REPLACED);
     }
 
     @ParameterizedTest
@@ -76,12 +95,12 @@ class CfnCreateOnlyReplacementIntegrationTest {
         String stack = "repl-" + Long.toString(System.nanoTime(), 36);
         try (CloudFormationClient client = AwsTestClients.create(
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
-            client.createStack(request -> request.stackName(stack).templateBody(row.template(row.before())));
+            client.createStack(request -> request.stackName(stack).templateBody(row.template(row.before(), false)));
             CfnStackWaits.awaitStatus(client, stack, "CREATE_COMPLETE");
             String before = physicalId(client, stack);
 
             client.createChangeSet(request -> request.stackName(stack).changeSetName("change")
-                    .changeSetType(ChangeSetType.UPDATE).templateBody(row.template(row.after())));
+                    .changeSetType(ChangeSetType.UPDATE).templateBody(row.template(row.after(), true)));
             List<String> reported = client.describeChangeSet(request -> request.stackName(stack)
                     .changeSetName("change")).changes().stream()
                     .filter(change -> "Subject".equals(change.resourceChange().logicalResourceId()))
@@ -94,6 +113,13 @@ class CfnCreateOnlyReplacementIntegrationTest {
 
             assertEquals("True".equals(row.replacement()), !before.equals(after),
                     row.label() + ": physical id " + before + " then " + after);
+            if (row.clusterSubnetGroupAfter() != null) {
+                try (ElastiCacheClient cache = AwsTestClients.create(
+                        ElastiCacheClient.builder(), "test", Region.US_EAST_1)) {
+                    assertEquals(row.clusterSubnetGroupAfter(), cache.describeCacheClusters(request ->
+                            request.cacheClusterId(after)).cacheClusters().getFirst().cacheSubnetGroupName());
+                }
+            }
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
