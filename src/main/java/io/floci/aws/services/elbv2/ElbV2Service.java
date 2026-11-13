@@ -1108,8 +1108,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 t.setPort(tg.getPort());
             }
             // replace if same id+port already registered
-            existing.removeIf(e -> e.getId().equals(t.getId())
-                    && ElbV2HealthChecker.effectivePort(e, tg) == ElbV2HealthChecker.effectivePort(t, tg));
+            existing.removeIf(e -> ElbV2HealthChecker.sameTarget(e, t, tg));
             existing.add(t);
         }
         persistRegion(targetGroups, region);
@@ -1133,8 +1132,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         TargetGroup tg = requireTargetGroup(region, tgArn);
         validateLambdaTargetPorts(tg, targets);
         for (TargetDescription t : targets) {
-            tg.getTargets().removeIf(e -> e.getId().equals(t.getId())
-                    && ElbV2HealthChecker.effectivePort(e, tg) == ElbV2HealthChecker.effectivePort(t, tg));
+            tg.getTargets().removeIf(e -> ElbV2HealthChecker.sameTarget(e, t, tg));
         }
         persistRegion(targetGroups, region);
         healthChecker.removeTargets(tgArn, targets, tg);

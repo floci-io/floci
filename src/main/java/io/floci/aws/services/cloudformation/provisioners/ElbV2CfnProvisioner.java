@@ -1,9 +1,14 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.elbv2.ElbV2HealthChecker;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.AvailabilityZone;
@@ -11,6 +16,7 @@ import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
 import io.floci.aws.services.elbv2.model.RuleCondition;
+import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -19,6 +25,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
@@ -38,6 +45,19 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     private static final String LISTENER_RULE = "AWS::ElasticLoadBalancingV2::ListenerRule";
     /** Prefixes one uses attribute per subnet a load balancer is on, numbered from 1. */
     private static final String USED_SUBNET_ATTR_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Subnet.";
+    /**
+     * The {@code Targets} the template declared at the last successful provision of a target group, a
+     * JSON array of {@code {id, port, availabilityZone}}. An update deregisters only the targets this
+     * record names and the template no longer does, so a target registered some other way, by
+     * RegisterTargets, an Auto Scaling group or an ECS service, stays registered. A target group
+     * provisioned before the record was kept has none: Floci registered nothing for it, so its first
+     * update deregisters nothing. The record an update overwrote is kept until the update commits, so
+     * a rollback puts it back.
+     */
+    private static final CreateOnlyInputs DECLARED_TARGETS = new CreateOnlyInputs(
+            "__FlociTargetGroupTargets", "__FlociTargetGroupTargetsPrior");
+    private static final TypeReference<List<TargetDescription>> TARGET_LIST = new TypeReference<>() { };
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final ElbV2Service elbV2Service;
 
@@ -54,10 +74,11 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
+        r.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case LOAD_BALANCER -> provisionLoadBalancer(r, props, ctx);
-            case TARGET_GROUP -> provisionTargetGroup(r, props, ctx);
+            case TARGET_GROUP -> provisionTargetGroup(r, props, ctx, attributesBefore);
             case LISTENER -> provisionListener(r, props, ctx);
             case LISTENER_RULE -> provisionListenerRule(r, props, ctx);
             default -> throw new IllegalStateException("ElbV2CfnProvisioner cannot handle " + r.getResourceType());
@@ -106,31 +127,90 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         if ("UPDATE_COMPLETE".equals(resource.getStatus())) {
             resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         }
+        clearTargetUpdateRecords(resource);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
+        clearTargetUpdateRecords(resource);
         ReplacementCleanup.clear(resource);
     }
 
+    private static void clearTargetUpdateRecords(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        DECLARED_TARGETS.clearPrior(resource);
+    }
+
     /**
-     * A replacement is undone through the cleanup record. Without one, a load balancer is moved
-     * back to the subnets an update took it off, and otherwise it and a target group have nothing to
-     * put back: an update that kept the name changed nothing else, the way the switch did. A listener
-     * or rule without a record was modified in place, and putting that back needs a snapshot this
-     * provisioner does not keep, so the engine reports it as not rolled back, as it did for the switch.
+     * Keeps the snapshot of a target group update whose own undo did not complete. The engine restores
+     * the previous resource and reports the rollback failure once; with the snapshot, a
+     * ContinueUpdateRollback puts back the registrations the update started from, instead of finding
+     * nothing to undo.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        String snapshot = attempted.getAttributes().get(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot != null && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            previous.getAttributes().put(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR, snapshot);
+        }
+    }
+
+    /**
+     * A replacement is undone through the cleanup record, and a target group's record of its declared
+     * targets goes back with it, even when deleting the replacement fails. Without a cleanup record, a
+     * load balancer is moved back to the subnets an update took it off, and a target group gets back
+     * the registrations the update changed; otherwise neither has anything to put back: an update that
+     * kept the name changed nothing else, the way the switch did. A listener or rule without a record
+     * was modified in place, and putting that back needs a snapshot this provisioner does not keep, so
+     * the engine reports it as not rolled back, as it did for the switch.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        if (ReplacementCleanup.rollback(resource, this::delete)) {
+        boolean replaced;
+        try {
+            replaced = ReplacementCleanup.rollback(resource, this::delete);
+        } finally {
+            DECLARED_TARGETS.restorePrior(resource);
+        }
+        if (replaced) {
             return true;
         }
         if (LOAD_BALANCER.equals(resource.getResourceType())) {
             return restorePriorSubnets(resource);
         }
-        return TARGET_GROUP.equals(resource.getResourceType());
+        if (TARGET_GROUP.equals(resource.getResourceType())) {
+            restorePriorRegistrations(resource);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Deregisters the targets the update registered and registers again the ones it deregistered or
+     * registered over, as they were registered before it: the undo of a provision that failed, and the
+     * rollback of one that succeeded when a later resource fails the update. A failed call propagates,
+     * so the engine reports its reason, a target group gone since the update included, and the
+     * snapshot stays until a put back succeeds.
+     */
+    private void restorePriorRegistrations(StackResource resource) {
+        JsonNode saved = CfnRollback.updateSnapshot(resource,
+                CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        if (saved == null) {
+            return;
+        }
+        String arn = resource.getPhysicalId();
+        String region = AwsArnUtils.parse(arn).region();
+        List<TargetDescription> added = MAPPER.convertValue(saved.path("added"), TARGET_LIST);
+        List<TargetDescription> removed = MAPPER.convertValue(saved.path("removed"), TARGET_LIST);
+        if (!added.isEmpty()) {
+            elbV2Service.deregisterTargets(region, arn, added);
+        }
+        if (!removed.isEmpty()) {
+            elbV2Service.registerTargets(region, arn, removed);
+        }
+        resource.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
     }
 
     /**
@@ -257,7 +337,15 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         return subnets;
     }
 
-    private void provisionTargetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+    /**
+     * {@code Targets} is not create-only, so an update that keeps the group brings its registrations
+     * to the template's targets in place (see {@link #reconcileTargets}). When that fails, what it did
+     * is undone before the failure propagates ({@link CfnRollback#guarded}): a target group this
+     * provision created, on a create or a replacement, is deleted again, and a kept one gets back the
+     * registrations it had.
+     */
+    private void provisionTargetGroup(StackResource r, JsonNode props, ProvisionContext ctx,
+                                      Map<String, String> attributesBefore) {
         String name = nameOrPrior(ctx.resolveOptional(props, "Name"), r.getAttributes().get("TargetGroupName"),
                 ctx, r.getLogicalId());
         String protocol = ctx.resolveOptional(props, "Protocol");
@@ -276,8 +364,13 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         String matcher = parseMatcher(props, ctx);
         String ipAddressType = ctx.resolveOptional(props, "IpAddressType");
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        List<TargetDescription> targets = declaredTargets(props, ctx);
+        // Taken before RegisterTargets fills in the group's port on these targets, so the record
+        // keeps them as declared.
+        String declaredRecord = MAPPER.valueToTree(targets).toString();
 
         TargetGroup tg;
+        boolean created = true;
         try {
             tg = elbV2Service.createTargetGroup(ctx.region(), name, protocol, protocolVersion, port, vpcId, targetType,
                     hcProtocol, hcPort, hcEnabled, hcPath, hcInterval, hcTimeout,
@@ -287,6 +380,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
                 throw e;
             }
             tg = elbV2Service.describeTargetGroups(ctx.region(), null, null, List.of(name)).get(0);
+            created = false;
         }
 
         r.setPhysicalId(tg.getTargetGroupArn());
@@ -296,6 +390,107 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         // A list-valued attribute, joined the way Route53's NameServers is. Empty until a listener
         // forwards to the group, as on AWS.
         r.getAttributes().put("LoadBalancerArns", String.join(",", tg.getLoadBalancerArns()));
+        TargetGroup group = tg;
+        CfnRollback.guarded(r, ctx, created,
+                () -> elbV2Service.deleteTargetGroup(ctx.region(), group.getTargetGroupArn()),
+                () -> restorePriorRegistrations(r),
+                () -> reconcileTargets(r, group, targets, ctx));
+        DECLARED_TARGETS.record(r, ctx, attributesBefore, declaredRecord);
+    }
+
+    /**
+     * The template's {@code Targets}. An Fn::If that drops a target, or a member of one, with
+     * AWS::NoValue leaves it out. {@code Id} is required in a target, so one without it fails the
+     * resource before anything is created or registered, with the error the resource schema gives.
+     */
+    private static List<TargetDescription> declaredTargets(JsonNode props, ProvisionContext ctx) {
+        List<TargetDescription> targets = new ArrayList<>();
+        if (props == null || !props.has("Targets")) {
+            return targets;
+        }
+        JsonNode declared = ctx.engine().resolveNodeOmittingNoValue(props.get("Targets"));
+        if (declared == null || !declared.isArray()) {
+            return targets;
+        }
+        for (int i = 0; i < declared.size(); i++) {
+            JsonNode item = declared.get(i);
+            String id = ctx.resolveOptional(item, "Id");
+            if (id == null) {
+                throw new AwsException("InvalidRequest",
+                        "Model validation failed (#/Targets/" + i + ": required key [Id] not found)", 400);
+            }
+            TargetDescription target = new TargetDescription();
+            target.setId(id);
+            target.setPort(ctx.resolveOptionalInt(item, "Port"));
+            target.setAvailabilityZone(ctx.resolveOptional(item, "AvailabilityZone"));
+            targets.add(target);
+        }
+        return targets;
+    }
+
+    /**
+     * Brings the group's registrations to {@code targets}: registers each target that is not
+     * registered as declared, then deregisters the registered targets the last template declared and
+     * this one does not (see {@link #DECLARED_TARGETS}). A target is its Id and the port it receives
+     * traffic on, the group's when it names none, which is how RegisterTargets and DeregisterTargets
+     * tell registrations apart. RegisterTargets checks every target before registering any, so a
+     * refused target leaves the group as it was, and the deregistration, of targets that passed those
+     * checks when they were registered, comes last. An update that keeps the group saves what it
+     * changed once RegisterTargets has taken the targets, before the deregistration, and
+     * {@link #restorePriorRegistrations} puts it back from that. A refused target is not in it: the
+     * save comes after RegisterTargets has accepted every target, so the way back never names a
+     * target that was never registered.
+     */
+    private void reconcileTargets(StackResource r, TargetGroup tg, List<TargetDescription> targets,
+                                  ProvisionContext ctx) {
+        String arn = tg.getTargetGroupArn();
+        boolean kept = ctx.reusesPriorEntity(arn);
+        List<TargetDescription> recorded = kept ? recordedTargets(r) : List.of();
+        List<TargetDescription> registered = List.copyOf(tg.getTargets());
+        List<TargetDescription> register = targets.stream()
+                .filter(target -> registered.stream().noneMatch(existing ->
+                        ElbV2HealthChecker.sameTarget(existing, target, tg)
+                                && Objects.equals(existing.getAvailabilityZone(), target.getAvailabilityZone())))
+                .toList();
+        List<TargetDescription> deregister = registered.stream()
+                .filter(existing -> containsTarget(recorded, existing, tg) && !containsTarget(targets, existing, tg))
+                .toList();
+        if (register.isEmpty() && deregister.isEmpty()) {
+            return;
+        }
+        if (!register.isEmpty()) {
+            elbV2Service.registerTargets(ctx.region(), arn, register);
+        }
+        if (kept) {
+            List<TargetDescription> removed = new ArrayList<>(deregister);
+            registered.stream().filter(existing -> containsTarget(register, existing, tg)).forEach(removed::add);
+            ObjectNode saved = MAPPER.createObjectNode();
+            saved.set("added", MAPPER.valueToTree(register.stream()
+                    .filter(target -> !containsTarget(registered, target, tg)).toList()));
+            saved.set("removed", MAPPER.valueToTree(removed));
+            r.getAttributes().put(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR, saved.toString());
+        }
+        if (!deregister.isEmpty()) {
+            elbV2Service.deregisterTargets(ctx.region(), arn, deregister);
+        }
+    }
+
+    private static List<TargetDescription> recordedTargets(StackResource r) {
+        String recorded = DECLARED_TARGETS.read(r.getAttributes());
+        if (recorded == null) {
+            return List.of();
+        }
+        try {
+            return MAPPER.readValue(recorded, TARGET_LIST);
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Ignoring unreadable Targets record on {0} ({1}): {2}", r.getLogicalId(), e.getMessage(),
+                    recorded);
+            return List.of();
+        }
+    }
+
+    private static boolean containsTarget(List<TargetDescription> targets, TargetDescription target, TargetGroup tg) {
+        return targets.stream().anyMatch(candidate -> ElbV2HealthChecker.sameTarget(candidate, target, tg));
     }
 
     /**
