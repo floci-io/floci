@@ -204,6 +204,7 @@ cross-resource references.
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
+| EFS | `FileSystem` (metadata only, there is no NFS data plane), `MountTarget` (`SecurityGroups` update in place, every other property replaces), `AccessPoint` (`AccessPointTags` update in place, every other property replaces) |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |

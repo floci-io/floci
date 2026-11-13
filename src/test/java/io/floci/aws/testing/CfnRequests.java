@@ -1,6 +1,7 @@
 package io.floci.aws.testing;
 
 import io.floci.aws.core.common.XmlParser;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 
 import java.util.Map;
@@ -45,6 +46,20 @@ public final class CfnRequests {
         }
         return request.when().post("/").then().statusCode(200)
                 .extract().xmlPath().getString("**.find { it.name() == 'PhysicalResourceId' }");
+    }
+
+    /** Returns the parsed DescribeStacks response for {@code stackName}. */
+    public static XmlPath describe(String stackName, String authorization) {
+        return cfn("DescribeStacks", stackName)
+                .header("Authorization", authorization)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().xmlPath();
+    }
+
+    /** Returns the value of the stack output {@code key} in a {@link #describe} response. */
+    public static String output(XmlPath stack, String key) {
+        return stack.getString("**.findAll { it.OutputKey == '" + key + "' }.OutputValue");
     }
 
     /** Returns the stack-level tags reported by DescribeStacks. */

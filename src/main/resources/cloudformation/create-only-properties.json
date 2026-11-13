@@ -468,6 +468,34 @@
     "IpcMode",
     "EphemeralStorage"
   ],
+  "AWS::EFS::AccessPoint": [
+    "FileSystemId",
+    "ClientToken",
+    "CreationInfo",
+    "CreationInfo/OwnerUid",
+    "CreationInfo/OwnerGid",
+    "CreationInfo/Permissions",
+    "PosixUser",
+    "PosixUser/Uid",
+    "PosixUser/Gid",
+    "PosixUser/SecondaryGids",
+    "RootDirectory",
+    "RootDirectory/Path",
+    "RootDirectory/CreationInfo"
+  ],
+  "AWS::EFS::FileSystem": [
+    "AvailabilityZoneName",
+    "Encrypted",
+    "KmsKeyId",
+    "PerformanceMode"
+  ],
+  "AWS::EFS::MountTarget": [
+    "IpAddress",
+    "Ipv6Address",
+    "IpAddressType",
+    "SubnetId",
+    "FileSystemId"
+  ],
   "AWS::EKS::Cluster": [
     "OutpostConfig",
     "EncryptionConfig",
