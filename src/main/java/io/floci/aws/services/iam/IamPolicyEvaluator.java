@@ -255,7 +255,8 @@ public class IamPolicyEvaluator {
         boolean directIamUserResourceAllow = resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
 
         // 1. Explicit deny in ANY policy → DENY, whatever else would have been decided.
-        DecidingStatement deny = firstScpExplicitDeny(caller.scpLevels(), loweredAction, resource, ctx);
+        ScpWalk scp = scpWalk(caller.scpLevels(), loweredAction, resource, ctx);
+        DecidingStatement deny = scp.firstDeny();
         if (deny == null) {
             deny = firstMatch(PolicyLayer.IDENTITY, -1, identityDocs, true, loweredAction, resource, ctx);
         }
@@ -276,7 +277,7 @@ public class IamPolicyEvaluator {
         //    organization level and explicitly denied at none, before identity policies are
         //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
         //    a level holding an unparseable document denies.
-        if (!scpAllows(caller.scpLevels(), loweredAction, resource, ctx)) {
+        if (!scp.allows()) {
             return implicitDeny(PolicyLayer.SERVICE_CONTROL);
         }
 
@@ -306,14 +307,17 @@ public class IamPolicyEvaluator {
         //    already handled above. Other grants remain limited by the boundary intersection.
         boolean directSameAccountUserGrant = directIamUserResourceAllow
                 && relationship == ResourceAccountRelationship.SAME_ACCOUNT;
-        if (!directSameAccountUserGrant && boundaryDocs != null
-                && firstMatch(PolicyLayer.PERMISSIONS_BOUNDARY, -1, boundaryDocs, false,
-                        loweredAction, resource, ctx) == null) {
+        boolean boundaryAllows = boundaryDocs == null
+                || firstMatch(PolicyLayer.PERMISSIONS_BOUNDARY, -1, boundaryDocs, false,
+                        loweredAction, resource, ctx) != null;
+        if (!directSameAccountUserGrant && !boundaryAllows) {
             return implicitDeny(PolicyLayer.PERMISSIONS_BOUNDARY);
         }
 
-        // 6. Allowed: the identity statement that granted it, or the resource policy alone.
-        DecidingStatement granting = identityAllow != null ? identityAllow : resourceStatement();
+        // 6. Allowed: the identity statement that granted it, or the resource policy alone. A direct
+        //    grant the boundary does not allow is the resource policy's, whatever identity said.
+        DecidingStatement granting = identityAllow != null && !(directSameAccountUserGrant && !boundaryAllows)
+                ? identityAllow : resourceStatement();
         return new DecisionRecord(Outcome.ALLOW, granting.layer(), granting);
     }
 
@@ -612,7 +616,7 @@ public class IamPolicyEvaluator {
      * The service namespaces an SCP chain leaves reachable, backing the service list in
      * {@code GetOrganizationsAccessReport}.
      *
-     * <p>Level conventions are {@link #scpAllows}'s. A {@code null} chain means SCPs do not apply
+     * <p>Level conventions are {@link #scpWalk}'s. A {@code null} chain means SCPs do not apply
      * and every published namespace is reachable, which is the management account's case. A level
      * with no document constrains nothing, since AWS keeps FullAWSAccess attached to every target,
      * and a level carrying a document that fails to parse leaves nothing reachable, because the
@@ -626,7 +630,7 @@ public class IamPolicyEvaluator {
      * What a namespace-wide reading got right stays right: an SCP denying {@code s3:DeleteBucket}
      * alone keeps S3 on the list, because every other S3 action is still reachable.
      *
-     * <p>This is not {@link #scpAllows} asked once per namespace. That question needs a concrete
+     * <p>This is not {@link #scpWalk} asked once per namespace. That question needs a concrete
      * action, and a request action of {@code s3:*} would not match a statement naming
      * {@code s3:GetObject}, because a pattern globs against a request value and never the other
      * way round. The survivors are found by probing instead, with the actions the policies
@@ -812,53 +816,50 @@ public class IamPolicyEvaluator {
         }
     }
 
-    /** The first explicit Deny at any SCP level, in level order, or null. A level that fails to parse is skipped. */
-    private DecidingStatement firstScpExplicitDeny(List<List<String>> scpLevels, String action, String resource,
-                                                   Map<String, List<String>> ctx) {
-        if (scpLevels == null) {
-            return null;
-        }
-        for (int level = 0; level < scpLevels.size(); level++) {
-            DecidingStatement found = firstMatch(PolicyLayer.SERVICE_CONTROL, level,
-                    parseEach(scpLevels.get(level)), true, action, resource, ctx);
-            if (found != null) {
-                return found;
-            }
-        }
-        return null;
-    }
-
     /**
-     * SCP evaluation: at every organization level the action must be explicitly allowed
-     * and not explicitly denied. {@code null} levels mean SCPs don't apply; a level with
-     * no documents at all (defensive — the last SCP on a target can't be detached) is
-     * FullAWSAccess semantics and passes.
+     * SCP evaluation, in one pass over the levels: at every organization level the action must be
+     * explicitly allowed and not explicitly denied. {@code null} levels mean SCPs don't apply; a
+     * level with no documents at all (defensive: the last SCP on a target can't be detached) is
+     * FullAWSAccess semantics and passes. The result carries the first explicit Deny (level,
+     * document, statement order) as well, since an explicit Deny decides ahead of every other
+     * layer.
      *
      * <p>A level containing a document that fails to parse denies. The ceiling cannot tell
      * what an unreadable guardrail would have said, and every target also carries
      * FullAWSAccess, so skipping the bad document would silently leave the level allowing
-     * everything the operator meant to forbid.</p>
+     * everything the operator meant to forbid. The Deny lookup alone skips such a document.</p>
      */
-    private boolean scpAllows(List<List<String>> scpLevels, String action, String resource,
-                              Map<String, List<String>> ctx) {
+    private ScpWalk scpWalk(List<List<String>> scpLevels, String action, String resource,
+                            Map<String, List<String>> ctx) {
         if (scpLevels == null) {
-            return true;
+            return new ScpWalk(null, true);
         }
-        for (List<String> level : scpLevels) {
-            ParsedDocuments parsed = parseAllTracked(level);
-            if (parsed.anyFailed()) {
-                return false;
+        boolean allows = true;
+        for (int level = 0; level < scpLevels.size(); level++) {
+            List<CachedDocument> documents = parseEach(scpLevels.get(level));
+            DecidingStatement deny = firstMatch(PolicyLayer.SERVICE_CONTROL, level, documents, true,
+                    action, resource, ctx);
+            if (deny != null) {
+                return new ScpWalk(deny, false);
             }
-            List<PolicyStatement> levelStmts = parsed.statements();
-            if (levelStmts.isEmpty()) {
+            if (!allows) {
                 continue;
             }
-            if (anyExplicitDeny(levelStmts, action, resource, ctx)
-                    || !anyExplicitAllow(levelStmts, action, resource, ctx)) {
-                return false;
+            List<PolicyStatement> levelStmts = new ArrayList<>();
+            boolean anyFailed = false;
+            for (CachedDocument document : documents) {
+                levelStmts.addAll(document.statements());
+                anyFailed |= document.failed();
+            }
+            if (anyFailed || (!levelStmts.isEmpty() && !anyExplicitAllow(levelStmts, action, resource, ctx))) {
+                allows = false;
             }
         }
-        return true;
+        return new ScpWalk(null, allows);
+    }
+
+    /** What {@link #scpWalk} found: the first explicit Deny or null, and whether every level passes. */
+    private record ScpWalk(DecidingStatement firstDeny, boolean allows) {
     }
 
     // -----------------------------------------------------------------------
