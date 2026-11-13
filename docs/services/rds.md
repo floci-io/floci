@@ -1186,6 +1186,9 @@ For users created through the rewrite, `SHOW CREATE USER` reports the substitute
 than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
 MySQL IAM token login is supported over TLS: the proxy can request a `mysql_clear_password`
 auth switch to validate the token, then authenticates to the container as the master user.
+Unlike RDS, that MySQL session stays the master user: `CURRENT_USER()` reports the master,
+and the IAM user's own grants do not apply. The PostgreSQL proxy instead hands the session
+over to the role named in the token.
 
 ## Certificate authorities
 
