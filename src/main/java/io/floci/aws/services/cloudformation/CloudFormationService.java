@@ -64,6 +64,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
@@ -1344,6 +1345,36 @@ public class CloudFormationService implements ResourceProvider {
      * value that changed. Without compared forms (a template that did not resolve) there is nothing
      * to read.
      */
+    /**
+     * Whether a create-only property resolves differently now than the previous template resolved
+     * to against the state the update started from. The preview cannot see this for a resource the
+     * update itself changed after the preview was computed. A value that cannot be resolved is no
+     * evidence of a change.
+     */
+    private static boolean resolvedCreateOnlyChanged(String resourceType, JsonNode priorProps,
+                                                     JsonNode props, CloudFormationTemplateEngine current,
+                                                     CloudFormationTemplateEngine previous) {
+        if (priorProps == null || props == null || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
+            return false;
+        }
+        boolean dynamic = false;
+        for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props)) {
+            String text = subtree.toString();
+            dynamic |= text.contains("\"Ref\"") || text.contains("\"Fn::");
+        }
+        if (!dynamic) {
+            return false;
+        }
+        try {
+            return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
+                    previous.resolveNode(priorProps), current.resolveNode(props));
+        } catch (RuntimeException e) {
+            LOG.debugv("Resolved create-only values of a {0} could not be compared: {1}", resourceType,
+                    e.getMessage());
+            return false;
+        }
+    }
+
     private static boolean comparedCreateOnlyChanged(String resourceType, JsonNode[] compared, String logicalId) {
         if (compared == null || compared[0] == null || compared[1] == null
                 || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
@@ -2443,6 +2474,24 @@ public class CloudFormationService implements ResourceProvider {
                 }
             }
 
+            // The state the update started from, so a resolved value can be compared with what the
+            // previous template resolved to while the loop below changes ids and attributes.
+            Map<String, String> startPhysicalIds = new LinkedHashMap<>(physicalIds);
+            Map<String, Map<String, String>> startResourceAttrs = new LinkedHashMap<>();
+            resourceAttrs.forEach((id, attrs) -> startResourceAttrs.put(id, new HashMap<>(attrs)));
+
+            BiFunction<Map<String, String>, Map<String, Map<String, String>>, CloudFormationTemplateEngine> engineFor =
+                    (ids, attributes) -> new CloudFormationTemplateEngine(
+                            accountId, region, stack.getStackName(),
+                            stack.getStackId(), resolvedParams, ids, attributes, conditions, mappings, objectMapper,
+                            name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                            value -> dynamicReferences.resolveDynamicReferences(value, region, false),
+                            (name, output, outputRegion, roleArn) ->
+                                    resolveStackOutput(accountId, name, output, outputRegion, roleArn),
+                            parameterTypes,
+                            (id, attribute, value) -> dispatcher.attributeValue(
+                                    resources.path(id).path("Type").asText(), attribute, value));
+
             StackResource failedResource = null;
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
@@ -2471,16 +2520,7 @@ public class CloudFormationService implements ResourceProvider {
                     String type = resDef.path("Type").asText();
                     String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
 
-                    CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
-                            accountId, region, stack.getStackName(),
-                            stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                            name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
-                            value -> dynamicReferences.resolveDynamicReferences(value, region, false),
-                            (name, output, outputRegion, roleArn) ->
-                                    resolveStackOutput(accountId, name, output, outputRegion, roleArn),
-                            parameterTypes,
-                            (id, attribute, value) -> dispatcher.attributeValue(
-                                    resources.path(id).path("Type").asText(), attribute, value));
+                    CloudFormationTemplateEngine engine = engineFor.apply(physicalIds, resourceAttrs);
                     // AWS::NoValue removes the property, wherever the template puts it, so no
                     // provisioner sees it: not a member, a list item or a whole property.
                     JsonNode props = engine.omitNoValue(resDef.path("Properties"));
@@ -2528,13 +2568,19 @@ public class CloudFormationService implements ResourceProvider {
                                 ? previousDefinition.path("Properties") : null;
                         JsonNode provisionProps = props.isMissingNode() ? null : props;
                         JsonNode[] comparedForms = comparedProperties.get(logicalId);
+                        boolean updating = ProvisionContext.isUpdate(resource.getPhysicalId());
+                        // The preview's Replacement, or a create-only value that resolves differently now
+                        // than it did when the stack was last updated: a resource this update changed
+                        // after the preview was computed (a GetAtt of a resource whose attributes moved).
+                        boolean replaces = replacedResourceIds.contains(logicalId)
+                                || (updating && resolvedCreateOnlyChanged(type, priorProps, provisionProps, engine,
+                                        engineFor.apply(startPhysicalIds, startResourceAttrs)));
                         PropertyChanges changes = PropertyChanges.between(type,
-                                ProvisionContext.isUpdate(resource.getPhysicalId()), priorProps,
+                                updating, priorProps,
                                 provisionProps,
                                 comparedForms != null ? comparedForms[0] : null,
                                 comparedForms != null ? comparedForms[1] : null,
-                                changedResourceIds.contains(logicalId)
-                                        ? replacedResourceIds.contains(logicalId) : null);
+                                updating ? replaces : null);
                         resource = dispatcher.provision(logicalId, type, provisionProps,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
