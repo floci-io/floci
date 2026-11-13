@@ -88,6 +88,36 @@ public class IamPolicyEvaluator {
         NEUTRAL
     }
 
+    /** What a request came to: allowed, denied by an explicit Deny, or denied for want of an Allow. */
+    public enum Outcome { ALLOW, EXPLICIT_DENY, IMPLICIT_DENY }
+
+    /** The policy family that decided a request. */
+    public enum PolicyLayer { IDENTITY, RESOURCE, SESSION, PERMISSIONS_BOUNDARY, SERVICE_CONTROL }
+
+    /**
+     * The statement that decided a request.
+     *
+     * @param layer     the policy family it sits in
+     * @param level     the SCP level, or -1 outside {@link PolicyLayer#SERVICE_CONTROL}
+     * @param document  its document's index in that layer's list (SCP: within the level; session and
+     *                  boundary: 0); -1 for {@link PolicyLayer#RESOURCE}, which arrives already decided
+     * @param statement its index in the document's {@code Statement} (0 for a single object); -1 for
+     *                  {@link PolicyLayer#RESOURCE}
+     * @param sid       its {@code Sid}, or null
+     */
+    public record DecidingStatement(PolicyLayer layer, int level, int document, int statement, String sid) {
+    }
+
+    /**
+     * Why a request was decided as it was. {@code statement} is null for an implicit deny, which no
+     * statement caused.
+     */
+    public record DecisionRecord(Outcome outcome, PolicyLayer layer, DecidingStatement statement) {
+        public Decision decision() {
+            return outcome == Outcome.ALLOW ? Decision.ALLOW : Decision.DENY;
+        }
+    }
+
     /** How a resource policy statement's principal names a caller: itself, only its account, or not at all. */
     private enum PrincipalMatch { NONE, ACCOUNT, CALLER }
 
@@ -190,25 +220,110 @@ public class IamPolicyEvaluator {
             String action,
             String resource,
             Map<String, List<String>> conditionCtx) {
+        return explain(caller, resourcePolicyDecision, accountRelationship, action, resource, conditionCtx)
+                .decision();
+    }
+
+    /**
+     * Evaluates exactly as {@link #evaluateResolvedResourcePolicy} does and names what decided it:
+     * the outcome, the policy family and, for an explicit deny or an identity allow, the statement.
+     * An explicit deny names the first one in the order SCP levels, identity, resource, session,
+     * boundary.
+     */
+    public DecisionRecord explain(
+            CallerContext caller,
+            ResourcePolicyDecision resourcePolicyDecision,
+            ResourceAccountRelationship accountRelationship,
+            String action,
+            String resource,
+            Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
-        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
-        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
-                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
-        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
-                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+        String loweredAction = lowercase(action);
+        List<CachedDocument> identityDocs = parseEach(caller.identityPolicies());
+        List<CachedDocument> sessionDocs = caller.sessionPolicyDocument() == null
+                ? null : parseEach(List.of(caller.sessionPolicyDocument()));
+        List<CachedDocument> boundaryDocs = caller.boundaryPolicyDocument() == null
+                ? null : parseEach(List.of(caller.boundaryPolicyDocument()));
         ResourcePolicyDecision resolvedDecision = resourcePolicyDecision == null
                 ? ResourcePolicyDecision.NEUTRAL : resourcePolicyDecision;
         ResourceAccountRelationship relationship = accountRelationship == null
                 ? ResourceAccountRelationship.CROSS_ACCOUNT : accountRelationship;
-        return evaluateParsed(
-                caller, identityStmts, sessionStmts, boundaryStmts,
-                resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY,
-                resolvedDecision == ResourcePolicyDecision.ALLOW
-                        || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
-                        || resolvedDecision == ResourcePolicyDecision.ALLOW_ACCOUNT
-                                && relationship == ResourceAccountRelationship.CROSS_ACCOUNT,
-                resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER,
-                relationship, lowercase(action), resource, ctx);
+        boolean resourceAllow = resolvedDecision == ResourcePolicyDecision.ALLOW
+                || resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER
+                || resolvedDecision == ResourcePolicyDecision.ALLOW_ACCOUNT
+                        && relationship == ResourceAccountRelationship.CROSS_ACCOUNT;
+        boolean directIamUserResourceAllow = resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
+
+        // 1. Explicit deny in ANY policy → DENY, whatever else would have been decided.
+        DecidingStatement deny = firstScpExplicitDeny(caller.scpLevels(), loweredAction, resource, ctx);
+        if (deny == null) {
+            deny = firstMatch(PolicyLayer.IDENTITY, -1, identityDocs, true, loweredAction, resource, ctx);
+        }
+        if (deny == null && resolvedDecision == ResourcePolicyDecision.EXPLICIT_DENY) {
+            deny = resourceStatement();
+        }
+        if (deny == null && sessionDocs != null) {
+            deny = firstMatch(PolicyLayer.SESSION, -1, sessionDocs, true, loweredAction, resource, ctx);
+        }
+        if (deny == null && boundaryDocs != null) {
+            deny = firstMatch(PolicyLayer.PERMISSIONS_BOUNDARY, -1, boundaryDocs, true, loweredAction, resource, ctx);
+        }
+        if (deny != null) {
+            return new DecisionRecord(Outcome.EXPLICIT_DENY, deny.layer(), deny);
+        }
+
+        // 2. Service control policies gate everything: the action must be allowed at EVERY
+        //    organization level and explicitly denied at none, before identity policies are
+        //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
+        //    a level holding an unparseable document denies.
+        if (!scpAllows(caller.scpLevels(), loweredAction, resource, ctx)) {
+            return implicitDeny(PolicyLayer.SERVICE_CONTROL);
+        }
+
+        // 3. Base grant: same-account access needs either policy family; cross-account access
+        //    needs both the caller's identity policy and the resource owner's policy.
+        DecidingStatement identityAllow =
+                firstMatch(PolicyLayer.IDENTITY, -1, identityDocs, false, loweredAction, resource, ctx);
+        if (relationship == ResourceAccountRelationship.CROSS_ACCOUNT) {
+            if (identityAllow == null) {
+                return implicitDeny(PolicyLayer.IDENTITY);
+            }
+            if (!resourceAllow) {
+                return implicitDeny(PolicyLayer.RESOURCE);
+            }
+        } else if (identityAllow == null && !resourceAllow) {
+            return implicitDeny(PolicyLayer.IDENTITY);
+        }
+
+        // 4. Session policy (if present) must also allow (intersection)
+        if (sessionDocs != null
+                && firstMatch(PolicyLayer.SESSION, -1, sessionDocs, false, loweredAction, resource, ctx) == null) {
+            return implicitDeny(PolicyLayer.SESSION);
+        }
+
+        // 5. A same-account resource policy that names an IAM user ARN grants directly to that
+        //    user. Its boundary's implicit deny does not cap the grant; explicit denies were
+        //    already handled above. Other grants remain limited by the boundary intersection.
+        boolean directSameAccountUserGrant = directIamUserResourceAllow
+                && relationship == ResourceAccountRelationship.SAME_ACCOUNT;
+        if (!directSameAccountUserGrant && boundaryDocs != null
+                && firstMatch(PolicyLayer.PERMISSIONS_BOUNDARY, -1, boundaryDocs, false,
+                        loweredAction, resource, ctx) == null) {
+            return implicitDeny(PolicyLayer.PERMISSIONS_BOUNDARY);
+        }
+
+        // 6. Allowed: the identity statement that granted it, or the resource policy alone.
+        DecidingStatement granting = identityAllow != null ? identityAllow : resourceStatement();
+        return new DecisionRecord(Outcome.ALLOW, granting.layer(), granting);
+    }
+
+    private static DecisionRecord implicitDeny(PolicyLayer layer) {
+        return new DecisionRecord(Outcome.IMPLICIT_DENY, layer, null);
+    }
+
+    /** The resource layer arrives already decided, so it has no statement to point at. */
+    private static DecidingStatement resourceStatement() {
+        return new DecidingStatement(PolicyLayer.RESOURCE, -1, -1, -1, null);
     }
 
     /**
@@ -281,64 +396,6 @@ public class IamPolicyEvaluator {
         ResourcePolicyDecision decision = evaluateResourcePolicyFor(
                 resourcePolicies, RequestPrincipal.service(servicePrincipal), action, resource, conditionCtx);
         return decision == ResourcePolicyDecision.ALLOW ? Decision.ALLOW : Decision.DENY;
-    }
-
-    private Decision evaluateParsed(
-            CallerContext caller,
-            List<PolicyStatement> identityStmts,
-            List<PolicyStatement> sessionStmts,
-            List<PolicyStatement> boundaryStmts,
-            boolean resourceExplicitDeny,
-            boolean resourceAllow,
-            boolean directIamUserResourceAllow,
-            ResourceAccountRelationship accountRelationship,
-            String action,
-            String resource,
-            Map<String, List<String>> ctx) {
-
-        // 0. Service control policies gate everything: the action must be allowed at EVERY
-        //    organization level and explicitly denied at none, before identity policies are
-        //    even consulted. An empty level means FullAWSAccess semantics and is skipped;
-        //    a level holding an unparseable document denies.
-        if (!scpAllows(caller.scpLevels(), action, resource, ctx)) {
-            return Decision.DENY;
-        }
-
-        // 1. Explicit deny in ANY policy → DENY immediately
-        if (anyExplicitDeny(identityStmts, action, resource, ctx)
-                || resourceExplicitDeny
-                || (sessionStmts  != null && anyExplicitDeny(sessionStmts,  action, resource, ctx))
-                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
-            return Decision.DENY;
-        }
-
-        // 2. Base grant: same-account access needs either policy family; cross-account access
-        //    needs both the caller's identity policy and the resource owner's policy.
-        boolean identityAllow = anyExplicitAllow(identityStmts, action, resource, ctx);
-        if (accountRelationship == ResourceAccountRelationship.CROSS_ACCOUNT) {
-            if (!identityAllow || !resourceAllow) {
-                return Decision.DENY;
-            }
-        } else if (!identityAllow && !resourceAllow) {
-            return Decision.DENY;
-        }
-
-        // 3. Session policy (if present) must also allow (intersection)
-        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, action, resource, ctx)) {
-            return Decision.DENY;
-        }
-
-        // 4. A same-account resource policy that names an IAM user ARN grants directly to that
-        //    user. Its boundary's implicit deny does not cap the grant; explicit denies were
-        //    already handled above. Other grants remain limited by the boundary intersection.
-        boolean directSameAccountUserGrant = directIamUserResourceAllow
-                && accountRelationship == ResourceAccountRelationship.SAME_ACCOUNT;
-        if (!directSameAccountUserGrant && boundaryStmts != null
-                && !anyExplicitAllow(boundaryStmts, action, resource, ctx)) {
-            return Decision.DENY;
-        }
-
-        return Decision.ALLOW;
     }
 
     /**
@@ -755,6 +812,22 @@ public class IamPolicyEvaluator {
         }
     }
 
+    /** The first explicit Deny at any SCP level, in level order, or null. A level that fails to parse is skipped. */
+    private DecidingStatement firstScpExplicitDeny(List<List<String>> scpLevels, String action, String resource,
+                                                   Map<String, List<String>> ctx) {
+        if (scpLevels == null) {
+            return null;
+        }
+        for (int level = 0; level < scpLevels.size(); level++) {
+            DecidingStatement found = firstMatch(PolicyLayer.SERVICE_CONTROL, level,
+                    parseEach(scpLevels.get(level)), true, action, resource, ctx);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
+    }
+
     /**
      * SCP evaluation: at every organization level the action must be explicitly allowed
      * and not explicitly denied. {@code null} levels mean SCPs don't apply; a level with
@@ -813,6 +886,25 @@ public class IamPolicyEvaluator {
             normalized.putIfAbsent(entry.getKey().toLowerCase(Locale.ROOT), values);
         }
         return normalized;
+    }
+
+    /**
+     * The first statement, in document then statement order, whose Effect is Deny (or Allow) and
+     * which matches the request, or null. Same matching as {@link #anyExplicitDeny}.
+     */
+    private DecidingStatement firstMatch(PolicyLayer layer, int level, List<CachedDocument> documents,
+                                         boolean deny, String action, String resource,
+                                         Map<String, List<String>> ctx) {
+        for (int d = 0; d < documents.size(); d++) {
+            List<PolicyStatement> stmts = documents.get(d).statements();
+            for (int s = 0; s < stmts.size(); s++) {
+                PolicyStatement stmt = stmts.get(s);
+                if ((deny ? stmt.isDeny() : stmt.isAllow()) && matchesStatement(stmt, action, resource, ctx)) {
+                    return new DecidingStatement(layer, level, d, s, stmt.getSid());
+                }
+            }
+        }
+        return null;
     }
 
     private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
@@ -1697,6 +1789,17 @@ public class IamPolicyEvaluator {
         return IamPolicyDocuments.readsAsPolicyDocument(document);
     }
 
+    /** Each document's parse, in order and position for position, so a statement can be located. */
+    private List<CachedDocument> parseEach(List<String> documents) {
+        List<CachedDocument> result = new ArrayList<>();
+        if (documents != null) {
+            for (String doc : documents) {
+                result.add(parseDocument(doc));
+            }
+        }
+        return result;
+    }
+
     private List<PolicyStatement> parseAll(List<String> documents) {
         return parseAllTracked(documents).statements();
     }
@@ -1786,7 +1889,8 @@ public class IamPolicyEvaluator {
                 resources.isEmpty()   ? null : resources,
                 notResources.isEmpty()? null : notResources,
                 conditions,
-                version);
+                version,
+                stmt.path("Sid").isTextual() ? stmt.get("Sid").asText() : null);
     }
 
     private Map<String, List<String>> parsePrincipals(JsonNode node) {
