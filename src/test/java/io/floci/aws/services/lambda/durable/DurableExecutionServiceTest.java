@@ -29,6 +29,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -737,6 +738,62 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aDurableChainedChildTakesTheRequestedTraceHeaderAndPassesItToItsInvocation() {
+        String header = "Root=1-6af70000-0000000000000000000000e1;Parent=00000000000000e1;Sampled=1";
+        invoker.childScript("child-fn", event -> succeeded("\"c\""));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "child-fn:1", null, header)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        DurableExecution parent = service.get(startWithTraceHeader("exec-1",
+                "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1").getExecutionArn());
+
+        DurableExecution child = service.get(parent.getOperations().get("i1").getChildExecutionArn());
+        assertEquals(header, child.getTraceHeader());
+        assertEquals(List.of(header), invoker.otherTraceIds.get("child-fn"));
+    }
+
+    @Test
+    void aDurableChainedChildWithoutARequestedTraceHeaderTakesTheParentHeader() {
+        String parentHeader = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        invoker.childScript("child-fn", event -> succeeded("\"c\""));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "child-fn:1", null)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        DurableExecution parent = service.get(startWithTraceHeader("exec-1", parentHeader).getExecutionArn());
+
+        DurableExecution child = service.get(parent.getOperations().get("i1").getChildExecutionArn());
+        assertEquals(parentHeader, child.getTraceHeader());
+        assertEquals(List.of(parentHeader), invoker.otherTraceIds.get("child-fn"));
+    }
+
+    @Test
+    void aPlainChainedTargetGetsTheRequestedTraceHeader() {
+        String header = "Root=1-6af70000-0000000000000000000000e1;Parent=00000000000000e1;Sampled=1";
+        invoker.plainFunctions.put("plain-fn", event -> handlerResponse("{}"));
+        invoker.plainFunctions.put("active-fn", event -> handlerResponse("{}"));
+        invoker.activeFunctions.add("active-fn");
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("p", "plain-fn", null, header),
+                    chainedStart("a", "active-fn", null, header)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        start("exec-1", "{}", false);
+
+        assertEquals(List.of(header), invoker.otherTraceIds.get("plain-fn"));
+        assertEquals(1, invoker.otherTraceIds.get("active-fn").size());
+        assertTrue(invoker.otherTraceIds.get("active-fn").get(0)
+                .matches("Root=1-6af70000-0000000000000000000000e1;Parent=(?!00000000000000e1)[0-9a-f]{16};Sampled=1"));
+    }
+
+    @Test
     void aChainedInvokeOfAPlainFunctionFailsWithItsErrorOrAnOversizedOutput() {
         invoker.plainFunctions.put("raising-fn",
                 event -> functionError("{\"errorMessage\":\"child exploded\",\"errorType\":\"ValueError\"}"));
@@ -924,8 +981,14 @@ class DurableExecutionServiceTest {
     }
 
     private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
+        return chainedStart(id, functionName, payload, null);
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String functionName, String payload,
+                                                       String traceHeader) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
-                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null,
+                traceHeader);
     }
 
     private static void assertCallbackClosed(Executable call) {
@@ -977,27 +1040,27 @@ class DurableExecutionServiceTest {
     private static DurableOperationUpdate step(String id, DurableOperationAction action, String payload,
                                                DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step", action, payload, error,
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate stepRetry(String id, int delaySeconds, DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step",
-                DurableOperationAction.RETRY, null, error, delaySeconds, null, null, null, null, null, null);
+                DurableOperationAction.RETRY, null, error, delaySeconds, null, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds, int heartbeatSeconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
-                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null);
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null, null);
     }
 
     private static DurableOperationUpdate waitStart(String id, int seconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.WAIT, "Wait",
-                DurableOperationAction.START, null, null, null, seconds, null, null, null, null, null);
+                DurableOperationAction.START, null, null, null, seconds, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate executionSucceed(String payload) {
         return new DurableOperationUpdate("execution-result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.SUCCEED, payload, null, null, null, null, null, null, null, null);
+                DurableOperationAction.SUCCEED, payload, null, null, null, null, null, null, null, null, null);
     }
 
     private static DurableFunctionInvoker.DurableInvocationResult succeeded(String result) {
@@ -1032,7 +1095,11 @@ class DurableExecutionServiceTest {
         String functionName = FUNCTION;
         int retentionPeriodInDays = 7;
         boolean activeTracing;
+        /** Functions that trace Active, plain or durable, whatever activeTracing says. */
+        final Set<String> activeFunctions = new HashSet<>();
         final List<String> traceIds = new ArrayList<>();
+        /** The trace id each invocation of a function other than the one under test received. */
+        final Map<String, List<String>> otherTraceIds = new HashMap<>();
 
         void script(Function<JsonNode, DurableInvocationResult> script) {
             scripts.add(script);
@@ -1047,7 +1114,8 @@ class DurableExecutionServiceTest {
             String version = qualifier == null ? "$LATEST" : qualifier;
             if (plainFunctions.containsKey(functionName)) {
                 return new ResolvedDurableTarget(accountId, region, functionName,
-                        "arn:aws:lambda:us-east-1:000000000000:function:" + functionName, version, false, 0, 0, false);
+                        "arn:aws:lambda:us-east-1:000000000000:function:" + functionName, version, false, 0, 0,
+                        activeFunctions.contains(functionName));
             }
             String name = FUNCTION.equals(functionName) ? this.functionName : functionName;
             if (!name.equals(this.functionName) && !childScripts.containsKey(name)) {
@@ -1057,7 +1125,7 @@ class DurableExecutionServiceTest {
             return new ResolvedDurableTarget(accountId, region, name,
                     "arn:aws:lambda:us-east-1:000000000000:function:" + name + ":" + durableVersion, durableVersion,
                     true, name.equals(this.functionName) ? executionTimeoutSeconds : childExecutionTimeoutSeconds,
-                    retentionPeriodInDays, activeTracing);
+                    retentionPeriodInDays, activeTracing || activeFunctions.contains(name));
         }
 
         @Override
@@ -1068,6 +1136,9 @@ class DurableExecutionServiceTest {
                 event = MAPPER.readTree(payload);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
+            }
+            if (!FUNCTION.equals(target.functionName())) {
+                otherTraceIds.computeIfAbsent(target.functionName(), ignored -> new ArrayList<>()).add(traceId);
             }
             if (!target.durable()) {
                 return plainFunctions.get(target.functionName()).apply(event);
