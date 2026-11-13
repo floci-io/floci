@@ -302,9 +302,9 @@ state.
   own write touched if a later step in that same version fails, preserving the original error, but
   a sidecar outage mid-cleanup can still leave a version in an inconsistent state, the same
   residual risk the generic path's own write-level failure handling already accepts. A single call
-  also holds every fetched asset in memory until the whole batch's destination writes complete, so
-  a batch of many large assets is bounded by available heap, not disk; the same nominal-quota
-  tradeoff the 5 GB limitation below already accepts elsewhere. A copied `npm` or `pypi` version's
+  stages every fetched asset to disk, not memory, for the whole batch's duration (cleaned up when
+  the call returns, success or failure), so a batch of many large assets is bounded by available
+  disk, not heap. A copied `npm` or `pypi` version's
   readme is propagated to the destination too, from this service's own record captured at publish
   time, since neither sidecar can answer for one after the fact (`GetPackageVersionReadme`'s own
   constraint, described earlier in this document); `nuget` needs no equivalent step, since
@@ -313,12 +313,44 @@ state.
   own upstream-repository chain specifically, which this emulator does not resolve for any
   format yet (see the upstream-resolution limitation below). Maven's own external-connection
   retention is a different mechanism and does not change this.
-- **The 5 GB asset size quota is nominal.** `PublishPackageVersion` and the Maven, pypi, and
-  nuget repository endpoints all receive the request body as a single byte array before Floci ever
-  checks its length, so a request already large enough to exhaust available heap fails before the
-  quota check runs. The rejection (`ServiceQuotaExceededException` from `PublishPackageVersion`,
-  HTTP 413 from the Maven, pypi, and nuget endpoints) is correct for anything that does fit in
-  memory; it is not itself a streaming size limit.
+- **`CopyPackageVersions` holds this service's one write lock for the whole call, including the
+  disk staging and sidecar streaming a large batch now needs.** Every package-mutating method
+  here (`CreateDomain`, `PublishPackageVersion`, `DeletePackageVersions`, ...) shares one lock, so
+  only one such call runs at a time across every domain and repository, not just the one being
+  touched; that has always been true and is fine as long as what runs under the lock is fast.
+  `PublishPackageVersion` was specifically restructured to stage and digest a large upload
+  *before* taking this lock, so a multi-GB publish doesn't serialize every other call for as long
+  as it takes to read; `CopyPackageVersions` was not given the same treatment, since its own
+  validation (`NOT_FOUND`/`Disposed`/`MISMATCHED_REVISION`/content-match/`ALREADY_EXISTS`, all-or-
+  nothing across up to 100 requested versions) would need to be re-derived against a staged-then-
+  committed shape to split safely, a real design task rather than a mechanical move. A single
+  call copying many large versions can therefore hold up every other CodeArtifact request for as
+  long as that whole batch takes, not just slow down the one call itself.
+- **The 5 GB asset size quota is a real streaming limit for `generic`, Maven, pypi, and nuget,
+  with two exceptions.** Every upload and download path (direct publish, the native Maven/pypi/
+  nuget proxies, `GetPackageVersionAsset`, and `CopyPackageVersions`) stages an asset to disk and
+  streams it rather than holding it as one JVM array, so none of them are bound by the ~2 GiB
+  `byte[]` limit that would otherwise sit well under AWS's own 5 GB quota. Two things still cap a
+  real upload below that:
+  - **Every request body is still capped by `FLOCI_PROTOCOLS_MAX_REQUEST_SIZE`, 2048 MB by
+    default** (the same global limit [S3](s3.md) documents): raise it past 5120 to accept a 5 GiB
+    asset, the same adjustment a 5 GiB S3 `PutObject` needs.
+  - **In `floci.storage.mode: memory` (the shipped default), a `generic` asset's bytes are a
+    single in-memory `byte[]`**, so one can hold at most about 2 GiB there, the same ~2 GiB
+    ceiling S3 documents for its own `memory` mode (see [S3](s3.md#storage)); past that, the
+    publish fails with an uncaught `OutOfMemoryError` rather than a clean rejection. Unlike S3,
+    CodeArtifact has no per-service storage-mode override (`FLOCI_STORAGE_SERVICES_S3_MODE`'s own
+    equivalent does not exist here): set the global `FLOCI_STORAGE_MODE=persistent` (or `hybrid`/
+    `wal`) to lift this. Maven, npm, pypi, and nuget assets are unaffected either way, since their
+    real bytes always live in their own sidecar container, never in this map.
+  - **npm has its own, separate, much lower ceiling that no Floci-side configuration changes:**
+    real npm's publish protocol embeds the whole tarball as one base64 string inside a JSON
+    document, and Verdaccio (the sidecar behind this proxy) converts the whole received body to a
+    single JavaScript string before parsing it. Past roughly a 500 MB asset (confirmed between
+    200 MB, which succeeds, and 500 MB, which does not), that conversion hits V8's own hard maximum
+    string length and crashes the Verdaccio process outright with an uncaught `RangeError: Invalid
+    string length`, not a clean rejection either. This is a limitation of real npm's own wire
+    protocol as Verdaccio implements it, not something this emulator's own code can stream around.
 - **Maven artifacts, npm packages, pypi packages, and NuGet packages do not survive a Floci
   restart, even under persistent storage.** The Reposilite instance and every per-repository
   Verdaccio, pypiserver, and BaGetter container have no volume attached and are removed on shutdown

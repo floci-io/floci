@@ -48,6 +48,17 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
                 publish: $all
                 unpublish: $all
             listen: 0.0.0.0:4873
+            # Verdaccio's own documented default (10mb) is for a small JSON document, not a real
+            # npm publish's packument-with-embedded-tarball body; discovered by hand-testing a
+            # multi-GB publish end to end, which Verdaccio rejected outright with its own "request
+            # entity too large" below this value. Raising it past CodeArtifactService
+            # .MAX_ASSET_FILE_SIZE_BYTES is still worthwhile even though it alone doesn't reach
+            # that real AWS quota: past roughly a 500 MB asset, Verdaccio's own Node/V8 runtime hits
+            # its hard maximum JavaScript string length converting the received body to one string
+            # before parsing it, and crashes outright: a real, documented, npm-protocol-specific
+            # ceiling no Verdaccio config can move (see docs/services/codeartifact.md's own Known
+            # limitations entry).
+            max_body_size: 5gb
             log:
               type: stdout
               format: pretty

@@ -83,7 +83,9 @@ final class ExpressionEvaluator {
 
             if (isDigit(c)) {
                 int start = i;
-                while (i < len && isDigit(expression.charAt(i))) {
+                i++;
+                // DynamoDB reads a leading 0 as a number of its own, so a[01] fails on "1".
+                while (c != '0' && i < len && isDigit(expression.charAt(i))) {
                     i++;
                 }
                 tokens.add(new Token(TokenType.NUMBER, expression.substring(start, i), start));
@@ -216,14 +218,8 @@ final class ExpressionEvaluator {
             return advance();
         }
 
-        // DynamoDB quotes the text from the token before the failing one through the token after it.
         private IllegalArgumentException syntaxError() {
-            Token token = peek();
-            int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
-            int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
-            String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
-            return new IllegalArgumentException(
-                    "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to)));
+            return new IllegalArgumentException(syntaxErrorDetail(expression, tokens, pos));
         }
 
         Expr parseExpression() {
@@ -381,6 +377,15 @@ final class ExpressionEvaluator {
                    type == TokenType.LT || type == TokenType.LE ||
                    type == TokenType.GT || type == TokenType.GE;
         }
+    }
+
+    // DynamoDB quotes the text from the token before the failing one through the token after it.
+    static String syntaxErrorDetail(String expression, List<Token> tokens, int pos) {
+        Token token = tokens.get(pos);
+        int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
+        int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
+        String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
+        return "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to));
     }
 
     // ── Parse helper ──

@@ -270,7 +270,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 String prior = originalInlinePolicies.get(policyName);
                 if (prior != null && !CfnRollback.attemptIamCleanup(failure,
                         "restore inline policy " + policyName + " on role " + resolvedRoleName,
-                        () -> iamService.putRolePolicy(resolvedRoleName, policyName, prior))) {
+                        () -> iamService.restoreRolePolicy(resolvedRoleName, policyName, prior))) {
                     cleanupSucceeded = false;
                 }
             }
@@ -308,7 +308,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                 // recreated under this name in between, this must not write the restored document
                 // onto the replacement.
                 if (!CfnRollback.attemptIamCleanup(failure, "restore prior trust policy on role " + resolvedRoleName,
-                        () -> iamService.updateAssumeRolePolicy(
+                        () -> iamService.restoreAssumeRolePolicy(
                                 resolvedRoleName, documentToRestore, roleIdToRestore))) {
                     cleanupSucceeded = false;
                 }

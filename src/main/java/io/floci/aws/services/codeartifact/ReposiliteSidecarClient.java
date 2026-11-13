@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -13,6 +14,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
@@ -21,6 +23,8 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -128,6 +132,32 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     @Override
     public Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version, String assetName) {
+        HttpRequest request = packageVersionAssetRequest(repositoryContainerId, namespace, packageName, version,
+                assetName);
+        HttpResponse<byte[]> response = send(request, BodyHandlers.ofByteArray());
+        if (response.statusCode() != 200) {
+            return Optional.empty();
+        }
+        return Optional.of(response.body());
+    }
+
+    /** {@link #fetchPackageVersionAsset}'s streamed sibling; see {@link RepositorySidecarManager} for why. */
+    @Override
+    public Optional<StreamedAsset> fetchPackageVersionAssetStreamed(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String version, String assetName) {
+        HttpRequest request = packageVersionAssetRequest(repositoryContainerId, namespace, packageName, version,
+                assetName);
+        HttpResponse<InputStream> response = send(request, BodyHandlers.ofInputStream());
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            return Optional.empty();
+        }
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        return Optional.of(new StreamedAsset(response.body(), contentLength));
+    }
+
+    private HttpRequest packageVersionAssetRequest(String repositoryContainerId, String namespace,
+            String packageName, String version, String assetName) {
         ensureRepository(repositoryContainerId);
         String baseUrl = manager.ensureReady();
         StringBuilder path = new StringBuilder("/").append(SidecarUriUtils.encodeSegment(repositoryContainerId));
@@ -137,16 +167,15 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         path.append('/').append(SidecarUriUtils.encodeSegment(packageName))
                 .append('/').append(SidecarUriUtils.encodeSegment(version))
                 .append('/').append(SidecarUriUtils.encodeSegment(assetName));
-        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path.toString()))
-                .timeout(Duration.ofSeconds(30))
+        // Shared by both fetchPackageVersionAsset (byte[]) and fetchPackageVersionAssetStreamed:
+        // the asset this fetches can be gigabytes through either one, so a flat, small timeout
+        // sized for metadata-only requests would cancel a legitimately large, still-in-progress
+        // download, the same gap the write side once had on its own forwarding call.
+        return HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path.toString()))
+                .timeout(SidecarUriUtils.maxTransferTimeout())
                 .header("Authorization", manager.basicAuthHeader())
                 .GET()
                 .build();
-        HttpResponse<byte[]> response = send(request, BodyHandlers.ofByteArray());
-        if (response.statusCode() != 200) {
-            return Optional.empty();
-        }
-        return Optional.of(response.body());
     }
 
     /**
@@ -563,6 +592,39 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         HttpRequest request = authenticated(baseUrl, repositoryContainerId, gav)
                 .PUT(BodyPublishers.ofByteArray(content))
                 .build();
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        if (status != 200 && status != 201) {
+            throw new IllegalStateException("Could not copy " + packageName + " " + version + "'s asset "
+                    + assetName + " to the Reposilite sidecar: upstream returned " + status);
+        }
+    }
+
+    /**
+     * {@link #storePackageVersionAsset(String, String, String, String, String, String, String,
+     * byte[])}'s own streamed sibling: without this override, {@code CopyPackageVersions}'
+     * destination write for Maven would silently fall back to {@link RepositorySidecarManager}'s
+     * own default, which reads the whole staged file into a {@code byte[]} before delegating to
+     * the overload above, reinstating the ~2 GiB ceiling this class's own {@link #deployArtifact}
+     * override already streams around for a direct publish. The real content is sent via {@code
+     * BodyPublishers.ofFile}, the same way {@link #deployArtifact(String, String, Path)} already
+     * does for its own PUT.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength) {
+        ensureRepository(repositoryContainerId);
+        String baseUrl = manager.ensureReady();
+        String gav = versionGav(namespace, packageName, version, assetName);
+        HttpRequest request;
+        try {
+            request = authenticated(baseUrl, repositoryContainerId, gav)
+                    .timeout(SidecarUriUtils.transferTimeout(contentLength))
+                    .PUT(BodyPublishers.ofFile(content))
+                    .build();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         int status = send(request, BodyHandlers.discarding()).statusCode();
         if (status != 200 && status != 201) {
             throw new IllegalStateException("Could not copy " + packageName + " " + version + "'s asset "
@@ -1188,6 +1250,37 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * {@code content}'s own streamed sibling, for an artifact too large to ever hold as one {@code
+     * byte[]} (Maven's own direct {@code deploy}/retention paths stage a large upload to disk
+     * rather than buffering it): streams the file straight to Reposilite via {@code
+     * BodyPublishers.ofFile} instead of reading it into memory first, and the idempotent-match
+     * preflight below compares two streams in lockstep instead of one stream against a resident
+     * array.
+     */
+    public DeployOutcome deployArtifact(String repoId, String gav, Path content) {
+        String baseUrl = manager.ensureReady();
+        if (existingArtifactMatches(baseUrl, repoId, gav, content)) {
+            return new DeployOutcome(200, false);
+        }
+        HttpRequest request;
+        try {
+            // authenticated(...)'s own flat 30-second timeout is sized for the small metadata
+            // requests every other call site here sends; overridden here (a builder's timeout(...)
+            // can be set more than once, the last call winning) with one that scales with this
+            // artifact's own size, discovered by hand-testing a multi-GB deploy end to end: the flat
+            // 30 seconds was nowhere near enough once the artifact itself, not just its metadata, is
+            // what's being forwarded.
+            request = authenticated(baseUrl, repoId, gav)
+                    .timeout(SidecarUriUtils.transferTimeout(Files.size(content)))
+                    .PUT(BodyPublishers.ofFile(content)).build();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        int status = send(request, BodyHandlers.discarding()).statusCode();
+        return new DeployOutcome(status, status == 200 || status == 201);
+    }
+
+    /**
      * {@code true} when {@code repoId}'s {@code gav} path already holds content identical to
      * {@code content}. Streams the existing artifact in fixed-size chunks rather than buffering it
      * whole: {@code content} is already fully resident (RESTEasy Reactive buffers the whole request
@@ -1230,9 +1323,66 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
         }
     }
 
+    /**
+     * {@link #existingArtifactMatches(String, String, String, byte[])}'s own streamed sibling:
+     * compares the remote artifact against {@code content} chunk by chunk from each side rather
+     * than against one resident array, using {@code readNBytes} so a short individual {@code
+     * read()} on either side (always possible, never guaranteed to fill the buffer) can't be
+     * mistaken for the two streams genuinely disagreeing.
+     */
+    private boolean existingArtifactMatches(String baseUrl, String repoId, String gav, Path content) {
+        HttpRequest request = authenticated(baseUrl, repoId, gav).GET().build();
+        try {
+            HttpResponse<InputStream> response = httpClient.send(request, BodyHandlers.ofInputStream());
+            if (response.statusCode() != 200) {
+                response.body().close();
+                return false;
+            }
+            try (InputStream remote = response.body(); InputStream local = Files.newInputStream(content)) {
+                return StreamEquality.contentsMatch(remote, local);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not check {0}/{1} for an existing match before deploying: {2}", repoId, gav,
+                    e.getMessage());
+            return false;
+        }
+    }
+
     /** Fetches {@code repoId}'s {@code gav} path, or {@link Optional#empty()} on a non-200 response. */
     public Optional<FetchedArtifact> fetchArtifact(String repoId, String gav) {
         return fetchArtifact(manager.ensureReady(), repoId, gav);
+    }
+
+    /**
+     * {@link #fetchArtifact(String, String)}'s streamed sibling, for the real wire-protocol GET
+     * route: that method's own {@code byte[]} is fine for its other callers (a
+     * {@code maven-metadata.xml} listing, never a large asset), but the real download route has
+     * to hand back whatever a published jar actually is, which can be gigabytes. The caller owns
+     * closing the returned stream.
+     *
+     * <p>{@code authenticated(...)}'s own flat 30-second timeout is sized for the small metadata
+     * requests every other call site here sends; overridden here with the worst-case download
+     * timeout, the read-side counterpart of {@code deployArtifact(Path)}'s own override: a GET
+     * can't size its own timeout off a real {@code contentLength} the way that PUT can off its
+     * already-known upload size, since the real size here isn't known until the response itself
+     * arrives.
+     */
+    public Optional<StreamedArtifact> fetchArtifactStreamed(String repoId, String gav) {
+        String baseUrl = manager.ensureReady();
+        HttpRequest request = authenticated(baseUrl, repoId, gav)
+                .timeout(SidecarUriUtils.maxTransferTimeout())
+                .GET().build();
+        HttpResponse<InputStream> response = send(request, BodyHandlers.ofInputStream());
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            return Optional.empty();
+        }
+        String contentType = response.headers().firstValue("Content-Type").orElse("application/octet-stream");
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        return Optional.of(new StreamedArtifact(response.body(), contentLength, contentType));
     }
 
     /**
@@ -1268,6 +1418,10 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     public record FetchedArtifact(byte[] content, String contentType) {}
+
+    /** {@code contentLength} is -1 when the sidecar's response carried no {@code Content-Length} header. */
+    public record StreamedArtifact(InputStream content, long contentLength, String contentType) {}
+
 
     /** {@code true} if {@code repoId}'s {@code gav} path exists. */
     public boolean artifactExists(String repoId, String gav) {

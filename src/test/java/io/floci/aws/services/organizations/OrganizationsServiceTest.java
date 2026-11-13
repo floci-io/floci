@@ -408,22 +408,42 @@ class OrganizationsServiceTest {
     }
 
     @Test
-    void putResourcePolicyReplacesTagsRatherThanMergingThem() {
+    void putResourcePolicyWithoutTagsCreatesAnUntaggedPolicy() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String policyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}", null).id();
+
+        assertTrue(service.listTagsForResource(MANAGEMENT_ACCOUNT, policyId).isEmpty());
+    }
+
+    @Test
+    void putResourcePolicyRefusesTagsForAnExistingPolicyAndChangesNothing() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String content = "{\"Version\":\"2012-10-17\"}";
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "test"));
 
-        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "test", "owner", "platform"));
-        assertEquals(Map.of("env", "test", "owner", "platform"),
-                service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+        AwsException error = assertThrows(AwsException.class, () -> service.putResourcePolicy(
+                MANAGEMENT_ACCOUNT, "{\"Statement\":[]}", Map.of("env", "prod")));
+        assertEquals("InvalidInputException", error.getErrorCode());
 
-        // Put drops a key the new set leaves out; CloudFormation relies on that to converge on update.
-        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "prod"));
-        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+        OrganizationsService.ResourcePolicyView policy = service.describeResourcePolicy(MANAGEMENT_ACCOUNT);
+        assertEquals(content, policy.content());
+        assertEquals(Map.of("env", "test"), policy.tags());
+    }
 
-        // Omitting Tags entirely is "don't touch", matching how the provisioner treats an absent
-        // Tags property on every other Organizations type.
-        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, null);
-        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+    @Test
+    void putResourcePolicyWithoutTagsUpdatesAnExistingPolicyAndKeepsItsTags() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String policyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}",
+                Map.of("env", "test")).id();
+        String updated = "{\"Statement\":[]}";
+
+        OrganizationsService.ResourcePolicyView policy = service.putResourcePolicy(MANAGEMENT_ACCOUNT, updated, null);
+        assertEquals(policyId, policy.id());
+        assertEquals(updated, policy.content());
+        assertEquals(Map.of("env", "test"), policy.tags());
+
+        // An empty Tags list has no tags to apply, so it is not refused either.
+        assertEquals(Map.of("env", "test"), service.putResourcePolicy(MANAGEMENT_ACCOUNT, updated, Map.of()).tags());
     }
 
     @Test

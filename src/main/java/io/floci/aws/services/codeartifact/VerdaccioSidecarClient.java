@@ -3,29 +3,43 @@ package io.floci.aws.services.codeartifact;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.ByteArrayInputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.io.SequenceInputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * The HTTP wire protocol for a Verdaccio sidecar: package metadata, tarball fetches, and stored
@@ -106,6 +120,18 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
             return Optional.empty();
         }
         return fetchTarball(baseUrl, namespace, packageName, assetName);
+    }
+
+    /** {@link #fetchPackageVersionAsset}'s streamed sibling; see {@link RepositorySidecarManager} for why. */
+    @Override
+    public Optional<RepositorySidecarManager.StreamedAsset> fetchPackageVersionAssetStreamed(
+            String repositoryContainerId, String domain, String repository, String namespace, String packageName,
+            String version, String assetName) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        if (!versionHasAsset(baseUrl, packagePath(namespace, packageName), version, assetName)) {
+            return Optional.empty();
+        }
+        return fetchTarballStreamed(baseUrl, namespace, packageName, assetName);
     }
 
     /**
@@ -287,6 +313,29 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         return Optional.of(response.body());
     }
 
+    /** {@link #fetchTarball}'s streamed sibling. The caller owns closing the returned stream. */
+    public Optional<RepositorySidecarManager.StreamedAsset> fetchTarballStreamed(String baseUrl, String namespace,
+            String packageName, String assetName) {
+        HttpRequest request = tarballRequest(baseUrl, namespace, packageName, assetName);
+        HttpResponse<InputStream> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the Verdaccio sidecar to fetch " + assetName, e);
+        }
+        if (response.statusCode() == 404) {
+            StreamingResponses.closeQuietly(response.body());
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            throw new IllegalStateException("Could not fetch " + assetName
+                    + " from the Verdaccio sidecar: upstream returned " + response.statusCode());
+        }
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        return Optional.of(new RepositorySidecarManager.StreamedAsset(response.body(), contentLength));
+    }
+
     /**
      * The SHA-512 integrity of a stored tarball, computed by streaming its bytes so the file never
      * sits in memory. Empty when the tarball is not there.
@@ -308,7 +357,7 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
                 throw new IllegalStateException("Could not fetch " + assetName
                         + " from the Verdaccio sidecar: upstream returned " + response.statusCode());
             }
-            MessageDigest digest = sha512();
+            MessageDigest digest = Digests.sha512Digest();
             byte[] chunk = new byte[64 * 1024];
             for (int read = body.read(chunk); read != -1; read = body.read(chunk)) {
                 digest.update(chunk, 0, read);
@@ -319,16 +368,24 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         }
     }
 
+
     private static String packagePath(String namespace, String packageName) {
         return namespace == null
                 ? SidecarUriUtils.encodeSegment(packageName)
                 : "@" + SidecarUriUtils.encodeSegment(namespace) + "/" + SidecarUriUtils.encodeSegment(packageName);
     }
 
+    /**
+     * Shared by {@link #fetchTarball}, {@link #fetchTarballStreamed}, and {@link
+     * #storedTarballIntegrity} — every one of the three reads the real tarball's own bytes in
+     * full (the last one to compute its digest, not just to hand them back), so a flat, small
+     * timeout sized for a metadata-only request would cancel a legitimately large, still-in-
+     * progress read through any of them.
+     */
     private HttpRequest tarballRequest(String baseUrl, String namespace, String packageName, String assetName) {
         URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/" + packagePath(namespace, packageName) + "/-/"
                 + SidecarUriUtils.encodeSegment(assetName));
-        return HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
+        return HttpRequest.newBuilder(uri).timeout(SidecarUriUtils.maxTransferTimeout()).GET().build();
     }
 
     private Optional<JsonNode> packageDocument(String baseUrl, String packagePath) {
@@ -444,6 +501,20 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * {@link #storePackageVersionAsset(String, String, String, String, String, String, String,
+     * byte[])}'s own streamed sibling, for a tarball too large to ever hold as one {@code byte[]}
+     * (~2 GiB, the JVM array limit): see {@link #storeVersion(String, String, String, String,
+     * String, String, String, Path, long, JsonNode)} for how the write itself streams.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength) {
+        storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
+                contentLength, null);
+    }
+
+    /**
      * Reuses {@code sourceRepositoryContainerId}'s own version entry verbatim (the exact document
      * its original publish wrote, including {@code dependencies}/{@code scripts}/{@code engines}
      * and anything else npm's own protocol carries on a version), rather than building a fresh,
@@ -465,6 +536,25 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
                 .orElse(null);
         storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
                 sourceVersionDoc);
+    }
+
+    /**
+     * {@link #copyPackageVersionAsset(String, String, String, String, String, String, String,
+     * String, String, byte[])}'s own streamed sibling, mirroring {@link
+     * #storePackageVersionAsset(String, String, String, String, String, String, String, Path,
+     * long)}'s own reason for existing.
+     */
+    @Override
+    public void copyPackageVersionAsset(String sourceRepositoryContainerId, String domain, String sourceRepository,
+            String repositoryContainerId, String repository, String namespace, String packageName, String version,
+            String assetName, Path content, long contentLength) {
+        String sourceBaseUrl = ensureReady(sourceRepositoryContainerId, publicUrl(domain, sourceRepository));
+        JsonNode sourceVersionDoc = packageDocument(sourceBaseUrl, packagePath(namespace, packageName))
+                .map(doc -> doc.path("versions").path(version))
+                .filter(node -> !node.isMissingNode() && !node.isNull())
+                .orElse(null);
+        storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
+                contentLength, sourceVersionDoc);
     }
 
     /**
@@ -490,6 +580,20 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
     }
 
     /**
+     * {@link #storeRetainedVersionAsset(String, String, String, String, String, String, String,
+     * byte[], JsonNode)}'s own streamed sibling, mirroring {@link #storePackageVersionAsset(String,
+     * String, String, String, String, String, String, Path, long)}'s own reason for existing: the
+     * real public registry's own tarballs are exactly the ones most likely to actually exceed
+     * {@code byte[]}'s own ~2 GiB ceiling.
+     */
+    public void storeRetainedVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength, JsonNode externalVersionDoc) {
+        storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
+                contentLength, externalVersionDoc);
+    }
+
+    /**
      * The one real write every {@code storePackageVersionAsset}/{@code copyPackageVersionAsset}/
      * {@code storeRetainedVersionAsset} call goes through. Sends no {@code dist-tags} of its own
      * (found by hectorvent's review of the npm external-connection work: the unconditional {@code
@@ -506,18 +610,8 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
         String path = packagePath(namespace, packageName);
         String npmName = npmPackageName(namespace, packageName);
-        String tarballUrl = baseUrl + "/" + path + "/-/" + assetName;
-
-        ObjectNode versionDoc = sourceVersionDoc != null ? sourceVersionDoc.deepCopy() : mapper.createObjectNode();
-        versionDoc.put("name", npmName);
-        versionDoc.put("version", version);
-        if (!versionDoc.has("description")) {
-            versionDoc.put("description", "");
-        }
-        ObjectNode dist = versionDoc.putObject("dist");
-        dist.put("shasum", Digests.sha1Hex(content));
-        dist.put("integrity", "sha512-" + Base64.getEncoder().encodeToString(sha512().digest(content)));
-        dist.put("tarball", tarballUrl);
+        ObjectNode versionDoc = versionDocument(sourceVersionDoc, npmName, version, baseUrl, path, assetName,
+                Digests.sha1Hex(content), Base64.getEncoder().encodeToString(Digests.sha512Digest().digest(content)));
 
         // No dist-tags sent: see this method's own javadoc for why.
         ObjectNode body = mapper.createObjectNode();
@@ -530,10 +624,236 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         attachment.put("data", Base64.getEncoder().encodeToString(content));
         attachment.put("length", content.length);
 
+        byte[] bodyBytes = writeValue(body);
+        sendVersionDocument(baseUrl, path, npmName, version, BodyPublishers.ofByteArray(bodyBytes), bodyBytes.length);
+    }
+
+    /**
+     * {@link #storeVersion(String, String, String, String, String, String, String, byte[],
+     * JsonNode)}'s own streamed sibling: unlike every other sidecar write in this package, a
+     * plain {@code BodyPublishers.concat} around the tarball's own bytes is not enough here,
+     * since the tarball is not a standalone part of a multipart body but one base64-encoded JSON
+     * string value embedded inside a larger document (Verdaccio's own publish protocol, confirmed
+     * live). {@link #dist} aside, {@code shasum}/{@code integrity} are computed from the file
+     * once, up front (a second full pass, since this class's own byte[]-based hashing has no
+     * reason to be reused across the unrelated digest set {@code AssetDigestingInputStream}
+     * already computed when this content was staged/fetched), and the JSON document itself is
+     * built as explicit prefix/suffix string fragments around a {@link #base64EncodingStream}
+     * instead of one fully-serialized string, so the base64 payload streams through rather than
+     * ever being held, encoded, whole in memory the way the {@code byte[]} overload's own {@code
+     * Base64.getEncoder().encodeToString(content)} call still is.
+     */
+    private void storeVersion(String repositoryContainerId, String domain, String repository, String namespace,
+            String packageName, String version, String assetName, Path content, long contentLength,
+            JsonNode sourceVersionDoc) {
+        String sha1Hex;
+        String sha512Base64;
+        try (InputStream in = Files.newInputStream(content)) {
+            MessageDigest sha1 = Digests.sha1Digest();
+            MessageDigest sha512 = Digests.sha512Digest();
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(buffer)) != -1) {
+                sha1.update(buffer, 0, read);
+                sha512.update(buffer, 0, read);
+            }
+            sha1Hex = HexFormat.of().formatHex(sha1.digest());
+            sha512Base64 = Base64.getEncoder().encodeToString(sha512.digest());
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        String path = packagePath(namespace, packageName);
+        String npmName = npmPackageName(namespace, packageName);
+        ObjectNode versionDoc = versionDocument(sourceVersionDoc, npmName, version, baseUrl, path, assetName,
+                sha1Hex, sha512Base64);
+
+        // No dist-tags sent: see storeVersion's own byte[] overload's javadoc for why.
+        ObjectNode bodyWithoutAttachment = mapper.createObjectNode();
+        bodyWithoutAttachment.put("_id", npmName);
+        bodyWithoutAttachment.put("name", npmName);
+        bodyWithoutAttachment.put("description", "");
+        bodyWithoutAttachment.putObject("versions").set(version, versionDoc);
+        String prefix = jsonUpTo(bodyWithoutAttachment) + ",\"_attachments\":{"
+                + writeValueAsString(assetName) + ":{\"content_type\":\"application/octet-stream\",\"data\":\"";
+        String suffix = "\",\"length\":" + contentLength + "}}}";
+        byte[] prefixBytes = prefix.getBytes(StandardCharsets.UTF_8);
+        byte[] suffixBytes = suffix.getBytes(StandardCharsets.UTF_8);
+
+        // BodyPublishers.ofInputStream's supplier can be invoked more than once (the JDK may
+        // retry a request before any byte of the body is sent), each time needing a genuinely
+        // fresh stream, so base64EncodingStream(content) is called inside the lambda, not hoisted
+        // above it. Confirmed directly (a probe against a server that accepts a connection then
+        // drops it mid-body): the JDK HttpClient does NOT close a supplied InputStream when the
+        // send fails or is aborted, so without tracking every stream the supplier ever actually
+        // created and closing it in the finally below, base64EncodingStream's own virtual thread
+        // would stay blocked forever on a full pipe, leaking the thread and the open file handle
+        // it still holds, on every aborted/timed-out npm publish, not just a successful one.
+        List<InputStream> encodingStreams = new CopyOnWriteArrayList<>();
+        HttpRequest.BodyPublisher publisher = BodyPublishers.ofInputStream(() -> {
+            InputStream encoding = base64EncodingStream(content);
+            encodingStreams.add(encoding);
+            return new SequenceInputStream(new SequenceInputStream(new ByteArrayInputStream(prefixBytes), encoding),
+                    new ByteArrayInputStream(suffixBytes));
+        });
+        // Base64 expands the real asset bytes by 4/3 (rounded up to a multiple of 4): the timeout
+        // below is sized against what actually crosses the wire, not the smaller pre-encoding
+        // contentLength, the same distinction suffix's own "length" field above does not need to
+        // make (that one reports the real asset size, matching what AWS's own npm dist.tarball
+        // convention expects a consumer to see, regardless of how it was transported here).
+        long encodedContentLength = prefixBytes.length + ((contentLength + 2) / 3) * 4 + suffixBytes.length;
+        try {
+            sendVersionDocument(baseUrl, path, npmName, version, publisher, encodedContentLength);
+        } finally {
+            // A no-op for a stream the HTTP client already read to EOF and closed itself (closing
+            // an already-closed PipedInputStream is safe); the real purpose is unblocking the
+            // encoding thread of a stream the client gave up on early, the gap this fix exists for.
+            encodingStreams.forEach(StreamingResponses::closeQuietly);
+        }
+    }
+
+    /** {@code versionDoc}'s own {@code dist} fields, shared by both {@code storeVersion} overloads. */
+    private ObjectNode versionDocument(JsonNode sourceVersionDoc, String npmName, String version, String baseUrl,
+            String path, String assetName, String shasum, String integritySha512Base64) {
+        ObjectNode versionDoc = sourceVersionDoc != null ? sourceVersionDoc.deepCopy() : mapper.createObjectNode();
+        versionDoc.put("name", npmName);
+        versionDoc.put("version", version);
+        if (!versionDoc.has("description")) {
+            versionDoc.put("description", "");
+        }
+        ObjectNode dist = versionDoc.putObject("dist");
+        dist.put("shasum", shasum);
+        dist.put("integrity", "sha512-" + integritySha512Base64);
+        dist.put("tarball", baseUrl + "/" + path + "/-/" + assetName);
+        return versionDoc;
+    }
+
+    /**
+     * {@code body} serialized as JSON with its own closing {@code }} dropped, so the caller can
+     * append one more field (here, {@code _attachments}) before closing the object itself: {@code
+     * body} has no {@code _attachments} of its own yet, so this is always well-formed JSON up to
+     * that point, never a value cut off mid-way.
+     */
+    private String jsonUpTo(ObjectNode body) {
+        String json = new String(writeValue(body), StandardCharsets.UTF_8);
+        return json.substring(0, json.length() - 1);
+    }
+
+    private String writeValueAsString(String value) {
+        return new String(writeValue(new TextNode(value)), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * A dedicated virtual thread reads {@code content} and writes it through the JDK's own
+     * {@link Base64.Encoder#wrap(java.io.OutputStream)} into a pipe, so the caller gets back a
+     * plain {@link InputStream} of base64 characters without this class hand-rolling its own
+     * encoder: {@link Base64.Encoder#encodeToString} has no streaming counterpart of its own, and
+     * every byte this emits still has to cross an {@code OutputStream}-shaped boundary somewhere.
+     *
+     * <p>Raised by Qodo's review of this PR: a failure on the writing side (the staged file
+     * disappearing mid-read, for instance) does <em>not</em> surface as an {@code IOException} on
+     * the reading side merely by closing the pipe, the way an earlier version of this method's
+     * own javadoc claimed. Closing a {@link PipedOutputStream} is indistinguishable, from the
+     * read side, from the writer finishing normally: either way {@link PipedInputStream} just
+     * reports a clean EOF. Left as a bare close, a truncated read would send a well-formed but
+     * short base64 payload inside an otherwise valid publish document whose {@code shasum}/
+     * {@code integrity}/{@code length} fields (computed from the whole file before this stream
+     * was ever opened) still describe the untruncated original — a silently corrupted publish
+     * that reports success. The writer now records its own failure in {@code writerFailure}
+     * <em>before</em> the {@code try}'s own resources close (a plain {@code finally}, not a
+     * second try-with-resources, so the ordering is guaranteed: {@link FailFastInputStream}
+     * would otherwise race a reader that observes the pipe's own EOF before the failure is
+     * recorded), and the returned stream checks it after every read, turning that clean EOF back
+     * into a real {@code IOException} instead.
+     *
+     * <p>Package-private, not {@code private}, so {@code VerdaccioSidecarClientTest} can exercise
+     * this exact failure path directly against a nonexistent {@code content} path, rather than
+     * only through the full {@code storePackageVersionAsset} call chain, whose own earlier
+     * whole-file digesting pass would otherwise already reject a missing file before this method
+     * is ever reached.
+     */
+    static InputStream base64EncodingStream(Path content) {
+        PipedOutputStream pipedOut = new PipedOutputStream();
+        PipedInputStream pipedIn;
+        try {
+            pipedIn = new PipedInputStream(pipedOut, 64 * 1024);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        AtomicReference<IOException> writerFailure = new AtomicReference<>();
+        Thread.ofVirtual().start(() -> {
+            InputStream fileIn = null;
+            OutputStream encodingOut = null;
+            try {
+                encodingOut = Base64.getEncoder().wrap(pipedOut);
+                fileIn = Files.newInputStream(content);
+                fileIn.transferTo(encodingOut);
+            } catch (IOException e) {
+                writerFailure.set(e);
+            } finally {
+                StreamingResponses.closeQuietly(fileIn);
+                closeQuietly(encodingOut);
+            }
+        });
+        return new FailFastInputStream(pipedIn, writerFailure);
+    }
+
+    /** {@link #base64EncodingStream}'s own close helper for the {@code OutputStream} side of its pipe. */
+    private static void closeQuietly(OutputStream out) {
+        if (out == null) {
+            return;
+        }
+        try {
+            out.close();
+        } catch (IOException ignored) {
+            // Best-effort: the encoding thread is tearing down regardless, and any failure here
+            // is already captured (or about to be) in writerFailure above.
+        }
+    }
+
+    /**
+     * Wraps {@link #base64EncodingStream}'s pipe so a writer-side failure recorded in {@code
+     * writerFailure} (set before the pipe itself closes; see that method's own javadoc) is
+     * thrown on the next read instead of being masked by the pipe's own ordinary EOF.
+     */
+    private static final class FailFastInputStream extends FilterInputStream {
+        private final AtomicReference<IOException> writerFailure;
+
+        FailFastInputStream(InputStream in, AtomicReference<IOException> writerFailure) {
+            super(in);
+            this.writerFailure = writerFailure;
+        }
+
+        @Override
+        public int read() throws IOException {
+            int result = super.read();
+            throwIfFailed();
+            return result;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int result = super.read(b, off, len);
+            throwIfFailed();
+            return result;
+        }
+
+        private void throwIfFailed() throws IOException {
+            IOException failure = writerFailure.get();
+            if (failure != null) {
+                throw new IOException("Failed to read the staged asset while base64-encoding it for the "
+                        + "Verdaccio sidecar", failure);
+            }
+        }
+    }
+
+    private void sendVersionDocument(String baseUrl, String path, String npmName, String version,
+            HttpRequest.BodyPublisher publisher, long contentLength) {
         HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), "/" + path))
-                .timeout(Duration.ofSeconds(30))
+                .timeout(SidecarUriUtils.transferTimeout(contentLength))
                 .header("Content-Type", "application/json")
-                .PUT(BodyPublishers.ofByteArray(writeValue(body)))
+                .PUT(publisher)
                 .build();
         HttpResponse<Void> response;
         try {
@@ -625,19 +945,11 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         return namespace == null ? packageName : "@" + namespace + "/" + packageName;
     }
 
-    private byte[] writeValue(ObjectNode value) {
+    private byte[] writeValue(JsonNode value) {
         try {
             return mapper.writeValueAsBytes(value);
         } catch (Exception e) {
             throw new IllegalStateException("Could not serialize a Verdaccio request body", e);
-        }
-    }
-
-    private static MessageDigest sha512() {
-        try {
-            return MessageDigest.getInstance("SHA-512");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-512 is required by every Java runtime", e);
         }
     }
 }

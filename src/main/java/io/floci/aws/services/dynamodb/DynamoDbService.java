@@ -3527,12 +3527,11 @@ public class DynamoDbService {
                                         List<String> touched) {
         // Parse SET and REMOVE clauses from expressions like:
         // "SET #n = :newName, age = :newAge REMOVE oldField"
-        if (expression.isBlank()) {
+        if (expression.isEmpty()) {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        requireAssignmentAfterSetTarget(expression);
-        requireClosedParentheses(expression, "");
+        DynamoDbUpdateExpressionSyntax.check(expression);
         // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
         // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
         // comma-separated action parsing below work regardless of formatting. Normalize
@@ -3541,6 +3540,7 @@ public class DynamoDbService {
         // name as a bare identifier instead.
         String remaining = expression.trim().replaceAll("\\s+", " ");
         DynamoDbReservedWords.check(remaining, "UpdateExpression");
+        requireSectionsUsedOnce(remaining);
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -4423,88 +4423,19 @@ public class DynamoDbService {
         }
     }
 
-    // DynamoDB reads an unclosed call or group to the end of the expression and reports the
-    // raw text from its last token on, trailing whitespace included. UpdateItem wraps the
-    // error in the validation envelope, TransactWriteItems does not.
-    static void requireClosedParentheses(String expression, String envelope) {
-        int depth = 0;
-        int lastToken = 0;
-        for (int i = 0; i < expression.length(); i++) {
-            char c = expression.charAt(i);
-            if (Character.isWhitespace(c)) {
-                continue;
+    static void requireSectionsUsedOnce(String expression) {
+        Set<String> seen = new HashSet<>();
+        for (ExpressionEvaluator.Token token : ExpressionEvaluator.tokenize(expression)) {
+            String word = token.value().toUpperCase(Locale.ROOT);
+            if (token.type() == ExpressionEvaluator.TokenType.IDENTIFIER && UPDATE_SECTIONS.contains(word)
+                    && !seen.add(word)) {
+                throw new AwsException("ValidationException", "Invalid UpdateExpression: The \"" + word
+                        + "\" section can only be used once in an update expression;", 400);
             }
-            if (c == '(') {
-                depth++;
-            } else if (c == ')') {
-                depth--;
-                if (depth < 0) {
-                    return;
-                }
-            }
-            if (i == 0 || isUpdatePunctuation(c) || isUpdatePunctuation(expression.charAt(i - 1))
-                    || Character.isWhitespace(expression.charAt(i - 1))) {
-                lastToken = i;
-            }
-        }
-        if (depth > 0) {
-            throw new AwsException("ValidationException",
-                    envelope + "Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \""
-                            + expression.substring(lastToken) + "\"", 400);
         }
     }
 
-    private static boolean isUpdatePunctuation(char c) {
-        return "()[],.=+-".indexOf(c) >= 0;
-    }
-
-    // DynamoDB reads a SET target path up to "=", so a comma before it fails on the comma.
-    static void requireAssignmentAfterSetTarget(String expression) {
-        List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize(expression);
-        boolean inSet = false;
-        int target = -1;
-        int depth = 0;
-        for (int i = 0; i < tokens.size(); i++) {
-            ExpressionEvaluator.Token token = tokens.get(i);
-            if (target >= 0) {
-                switch (token.type()) {
-                    case COMMA -> throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: Syntax error; token: \",\", near: \""
-                                    + expression.substring(tokens.get(i - 1).pos(), tokens.get(i + 1).end()) + "\"",
-                            400);
-                    case EQ -> {
-                        if (i == target) {
-                            return;
-                        }
-                        target = -1;
-                    }
-                    case IDENTIFIER, NAME_REF, DOT, LBRACKET, NUMBER, RBRACKET -> { }
-                    default -> {
-                        return;
-                    }
-                }
-                continue;
-            }
-            switch (token.type()) {
-                case LPAREN -> depth++;
-                case RPAREN -> depth--;
-                case COMMA -> target = inSet && depth == 0 ? i + 1 : -1;
-                case IDENTIFIER -> {
-                    String word = token.value().toUpperCase(Locale.ROOT);
-                    if (depth == 0 && List.of("SET", "REMOVE", "ADD", "DELETE").contains(word)) {
-                        inSet = word.equals("SET");
-                        target = inSet ? i + 1 : -1;
-                    }
-                }
-                case UNKNOWN -> {
-                    if (!isUpdatePunctuation(token.value().charAt(0))) {
-                        return;
-                    }
-                }
-                default -> { }
-            }
-        }
-    }
+    static final Set<String> UPDATE_SECTIONS = Set.of("SET", "REMOVE", "ADD", "DELETE");
 
     static int findNextComma(String s) {
         // Find next comma that is not inside a function call

@@ -6,6 +6,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
@@ -164,55 +168,85 @@ public class CodeArtifactMavenExternalConnectionImporter {
         try {
             for (String candidateFilename : candidates) {
                 String candidateGav = directory + candidateFilename;
-                Optional<MavenExternalConnectionClient.FetchedAsset> fetched;
+                Path staged;
                 try {
-                    fetched = externalConnectionClient.fetchAsset(externalConnectionName, candidateGav);
-                } catch (RuntimeException e) {
-                    LOG.warnv(e, "Could not fetch {0} from {1} while retaining a Maven release through an "
-                            + "external connection; skipping this candidate.", candidateGav, externalConnectionName);
-                    continue;
+                    staged = Files.createTempFile("codeartifact-maven-import-", ".bin");
+                } catch (IOException e) {
+                    throw new UncheckedIOException("Failed to create a staging file for a Maven "
+                            + "external-connection import", e);
                 }
-                if (fetched.isEmpty()) {
-                    continue;
-                }
-                byte[] content = fetched.get().content();
-                // The fence check and the real write happen inside the very same synchronized
-                // call DeletePackageVersions/DeletePackage/DeleteRepository/DisposePackageVersions
-                // already hold across their own entire operation, so a write here and one of
-                // those four operations can never interleave: whichever gets there first finishes
-                // completely before the other even starts. See deployMavenAssetUnderVersionFence's
-                // own javadoc for why this has to be a method on the service itself rather than a
-                // block synchronized on the injected reference here: only a lock actually taken
-                // inside that class's own synchronized method is guaranteed to be the exact same
-                // lock its other synchronized methods already hold.
-                // packageFenceSnapshot is passed through so byte accounting (when this write
-                // genuinely adds new content) runs inside this exact same locked call too,
-                // rather than in a separate call after this one already released the lock, which
-                // would let a delete or disposal subtract this asset's bytes as part of its own
-                // normal cleanup before that separate call added them, permanently over-counting
-                // DescribeDomain's total for an asset already gone.
-                CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(
-                        region, domain, owner, repository, namespace, packageName, version, versionFenceSnapshot,
-                        fenceSnapshot, claim.episodeId(), reposilite, repoId, candidateGav, content);
-                if (!result.fenceMatched()) {
-                    // The version itself is gone: every later candidate in this same attempt
-                    // would fail the exact same way, so none of them are even attempted.
-                    break;
-                }
-                ReposiliteSidecarClient.DeployOutcome outcome = result.outcome();
-                if (outcome == null) {
-                    continue;
-                }
-                // The asset is genuinely present either way a 200/201 status is reached: a fresh
-                // write (201, or 200 with wroteNewContent()) or an idempotent match against bytes
-                // already there (200, wroteNewContent() false). Only a real conflict or sidecar
-                // error leaves nothing to record.
-                if (outcome.status() != 200 && outcome.status() != 201) {
-                    continue;
-                }
-                importedAny = true;
-                if (candidateFilename.equals(filename)) {
-                    importedRequestedAsset = true;
+                try {
+                    Optional<MavenExternalConnectionClient.FetchedFile> fetched;
+                    try {
+                        fetched = externalConnectionClient.fetchAsset(externalConnectionName, candidateGav, staged);
+                    } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+                        // The same 5 GB AWS quota CodeArtifactMavenController#deploy already
+                        // enforces on a direct publish, now checked by fetchAsset(Path) itself
+                        // during the download rather than in a second pass over the staged file
+                        // afterward: a release this large is rejected before it is ever fully
+                        // pulled across the network and written to local disk. This candidate
+                        // alone is skipped, not the whole attempt: an oversized javadoc/sources
+                        // jar should not stop the pom/jar themselves from still being imported.
+                        LOG.warnv("Skipping {0}: the real registry''s own file is larger than this emulator''s "
+                                + "{1}-byte asset quota.", candidateGav,
+                                CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+                        continue;
+                    } catch (RuntimeException e) {
+                        LOG.warnv(e, "Could not fetch {0} from {1} while retaining a Maven release through an "
+                                + "external connection; skipping this candidate.", candidateGav,
+                                externalConnectionName);
+                        continue;
+                    }
+                    if (fetched.isEmpty()) {
+                        continue;
+                    }
+                    long contentLength = fetched.get().size();
+                    // The fence check and the real write happen inside the very same synchronized
+                    // call DeletePackageVersions/DeletePackage/DeleteRepository/DisposePackageVersions
+                    // already hold across their own entire operation, so a write here and one of
+                    // those four operations can never interleave: whichever gets there first finishes
+                    // completely before the other even starts. See deployMavenAssetUnderVersionFence's
+                    // own javadoc for why this has to be a method on the service itself rather than a
+                    // block synchronized on the injected reference here: only a lock actually taken
+                    // inside that class's own synchronized method is guaranteed to be the exact same
+                    // lock its other synchronized methods already hold.
+                    // packageFenceSnapshot is passed through so byte accounting (when this write
+                    // genuinely adds new content) runs inside this exact same locked call too,
+                    // rather than in a separate call after this one already released the lock, which
+                    // would let a delete or disposal subtract this asset's bytes as part of its own
+                    // normal cleanup before that separate call added them, permanently over-counting
+                    // DescribeDomain's total for an asset already gone.
+                    CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(
+                            region, domain, owner, repository, namespace, packageName, version, versionFenceSnapshot,
+                            fenceSnapshot, claim.episodeId(), reposilite, repoId, candidateGav, staged,
+                            contentLength);
+                    if (!result.fenceMatched()) {
+                        // The version itself is gone: every later candidate in this same attempt
+                        // would fail the exact same way, so none of them are even attempted.
+                        break;
+                    }
+                    ReposiliteSidecarClient.DeployOutcome outcome = result.outcome();
+                    if (outcome == null) {
+                        continue;
+                    }
+                    // The asset is genuinely present either way a 200/201 status is reached: a fresh
+                    // write (201, or 200 with wroteNewContent()) or an idempotent match against bytes
+                    // already there (200, wroteNewContent() false). Only a real conflict or sidecar
+                    // error leaves nothing to record.
+                    if (outcome.status() != 200 && outcome.status() != 201) {
+                        continue;
+                    }
+                    importedAny = true;
+                    if (candidateFilename.equals(filename)) {
+                        importedRequestedAsset = true;
+                    }
+                } finally {
+                    try {
+                        Files.deleteIfExists(staged);
+                    } catch (IOException e) {
+                        LOG.warnv(e, "Could not delete a staged Maven external-connection import file at {0}",
+                                staged);
+                    }
                 }
             }
         } finally {

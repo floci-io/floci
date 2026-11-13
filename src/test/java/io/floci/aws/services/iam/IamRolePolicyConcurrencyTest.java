@@ -14,6 +14,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -48,7 +49,7 @@ class IamRolePolicyConcurrencyTest {
             for (int trial = 0; trial < trials; trial++) {
                 IamService iam = newIamService();
                 String roleName = "repro-role-" + trial;
-                iam.createRole(roleName, "/", "{}", null, 3600, null);
+                iam.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
 
                 CountDownLatch start = new CountDownLatch(1);
                 CountDownLatch done = new CountDownLatch(policiesPerTrial);

@@ -19,15 +19,16 @@ import java.util.Map;
  *   program the link-local IMDS endpoint into a cluster's container, for the node and for its pods.
  *   {@code EksImdsDockerIntegrationTest} relies on them.</li>
  *   <li>{@code floci.services.emr.runner-mode=docker} and {@code floci.services.emrserverless.runner-mode=docker}
- *   run a cluster's steps and an EMR Serverless application's job runs in containers of the release's image.
- *   {@code EmrDockerRunnerDockerIntegrationTest} relies on them.</li>
+ *   run a cluster's steps and an EMR Serverless application's job runs in containers of the release's image, and
+ *   {@code floci.services.emrserverless.executor-containers=2} a Spark job run's executors each in a container of
+ *   its own. {@code EmrDockerRunnerDockerIntegrationTest} relies on them.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes. An InfluxDB container only starts when a DB
  * instance is created, which the IMDS test never does. The IMDS settings only act when a cluster's
  * container starts, and the test defaults keep EKS mocked, so only {@code EksImdsDockerIntegrationTest},
  * which configures the endpoint on its own container, reaches them. The metadata server it starts
- * stays up for the Timestream test, on a port that test does not use. The EMR runner modes only act
+ * stays up for the Timestream test, on a port that test does not use. The EMR settings only act
  * when a cluster runs a step or an application runs a job, which neither of the other classes does.
  *
  * <p>The ELBv2 data-plane classes stay on {@link RealElbV2DataPlaneProfile}: one of them,
@@ -45,6 +46,7 @@ public class ContainerDataPlaneProfile implements QuarkusTestProfile {
                 "floci.services.eks.imds", "true",
                 "floci.services.eks.imds-pod-network", "true",
                 "floci.services.emr.runner-mode", "docker",
-                "floci.services.emrserverless.runner-mode", "docker");
+                "floci.services.emrserverless.runner-mode", "docker",
+                "floci.services.emrserverless.executor-containers", "2");
     }
 }

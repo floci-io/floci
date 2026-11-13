@@ -986,6 +986,67 @@ class KmsServiceTest {
     }
 
     @Test
+    void createAliasOnExistingNameThrowsAndKeepsTarget() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        kmsService.createAlias("alias/dup", keyA.getKeyId(), REGION);
+
+        AwsException sameTarget = assertThrows(AwsException.class, () ->
+                kmsService.createAlias("alias/dup", keyA.getKeyId(), REGION));
+        AwsException otherTarget = assertThrows(AwsException.class, () ->
+                kmsService.createAlias("alias/dup", keyB.getKeyId(), REGION));
+
+        assertEquals("AlreadyExistsException", sameTarget.getErrorCode());
+        assertEquals("AlreadyExistsException", otherTarget.getErrorCode());
+        assertEquals(400, otherTarget.getHttpStatus());
+        assertEquals(keyA.getKeyId(), customerAliases(REGION).getFirst().getTargetKeyId());
+    }
+
+    @Test
+    void createAliasWithSameNameInAnotherRegionSucceeds() {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, "eu-west-1");
+        kmsService.createAlias("alias/dup", keyA.getKeyId(), REGION);
+
+        kmsService.createAlias("alias/dup", keyB.getKeyId(), "eu-west-1");
+
+        assertEquals(1, customerAliases("eu-west-1").size());
+    }
+
+    @Test
+    void concurrentCreateAliasOnSameNameAdmitsExactlyOne() throws Exception {
+        KmsKey keyA = kmsService.createKey(null, REGION);
+        KmsKey keyB = kmsService.createKey(null, REGION);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (KmsKey key : List.of(keyA, keyB)) {
+                results.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        kmsService.createAlias("alias/race", key.getKeyId(), REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("AlreadyExistsException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int created = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(10, TimeUnit.SECONDS)) {
+                    created++;
+                }
+            }
+            assertEquals(1, created);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void createAliasWithoutPrefixThrows() {
         KmsKey key = kmsService.createKey(null, REGION);
         assertThrows(AwsException.class, () ->

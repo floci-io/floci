@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -26,7 +27,7 @@ class EksAccessEntryIntegrationTest {
         String entryPath = path + "/" + URLEncoder.encode(principal, StandardCharsets.UTF_8);
         given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/path/")
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
         createCluster(account, name, "API");
         try {
             Map<String, Object> request = Map.of("principalArn", principal, "type", "EC2_LINUX",
@@ -77,7 +78,7 @@ class EksAccessEntryIntegrationTest {
         String policiesPath = entryPath + "/access-policies";
         given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", "/path/")
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
         createCluster(account, name, "API");
         try {
             given().header("Authorization", auth(account, "eks")).contentType("application/json")
@@ -220,7 +221,7 @@ class EksAccessEntryIntegrationTest {
     private static void createRole(String account, String role, String rolePath) {
         given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", rolePath)
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
     }
 
     private static void deleteRole(String account, String role) {

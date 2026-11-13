@@ -23,6 +23,8 @@ import java.util.function.IntConsumer;
 import java.util.function.ToIntFunction;
 import java.util.stream.Stream;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.floci.aws.testing.IamTestPolicies.policyDocument;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -56,17 +58,17 @@ class IamConcurrencyTest {
 
         List<Scenario> scenarios = List.of(
                 new Scenario("role.tags", iam -> {
-                    iam.createRole("r", "/", "{}", null, 3600, null);
+                    iam.createRole("r", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
                     return i -> iam.tagRole("r", Map.of("k" + i, "v" + i));
                 }, iam -> iam.getRole("r").getTags().size()),
 
                 new Scenario("role.inlinePolicies", iam -> {
-                    iam.createRole("r", "/", "{}", null, 3600, null);
-                    return i -> iam.putRolePolicy("r", "p" + i, "{\"S\":" + i + "}");
+                    iam.createRole("r", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+                    return i -> iam.putRolePolicy("r", "p" + i, policyDocument(i));
                 }, iam -> iam.listRolePolicies("r").size()),
 
                 new Scenario("role.attachedPolicyArns", iam -> {
-                    iam.createRole("r", "/", "{}", null, 3600, null);
+                    iam.createRole("r", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
                     String[] arns = createPolicies(iam, "rp");
                     return i -> iam.attachRolePolicy("r", arns[i]);
                 }, iam -> iam.listAttachedRolePolicies("r", null).size()),
@@ -78,7 +80,7 @@ class IamConcurrencyTest {
 
                 new Scenario("user.inlinePolicies", iam -> {
                     iam.createUser("u", "/");
-                    return i -> iam.putUserPolicy("u", "p" + i, "{\"S\":" + i + "}");
+                    return i -> iam.putUserPolicy("u", "p" + i, policyDocument(i));
                 }, iam -> iam.listUserPolicies("u").size()),
 
                 new Scenario("user.attachedPolicyArns", iam -> {
@@ -101,7 +103,7 @@ class IamConcurrencyTest {
 
                 new Scenario("group.inlinePolicies", iam -> {
                     iam.createGroup("g", "/");
-                    return i -> iam.putGroupPolicy("g", "p" + i, "{\"S\":" + i + "}");
+                    return i -> iam.putGroupPolicy("g", "p" + i, policyDocument(i));
                 }, iam -> iam.listGroupPolicies("g").size()),
 
                 new Scenario("group.attachedPolicyArns", iam -> {
@@ -113,13 +115,13 @@ class IamConcurrencyTest {
                 // One policy across many principals: every attach/detach updates the
                 // policy's AttachmentCount, so a lost update leaves DeletePolicy refusing.
                 new Scenario("policy.attachmentCount.attachGroup", iam -> {
-                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    String arn = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
                     for (int i = 0; i < N; i++) iam.createGroup("g" + i, "/");
                     return i -> iam.attachGroupPolicy("g" + i, arn);
                 }, iam -> iam.getPolicy(onlyPolicyArn(iam)).getAttachmentCount()),
 
                 new Scenario("policy.attachmentCount.detachGroup", iam -> {
-                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    String arn = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
                     for (int i = 0; i < N; i++) {
                         iam.createGroup("g" + i, "/");
                         iam.attachGroupPolicy("g" + i, arn);
@@ -128,7 +130,7 @@ class IamConcurrencyTest {
                 }, IamConcurrencyTest::detachedThenDeleted),
 
                 new Scenario("policy.attachmentCount.detachUser", iam -> {
-                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    String arn = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
                     for (int i = 0; i < N; i++) {
                         iam.createUser("u" + i, "/");
                         iam.attachUserPolicy("u" + i, arn);
@@ -137,16 +139,16 @@ class IamConcurrencyTest {
                 }, IamConcurrencyTest::detachedThenDeleted),
 
                 new Scenario("policy.attachmentCount.detachRole", iam -> {
-                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    String arn = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
                     for (int i = 0; i < N; i++) {
-                        iam.createRole("r" + i, "/", "{}", null, 3600, null);
+                        iam.createRole("r" + i, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
                         iam.attachRolePolicy("r" + i, arn);
                     }
                     return i -> iam.detachRolePolicy("r" + i, arn);
                 }, IamConcurrencyTest::detachedThenDeleted),
 
                 new Scenario("policy.tags", iam -> {
-                    IamPolicy p = iam.createPolicy("pol", "/", null, "{}", null);
+                    IamPolicy p = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null);
                     return i -> iam.tagPolicy(p.getArn(), Map.of("k" + i, "v" + i));
                 }, iam -> iam.getPolicy(onlyPolicyArn(iam)).getTags().size())
         );
@@ -207,7 +209,7 @@ class IamConcurrencyTest {
         try {
             for (int trial = 0; trial < trials; trial++) {
                 IamService iam = newIamService();
-                IamPolicy p = iam.createPolicy("pol", "/", null, "{}", null);
+                IamPolicy p = iam.createPolicy("pol", "/", null, EMPTY_POLICY_DOCUMENT, null);
                 String arn = p.getArn();
 
                 CountDownLatch start = new CountDownLatch(1);
@@ -217,7 +219,7 @@ class IamConcurrencyTest {
                     pool.submit(() -> {
                         try {
                             start.await();
-                            iam.createPolicyVersion(arn, "{\"v\":true}", false);
+                            iam.createPolicyVersion(arn, policyDocument("v"), false);
                         } catch (Throwable t) {
                             errors.add(t);
                         } finally {
@@ -252,7 +254,7 @@ class IamConcurrencyTest {
             for (int trial = 0; trial < trials; trial++) {
                 IamService iam = newIamService();
                 iam.createInstanceProfile("prof", "/");
-                for (int i = 0; i < racers; i++) iam.createRole("role" + i, "/", "{}", null, 3600, null);
+                for (int i = 0; i < racers; i++) iam.createRole("role" + i, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
 
                 CountDownLatch start = new CountDownLatch(1);
                 CountDownLatch done = new CountDownLatch(racers);
@@ -610,7 +612,7 @@ class IamConcurrencyTest {
     private static String[] createPolicies(IamService iam, String prefix) {
         String[] arns = new String[N];
         for (int i = 0; i < N; i++) {
-            arns[i] = iam.createPolicy(prefix + "-" + i, "/", null, "{}", null).getArn();
+            arns[i] = iam.createPolicy(prefix + "-" + i, "/", null, EMPTY_POLICY_DOCUMENT, null).getArn();
         }
         return arns;
     }

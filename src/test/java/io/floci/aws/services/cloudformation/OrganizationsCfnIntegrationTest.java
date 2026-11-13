@@ -23,6 +23,7 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
@@ -96,7 +97,8 @@ class OrganizationsCfnIntegrationTest {
                     "Action": "organizations:Describe*",
                     "Resource": "*"
                   } ]
-                }
+                },
+                "Tags": [ { "Key": "team", "Value": "security" } ]
               }
             }
           },
@@ -340,6 +342,24 @@ class OrganizationsCfnIntegrationTest {
 
     @Test
     @Order(8)
+    void updateStackConvergesTheResourcePolicyTags() {
+        String updated = TEMPLATE.replace("\"Key\": \"team\", \"Value\": \"security\"",
+                "\"Key\": \"owner\", \"Value\": \"platform\"");
+
+        cloudFormation("UpdateStack", "StackName", STACK_NAME, "TemplateBody", updated)
+                .then().statusCode(200);
+        awaitStackStatus("UPDATE_COMPLETE");
+
+        organizations("ListTagsForResource",
+                "{\"ResourceId\":\"" + output(describeStacks(), "ResourcePolicyId") + "\"}")
+                .then().statusCode(200)
+                .body("Tags", hasSize(1))
+                .body("Tags[0].Key", equalTo("owner"))
+                .body("Tags[0].Value", equalTo("platform"));
+    }
+
+    @Test
+    @Order(9)
     void deleteStackTearsTheOrganizationDown() {
         cloudFormation("DeleteStack", "StackName", STACK_NAME).then().statusCode(200);
 
@@ -352,7 +372,7 @@ class OrganizationsCfnIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void theManagementAccountIsFreeToStartOver() {
         // The teardown must leave no organization behind for this account, otherwise a second
         // stack — or a re-run of this test class — would hit AlreadyInOrganizationException.

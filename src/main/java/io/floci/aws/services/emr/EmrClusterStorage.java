@@ -222,23 +222,25 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // without permissions, listening on FLOCI_HDFS_BIND: every address of the container, on the cluster's own network,
     // or, in a namespace the steps share, the host's or a container's, only its loopback, which its name leads to, so
     // no other interface serves files anyone could change; in a container's, the hosts file the name goes in is the
-    // one the namespace's containers share, the steps' too. Once the NameNode on its port is this container's own,
-    // its ClusterId the one its format gave it, rather than another cluster's in that namespace, the DataNode has
-    // joined and the NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the
-    // folders EMR's HDFS has for steps, /tmp and the hadoop user's home, are made. With HIVE_METASTORE_VARIABLE set,
-    // Hive's metastore service starts too, with the Hive image's Hadoop configuration, which the node's image keeps at
-    // HIVE_HADOOP_CONF, as Hive steps run, its settings after it: "Hive records metastore information in a MySQL database on the primary node's file system", kept as a Derby
-    // database in /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its
-    // warehouse in the HDFS, Hive's exec jar in HIVE_JARS; the cluster's core-site and hive-site, last, replace any of
-    // them, as on EMR's primary node. With YARN_MEMORY_VARIABLE set, YARN starts last, as "the primary node runs the
-    // YARN ResourceManager service": a ResourceManager and, as on a cluster of one node, a NodeManager, which offers
-    // that much memory and YARN_VCORES_VARIABLE's cores to the containers it runs the steps' Spark executors in, its
-    // local and log folders in /mnt, Java 17 opening to both the packages they reach into, and the node is ready once
-    // the NodeManager has registered. Where the cluster's core nodes hold them (NODE_WORKERS_VARIABLE), the node runs no
-    // DataNode or NodeManager, but a DataNode on a volume that holds one's data, so the blocks it kept stay in reach.
-    // HDFS_READY then says the node is ready. A daemon that exits,
-    // before or after, the metastore among them, ends the container, its readiness gone, so the next step starts it
-    // again on its data. With HADOOP_FOLDER_VARIABLE set, every daemon runs from the Hadoop in that folder.
+    // one the namespace's containers share, the steps' too. The other daemons start with them, as none needs the HDFS
+    // to start. With HIVE_METASTORE_VARIABLE set, Hive's metastore service does, with the Hive image's Hadoop
+    // configuration, which the node's image keeps at HIVE_HADOOP_CONF, as Hive steps run, its settings after it: "Hive
+    // records metastore information in a MySQL database on the primary node's file system", kept as a Derby database
+    // in /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its warehouse in
+    // the HDFS; the cluster's core-site and hive-site, last, replace any of them, as on EMR's primary node. With
+    // YARN_MEMORY_VARIABLE set, YARN does, as "the primary node runs the YARN ResourceManager service": a
+    // ResourceManager and, as on a cluster of one node, a NodeManager, which offers that much memory and
+    // YARN_VCORES_VARIABLE's cores to the containers it runs the steps' Spark executors in, its local and log folders
+    // in /mnt, Java 17 opening to both the packages they reach into. Where the cluster's core nodes hold them
+    // (NODE_WORKERS_VARIABLE), the node runs no DataNode or NodeManager, but a DataNode on a volume that holds one's
+    // data, so the blocks it kept stay in reach. Once the NameNode on its port is this container's own, its ClusterId
+    // the one its format gave it, rather than another cluster's in that namespace, the DataNode has joined and the
+    // NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the folders EMR's HDFS has
+    // for steps, /tmp and the hadoop user's home, are made, and the metastore's warehouse and HIVE_JARS, which Hive's
+    // exec jar goes in. HDFS_READY then says the node is ready, once the metastore takes connections and the
+    // NodeManager has registered. A daemon that exits, before or after, the metastore among them, ends the container,
+    // its readiness gone, so the next step starts it again on its data. With HADOOP_FOLDER_VARIABLE set, every daemon
+    // runs from the Hadoop in that folder.
     private static final String HDFS_SCRIPT = String.join("\n",
             "address=$FLOCI_HDFS_BIND; [ \"$address\" != 0.0.0.0 ] || address=$(hostname -i | awk '{print $1}')",
             "echo \"$address $FLOCI_HDFS_HOST\" >> /etc/hosts || exit",
@@ -249,21 +251,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + "hdfs namenode & n=1; "
                     + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ] || [ -d /mnt/datanode/current ]; then "
                     + "hdfs datanode & n=2; fi; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
-                    + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
-                    + " | grep -q \"\\\"NumLiveDataNodes\\\" : [1-9]\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
-                    + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
-                    + "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1; "
+                    + "dirs=\"/tmp /user/hadoop\"; "
                     + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
-                    + "hdfs dfs -mkdir -p /user/hive/warehouse " + HIVE_JARS + " || exit 1; "
-                    + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
-                    + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
-                    + "/$(basename \"$jar\" .jar)-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; "
+                    + "dirs=\"$dirs /user/hive/warehouse " + HIVE_JARS + "\"; "
                     + "[ -z \"$" + HIVE_METASTORE_SITE_VARIABLE + "\" ] || mapfile -t site <<< \"$"
                     + HIVE_METASTORE_SITE_VARIABLE + "\"; "
                     + "cd /tmp; LOGS_DIR=/tmp/floci-hive-logs HADOOP_CONF_DIR="
@@ -277,13 +267,30 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " --hiveconf hive.metastore.schema.verification=false"
                     + " --hiveconf hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
                     + " \"${site[@]}\" & n=$((n + 1)); "
-                    + "until (exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                     + "fi; "
                     + "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then "
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn resourcemanager & n=$((n + 1)); "
                     + "if [ -z \"$" + NODE_WORKERS_VARIABLE + "\" ]; then "
                     + "JDK_JAVA_OPTIONS=\"" + yarnOpens() + "\" yarn nodemanager & n=$((n + 1)); fi; "
+                    + "fi; "
+                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
+                    + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
+                    + " | grep -q \"\\\"NumLiveDataNodes\\\" : [1-9]\"; do "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
+                    + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + "hdfs dfs -mkdir -p $dirs || exit 1; "
+                    + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
+                    + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
+                    + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
+                    + "/$(basename \"$jar\" .jar)-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; "
+                    + "until (exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null; do "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
+                    + "fi; "
+                    + "if [ -n \"$" + YARN_MEMORY_VARIABLE + "\" ]; then "
                     + "until curl -sf -m 5 " + RESOURCE_MANAGER_METRICS
                     + " | grep -q \"\\\"activeNodes\\\":[1-9]\"; do "
                     + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "

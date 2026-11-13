@@ -1035,39 +1035,26 @@ public class NativeDynamoDbJsonHandler {
                         + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
             }
 
+            // DynamoDB checks the condition in full before it parses the update.
+            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
             // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
             if (updateExpression != null) {
-                // Pre-validate syntax: expression must start with a valid clause keyword.
-                // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
-                // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
-                String ue = updateExpression.trim().replaceAll("\\s+", " ");
-                if (!ue.isEmpty()) {
-                    String upper = ue.toUpperCase();
-                    if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
-                        String[] parts = ue.split("\\s+", 3);
-                        String token = parts[0];
-                        String near = parts.length >= 2
-                                ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
-                                : token;
-                        throw new AwsException("ValidationException",
-                                "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
-                    }
-                    DynamoDbService.requireAssignmentAfterSetTarget(updateExpression);
-                    DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
+                if (!updateExpression.isEmpty()) {
+                    DynamoDbUpdateExpressionSyntax.check(updateExpression);
                 }
-                // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
-                // before the unused-EAN/EAV checks below.
+                // Undefined tokens must be caught before the unused-EAN/EAV checks below.
                 requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
-                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
                 requireNonEmptyExpression(updateExpression, "UpdateExpression");
+                // The reserved word check looks past single spaces only.
+                String ue = updateExpression.trim().replaceAll("\\s+", " ");
                 DynamoDbReservedWords.check(ue, "UpdateExpression");
+                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
+                DynamoDbService.requireSectionsUsedOnce(updateExpression);
                 Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
                 checkUnusedEan(exprAttrNames, hashTokens);
                 Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
                 checkUnusedEav(exprAttrValues, colonTokensAll);
-                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
-            } else {
-                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
             }
         } catch (AwsException e) {
             throw inValidationEnvelope(e);
@@ -3160,8 +3147,14 @@ public class NativeDynamoDbJsonHandler {
 
         requireNonEmptyExpression(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
+        if (updateExpression != null) {
+            DynamoDbUpdateExpressionSyntax.check(updateExpression);
+        }
         requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
         dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+        if (updateExpression != null) {
+            DynamoDbService.requireSectionsUsedOnce(updateExpression);
+        }
 
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));

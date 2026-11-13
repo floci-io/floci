@@ -1181,6 +1181,16 @@ public interface EmulatorConfig {
         Optional<String> hiveImageTemplate();
 
         /**
+         * How many executors a {@code docker} Spark job run may have at once, each in a container of its own, as each
+         * has a worker of its own on EMR Serverless; 0, the default, runs a job's executors in its driver's container, in
+         * Spark's local mode. The application's maximum capacity limits them too.
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_EXECUTOR_CONTAINERS
+         */
+        @WithDefault("0")
+        int executorContainers();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
          * previous run of <em>this same</em> Floci left on the daemon (matched by the
          * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci
@@ -1542,6 +1552,10 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean globalBucketNamespace();
+
+        /** Seconds before RestoreObject reports a completed temporary copy. */
+        @WithDefault("0")
+        long restoreCompletionDelaySeconds();
 
         /**
          * Run the background sweep that applies bucket lifecycle expiration rules: Expiration,

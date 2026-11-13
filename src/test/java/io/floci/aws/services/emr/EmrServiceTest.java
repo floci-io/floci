@@ -463,18 +463,21 @@ class EmrServiceTest {
         EmrService service = fixture.service;
         EmrCluster read = cluster("read", true, step("only"));
         read.getInstanceGroups().add(group("CORE", 2));
-        read.getInstanceFleets().add(fleet("TASK", 2));
         EmrCluster created = service.runJobFlow(read, REGION);
         String id = created.getId();
         String stepId = created.getSteps().get(0).getId();
+        // A cluster has instance groups or fleets, never both, so the fleet is another cluster's.
+        EmrCluster fleets = cluster("fleets", true, step("only"));
+        fleets.getInstanceFleets().add(fleet("TASK", 2));
+        String fleetsId = service.runJobFlow(fleets, REGION).getId();
 
         List<EmrCluster> clusters = List.of(service.describeCluster(id),
                 service.listClusters(REGION, null, null, null).get(0), service.getClusterForInstances(id));
         List<EmrStep> steps = List.of(service.describeStep(id, stepId), service.listSteps(id, null, null).get(0));
         EmrInstanceGroup group = service.listInstanceGroups(id).get(0);
-        EmrInstanceFleet fleet = service.listInstanceFleets(id).get(0);
+        EmrInstanceFleet fleet = service.listInstanceFleets(fleetsId).get(0);
         fixture.pass(Duration.ofSeconds(60));
-        service.terminateJobFlows(List.of(id));
+        service.terminateJobFlows(List.of(id, fleetsId));
         fixture.pass(Duration.ofSeconds(30));
 
         assertEquals("TERMINATED", service.describeCluster(id).getState());

@@ -1,6 +1,5 @@
 package io.floci.aws.services.iam;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -1691,17 +1690,11 @@ public class IamPolicyEvaluator {
      * not make every later call fail.
      */
     public boolean readsAsPolicyDocument(String document) {
-        if (document == null) {
-            return false;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(document);
-            return root.isObject() && root.has("Statement");
-        } catch (JsonProcessingException unreadable) {
-            // Not JSON, so no policy document either, and the caller words the refusal. A stored
-            // document carrying the same text is logged where it is parsed, in parseUncached.
-            return false;
-        }
+        // One reader of the grammar rather than two: the writes hold a document to this same
+        // top-level shape and need to know which way it failed in order to word their refusal, so
+        // the reading lives in IamPolicyDocuments and this is its boolean face. A stored document
+        // carrying the same text is logged where it is parsed, in parseUncached.
+        return IamPolicyDocuments.readsAsPolicyDocument(document);
     }
 
     private List<PolicyStatement> parseAll(List<String> documents) {

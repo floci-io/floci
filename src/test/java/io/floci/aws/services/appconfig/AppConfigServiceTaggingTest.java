@@ -9,16 +9,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -63,29 +56,9 @@ class AppConfigServiceTaggingTest {
         Application app = service.createApplication(Map.of("Name", "orders"));
 
         store.parkNextWrite();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> tag = pool.submit(() -> service.tagApplication(app.getId(), Map.of("team", "payments")));
-            assertTrue(store.awaitParked(), "the tag write must reach the store");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> delete = pool.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                service.deleteApplication(app.getId());
-            });
-            awaitBlockedOrDone(deleteThread, delete);
-            assertFalse(delete.isDone(), "the delete ran while a tag write on the same application was mid-flight");
-            assertEquals(Thread.State.BLOCKED, deleteThread.get().getState(),
-                    "the delete waits on the service's monitor");
-
-            store.release();
-            tag.get(2, TimeUnit.SECONDS);
-            delete.get(2, TimeUnit.SECONDS);
-        } catch (ExecutionException e) {
-            throw new AssertionError(e.getCause());
-        } finally {
-            store.release();
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(store,
+                () -> service.tagApplication(app.getId(), Map.of("team", "payments")),
+                () -> service.deleteApplication(app.getId()));
 
         assertTrue(service.listApplications().isEmpty(), "the application outlived its delete");
     }
