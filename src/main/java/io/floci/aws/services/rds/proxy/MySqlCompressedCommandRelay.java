@@ -11,7 +11,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.zip.InflaterInputStream;
 
-/** Rewrites IAM user DDL without making compressed MySQL clients wait for the next command. */
+/**
+ * Rewrites IAM user DDL for zlib-negotiated clients without waiting for the next command.
+ * Zstd-negotiated frames pass through unchanged.
+ */
 final class MySqlCompressedCommandRelay {
 
     private static final int MAX_PACKET_PAYLOAD = 0xFFFFFF;
@@ -281,10 +284,6 @@ final class MySqlCompressedCommandRelay {
             }
         }
         return true;
-    }
-
-    private static int skipIgnored(byte[] bytes, int offset) {
-        return skipIgnored(bytes, offset, bytes.length);
     }
 
     private static int skipIgnored(byte[] bytes, int offset, int limit) {
