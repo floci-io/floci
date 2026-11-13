@@ -93,17 +93,6 @@ public class ResourceArnBuilder {
     private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
 
-    /** The SSM tagging actions, which act on the resource of the request's {@code ResourceType}. */
-    private static final Set<String> SSM_TAGGING_OPERATIONS =
-            Set.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource");
-
-    /**
-     * The tagged resource types SSM serves apart from parameters, each with its ARN's resource type: a
-     * document by its name and an association by its ID. Any other type stays on the parameter ARN.
-     */
-    private static final Map<String, String> SSM_TAGGED_RESOURCE_TYPES =
-            Map.of("Document", "document", "Association", "association");
-
     private final ObjectMapper objectMapper;
     /**
      * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
@@ -1906,12 +1895,6 @@ public class ResourceArnBuilder {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             String operation = IamActionRegistry.targetOperation(ctx);
-            String taggedResource = operation != null && SSM_TAGGING_OPERATIONS.contains(operation)
-                    ? SSM_TAGGED_RESOURCE_TYPES.get(json.path("ResourceType").asText()) : null;
-            if (taggedResource != null && json.hasNonNull("ResourceId")) {
-                return AwsArnUtils.Arn.of("ssm", region, accountId,
-                        taggedResource + "/" + json.get("ResourceId").asText().trim()).toString();
-            }
             if (operation != null && SSM_RESOURCE_POLICY_ACTIONS.contains(operation)
                     && json.hasNonNull("ResourceArn")) {
                 String resourceArn = json.get("ResourceArn").asText().trim();

@@ -30,8 +30,9 @@
 
 `CreateDocument` and `CreateAssociation` keep their `Tags`. A document's tags are also returned in
 the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDocument`, and in each
-`ListDocuments` entry. With IAM enforcement on, tagging a document is checked against
-`document/<name>` and tagging an association against `association/<id>`.
+`ListDocuments` entry. With IAM enforcement on, the tag calls are checked against the resource their
+`ResourceType` and `ResourceId` name: `document/<name>`, `association/<id>` or `parameter/<name>`
+without its leading `/`. `CreateDocument` is checked against `document/<name>`.
 
 `DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
 `GetParameter`. This applies to filtered and paginated results as well.

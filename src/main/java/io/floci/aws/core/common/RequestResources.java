@@ -509,6 +509,7 @@ public final class RequestResources {
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
             List<String> values = read(resource, form, body, variable.getValue()).stream()
                     .map(value -> withoutTypePath(before(value, resource.before()), resource.types().getFirst()))
+                    .map(value -> asVariable(variable.getKey(), value))
                     .toList();
             if (values.isEmpty()) {
                 continue;
@@ -553,6 +554,14 @@ public final class RequestResources {
                         region, accountId, null);
             }
         }
+    }
+
+    /**
+     * The value as the variable takes it: without the leading {@code /} a variable named for leaving it out drops,
+     * as an SSM parameter's ARN names {@code /team/x} as {@code parameter/team/x}.
+     */
+    static String asVariable(String variable, String value) {
+        return variable.endsWith("WithoutLeadingSlash") && value.startsWith("/") ? value.substring(1) : value;
     }
 
     /** The value without a leading {@code /<type>/}, the path a service may return an id of that type under. */

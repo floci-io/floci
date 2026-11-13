@@ -12,6 +12,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.DocumentType;
+import software.amazon.awssdk.services.ssm.model.InvalidDocumentException;
 import software.amazon.awssdk.services.ssm.model.ResourceTypeForTagging;
 import software.amazon.awssdk.services.ssm.model.SsmException;
 
@@ -73,6 +74,72 @@ class SsmDocumentAssociationTagsIamEnforcementIntegrationTest {
                 root.deleteDocument(r -> r.name(allowedDocument).force(true));
                 root.deleteDocument(r -> r.name(deniedDocument).force(true));
             }
+        }
+    }
+
+    @Test
+    void aParameterIsTaggedOnItsOwnArn() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String allowedParameter = "/iam-tags-" + suffix + "/allowed";
+        String deniedParameter = "/iam-tags-" + suffix + "-other/denied";
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(allowedParameter).value("v").type("String"));
+                root.putParameter(r -> r.name(deniedParameter).value("v").type("String"));
+                String userName = "ssm-param-tags-" + suffix;
+                EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                        cleanup, RestAssured.port, auth(ACCOUNT, "iam"), userName);
+                EnforcementFixtures.putUserPolicy(RestAssured.port, auth(ACCOUNT, "iam"), userName, "p", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":%s,
+                          "Resource":"arn:aws:ssm:*:*:parameter/iam-tags-%s/*"}]}"""
+                        .formatted(TAG_ACTIONS, suffix));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        Region.US_EAST_1)) {
+                    assertDoesNotThrow(() -> tag(user, ResourceTypeForTagging.PARAMETER, allowedParameter));
+                    assertDenied(() -> tag(user, ResourceTypeForTagging.PARAMETER, deniedParameter));
+                }
+            } finally {
+                root.deleteParameters(r -> r.names(allowedParameter, deniedParameter));
+            }
+        }
+    }
+
+    @Test
+    void aDocumentIsCreatedWithTagsOnItsOwnArn() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String allowedDocument = "iam-create-allowed-" + suffix;
+        String deniedDocument = "iam-create-denied-" + suffix;
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                String userName = "ssm-create-" + suffix;
+                EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                        cleanup, RestAssured.port, auth(ACCOUNT, "iam"), userName);
+                EnforcementFixtures.putUserPolicy(RestAssured.port, auth(ACCOUNT, "iam"), userName, "p", """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                          "Action":["ssm:CreateDocument","ssm:AddTagsToResource"],
+                          "Resource":"arn:aws:ssm:*:*:document/%s"}]}"""
+                        .formatted(allowedDocument));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        Region.US_EAST_1)) {
+                    assertDoesNotThrow(() -> user.createDocument(r -> r.name(allowedDocument)
+                            .documentType(DocumentType.COMMAND).content(CONTENT)
+                            .tags(t -> t.key("team").value("red"))));
+                    assertDenied(() -> user.createDocument(r -> r.name(deniedDocument)
+                            .documentType(DocumentType.COMMAND).content(CONTENT)
+                            .tags(t -> t.key("team").value("red"))));
+                }
+            } finally {
+                deleteIfPresent(root, allowedDocument);
+                deleteIfPresent(root, deniedDocument);
+            }
+        }
+    }
+
+    private static void deleteIfPresent(SsmClient root, String document) {
+        try {
+            root.deleteDocument(r -> r.name(document).force(true));
+        } catch (InvalidDocumentException expected) {
+            // The document was never created, which is what a denied create leaves.
         }
     }
 

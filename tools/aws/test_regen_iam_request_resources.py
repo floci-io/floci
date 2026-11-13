@@ -1262,3 +1262,17 @@ def test_a_member_whose_enum_lists_two_of_the_actions_types_picks_the_type():
     assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, {"ResourceType": {"other"}}) is None
     # Without a member naming the resource, the request names none of them.
     assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, {"ResourceType": "ResourceType"}, enums) is None
+
+
+def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_id_fills_it():
+    formats = {"document": "arn:${Partition}:ssm:${Region}:${Account}:document/${DocumentName}",
+               "managed-instance": "arn:${Partition}:ssm:${Region}:${Account}:managed-instance/${InstanceId}",
+               "parameter": "arn:${Partition}:ssm:${Region}:${Account}:parameter/${ParameterNameWithoutLeadingSlash}"}
+    members = {"ResourceType": "ResourceType", "ResourceId": "ResourceId"}
+    enums = {"ResourceType": {"Document", "ManagedInstance", "Parameter", "Automation"}}
+    assert r.picked_by_enum(["document", "managed-instance", "parameter"], formats, members, enums) == [
+        {"type": "document", "fill": {"DocumentName": "ResourceId"}, "when": {"ResourceType": ["Document"]}},
+        {"type": "managed-instance", "fill": {"InstanceId": "ResourceId"},
+         "when": {"ResourceType": ["ManagedInstance"]}},
+        {"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"},
+         "when": {"ResourceType": ["Parameter"]}}]
