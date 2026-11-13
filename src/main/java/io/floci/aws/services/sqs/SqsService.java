@@ -1424,18 +1424,25 @@ public class SqsService implements Resettable, ResourceProvider {
      */
     public static int messageAttributeSize(String name, String dataType, String stringValue,
                                            String binaryValueBase64) {
+        byte[] binaryValue = null;
+        if (binaryValueBase64 != null) {
+            try {
+                binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+            } catch (IllegalArgumentException e) {
+                binaryValue = binaryValueBase64.getBytes(StandardCharsets.UTF_8);
+            }
+        }
+        return messageAttributeSize(name, dataType, stringValue, binaryValue);
+    }
+
+    private static int messageAttributeSize(String name, String dataType, String stringValue, byte[] binaryValue) {
         int total = name.getBytes(StandardCharsets.UTF_8).length;
         if (dataType != null) {
             total += dataType.getBytes(StandardCharsets.UTF_8).length;
         }
-        if (binaryValueBase64 != null) {
-            try {
-                return total + Base64.getDecoder().decode(binaryValueBase64).length;
-            } catch (IllegalArgumentException e) {
-                return total + binaryValueBase64.getBytes(StandardCharsets.UTF_8).length;
-            }
-        }
-        if (stringValue != null) {
+        if (binaryValue != null) {
+            total += binaryValue.length;
+        } else if (stringValue != null) {
             total += stringValue.getBytes(StandardCharsets.UTF_8).length;
         }
         return total;
@@ -1451,16 +1458,9 @@ public class SqsService implements Resettable, ResourceProvider {
             return total;
         }
         for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
-            total += entry.getKey().getBytes(StandardCharsets.UTF_8).length;
             MessageAttributeValue value = entry.getValue();
-            if (value.getDataType() != null) {
-                total += value.getDataType().getBytes(StandardCharsets.UTF_8).length;
-            }
-            if (value.getBinaryValue() != null) {
-                total += value.getBinaryValue().length;
-            } else if (value.getStringValue() != null) {
-                total += value.getStringValue().getBytes(StandardCharsets.UTF_8).length;
-            }
+            total += messageAttributeSize(entry.getKey(), value.getDataType(), value.getStringValue(),
+                    value.getBinaryValue());
         }
         return total;
     }
