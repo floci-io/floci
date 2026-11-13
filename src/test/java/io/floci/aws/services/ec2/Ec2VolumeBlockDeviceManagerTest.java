@@ -6,8 +6,10 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.Volume;
@@ -33,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -46,11 +49,15 @@ import static org.mockito.Mockito.when;
 class Ec2VolumeBlockDeviceManagerTest {
 
     private static final String HELPER_ID = "helper-container-id";
+    private static final String CREATED_HELPER_ID = "created-helper-container-id";
+    private static final String HELPER_IMAGE = "alpine:3.21";
 
     private EmulatorConfig config;
     private DockerClient dockerClient;
     private InspectContainerResponse helper;
+    private ContainerBuilder containerBuilder;
     private ContainerLifecycleManager lifecycleManager;
+    private ContainerDetector containerDetector;
     private Ec2VolumeBlockDeviceManager manager;
 
     @BeforeEach
@@ -65,9 +72,11 @@ class Ec2VolumeBlockDeviceManagerTest {
         when(helper.getId()).thenReturn(HELPER_ID);
         when(dockerClient.inspectContainerCmd(anyString()).exec()).thenReturn(helper);
 
+        containerBuilder = mock(ContainerBuilder.class);
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        manager = new Ec2VolumeBlockDeviceManager(dockerClient, mock(ContainerBuilder.class),
-                lifecycleManager, config);
+        containerDetector = mock(ContainerDetector.class);
+        manager = new Ec2VolumeBlockDeviceManager(dockerClient, containerBuilder,
+                lifecycleManager, containerDetector, config);
     }
 
     @Test
@@ -253,6 +262,51 @@ class Ec2VolumeBlockDeviceManagerTest {
         assertEquals("attached", attachment.getState());
     }
 
+    /**
+     * Inside a container the host persistent path names a directory on the Docker host, which
+     * Floci can neither see nor create. Creating it from here used to fail, so no helper started
+     * and every attachment reported the helper unavailable; the daemon creates the bind source.
+     */
+    @Test
+    void helperInsideAContainerLeavesCreatingTheHostBindDirectoryToDocker(@TempDir Path directory) {
+        Path hostPersistentPath = directory.resolve("floci-data");
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        ContainerBuilder.Builder helperBuilder = helperToBeCreatedOn(hostPersistentPath);
+
+        assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        assertFalse(Files.exists(hostPersistentPath), "Floci must not create the Docker host's directory itself");
+        verify(helperBuilder).withBind(hostPersistentPath.resolve("ec2").resolve("volumes").toString(), "/volumes");
+    }
+
+    @Test
+    void helperOnTheHostCreatesTheBindDirectoryBeforeBindingIt(@TempDir Path directory) {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        ContainerBuilder.Builder helperBuilder = helperToBeCreatedOn(directory);
+
+        assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        assertTrue(Files.isDirectory(directory.resolve("ec2").resolve("volumes")));
+        verify(helperBuilder).withBind(directory.resolve("ec2").resolve("volumes").toString(), "/volumes");
+    }
+
+    /**
+     * Stubs bind-mode storage under {@code hostPersistentPath} with no helper container yet, so the
+     * next operation creates the helper through the returned builder and its commands succeed.
+     */
+    private ContainerBuilder.Builder helperToBeCreatedOn(Path hostPersistentPath) {
+        when(config.storage().hostPersistentPath()).thenReturn(hostPersistentPath.toString());
+        when(config.services().ec2().volumeHelperImage()).thenReturn(HELPER_IMAGE);
+        when(dockerClient.inspectContainerCmd(anyString()).exec()).thenThrow(new NotFoundException("no such container"));
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        ContainerSpec spec = new ContainerSpec(HELPER_IMAGE);
+        when(containerBuilder.newContainer(HELPER_IMAGE)).thenReturn(builder);
+        when(builder.build()).thenReturn(spec);
+        when(lifecycleManager.createAndStart(spec))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo(CREATED_HELPER_ID, Map.of()));
+        ContainerExecStubs.completeEveryExec(dockerClient, CREATED_HELPER_ID, 0, "1 /dev/loop3", "");
+        ContainerExecStubs.completeEveryExec(dockerClient, "guest", 0, "", "");
+        return builder;
+    }
+
     private Instance runningInstance() {
         Instance instance = new Instance();
         instance.setInstanceId("i-1");
@@ -339,7 +393,7 @@ class Ec2VolumeBlockDeviceManagerTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().volumeBlockDevices()).thenReturn(false);
         Ec2VolumeBlockDeviceManager disabledManager = new Ec2VolumeBlockDeviceManager(dockerClient,
-                mock(ContainerBuilder.class), lifecycleManager, config);
+                mock(ContainerBuilder.class), lifecycleManager, mock(ContainerDetector.class), config);
 
         disabledManager.stopManagedContainers();
 
@@ -419,7 +473,8 @@ class Ec2VolumeBlockDeviceManagerTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().volumeBlockDevices()).thenReturn(false);
         Ec2VolumeBlockDeviceManager disabledManager = new Ec2VolumeBlockDeviceManager(dockerClient,
-                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class), config);
+                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
+                mock(ContainerDetector.class), config);
 
         assertFalse(disabledManager.resizeVolume("vol-1", 16));
     }
