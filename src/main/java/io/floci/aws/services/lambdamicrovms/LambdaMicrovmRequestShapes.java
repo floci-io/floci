@@ -3,13 +3,13 @@ package io.floci.aws.services.lambdamicrovms;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.RequestConstraintCheck;
 
-final class LambdaMicrovmImageRequestShapes {
+final class LambdaMicrovmRequestShapes {
 
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.load(
-            "aws/lambda-microvm-image-request-shapes.json", "MicroVM image request shapes",
+            "aws/lambda-microvm-request-shapes.json", "MicroVM request shapes",
             RequestConstraintCheck.standardMessages("ValidationException"));
 
-    private LambdaMicrovmImageRequestShapes() {
+    private LambdaMicrovmRequestShapes() {
     }
 
     static void check(String operation, JsonNode request) {

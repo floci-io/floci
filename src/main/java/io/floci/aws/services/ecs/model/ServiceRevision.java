@@ -21,6 +21,7 @@ public class ServiceRevision {
     private LaunchType launchType;
     private List<CapacityProviderStrategyItem> capacityProviderStrategy;
     private String platformVersion;
+    private String requestedPlatformVersion;
     private String platformFamily;
     private List<EcsLoadBalancer> loadBalancers;
     private List<Map<String, Object>> serviceRegistries;
@@ -36,6 +37,11 @@ public class ServiceRevision {
 
     public String getPlatformVersion() { return platformVersion; }
     public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }
+
+    public String getRequestedPlatformVersion() { return requestedPlatformVersion; }
+    public void setRequestedPlatformVersion(String requestedPlatformVersion) {
+        this.requestedPlatformVersion = requestedPlatformVersion;
+    }
 
     public String getPlatformFamily() { return platformFamily; }
     public void setPlatformFamily(String platformFamily) { this.platformFamily = platformFamily; }

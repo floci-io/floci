@@ -2,6 +2,7 @@ package io.floci.aws.services.s3;
 
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -11,6 +12,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -36,6 +38,24 @@ class S3LeadingSlashKeyIntegrationTest {
 
     @TestHTTPResource("/")
     URI baseUri;
+
+    /** The slash-only key test's bucket. Every {@code @QuarkusTest} class shares one emulator, so it goes too. */
+    private String slashOnlyBucket;
+
+    @AfterEach
+    void deleteTheSlashOnlyBucket() throws Exception {
+        if (slashOnlyBucket == null) {
+            return;
+        }
+        HttpClient client = HttpClient.newHttpClient();
+        String base = baseUri.toString().replaceAll("/$", "");
+        for (String key : List.of("/", "//")) {
+            HttpRequest delete = HttpRequest.newBuilder(URI.create(base + "/" + slashOnlyBucket + "/" + key))
+                    .DELETE().build();
+            assertEquals(204, client.send(delete, HttpResponse.BodyHandlers.ofString()).statusCode(), key);
+        }
+        given().when().delete("/" + slashOnlyBucket).then().statusCode(204);
+    }
 
     // --- Setup ---
 
@@ -289,6 +309,7 @@ class S3LeadingSlashKeyIntegrationTest {
         // "/bucket//" names the key "/" and "/bucket///" the key "//": collapsed, either reads as the bucket.
         String bucket = "test-slash-only-bucket";
         given().when().put("/" + bucket).then().statusCode(200);
+        slashOnlyBucket = bucket;
         HttpClient client = HttpClient.newHttpClient();
         String base = baseUri.toString().replaceAll("/$", "");
         URI oneSlash = URI.create(base + "/" + bucket + "//");

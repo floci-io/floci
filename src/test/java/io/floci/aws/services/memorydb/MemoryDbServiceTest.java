@@ -214,6 +214,8 @@ class MemoryDbServiceTest {
         assertNotFoundFault("ClusterNotFoundFault", () -> service.listTags(arn + "cluster/missing"));
         assertNotFoundFault("ClusterNotFoundFault",
                 () -> service.listTags("arn:aws:memorydb:eu-west-1:000000000000:cluster/missing"));
+        assertNotFoundFault("ClusterNotFoundFault",
+                () -> service.listTags("arn:aws:memorydb:us-east-1:111111111111:cluster/missing"));
         assertNotFoundFault("UserNotFoundFault", () -> service.describeUsers("missing", "us-east-1"));
         assertNotFoundFault("UserNotFoundFault", () -> service.deleteUser("missing", "us-east-1"));
         assertNotFoundFault("UserNotFoundFault", () -> service.createAcl(acl("an-acl", "missing"), "us-east-1"));
@@ -223,6 +225,20 @@ class MemoryDbServiceTest {
         assertNotFoundFault("ACLNotFoundFault",
                 () -> service.createCluster(cluster("a-cluster", "missing"), "us-east-1"));
         assertNotFoundFault("ACLNotFoundFault", () -> service.listTags(arn + "acl/missing"));
+    }
+
+    @Test
+    void malformedOrOtherServiceArnRaisesInvalidArnFault() {
+        for (String arn : List.of("not-an-arn", "arn:aws:s3:::bucket")) {
+            for (Executable call : List.<Executable>of(
+                    () -> service.listTags(arn),
+                    () -> service.tagResource(arn, Map.of("env", "dev")),
+                    () -> service.untagResource(arn, List.of("env")))) {
+                AwsException ex = assertThrows(AwsException.class, call);
+                assertEquals("InvalidARNFault", ex.jsonType(), arn);
+                assertEquals(400, ex.getHttpStatus(), arn);
+            }
+        }
     }
 
     @Test

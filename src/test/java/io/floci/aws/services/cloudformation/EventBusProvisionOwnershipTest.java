@@ -66,7 +66,7 @@ class EventBusProvisionOwnershipTest {
      */
     @Test
     void updateOfBusProvisionedBeforeOwnershipTrackingAdoptsItInsteadOfFailing() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         when(eventBridgeService.describeEventBus(BUS, REGION))
                 .thenReturn(bus(Instant.parse("2026-01-01T00:00:00Z")));
@@ -81,7 +81,7 @@ class EventBusProvisionOwnershipTest {
 
     @Test
     void updateOfTaggedBusProvisionedBeforeTagTrackingAdoptsItInsteadOfFailing() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
         existingBus.setTags(Map.of("environment", "test"));
@@ -101,7 +101,7 @@ class EventBusProvisionOwnershipTest {
     @Test
     void updateOfBusProvisionedBeforePolicyTrackingAdoptsUnchangedPolicyWithoutReapplyingIt()
             throws Exception {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
         existingBus.setPolicy("{\"Version\":\"2012-10-17\"}");
@@ -119,7 +119,7 @@ class EventBusProvisionOwnershipTest {
 
     @Test
     void changedTrackedPolicyFailsWithoutMutatingTheOwnedBus() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
         existingBus.setPolicy("{\"Version\":\"2008-10-17\"}");
@@ -154,7 +154,7 @@ class EventBusProvisionOwnershipTest {
      */
     @Test
     void failedTagUpdateKeepsItsSnapshotForTheRollbackWalker() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
         existingBus.setTags(Map.of("version", "0.1.5"));
@@ -211,7 +211,7 @@ class EventBusProvisionOwnershipTest {
 
     @Test
     void updateOfBusRecreatedOutOfBandStillFails() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         when(eventBridgeService.describeEventBus(BUS, REGION))
                 .thenReturn(bus(Instant.parse("2026-02-02T00:00:00Z")));
@@ -230,7 +230,7 @@ class EventBusProvisionOwnershipTest {
      */
     @Test
     void busIsRollbackDeletableWhenThePolicyCallFails() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenReturn(bus(Instant.parse("2026-01-01T00:00:00Z")));
         doThrow(new AwsException("MalformedPolicyDocumentException", "bad policy", 400))
                 .when(eventBridgeService)
@@ -246,7 +246,7 @@ class EventBusProvisionOwnershipTest {
 
     @Test
     void adoptedBusIsNotMarkedRollbackOwned() {
-        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         when(eventBridgeService.describeEventBus(BUS, REGION))
                 .thenReturn(bus(Instant.parse("2026-01-01T00:00:00Z")));

@@ -42,6 +42,8 @@ class AwsConfigServiceTaggingTest {
     private static final String ACCOUNT = "000000000000";
     private static final List<Map<String, String>> ENV_PROD = List.of(Map.of("Key", "env", "Value", "prod"));
     private static final List<Map<String, String>> TEAM_RED = List.of(Map.of("Key", "team", "Value", "red"));
+    private static final String GHOST_RECORDER_ARN =
+            "arn:aws:config:us-east-1:000000000000:configuration-recorder/default/ghost";
 
     private AwsConfigService service() {
         return new AwsConfigService(new RegionResolver(REGION, ACCOUNT), null);
@@ -50,6 +52,12 @@ class AwsConfigServiceTaggingTest {
     private static void assertNotFound(Executable call) {
         AwsException ex = assertThrows(AwsException.class, call);
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    private static void assertNoSuchRecorder(Executable call) {
+        AwsException ex = assertThrows(AwsException.class, call);
+        assertEquals("NoSuchConfigurationRecorderException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -224,7 +232,45 @@ class AwsConfigServiceTaggingTest {
 
         service.deleteConfigurationRecorder(REGION, "default");
 
-        assertTrue(service.describeConfigurationRecorders(REGION, null).isEmpty());
+        assertTrue(service.describeConfigurationRecorders(REGION, null, null).isEmpty());
+    }
+
+    @Test
+    void bothDescribeCallsReturnAndFilterByTheRecorderArn() {
+        AwsConfigService service = service();
+        service.putConfigurationRecorder(REGION, recorder("default"), null);
+        String arn = recorderArn(service);
+
+        assertEquals(arn, service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().arn());
+        assertEquals(arn, service.describeConfigurationRecorders(REGION, null, arn).getFirst().arn());
+        assertEquals(arn, service.describeConfigurationRecorderStatus(REGION, null, arn).getFirst().arn());
+        assertEquals(arn, service.describeConfigurationRecorders(REGION, List.of("default"), arn).getFirst().arn());
+        assertEquals(arn,
+                service.describeConfigurationRecorderStatus(REGION, List.of("default"), arn).getFirst().arn());
+    }
+
+    @Test
+    void anArnOrNameThatMissesTheRecorderIsNoSuchConfigurationRecorder() {
+        AwsConfigService service = service();
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, null, GHOST_RECORDER_ARN));
+
+        service.putConfigurationRecorder(REGION, recorder("default"), null);
+        String arn = recorderArn(service);
+
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, List.of("other"), arn));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, List.of("other"), arn));
+    }
+
+    @Test
+    void aRecorderSavedWithoutAnArnHasNoArnInItsStatusAndNoArnFindsIt() {
+        AwsConfigService service = serviceWithARecorderSavedWithoutAnArn();
+
+        assertNull(service.describeConfigurationRecorderStatus(REGION, List.of("default"), null).getFirst().arn());
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, null, GHOST_RECORDER_ARN));
     }
 
     @Test
@@ -345,6 +391,6 @@ class AwsConfigServiceTaggingTest {
     }
 
     private static String recorderArn(AwsConfigService service) {
-        return service.describeConfigurationRecorders(REGION, null).getFirst().arn();
+        return service.describeConfigurationRecorders(REGION, null, null).getFirst().arn();
     }
 }

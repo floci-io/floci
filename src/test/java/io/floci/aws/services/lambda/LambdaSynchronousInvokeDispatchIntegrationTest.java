@@ -82,7 +82,7 @@ class LambdaSynchronousInvokeDispatchIntegrationTest {
         // Each answer only records what it saw and waits for its own release; the checks run on the
         // test thread, so a mismatch fails there with its own message instead of a 500 to the client.
         doAnswer(call -> hold(call.getArgument(1), call.getArgument(4), held, invoking, releases))
-                .when(lambdaService).invoke(anyString(), anyString(), any(), any(), any(), any(), any());
+                .when(lambdaService).invoke(anyString(), anyString(), any(), any(), any(), any(), any(), any());
         doAnswer(call -> hold(call.getArgument(0), call.getArgument(2), held, invoking, releases))
                 .when(lambdaService).invokeArn(anyString(), any(), any());
 

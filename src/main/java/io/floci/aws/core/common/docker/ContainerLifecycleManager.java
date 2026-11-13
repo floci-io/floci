@@ -294,6 +294,9 @@ public class ContainerLifecycleManager {
         if (spec.user() != null && !spec.user().isBlank()) {
             createCmd.withUser(spec.user());
         }
+        if (spec.dnsName() != null) {
+            createCmd.withHostName(spec.dnsName()).withAliases(spec.dnsName());
+        }
         if (env != null && !env.isEmpty()) {
             createCmd.withEnv(env);
         }

@@ -9,6 +9,7 @@ import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -25,6 +26,10 @@ import java.util.Map;
  *
  * <p>Minting server-side keeps the RSA private key inside Floci. Callers never hold signing
  * material, and the claim shape stays authoritative in one place.
+ *
+ * <p>Takes the same optional {@code ?region=} as the discovery and key routes: cluster names are
+ * unique only within a Region of an account, and this route is usually called unsigned, so without
+ * it the request's Region is used, and then the account's only cluster of that name.
  */
 @ApplicationScoped
 @Path("_floci/eks/clusters/{name}/oidc-token")
@@ -42,8 +47,9 @@ public class EksOidcTokenController {
     }
 
     @POST
-    public Response mintToken(@PathParam("name") String clusterName, Map<String, Object> request) {
-        Cluster cluster = eksService.describeCluster(clusterName);
+    public Response mintToken(@PathParam("name") String clusterName, @QueryParam("region") String region,
+                              Map<String, Object> request) {
+        Cluster cluster = eksService.findClusterForFlociRoute(clusterName, region);
         String issuer = cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
                 ? cluster.getIdentity().getOidc().getIssuer()
                 : null;
@@ -59,7 +65,7 @@ public class EksOidcTokenController {
         Integer lifetime = integer(body, "expirySeconds");
 
         String token = oidcService.mintServiceAccountToken(
-                clusterName, issuer, namespace, serviceAccount, audience, lifetime);
+                eksService.clusterKey(cluster), issuer, namespace, serviceAccount, audience, lifetime);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("token", token);

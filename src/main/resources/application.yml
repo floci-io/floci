@@ -156,6 +156,7 @@ quarkus:
       - --initialize-at-run-time=io.floci.aws.services.bedrockagentcore.BedrockAgentCoreEventService
       - --initialize-at-run-time=io.floci.aws.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.floci.aws.services.emr.EmrService
+      - --initialize-at-run-time=io.floci.aws.services.emrserverless.EmrServerlessSparkRunner
       - --initialize-at-run-time=io.floci.aws.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.floci.aws.services.elb.ElbClassicService
       - --initialize-at-run-time=io.floci.aws.services.datasync.DataSyncService
@@ -634,6 +635,7 @@ floci:
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
       yarn-node-memory-mb: 4096             # memory a cluster's NodeManager offers its YARN containers
       yarn-node-vcores: 4                   # virtual cores it offers them
+      yarn-max-worker-nodes: 4              # the most core and task nodes a cluster runs as containers of their own
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
@@ -1047,8 +1049,9 @@ floci:
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs
-      # Remove the drivers a previous run of this deployment left on the daemon before the first
-      # job run starts. Scoped to this deployment's own containers.
+      executor-containers: 0        # a docker Spark run's executors at once, each in a container; 0 = local mode
+      # Remove the drivers and executors a previous run of this deployment left on the daemon before
+      # the first job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
     ssoadmin:
       enabled: true

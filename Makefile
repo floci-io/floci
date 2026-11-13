@@ -23,6 +23,8 @@
 # model by tools/aws/regen_apigateway_shapes.py.
 # src/main/resources/aws/ecs-request-shapes.json is generated from botocore's ECS model
 # by tools/aws/regen_ecs_shapes.py.
+# src/main/resources/aws/organizations-request-shapes.json is generated from botocore's Organizations
+# model by tools/aws/regen_organizations_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
 # from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
 # Athena request constraints for every operation are generated from botocore's Athena model
@@ -35,6 +37,8 @@
 # src/main/resources/aws/payment-cryptography-data-request-shapes.json, the Payment Cryptography
 # data plane request constraints, is generated from botocore's data plane model by
 # tools/aws/regen_payment_cryptography_data_shapes.py.
+# src/main/resources/aws/cloudfront-keyvaluestore-request-shapes.json, the CloudFront KeyValueStore data plane
+# request constraints, is generated from botocore's model by tools/aws/regen_cloudfront_keyvaluestore_shapes.py.
 # src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
@@ -289,6 +293,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_cur_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py
+	$(PYTHON) tools/aws/regen_cloudfront_keyvaluestore_shapes.py
 	$(PYTHON) tools/aws/regen_securityhub_shapes.py
 	$(PYTHON) tools/aws/regen_rekognition_shapes.py
 	$(PYTHON) tools/aws/regen_kinesis_shapes.py
@@ -299,6 +304,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_documentation_shapes.py
 	$(PYTHON) tools/aws/regen_ecs_shapes.py
+	$(PYTHON) tools/aws/regen_organizations_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_rest_routes.py
@@ -405,6 +411,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_cloudfront_keyvaluestore_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/cloudfront-keyvaluestore-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_securityhub_shapes.py --check || { \
 		echo "error: Security Hub request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
@@ -442,6 +454,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_ecs_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/ecs-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_organizations_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/organizations-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}

@@ -152,6 +152,43 @@ aws events put-events \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Partner Event Buses
+
+`CreateEventBus` with `EventSourceName` creates a partner event bus. As in AWS, the bus takes the
+source's name, so `Name` must equal `EventSourceName`, and the name must match
+`aws.partner/<partner>/<source>`. Floci does not model partner event sources, so any well-formed
+source name is accepted without one being created or activated first. Once created, the bus works
+like a custom bus: rules, targets, tags and `PutEvents` address it by name or ARN. A rule name
+can't contain a slash on any bus: `PutRule` rejects a name outside `[\.\-_A-Za-z0-9]+` or longer
+than 64 characters with `ValidationException`, as AWS does.
+
+Two calls differ from a custom bus. `PutPermission` and `RemovePermission` reject a partner bus
+with `ValidationException`, since the API types their `EventBusName` as a non-partner bus name.
+`PutEvents` to a partner bus is accepted and fans out to its rules, where AWS reserves that bus for
+the partner's own events; this lets a test publish an event a partner would send.
+
+When upgrading, a rule persisted by an earlier Floci version under a name `PutRule` now rejects,
+such as one with a slash or a space or longer than 64 characters, is still reachable by its exact
+name on its own bus, and it keeps `DeleteEventBus` from deleting that bus. One with a slash in its
+name is also no longer listed by `ListRules` or matched by `PutEvents`. On a custom bus it can still
+be tagged by its ARN, but on the default bus it cannot: an ARN such as `rule/team/rule-1` reads as
+rule `rule-1` on bus `team`, so that rule is reachable by its exact name for the rule and target
+operations only. On a custom bus named `aws.partner`, a rule such as `example.com/orders/r1` shares
+its storage key and ARN with rule `r1` on partner bus `aws.partner/example.com/orders`. That partner
+bus does not list, match or manage the legacy rule, and `PutRule` of `r1` on it fails with
+`ValidationException` until the legacy rule is deleted. A CloudFormation stack holding any of these legacy rules can still be deleted, but
+an `UpdateStack` that touches the rule fails, since `PutRule` rejects its name. Remove its targets,
+delete it and recreate it under a valid name. `DescribeRule`, `DeleteRule`, `EnableRule`,
+`DisableRule`, `PutTargets`, `RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid
+rule name as `PutRule` does.
+
+```bash
+aws events create-event-bus \
+  --name aws.partner/example.com/123/orders \
+  --event-source-name aws.partner/example.com/123/orders \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
 ## Event Bus Targets
 
 A rule can target another event bus by ARN: the event is republished there, and that bus's own rules evaluate it and fan out normally. `Source`, `DetailType`, `Resources` and the originating `account`/`region` carry over, and each hop gets a new event id.

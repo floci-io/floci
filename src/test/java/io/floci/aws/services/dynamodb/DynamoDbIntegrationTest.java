@@ -895,6 +895,55 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void updateTableRefusesIndexCapacityAboveThePerIndexMaximum() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "QuotaTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 1, "WriteCapacityUnits": 1},
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": 1, "WriteCapacityUnits": 1}
+                    }]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "QuotaTable",
+                    "GlobalSecondaryIndexUpdates": [{"Update": {
+                        "IndexName": "gsi1",
+                        "ProvisionedThroughput": {"ReadCapacityUnits": 40001, "WriteCapacityUnits": 1}
+                    }}]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("LimitExceededException"))
+            .body("message", equalTo("The requested ReadCapacityUnits for index gsi1, 40001, is above the per index "
+                    + "maximum for the account in us-east-1. Per table maximum: 40000. Refer to the Amazon DynamoDB "
+                    + "Developer Guide for current limits and how to request higher limits."));
+    }
+
+    @Test
     void describeEndpointsNamesFloci() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DescribeEndpoints")

@@ -21,6 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -78,6 +79,8 @@ final class EmrServiceFixture {
         Consumer<BooleanSupplier> whileStartingHdfs = stopped -> { };
         final List<String> removed = new ArrayList<>();
         final List<Set<String>> kept = new ArrayList<>();
+        // Each resize asked for: its cluster and the nodes it wants.
+        final List<ClusterStorage.Yarn> resizes = new ArrayList<>();
         boolean refuse;
         Runnable whileCreating = () -> { };
 
@@ -98,13 +101,19 @@ final class EmrServiceFixture {
         }
 
         @Override
+        public void resize(String clusterId, Supplier<Yarn> yarn) {
+            resizes.add(yarn.get());
+        }
+
+        @Override
         public void archiveContainerLogs(String clusterId, String accountId, String region, String logFolder) {
             containerLogs.add(List.of(clusterId, logFolder));
         }
 
         @Override
         public SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host,
-                                           String image, String dockerNetwork, HiveMetastore hiveMetastore, Yarn yarn,
+                                           String image, String dockerNetwork, HiveMetastore hiveMetastore,
+                                           Supplier<Yarn> yarn,
                                            BooleanSupplier stopped) {
             hdfs.add(Arrays.asList(clusterId, host, image, dockerNetwork, String.valueOf(hiveMetastore != null),
                     hiveMetastore != null ? hiveMetastore.role() : null));
@@ -112,7 +121,7 @@ final class EmrServiceFixture {
                 metastores.add(hiveMetastore);
             }
             if (yarn != null) {
-                yarns.add(yarn);
+                yarns.add(yarn.get());
             }
             whileStartingHdfs.accept(stopped);
             if (hdfsFailure != null) {
@@ -271,6 +280,7 @@ final class EmrServiceFixture {
         when(config.services().emr().dockerNetwork()).thenReturn(Optional.empty());
         when(config.services().emr().yarnNodeMemoryMb()).thenReturn(4096);
         when(config.services().emr().yarnNodeVcores()).thenReturn(4);
+        when(config.services().emr().yarnMaxWorkerNodes()).thenReturn(4);
         when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
         return config;
     }

@@ -6,15 +6,21 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.lang.reflect.RecordComponent;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -60,6 +66,25 @@ class ProvisionContextTest {
     }
 
     @Test
+    void withPriorPhysicalIdChangesOnlyThePriorPhysicalId() throws Exception {
+        PropertyChanges changes = PropertyChanges.between("AWS::SQS::Queue", true,
+                props("{\"A\":1}"), props("{\"A\":2}"));
+        ProvisionContext original = new ProvisionContext(engine, "eu-west-1", "123456789012", "stack",
+                "old-id", event -> {}, props("{\"A\":1}"), changes);
+
+        for (String replacement : new String[] {"new-id", null}) {
+            ProvisionContext copy = original.withPriorPhysicalId(replacement);
+
+            for (RecordComponent component : ProvisionContext.class.getRecordComponents()) {
+                Object expected = component.getName().equals("priorPhysicalId")
+                        ? replacement : component.getAccessor().invoke(original);
+                assertSame(expected, component.getAccessor().invoke(copy), component.getName());
+            }
+        }
+        assertEquals("old-id", original.priorPhysicalId());
+    }
+
+    @Test
     void previouslyDeclaredReadsThePreviousTemplatesProperties() {
         ProvisionContext ctx = contextWithPriorProperties("""
                 {"Declared": {"Fn::GetAtt": ["Other", "Arn"]}, "ExplicitNull": null}
@@ -81,6 +106,110 @@ class ProvisionContextTest {
                 "a property the stack never declared, or declared as null, is not dropped");
         assertEquals(Set.of("Kept", "Dropped", "DroppedIf"), ctx.droppedProperties(props("{}")));
         assertEquals(Set.of("Kept", "Dropped", "DroppedIf"), ctx.droppedProperties(null));
+    }
+
+    /** One prior/current pair for the rule that {@code changes(...).dropped()} is {@code droppedProperties}. */
+    private record DroppedCase(String label, String priorPhysicalId, String prior, String props,
+                               List<String> expected) {
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private static DroppedCase dropped(String label, String prior, String props, String... expected) {
+        return new DroppedCase(label, "prior-id", prior, props, List.of(expected));
+    }
+
+    /** Expected lists are the result of today's droppedProperties, worked out by hand from its definition. */
+    static Stream<DroppedCase> droppedCases() {
+        return Stream.of(
+                dropped("one name removed", "{\"A\":1,\"B\":2}", "{\"A\":1}", "B"),
+                dropped("everything removed, empty props", "{\"A\":1,\"B\":2}", "{}", "A", "B"),
+                dropped("everything removed, null props", "{\"A\":1,\"B\":2}", null, "A", "B"),
+                dropped("a prior JSON null was never declared", "{\"A\":null,\"B\":2}", "{}", "B"),
+                dropped("a JSON null now still counts as declared now", "{\"A\":1}", "{\"A\":null}"),
+                dropped("same names in another order", "{\"A\":1,\"B\":2}", "{\"B\":2,\"A\":1}"),
+                dropped("prior field order is kept", "{\"Z\":1,\"A\":2,\"M\":3}", "{\"A\":2}", "Z", "M"),
+                dropped("no prior properties", null, "{}"),
+                dropped("prior is an array", "[1,2]", "{}"),
+                dropped("prior is a string", "\"x\"", "{}"),
+                dropped("props is an array", "{\"A\":1}", "[\"A\"]", "A"),
+                new DroppedCase("not an update", null, "{\"A\":1}", "{}", List.of()),
+                dropped("empty prior, new property", "{}", "{\"A\":1}"),
+                dropped("a prior Fn::If is declared", "{\"A\":{\"Fn::If\":[\"C\",\"x\",\"y\"]}}", "{\"B\":1}", "A"),
+                dropped("a null in the middle is skipped", "{\"A\":1,\"B\":null,\"C\":3}", "{\"B\":1}", "A", "C"),
+                new DroppedCase("a blank prior physical id is not an update", "  ", "{\"A\":1}", "{}", List.of()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("droppedCases")
+    void changesDroppedEqualsDroppedPropertiesAndTheHandWrittenSet(DroppedCase c) {
+        ProvisionContext ctx = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack",
+                c.priorPhysicalId(), event -> { }, c.prior() == null ? null : props(c.prior()));
+        JsonNode current = c.props() == null ? null : props(c.props());
+
+        Set<String> viaChanges = ctx.changes("AWS::SQS::Queue", current).dropped();
+
+        assertEquals(c.expected(), List.copyOf(viaChanges), c.label());
+        assertEquals(Set.copyOf(c.expected()), viaChanges, c.label());
+        assertEquals(ctx.droppedProperties(current), viaChanges, c.label());
+        assertEquals(List.copyOf(ctx.droppedProperties(current)), List.copyOf(viaChanges), c.label());
+    }
+
+    @Test
+    void changesReturnsTheEngineSuppliedObjectWhenTheContextWasBuiltWithOne() {
+        PropertyChanges supplied = PropertyChanges.between("AWS::SQS::Queue", true,
+                props("{\"A\":1}"), props("{\"A\":2}"));
+        ProvisionContext ctx = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack",
+                "prior-id", event -> { }, props("{\"Other\":1}"), supplied);
+
+        assertSame(supplied, ctx.changes());
+        assertSame(supplied, ctx.changes("AWS::SQS::Queue", props("{\"Different\":1}")),
+                "the engine's statement wins over what the arguments would derive");
+        assertSame(supplied, ctx.changes("AWS::S3::Bucket", null));
+    }
+
+    @Test
+    void changesIsDerivedFromTheContextsOwnInputsWhenTheEngineSuppliedNone() {
+        JsonNode prior = props("{\"QueueName\":\"q\",\"Old\":1,\"Same\":2}");
+        JsonNode current = props("{\"QueueName\":\"q\",\"Same\":3,\"New\":4}");
+        ProvisionContext ctx = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack",
+                "prior-id", event -> { }, prior);
+
+        PropertyChanges derived = ctx.changes("AWS::SQS::Queue", current);
+
+        assertNotNull(derived);
+        assertEquals(PropertyChanges.between("AWS::SQS::Queue", true, prior, current), derived);
+        assertEquals(PropertyChanges.Kind.UNCHANGED, derived.kindOf("QueueName"));
+        assertTrue(derived.byName().get("QueueName").createOnly(), "the resource type given to changes() is used");
+        assertEquals(Set.of("Old"), derived.dropped());
+        assertEquals(Set.of("New"), derived.added());
+        assertEquals(Set.of("Same"), derived.changed());
+    }
+
+    @Test
+    void changesDerivedOnACreateMarksEveryPropertyAdded() {
+        ProvisionContext ctx = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+
+        PropertyChanges derived = ctx.changes("AWS::SQS::Queue", props("{\"A\":1,\"B\":2}"));
+
+        assertEquals(Set.of("A", "B"), derived.added());
+        assertTrue(derived.dropped().isEmpty());
+    }
+
+    @Test
+    void everyExistingConstructorYieldsNoSuppliedChanges() {
+        ProvisionContext four = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        ProvisionContext five = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", "prior-id");
+        ProvisionContext seven = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", "prior-id",
+                event -> { }, props("{\"A\":1}"));
+
+        assertNull(four.changes());
+        assertNull(five.changes());
+        assertNull(seven.changes());
+        assertEquals("prior-id", seven.priorPhysicalId());
+        assertEquals(props("{\"A\":1}"), seven.priorProperties());
     }
 
     @Test
