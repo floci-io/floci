@@ -60,6 +60,38 @@ class CfnReplacementFromResolvedValueIntegrationTest {
         }
     }
 
+    @Test
+    void aRefWrittenAsAJoinOfTheSameValueIsNotAChange() throws Exception {
+        String stack = "resolved-join-" + Long.toString(System.nanoTime(), 36);
+        String asRef = "{\"Ref\": \"App\"}";
+        String asJoin = "{\"Fn::Join\": [\"\", [{\"Ref\": \"App\"}]]}";
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            client.createStack(request -> request.stackName(stack)
+                    .templateBody(applicationTemplate(asRef, "first")));
+            CfnStackWaits.awaitStatus(client, stack, "CREATE_COMPLETE");
+            String before = physicalId(client, stack);
+
+            client.createChangeSet(request -> request.stackName(stack).changeSetName("rewrite")
+                    .changeSetType(ChangeSetType.UPDATE).templateBody(applicationTemplate(asJoin, "second")));
+            assertEquals(List.of("False"), replacement(client, stack, "rewrite"));
+
+            client.executeChangeSet(request -> request.stackName(stack).changeSetName("rewrite"));
+            CfnStackWaits.awaitStatus(client, stack, "UPDATE_COMPLETE");
+            assertEquals(before, physicalId(client, stack), "the same ApplicationId keeps the profile");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String applicationTemplate(String applicationId, String description) {
+        return "{\"Resources\": {\"App\": {\"Type\": \"AWS::AppConfig::Application\","
+                + " \"Properties\": {\"Name\": \"resolved-join-app\"}},"
+                + "\"Subject\": {\"Type\": \"AWS::AppConfig::ConfigurationProfile\", \"Properties\": {"
+                + "\"ApplicationId\": " + applicationId + ", \"Name\": \"settings\", \"LocationUri\": \"hosted\","
+                + " \"Description\": \"" + description + "\"}}}}";
+    }
+
     private static List<String> replacement(CloudFormationClient client, String stack, String changeSet) {
         return client.describeChangeSet(request -> request.stackName(stack).changeSetName(changeSet)).changes()
                 .stream().filter(change -> "Subject".equals(change.resourceChange().logicalResourceId()))
