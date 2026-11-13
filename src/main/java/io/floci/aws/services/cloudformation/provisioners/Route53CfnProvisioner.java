@@ -72,6 +72,8 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     // and attributes before an update, kept until the update commits or rolls back; the records a
     // failed update wrote that its rollback could not delete; and the cleanup's delete attempts.
     private static final String GROUP_RECORDS_ATTR = "__FlociRoute53GroupRecords";
+    /** The record a record set update displaced, and the attributes it had, for the update's rollback. */
+    private static final String RECORD_UPDATE_ATTR = "__FlociRoute53RecordUpdate";
     private static final String GROUP_UPDATE_ATTR = "__FlociRoute53GroupUpdate";
     private static final String GROUP_OWED_ATTR = "__FlociRoute53GroupOwedDeletes";
     private static final String GROUP_CLEANUP_ATTEMPTS_ATTR = "__FlociRoute53GroupCleanupAttempts";
@@ -105,6 +107,8 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionRecordSet(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        // A snapshot an earlier update left is stale: that update committed or its rollback was skipped.
+        resource.getAttributes().remove(RECORD_UPDATE_ATTR);
         Map<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
         ResourceRecordSet rrs = recordSet(RECORD_SET, props, ctx);
         String name = ctx.resolveOptional(props, "Name");
@@ -118,8 +122,12 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         // the stack does not own yet, so it is a CREATE: a record another owner already holds under
         // that identity fails the stack instead of being taken over.
         boolean sameIdentity = isPriorIdentity(ctx, priorAttributes, zoneId, name, type, setIdentifier);
+        String snapshot = ctx.isUpdate() ? recordSnapshotOf(ctx, resource, priorAttributes) : null;
         route53Service.changeResourceRecordSets(zoneId, List.of(change(sameIdentity ? "UPSERT" : "CREATE", rrs)),
                 "CloudFormation " + ctx.stackName() + "/" + resource.getLogicalId());
+        if (snapshot != null) {
+            resource.getAttributes().put(RECORD_UPDATE_ATTR, snapshot);
+        }
 
         // An update that changes the identity leaves the prior record orphaned, so remove it,
         // otherwise it lingers in the zone and later blocks the zone's own delete.
@@ -135,6 +143,68 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         } else {
             resource.getAttributes().remove(RECORD_SET_ID_ATTR);
         }
+    }
+
+    /**
+     * The record the update displaces and the resource's physical id and attributes before it, as
+     * JSON, so a failed stack update can put them back. The record is null when the zone or the
+     * record is gone.
+     */
+    private String recordSnapshotOf(ProvisionContext ctx, StackResource resource,
+                                    Map<String, String> priorAttributes) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("physicalId", ctx.priorPhysicalId());
+        snapshot.set("attributes", MAPPER.valueToTree(priorAttributes));
+        ResourceRecordSet record = null;
+        String zoneId = priorAttributes.get(RECORD_ZONE_ATTR);
+        String type = priorAttributes.get(RECORD_TYPE_ATTR);
+        if (isSet(zoneId) && isSet(ctx.priorPhysicalId()) && isSet(type)) {
+            try {
+                record = findRecord(zoneId, ctx.priorPhysicalId(), type, priorAttributes.get(RECORD_SET_ID_ATTR));
+            } catch (AwsException e) {
+                if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
+                    throw e;
+                }
+            }
+        }
+        snapshot.set("record", record == null ? null : MAPPER.valueToTree(record));
+        return snapshot.toString();
+    }
+
+    /**
+     * Puts a record set back as the failed update found it: the record the update wrote is deleted
+     * from its zone, and the record it displaced is written again in the zone it was in, which an
+     * update that moved the record to a replaced zone leaves standing until the stack commits. A
+     * zone already gone has no record left to delete. Returns false when this update changed nothing.
+     */
+    private boolean rollbackRecordSetUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(RECORD_UPDATE_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the update snapshot of " + resource.getLogicalId(), e);
+        }
+        Map<String, String> priorAttributes = MAPPER.convertValue(snapshot.path("attributes"), ATTRIBUTES);
+        ResourceRecordSet prior = snapshot.path("record").isObject()
+                ? MAPPER.convertValue(snapshot.get("record"), ResourceRecordSet.class) : null;
+        String zoneId = resource.getAttributes().get(RECORD_ZONE_ATTR);
+        String comment = "CloudFormation rollback " + resource.getLogicalId();
+        if (isSet(zoneId)) {
+            removeRecord(zoneId, resource.getPhysicalId(), resource.getAttributes().get(RECORD_TYPE_ATTR),
+                    resource.getAttributes().get(RECORD_SET_ID_ATTR), comment);
+        }
+        if (prior != null) {
+            route53Service.changeResourceRecordSets(priorAttributes.get(RECORD_ZONE_ATTR),
+                    List.of(change("UPSERT", prior)), comment);
+        }
+        resource.setPhysicalId(snapshot.path("physicalId").asText(null));
+        resource.getAttributes().clear();
+        resource.getAttributes().putAll(priorAttributes);
+        return true;
     }
 
     /**
@@ -1036,6 +1106,11 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
             return completeGroupCleanup(resource, false);
         }
+        if (RECORD_SET.equals(resource.getResourceType())) {
+            // The update committed, so there is nothing left to roll back.
+            resource.getAttributes().remove(RECORD_UPDATE_ATTR);
+            return UpdateCleanupResult.notApplicable();
+        }
         return replacesWithCleanup(resource)
                 ? ReplacementCleanup.complete(resource, this::deleteDisplaced) : UpdateCleanupResult.notApplicable();
     }
@@ -1080,6 +1155,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     public boolean rollbackUpdate(StackResource resource) {
         if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
             return rollbackGroupUpdate(resource);
+        }
+        if (RECORD_SET.equals(resource.getResourceType())) {
+            return rollbackRecordSetUpdate(resource);
         }
         if (HOSTED_ZONE.equals(resource.getResourceType())) {
             return ReplacementCleanup.rollback(resource, this::deleteDisplaced);
