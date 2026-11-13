@@ -573,6 +573,13 @@ public class SnsService implements Resettable, ResourceProvider {
         }
     }
 
+    private static void requirePublishablePhoneNumber(String phoneNumber) {
+        if (!E164_PHONE_NUMBER.matcher(phoneNumber).matches()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: PhoneNumber Reason: " + phoneNumber + " is not valid to publish to", 400);
+        }
+    }
+
     private static void requireSandboxPhoneNumber(String phoneNumber) {
         if (phoneNumber == null || phoneNumber.isEmpty()
                 || phoneNumber.length() > SANDBOX_PHONE_NUMBER_MAX_LENGTH
@@ -1097,6 +1104,7 @@ public class SnsService implements Resettable, ResourceProvider {
 
         // Send SMS
         if (phoneNumber != null) {
+            requirePublishablePhoneNumber(phoneNumber);
             requireWithinMaxMessageSize(payloadSize, DEFAULT_MAX_MESSAGE_SIZE);
             return recordSms(phoneNumber, message, subject, region);
         }

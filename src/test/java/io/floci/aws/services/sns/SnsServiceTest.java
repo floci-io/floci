@@ -553,6 +553,24 @@ class SnsServiceTest {
         assertNotNull(messageId);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"+1a234", "NAA+15551234567", "+44 7700900123", "+447777785494394394", "not-a-number",
+            "+0447700900123", "+", ""})
+    void publish_toPhoneNumberNotInE164Format_throwsInvalidParameter(String phoneNumber) {
+        AwsException e = assertThrows(AwsException.class, () ->
+                snsService.publish(null, null, phoneNumber, "Hello phone!", null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals("Invalid parameter: PhoneNumber Reason: " + phoneNumber + " is not valid to publish to",
+                e.getMessage());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"+447700900123", "+123456789012345"})
+    void publish_toE164PhoneNumber_returnsMessageId(String phoneNumber) {
+        assertNotNull(snsService.publish(null, null, phoneNumber, "Hello phone!", null, null, REGION));
+    }
+
     @Test
     void publish_smsWithInvalidSubject_throwsInvalidParameter() {
         assertThrows(AwsException.class, () ->
