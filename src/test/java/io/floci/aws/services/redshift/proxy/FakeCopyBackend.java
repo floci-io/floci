@@ -64,6 +64,7 @@ final class FakeCopyBackend {
 
     private void serve(OutputStream copied, boolean stopAfterLoad, boolean failCommit,
                        StatementObserver observer) throws Exception {
+        socket.setTcpNoDelay(true);
         PostgresWireDecoder decoder = new PostgresWireDecoder(socket.getInputStream());
         OutputStream out = socket.getOutputStream();
         Map<String, String> statements = new HashMap<>();
