@@ -475,10 +475,11 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
-    void invokeResolvesAccountDomainAndRequestTimeContextVariables() {
+    void invokeResolvesAccountDomainRequestIdAndRequestTimeContextVariables() {
         String attributes = "{\"Account\":{\"DataType\":\"String\",\"StringValue\":\"${context.accountId}\"},"
                 + "\"Domain\":{\"DataType\":\"String\",\"StringValue\":\"${context.domainName}\"},"
                 + "\"Prefix\":{\"DataType\":\"String\",\"StringValue\":\"${context.domainPrefix}\"},"
+                + "\"Request\":{\"DataType\":\"String\",\"StringValue\":\"${context.requestId}\"},"
                 + "\"Extended\":{\"DataType\":\"String\",\"StringValue\":\"${context.extendedRequestId}\"},"
                 + "\"Time\":{\"DataType\":\"String\",\"StringValue\":\"${context.requestTime}\"}}";
         withSendMessageRoute("sqs-invoke-context-host",
@@ -492,7 +493,9 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
                     assertThat(message.messageAttributes().get("Account").stringValue(), equalTo("000000000000"));
                     assertThat(message.messageAttributes().get("Domain").stringValue(), equalTo("localhost"));
                     assertThat(message.messageAttributes().get("Prefix").stringValue(), equalTo("localhost"));
-                    assertThat(message.messageAttributes().get("Extended").stringValue(), matchesPattern(".+"));
+                    String requestId = message.messageAttributes().get("Request").stringValue();
+                    assertThat(requestId, matchesPattern(".+"));
+                    assertThat(message.messageAttributes().get("Extended").stringValue(), equalTo(requestId));
                     assertThat(message.messageAttributes().get("Time").stringValue(),
                             matchesPattern("\\d{2}/[A-Z][a-z]{2}/\\d{4}:\\d{2}:\\d{2}:\\d{2} \\+0000"));
                 });
