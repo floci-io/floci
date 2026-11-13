@@ -532,6 +532,56 @@ class CodeArtifactPypiExternalConnectionImporterTest {
                 any(), anyLong(), anyLong(), anyLong(), any(), eq(SDIST_FILENAME), anyLong(), any());
     }
 
+    @Test
+    void hyphenatedSdistAndUnderscoredWheelShareTheRetentionLock() throws Exception {
+        String sdist = "widget-name-1.0.0.tar.gz";
+        String wheel = "widget_name-1.0.0-py3-none-any.whl";
+        CountDownLatch firstWheelWrite = new CountDownLatch(1);
+        CountDownLatch releaseWheelWrite = new CountDownLatch(1);
+        AtomicBoolean sdistWritten = new AtomicBoolean(false);
+        AtomicBoolean wheelWritten = new AtomicBoolean(false);
+        AtomicInteger wheelWrites = new AtomicInteger();
+        when(externalConnectionClient.fetchSimpleIndex(eq("public:pypi"), anyString()))
+                .thenReturn(Optional.of(new PypiExternalConnectionClient.FetchedAsset(
+                        simpleIndexJson(List.of(VERSION), sdist, wheel))));
+        stubFetchFile(urlFor(sdist), SDIST_CONTENT);
+        stubFetchFile(urlFor(wheel), WHEEL_CONTENT);
+        when(pypiserver.listPackageVersionAssetNames(anyString(), anyString(), anyString(), any(), anyString(),
+                anyString())).thenAnswer(invocation -> wheelWritten.get() ? List.of(sdist, wheel)
+                        : sdistWritten.get() ? List.of(sdist) : List.of());
+        when(service.retainedVersionOriginConnection(anyString(), anyString(), anyString(), anyString(),
+                anyString(), any(), anyString(), anyString())).thenReturn(Optional.of("public:pypi"));
+        when(service.retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(), any(),
+                anyLong(), anyLong(), anyLong(), any(), eq(sdist), anyLong(), any())).thenAnswer(invocation -> {
+            sdistWritten.set(true);
+            return new CodeArtifactService.AssetRetentionAttemptResult(true, true);
+        });
+        when(service.retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(), any(),
+                anyLong(), anyLong(), anyLong(), any(), eq(wheel), anyLong(), any())).thenAnswer(invocation -> {
+            if (wheelWrites.incrementAndGet() == 1) {
+                firstWheelWrite.countDown();
+                assertTrue(releaseWheelWrite.await(5, TimeUnit.SECONDS), "wheel write was never released");
+            }
+            wheelWritten.set(true);
+            return new CodeArtifactService.AssetRetentionAttemptResult(true, true);
+        });
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            assertTrue(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, sdist));
+            assertTrue(firstWheelWrite.await(5, TimeUnit.SECONDS), "background wheel write never started");
+            Future<Boolean> requestedWheel = pool.submit(
+                    () -> importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, wheel));
+            assertThrows(TimeoutException.class, () -> requestedWheel.get(500, TimeUnit.MILLISECONDS),
+                    "the wheel request must share the background sibling's canonical package lock");
+            releaseWheelWrite.countDown();
+            assertTrue(requestedWheel.get(5, TimeUnit.SECONDS));
+            assertEquals(1, wheelWrites.get());
+        } finally {
+            releaseWheelWrite.countDown();
+            pool.shutdownNow();
+        }
+    }
+
     private static String urlFor(String filename) {
         return "https://files.pythonhosted.org/packages/aa/bb/" + filename;
     }
