@@ -2148,6 +2148,21 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactWriteItemsRejectsARepeatedSectionBeforeUnusedValuesAndTheTableLookup() {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+        update.put("ConditionExpression", "attribute_exists(c)");
+        update.set("ExpressionAttributeValues", singleValue(":u"));
+        update.putObject("ExpressionAttributeNames").put("#u", "u");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
+    }
+
+    @Test
     void transactWriteItemsRejectsAPutItemWithALeafAtLevel33() {
         createUsersTable("eu-west-1");
         ObjectNode put = mapper.createObjectNode();

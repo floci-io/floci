@@ -3109,6 +3109,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
         requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
         dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+        if (updateExpression != null) {
+            DynamoDbService.requireSectionsUsedOnce(updateExpression);
+        }
 
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
