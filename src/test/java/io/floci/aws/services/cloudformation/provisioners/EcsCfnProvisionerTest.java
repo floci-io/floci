@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -345,7 +346,7 @@ class EcsCfnProvisionerTest {
                                                  Integer desiredCount) {
         return argThat(request -> request != null && cluster.equals(request.getCluster())
                 && service.equals(request.getService()) && taskDefinition.equals(request.getTaskDefinition())
-                && java.util.Objects.equals(desiredCount, request.getDesiredCount())
+                && Objects.equals(desiredCount, request.getDesiredCount())
                 && request.getNetworkConfiguration() == null);
     }
 
@@ -1258,6 +1259,28 @@ class EcsCfnProvisionerTest {
         assertEquals(List.of(), restore.getServiceRegistries(), "a registry the update added is deregistered");
         verify(ecs).awaitServiceStable(restored);
         assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aRestoreAfterAnUpdateThatSentNoDesiredCountSendsNoneEither() {
+        EcsServiceModel prior = service("front");
+        prior.setTaskDefinition(TASK_DEF_ARN);
+        prior.setDesiredCount(2);
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(prior);
+        EcsServiceModel updated = service("front");
+        EcsServiceModel restored = service("front");
+        when(ecs.updateService(any(UpdateServiceRequest.class), eq(REGION))).thenReturn(updated, restored);
+        doThrow(new AwsException("NotStabilized", "did not stabilize", 500)).when(ecs).awaitServiceStable(updated);
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.createObjectNode()
+                .put("Cluster", "web").put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx(SERVICE_ARN)));
+
+        ArgumentCaptor<UpdateServiceRequest> requests = ArgumentCaptor.forClass(UpdateServiceRequest.class);
+        verify(ecs, times(2)).updateService(requests.capture(), eq(REGION));
+        // A count an autoscaler or the API set during the wait must not be overwritten by the restore.
+        assertNull(requests.getAllValues().get(1).getDesiredCount(), "the update sent no count, so the restore restores none");
     }
 
     private static final String SERVICE_REGISTRIES = "ServiceRegistries";
