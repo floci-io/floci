@@ -165,8 +165,27 @@ public class KinesisService implements ResourceProvider {
     }
 
     private void beginStatusUpdate(KinesisStream stream) {
-        if (updatingDelayMillis > 0) {
-            stream.beginStatusUpdate(clock.instant().plusMillis(updatingDelayMillis));
+        beginStatusWindow(stream, "UPDATING", updatingDelayMillis);
+    }
+
+    private void beginStatusWindow(KinesisStream stream, String status, long delayMillis) {
+        if (delayMillis > 0) {
+            stream.beginStatusWindow(status, clock.instant().plusMillis(delayMillis));
+        }
+    }
+
+    private void persistStatusWindow(String key, KinesisStream stream, String status, long delayMillis) {
+        try {
+            store.put(key, stream);
+        } catch (RuntimeException | Error failure) {
+            if (delayMillis > 0) {
+                enterStatusWindow(stream, status, delayMillis);
+            }
+            throw failure;
+        }
+        if (delayMillis > 0) {
+            enterStatusWindow(stream, status, delayMillis);
+            store.put(key, stream);
         }
     }
 
@@ -203,7 +222,7 @@ public class KinesisService implements ResourceProvider {
         KinesisStream stream = new KinesisStream(streamName, arn);
         stream.setAccountId(regionResolver.getAccountId());
         stream.setStreamMode(resolvedMode);
-        enterStatusWindow(stream, "CREATING", creatingDelayMillis);
+        beginStatusWindow(stream, "CREATING", creatingDelayMillis);
         if (maxRecordSizeInKiB != null) {
             stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
         }
@@ -216,7 +235,7 @@ public class KinesisService implements ResourceProvider {
                     INITIAL_SEQUENCE_NUMBER));
         }
 
-        store.put(storageKey, stream);
+        persistStatusWindow(storageKey, stream, "CREATING", creatingDelayMillis);
         LOG.infov("Created Kinesis stream: {0} in region {1} with {2} shards (mode: {3})",
                 streamName, region, shardCount, resolvedMode);
         return stream;
@@ -237,9 +256,9 @@ public class KinesisService implements ResourceProvider {
             if (streamMode.equals(stream.getStreamMode())) {
                 return;
             }
-            enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
+            beginStatusUpdate(stream);
             stream.setStreamMode(streamMode);
-            store.put(key, stream);
+            persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
             LOG.infov("Updated stream mode for {0} to {1}", streamName, streamMode);
         }
     }
@@ -453,10 +472,10 @@ public class KinesisService implements ResourceProvider {
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
             requireActive(stream);
-            enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
+            beginStatusUpdate(stream);
             stream.setEncryptionType(encryptionType);
             stream.setKeyId(keyId);
-            store.put(key, stream);
+            persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
         }
     }
 
@@ -562,10 +581,10 @@ public class KinesisService implements ResourceProvider {
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
             requireActive(stream);
-            enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
+            beginStatusUpdate(stream);
             stream.setEncryptionType("NONE");
             stream.setKeyId(null);
-            store.put(key, stream);
+            persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
         }
     }
 
@@ -609,6 +628,7 @@ public class KinesisService implements ResourceProvider {
             if (!fromShardCountUpdate) {
                 beginStatusUpdate(stream);
             }
+            boolean completed = false;
             try {
                 normalizeOpenShardRanges(stream, legacyOpenShards);
                 parent.setClosed(true);
@@ -625,12 +645,17 @@ public class KinesisService implements ResourceProvider {
                 child2.setParentShardId(shardId);
 
                 stream.getShards().addAll(List.of(child1, child2));
+                completed = true;
             } finally {
-                if (!fromShardCountUpdate) {
+                if (!fromShardCountUpdate && !completed) {
                     enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
                 }
             }
-            store.put(key, stream);
+            if (fromShardCountUpdate) {
+                store.put(key, stream);
+            } else {
+                persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
+            }
             LOG.infov("Split shard {0} in stream {1}", shardId, streamName);
         }
     }
@@ -676,6 +701,7 @@ public class KinesisService implements ResourceProvider {
             if (!fromShardCountUpdate) {
                 beginStatusUpdate(stream);
             }
+            boolean completed = false;
             try {
                 normalizeOpenShardRanges(stream, legacyOpenShards);
                 shard1.setClosed(true);
@@ -689,12 +715,17 @@ public class KinesisService implements ResourceProvider {
                 child.setAdjacentParentShardId(adjacentShardId);
 
                 stream.getShards().add(child);
+                completed = true;
             } finally {
-                if (!fromShardCountUpdate) {
+                if (!fromShardCountUpdate && !completed) {
                     enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
                 }
             }
-            store.put(key, stream);
+            if (fromShardCountUpdate) {
+                store.put(key, stream);
+            } else {
+                persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
+            }
             LOG.infov("Merged shards {0} and {1} in stream {2}", shardId, adjacentShardId, streamName);
         }
     }
@@ -752,8 +783,12 @@ public class KinesisService implements ResourceProvider {
                 stream.setShardCountUpdateTimestamps(updateTimestamps);
                 applied = true;
             } finally {
-                enterStatusWindow(stream, "UPDATING", applied ? updatingDelayMillis : 0);
-                store.put(key, stream);
+                if (applied) {
+                    persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
+                } else {
+                    enterStatusWindow(stream, "UPDATING", 0);
+                    store.put(key, stream);
+                }
             }
 
             return new UpdateShardCountResult(streamName, stream.getStreamArn(), currentOpenShardCount, targetShardCount);
@@ -962,9 +997,9 @@ public class KinesisService implements ResourceProvider {
                         400);
             }
             requireActive(stream);
-            enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
+            beginStatusUpdate(stream);
             stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
-            store.put(key, stream);
+            persistStatusWindow(key, stream, "UPDATING", updatingDelayMillis);
             LOG.infov("Updated max record size for {0} to {1} KiB", streamName, maxRecordSizeInKiB);
         }
     }

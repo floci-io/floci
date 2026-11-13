@@ -591,6 +591,134 @@ class KinesisServiceTest {
     }
 
     @Test
+    void creatingWindowStartsAfterStreamPersistence() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 2_000, 0);
+        store.advanceNextPut();
+
+        KinesisStream stream = service.createStream("my-stream", 1, REGION);
+
+        assertEquals("CREATING", store.statusDuringAdvancedPut());
+        assertEquals("CREATING", stream.getStreamStatus(clock.instant()),
+                "the first persistence write must not consume the configured post-create window");
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void streamModeWindowStartsAfterUpdatePersistence() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 2_000);
+        KinesisStream stream = service.createStream("my-stream", 1, REGION);
+        store.advanceNextPut();
+
+        service.updateStreamMode("my-stream", "ON_DEMAND", REGION);
+
+        assertEquals("UPDATING", store.statusDuringAdvancedPut());
+        assertEquals("UPDATING", stream.getStreamStatus(clock.instant()),
+                "the first persistence write must not consume the configured post-update window");
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void splitWindowStartsAfterFinalPersistence() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 2_000);
+        KinesisStream stream = service.createStream("my-stream", 1, REGION);
+        store.advanceNextPut();
+
+        service.splitShard("my-stream", stream.getShards().getFirst().getShardId(),
+                "170141183460469231731687303715884105728", REGION);
+
+        assertEquals("UPDATING", store.statusDuringAdvancedPut());
+        assertEquals("UPDATING", stream.getStreamStatus(clock.instant()));
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void mergeWindowStartsAfterFinalPersistence() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 2_000);
+        KinesisStream stream = service.createStream("my-stream", 2, REGION);
+        String first = stream.getShards().get(0).getShardId();
+        String second = stream.getShards().get(1).getShardId();
+        store.advanceNextPut();
+
+        service.mergeShards("my-stream", first, second, REGION);
+
+        assertEquals("UPDATING", store.statusDuringAdvancedPut());
+        assertEquals("UPDATING", stream.getStreamStatus(clock.instant()));
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void shardCountWindowStartsAfterFinalPersistence() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 2_000);
+        KinesisStream stream = service.createStream("my-stream", 1, REGION);
+        // UpdateShardCount writes the initial state, the split, then the final state.
+        store.advanceNthPut(3);
+
+        service.updateShardCount("my-stream", 2, "UNIFORM_SCALING", REGION);
+
+        assertEquals("UPDATING", store.statusDuringAdvancedPut());
+        assertEquals("UPDATING", stream.getStreamStatus(clock.instant()));
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void zeroDelayControlPlaneChangesUseOneFinalWrite() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 0);
+
+        KinesisStream stream = service.createStream("my-stream", 1, REGION);
+        assertEquals(1, store.putCount());
+        service.splitShard("my-stream", stream.getShards().getFirst().getShardId(),
+                "170141183460469231731687303715884105728", REGION);
+        assertEquals(2, store.putCount());
+        service.mergeShards("my-stream", stream.getShards().get(1).getShardId(),
+                stream.getShards().get(2).getShardId(), REGION);
+        assertEquals(3, store.putCount());
+        service.updateStreamMode("my-stream", "ON_DEMAND", REGION);
+        assertEquals(4, store.putCount());
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void failedFinalPersistenceClearsInProgressStateWithoutDroppingUpdateWindow() {
+        MutableClock clock = new MutableClock();
+        AdvancingStore store = new AdvancingStore(clock);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 2_000);
+        KinesisStream stream = service.createStream("my-stream", 1, REGION);
+        store.failNextPut();
+
+        assertThrows(IllegalStateException.class,
+                () -> service.splitShard("my-stream", stream.getShards().getFirst().getShardId(),
+                        "170141183460469231731687303715884105728", REGION));
+
+        assertEquals("UPDATING", stream.getStreamStatus(clock.instant()));
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("ACTIVE", stream.getStreamStatus(clock.instant()));
+    }
+
+    @Test
     void updateShardCountCompletesItsOwnSplitsAndMergesWithinOneWindow() {
         MutableClock clock = new MutableClock();
         KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -780,6 +908,24 @@ class KinesisServiceTest {
         assertEquals("UPDATING", restored.getStreamStatus(clock.instant()));
         restored.setStatusTransitionDeadline(Instant.EPOCH);
         assertEquals("ACTIVE", restored.getStreamStatus(clock.instant()));
+    }
+
+    @Test
+    void streamModeDeadlineSurvivesPersistentStorageReload() {
+        Clock clock = Clock.systemUTC();
+        Path path = tempDir.resolve("kinesis-mode-status.json");
+        TypeReference<Map<String, KinesisStream>> type = new TypeReference<>() {};
+        PersistentStorage<String, KinesisStream> original = new PersistentStorage<>(path, type);
+        KinesisService service = new KinesisService(original, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 0, 60_000);
+        service.createStream("my-stream", 1, REGION);
+        service.updateStreamMode("my-stream", "ON_DEMAND", REGION);
+
+        PersistentStorage<String, KinesisStream> reloaded = new PersistentStorage<>(path, type);
+        reloaded.load();
+        KinesisStream restored = reloaded.get(REGION + "::my-stream").orElseThrow();
+        assertEquals("ON_DEMAND", restored.getStreamMode());
+        assertEquals("UPDATING", restored.getStreamStatus(clock.instant()));
     }
 
     @Test
@@ -1857,5 +2003,51 @@ class KinesisServiceTest {
 
     private static List<String> recordData(List<KinesisRecord> records) {
         return records.stream().map(r -> new String(r.getData(), StandardCharsets.UTF_8)).toList();
+    }
+
+    private static final class AdvancingStore extends InMemoryStorage<String, KinesisStream> {
+        private final MutableClock clock;
+        private int putsUntilAdvance;
+        private int putCount;
+        private boolean failNextPut;
+        private String statusDuringAdvancedPut;
+
+        private AdvancingStore(MutableClock clock) {
+            this.clock = clock;
+        }
+
+        private void advanceNextPut() {
+            advanceNthPut(1);
+        }
+
+        private void advanceNthPut(int puts) {
+            putsUntilAdvance = puts;
+        }
+
+        private int putCount() {
+            return putCount;
+        }
+
+        private void failNextPut() {
+            failNextPut = true;
+        }
+
+        private String statusDuringAdvancedPut() {
+            return statusDuringAdvancedPut;
+        }
+
+        @Override
+        public synchronized void put(String key, KinesisStream stream) {
+            super.put(key, stream);
+            putCount++;
+            if (failNextPut) {
+                failNextPut = false;
+                throw new IllegalStateException("simulated storage failure");
+            }
+            if (putsUntilAdvance > 0 && --putsUntilAdvance == 0) {
+                clock.advance(Duration.ofSeconds(3));
+                statusDuringAdvancedPut = stream.getStreamStatus(clock.instant());
+            }
+        }
     }
 }
