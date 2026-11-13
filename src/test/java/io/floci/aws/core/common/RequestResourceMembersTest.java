@@ -91,7 +91,7 @@ class RequestResourceMembersTest {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
         assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "logs", "ssm"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
         Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
                 "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
@@ -101,8 +101,6 @@ class RequestResourceMembersTest {
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("dynamodb:ListTables");
         expected.add("logs:PutDestination");
-        Stream.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource", "CreateDocument",
-                "CreateAssociation").forEach(operation -> expected.add("ssm:" + operation));
         assertEquals(expected, table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),

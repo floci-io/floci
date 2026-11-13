@@ -226,12 +226,6 @@ READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
 
-_SSM_TAGS = ("SSM tagging: a request names its resource by ResourceType and ResourceId, or tags the document or "
-             "association it creates, which the rule reads, while ResourceArnBuilder keeps building the parameter ARNs")
-READ_IN_HAND_BUILT.update({f"ssm:{operation}": _SSM_TAGS
-                           for operation in ("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
-                                             "CreateDocument", "CreateAssociation")})
-
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
          "matched in the vendored REST routes (regen_rest_routes.MODELS), which do not have its model yet")
