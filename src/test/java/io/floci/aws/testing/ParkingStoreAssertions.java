@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Assertions for operations that must serialize around an armed storage call. */
@@ -36,6 +37,11 @@ public final class ParkingStoreAssertions {
             });
             awaitBlockedOrDone(waitingThread, waiting);
             assertFalse(waiting.isDone(), "second operation must wait for the parked operation");
+            Thread worker = waitingThread.get();
+            assertNotNull(worker, "second operation started");
+            Thread.State state = worker.getState();
+            assertTrue(state == Thread.State.BLOCKED || state == Thread.State.WAITING,
+                    "second operation must block or wait for the parked operation");
             store.release();
             parked.get(5, TimeUnit.SECONDS);
             waiting.get(5, TimeUnit.SECONDS);
