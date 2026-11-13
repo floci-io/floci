@@ -401,6 +401,31 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aListedKeyIsItsSummary() {
+        // A list carries the key's summary and not the whole key: the identifier, the state,
+        // the attributes, the check value and the two flags.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("ListKeys", "{}")
+                .then().statusCode(200)
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyState",
+                            equalTo("CREATE_COMPLETE"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyAttributes.KeyAlgorithm",
+                            equalTo("AES_256"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyAttributes.KeyUsage",
+                            equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyCheckValue", notNullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.Enabled", equalTo(true))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.Exportable", equalTo(true))
+                    // The summary holds no timestamp and no origin: those belong to the whole
+                    // key, which the list does not carry.
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.CreateTimestamp", nullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyOrigin", nullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue());
+    }
+
+    @Test
     void anAliasIsCreatedAndListed() {
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");
