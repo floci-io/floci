@@ -277,6 +277,40 @@ class ContainerLifecycleManagerNetworkTest {
         verify(connectCmd, never()).exec();
     }
 
+    /**
+     * Docker refuses an exposed port together with container:<id> network mode, "conflicting
+     * options: port exposing and the container type network mode", which is how a sidecar built
+     * with a dynamic port failed to start inside another container's namespace. No namespace
+     * mode gives the container an endpoint of its own, so none of them takes an exposed port.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"host", "none", "container:sibling"})
+    void createDeclaresNoExposedPortInANamespaceNetworkMode(String networkMode) {
+        manager().create(spec(networkMode, Map.of(8180, 0), List.of(8180)));
+
+        verify(createCmd, never()).withExposedPorts(any(ExposedPort[].class));
+        assertNull(createdHostConfig().getPortBindings());
+    }
+
+    @Test
+    void createAndStartStillAnswersTheEndpointOfAPortItDidNotExposeInANamespace() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        when(inspectOf("container-id").getHostConfig())
+                .thenReturn(HostConfig.newHostConfig().withNetworkMode("container:sibling-id"));
+        InspectContainerResponse owner = inspectOf("sibling-id");
+        NetworkSettings ownerNetworks = mock(NetworkSettings.class);
+        when(owner.getHostConfig()).thenReturn(HostConfig.newHostConfig().withNetworkMode("bridge"));
+        when(owner.getNetworkSettings()).thenReturn(ownerNetworks);
+        when(ownerNetworks.getNetworks())
+                .thenReturn(Map.of("bridge", new ContainerNetwork().withIpv4Address("172.17.0.7")));
+
+        ContainerInfo info = manager().createAndStart(spec("container:sibling", Map.of(8180, 0), List.of(8180)));
+
+        verify(createCmd, never()).withExposedPorts(any(ExposedPort[].class));
+        assertEquals(new EndpointInfo("172.17.0.7", 8180), info.getEndpoint(8180));
+    }
+
     @Test
     void createPublishesNoDynamicPortOnHostNetwork() {
         manager().create(spec("host", Map.of(9200, 0), List.of()));

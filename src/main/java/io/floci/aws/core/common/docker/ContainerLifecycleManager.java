@@ -309,7 +309,12 @@ public class ContainerLifecycleManager {
         if (spec.workingDir() != null && !spec.workingDir().isBlank()) {
             createCmd.withWorkingDir(spec.workingDir());
         }
-        if (spec.exposedPorts() != null && !spec.exposedPorts().isEmpty()) {
+        // A container sharing a network namespace (host, none, container:<id>) has no endpoint
+        // of its own for Docker to expose a port on, and the daemon refuses an exposed port
+        // together with container:<id> ("conflicting options: port exposing and the container
+        // type network mode"). The spec keeps the ports: resolveEndpoints still answers them
+        // through the namespace's owner.
+        if (spec.exposedPorts() != null && !spec.exposedPorts().isEmpty() && !spec.sharesNetworkNamespace()) {
             ExposedPort[] exposed = spec.exposedPorts().stream()
                     .map(ExposedPort::tcp)
                     .toArray(ExposedPort[]::new);
