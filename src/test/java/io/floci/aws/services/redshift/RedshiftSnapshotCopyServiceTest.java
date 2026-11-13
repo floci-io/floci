@@ -286,6 +286,31 @@ class RedshiftSnapshotCopyServiceTest {
         assertEquals(List.of(new RedshiftService.TaggedResource(copyArn, "snapshot", "env", "test")), tags);
     }
 
+    @Test
+    void regionalCopyDoesNotInheritRestoreAccessGrants() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).authorizeSnapshotAccess("nightly", "warehouse", "222222222222");
+
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        Snapshot copy = fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").orElseThrow();
+        assertTrue(copy.getAccountsWithRestoreAccess().isEmpty());
+    }
+
+    @Test
+    void authorizingAccessToACopyIsRefused() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> fixture.service(DESTINATION).authorizeSnapshotAccess("nightly", "warehouse", "222222222222"));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+    }
+
     private long dumpFilesUnderCopies() {
         Path root = directory.resolve("redshift-dumps").resolve(ACCOUNT).resolve("copies");
         if (!Files.isDirectory(root)) {

@@ -43,6 +43,20 @@ def test_a_member_fills_a_variable_its_stem_relates_to_and_of_its_kind():
         {"type": "thing", "fill": {"ThingName": "SpecialThingName"}}]
 
 
+def test_a_member_naming_the_type_before_the_variable_wins_over_a_bare_one():
+    formats = {"snapshot": "arn:${Partition}:svc:${Region}:${Account}:snapshot:${ClusterName}/${SnapshotName}",
+               "cluster": FORMATS["thing"].replace("thing/${ThingName}", "cluster:${ClusterName}")}
+    # The snapshot's cluster is the one its SnapshotClusterIdentifier names; ClusterIdentifier is the cluster's own.
+    assert r.resources_for("svc:RestoreFromClusterSnapshot", ["cluster", "snapshot"], formats,
+                           members("ClusterIdentifier", "SnapshotIdentifier", "SnapshotClusterIdentifier")) == [
+        {"type": "cluster", "fill": {"ClusterName": "ClusterIdentifier"}},
+        {"type": "snapshot", "fill": {"ClusterName": "SnapshotClusterIdentifier", "SnapshotName": "SnapshotIdentifier"}}]
+    # The tenant's id is its own, not the bare Id of the invalidation the operation reads.
+    assert r.resources_for("svc:GetInvalidationForTenant", ["tenant"],
+                           {"tenant": "arn:${Partition}:svc::${Account}:tenant/${Id}"}, members("TenantId", "Id")) == [
+        {"type": "tenant", "fill": {"Id": "TenantId"}}]
+
+
 def test_a_bare_name_fills_the_type_the_operation_is_about_and_no_other():
     assert r.resources_for("svc:CreateThing", ["thing"], FORMATS, members("Name")) == [
         {"type": "thing", "fill": {"ThingName": "Name"}}]
@@ -393,6 +407,30 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+def test_an_account_member_of_a_types_own_structure_gives_that_types_account_alone(tmp_path):
+    service = model({"RestoreThing": {"ThingName": "String", "PoolId": "String", "OwnerAccount": "String"}})
+    service["shapes"]["Thing"] = {"type": "structure", "members": {"OwnerAccount": {"shape": "String"}}}
+    service["shapes"]["Pool"] = {"type": "structure", "members": {"PoolId": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.structure_account_members(models, "RestoreThing", ["thing", "pool"]) == {"thing": "OwnerAccount"}
+    resources = [{"type": "thing", "fill": {"ThingName": "ThingName"}}, {"type": "pool", "fill": {"PoolId": "PoolId"}},
+                 {"types": ["thing"], "arn": "ThingArn"}]
+    assert r.with_structure_account(resources, FORMATS, {"thing": "OwnerAccount"}) == [
+        {"type": "thing", "fill": {"ThingName": "ThingName"}, "account": "OwnerAccount"},
+        {"type": "pool", "fill": {"PoolId": "PoolId"}}, {"types": ["thing"], "arn": "ThingArn"}]
+    # An account another rule gave stays, and a format without an account takes none.
+    given = [{"type": "thing", "fill": {}, "account": "registryId"}]
+    assert r.with_structure_account(given, FORMATS, {"thing": "OwnerAccount"}) == given
+    assert r.with_structure_account([{"type": "catalog", "fill": {}}], {"catalog": "arn:${Partition}:svc:::catalog"},
+                                    {"catalog": "OwnerAccount"}) == [{"type": "catalog", "fill": {}}]
+    # A structure with two such members says nothing about which one is its account.
+    service["shapes"]["Thing"]["members"]["SourceAccount"] = {"shape": "String"}
+    service["shapes"]["RestoreThingIn"]["members"]["SourceAccount"] = {"shape": "String"}
+    write_models(tmp_path / "two", {"svc": service})
+    assert r.structure_account_members(r.load_models(tmp_path / "two", {"svc"}), "RestoreThing", ["thing"]) == {}
 
 
 ACCOUNTS = {"account": "arn:${Partition}:account::${Account}:account",
