@@ -200,14 +200,14 @@ final class DurableCheckpointApplier {
                 throw invalid("Invalid operation id.");
             }
             DurableOperation existing = operations.get(update.id());
-            if (existing != null) {
-                requireConsistent(existing, update);
-            }
             if (update.parentId() != null) {
                 DurableOperation parent = operations.get(update.parentId());
                 if (parent == null || parent.getType() != DurableOperationType.CONTEXT) {
                     throw invalid("Invalid parent operation id.");
                 }
+            }
+            if (existing != null) {
+                requireConsistent(existing, update);
             }
             requireErrorSize(update);
             if (update.type() == DurableOperationType.CHAINED_INVOKE) {
@@ -495,17 +495,22 @@ final class DurableCheckpointApplier {
 
         private static void requireConsistent(DurableOperation existing, DurableOperationUpdate update) {
             if (existing.getType() != update.type()) {
-                throw invalid("Inconsistent operation type.");
+                throw inconsistent("Type");
             }
             if (update.subType() != null && !Objects.equals(existing.getSubType(), update.subType())) {
-                throw invalid("Inconsistent operation subtype.");
+                throw inconsistent("SubType");
             }
             if (update.name() != null && !Objects.equals(existing.getName(), update.name())) {
-                throw invalid("Inconsistent operation name.");
+                throw inconsistent("Name");
             }
-            if (!Objects.equals(existing.getParentId(), update.parentId())) {
-                throw invalid("Inconsistent parent operation id.");
+            if (update.parentId() != null && !Objects.equals(existing.getParentId(), update.parentId())) {
+                throw inconsistent("ParentId");
             }
+        }
+
+        private static AwsException inconsistent(String field) {
+            return invalid(field + " value in OperationUpdate is inconsistent with existing operation. "
+                    + "Check for non-determinism.");
         }
 
         private static Map<String, Object> resultOrError(DurableOperation operation, boolean failed) {
