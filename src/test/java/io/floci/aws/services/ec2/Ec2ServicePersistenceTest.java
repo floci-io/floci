@@ -787,6 +787,20 @@ class Ec2ServicePersistenceTest {
         assertEquals(List.of(keyArn), XmlParser.extractAll(described, "kmsKeyId"), described);
     }
 
+    /** The token and the request it came with are stored, so a retry after a restart still matches. */
+    @Test
+    void volumeClientTokenSurvivesRestart(@TempDir Path dir) {
+        String[] request = {"AvailabilityZone", "us-east-1a", "Size", "1", "ClientToken", "restart-token",
+                "TagSpecification.1.ResourceType", "volume",
+                "TagSpecification.1.Tag.1.Key", "Name", "TagSpecification.1.Tag.1.Value", "pvc-1"};
+        String volumeId = XmlParser.extractFirst(query(newService(dir), "CreateVolume", request), "volumeId", null);
+
+        String retried = query(newService(dir), "CreateVolume", request);
+
+        assertEquals(volumeId, XmlParser.extractFirst(retried, "volumeId", null), retried);
+        assertEquals(List.of(volumeId), XmlParser.extractAll(query(newService(dir), "DescribeVolumes"), "volumeId"));
+    }
+
     /**
      * A volume store as Floci wrote it before a volume kept its KMS key: an encrypted volume
      * attached to an instance and an unencrypted one. Both load as they were stored, and

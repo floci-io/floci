@@ -5,7 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -26,6 +28,11 @@ public class Volume {
     private String region;
     private List<Tag> tags = new ArrayList<>();
     private List<VolumeAttachment> attachments = new ArrayList<>();
+    // The CreateVolume ClientToken and the request it came with, kept so a retry can be told
+    // apart from another request that reuses the token.
+    private String clientToken;
+    private List<String> requestParameters = new ArrayList<>();
+    private Map<String, String> requestTags = new LinkedHashMap<>();
 
     public Volume() {}
 
@@ -73,4 +80,13 @@ public class Volume {
 
     public List<VolumeAttachment> getAttachments() { return attachments; }
     public void setAttachments(List<VolumeAttachment> attachments) { this.attachments = attachments; }
+
+    public String getClientToken() { return clientToken; }
+    public void setClientToken(String clientToken) { this.clientToken = clientToken; }
+
+    public List<String> getRequestParameters() { return requestParameters; }
+    public void setRequestParameters(List<String> value) { requestParameters = new ArrayList<>(value); }
+
+    public Map<String, String> getRequestTags() { return requestTags; }
+    public void setRequestTags(Map<String, String> requestTags) { this.requestTags = requestTags; }
 }
