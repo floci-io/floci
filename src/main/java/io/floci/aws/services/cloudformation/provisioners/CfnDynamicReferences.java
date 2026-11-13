@@ -11,6 +11,8 @@ import io.floci.aws.services.ssm.model.ParameterHistory;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.util.List;
+import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,6 +41,16 @@ public class CfnDynamicReferences {
     }
 
     private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.*?)\\}\\}");
+    /** Whether a string holds the start of a dynamic reference, closed or not. */
+    public static boolean holdsDynamicReference(String value) {
+        return value.contains("{{resolve:");
+    }
+
+    /** The dynamic reference texts a string holds, without the text around them; never a resolved value. */
+    public static List<String> referencesIn(String value) {
+        return DYNAMIC_REF.matcher(value).results().map(MatchResult::group).toList();
+    }
+
     private static final Pattern SSM_DYNAMIC_REF_BODY =
             Pattern.compile("([a-zA-Z0-9_.\\-/]+)(?::([0-9]+))?");
 
@@ -50,7 +62,7 @@ public class CfnDynamicReferences {
      * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
      */
     public String resolveDynamicReferences(String value, String region, boolean allowSsmSecure) {
-        if (value == null || !value.contains("{{resolve:")) {
+        if (value == null || !holdsDynamicReference(value)) {
             return value;
         }
         Matcher m = DYNAMIC_REF.matcher(value);

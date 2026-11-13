@@ -173,11 +173,9 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         String description = optionalText(PROFILE, props, "Description", DESCRIPTION_MAX_LENGTH, ctx);
         allowed(PROFILE, "DeletionProtectionCheck", text(props, "DeletionProtectionCheck", ctx),
                 DELETION_PROTECTION_CHECKS);
-        ObjectNode createOnly = MAPPER.createObjectNode()
-                .put("ApplicationId", applicationId)
-                .put("LocationUri", locationUri)
-                .put("Type", type);
-        if (updating && madeFrom(r, createOnly)) {
+        // The engine's change decides: ApplicationId and LocationUri are create-only in the registry.
+        // A Type change is accepted and not applied: UpdateConfigurationProfile has no Type member.
+        if (updating && !ctx.changes(PROFILE, props).requiresReplacement()) {
             ConfigurationProfile current = service.findConfigurationProfile(ctx.priorPhysicalId())
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "Configuration profile not found", 404));
@@ -194,7 +192,6 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(profile.getId());
         r.getAttributes().put("ConfigurationProfileId", profile.getId());
         r.getAttributes().put(APPLICATION_ATTR, profile.getApplicationId());
-        r.getAttributes().put(CREATE_ONLY_ATTR, createOnly.toString());
     }
 
     /**

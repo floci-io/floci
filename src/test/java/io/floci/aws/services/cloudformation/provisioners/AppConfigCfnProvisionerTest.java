@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -18,6 +19,7 @@ import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +63,8 @@ class AppConfigCfnProvisionerTest {
     private AppConfigService service;
     private AppConfigCfnProvisioner provisioner;
     private CloudFormationTemplateEngine engine;
+    /** The properties each resource was last provisioned with, which the next update hands over as the previous ones. */
+    private final Map<StackResource, JsonNode> applied = new IdentityHashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -267,7 +271,7 @@ class AppConfigCfnProvisionerTest {
     }
 
     @Test
-    void aProfileWithoutTypeDefaultsToFreeformAndChangingItReplacesIt() {
+    void aProfileWithoutTypeDefaultsToFreeformAndChangingItKeepsTheProfileAndItsStoredType() {
         String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
         StackResource profile = create(PROFILE, props("ApplicationId", appId, "Name", "settings",
                 "LocationUri", "hosted"));
@@ -278,10 +282,12 @@ class AppConfigCfnProvisionerTest {
         update(profile, props("ApplicationId", appId, "Name", "flags", "LocationUri", "hosted",
                 "Type", "AWS.AppConfig.FeatureFlags"));
 
-        assertNotEquals(oldId, profile.getPhysicalId());
-        ConfigurationProfile replacement = service.getConfigurationProfile(appId, profile.getPhysicalId());
-        assertEquals("AWS.AppConfig.FeatureFlags", replacement.getType());
-        assertEquals("flags", replacement.getName());
+        assertEquals(oldId, profile.getPhysicalId(), "Type is not create-only in AWS, so the profile keeps its id");
+        assertFalse(provisioner.hasReplacementUpdate(profile));
+        ConfigurationProfile updated = service.getConfigurationProfile(appId, oldId);
+        assertEquals("AWS.Freeform", updated.getType(),
+                "UpdateConfigurationProfile has no Type member, so an update cannot change the stored type");
+        assertEquals("flags", updated.getName());
     }
 
     @Test
@@ -633,13 +639,16 @@ class AppConfigCfnProvisionerTest {
 
     private StackResource create(String type, Map<String, Object> properties) {
         StackResource resource = resource(type);
-        provisioner.provision(resource, MAPPER.valueToTree(properties), context(null));
+        provisioner.provision(resource, MAPPER.valueToTree(properties), context(null, null));
+        applied.put(resource, MAPPER.valueToTree(properties));
         return resource;
     }
 
     /** Provisions {@code resource} again with {@code properties}, as an UpdateStack does. */
     private void update(StackResource resource, Map<String, Object> properties) {
-        provisioner.provision(resource, MAPPER.valueToTree(properties), context(resource.getPhysicalId()));
+        provisioner.provision(resource, MAPPER.valueToTree(properties),
+                context(resource.getPhysicalId(), applied.get(resource)));
+        applied.put(resource, MAPPER.valueToTree(properties));
     }
 
     /** The resource as the stack stores it, so a provision of the copy leaves the original alone. */
@@ -658,7 +667,11 @@ class AppConfigCfnProvisionerTest {
     }
 
     private ProvisionContext context(String priorPhysicalId) {
-        return new ProvisionContext(engine, REGION, ACCOUNT, STACK, priorPhysicalId);
+        return context(priorPhysicalId, null);
+    }
+
+    private ProvisionContext context(String priorPhysicalId, JsonNode priorProperties) {
+        return new ProvisionContext(engine, REGION, ACCOUNT, STACK, priorPhysicalId, event -> {}, priorProperties);
     }
 
     /** Alternating property names and values, in order. */
