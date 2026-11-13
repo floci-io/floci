@@ -94,8 +94,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from regen_iam_authorized_actions import fetch_references
-from regen_iam_passed_roles import (BODY_LOCATIONS, MEMBER_PATH_RE, NAMESPACE_RE, OPERATION_RE, _shown, load_models,
-                                    namespace_of)
+from regen_iam_passed_roles import (
+    BODY_LOCATIONS,
+    MEMBER_PATH_RE,
+    NAMESPACE_RE,
+    OPERATION_RE,
+    _shown,
+    load_models,
+    namespace_of,
+)
 from regen_partitions import resolve_botocore_data
 from regen_rest_routes import MODELS as REST_MODELS
 
