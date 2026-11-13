@@ -12,6 +12,7 @@ import io.floci.aws.services.codeartifact.CodeArtifactService.PublishPackageVers
 import io.floci.aws.services.codeartifact.model.CodeArtifactDomain;
 import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
+import io.floci.aws.services.codeartifact.model.PackageGroup;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
 import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Assumptions;
@@ -680,6 +681,8 @@ class CodeArtifactAssetPersistenceTest {
                 "codeartifact-package-versions.json", new TypeReference<Map<String, CodeArtifactPackageVersion>>() {});
         AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore = accountAware(dir,
                 "codeartifact-package-origin-configs.json", new TypeReference<Map<String, PackageOriginConfig>>() {});
+        AccountAwareStorageBackend<PackageGroup> packageGroupStore = accountAware(dir,
+                "codeartifact-package-groups.json", new TypeReference<Map<String, PackageGroup>>() {});
 
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -691,7 +694,7 @@ class CodeArtifactAssetPersistenceTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
 
         return new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
-                regionResolver, config, false, dir.resolve("codeartifact-assets"),
+                packageGroupStore, regionResolver, config, false, dir.resolve("codeartifact-assets"),
                 persistenceSidecars());
     }
 

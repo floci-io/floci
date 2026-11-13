@@ -9,12 +9,20 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import io.floci.aws.services.codeartifact.CodeArtifactService.DomainView;
+import io.floci.aws.services.codeartifact.CodeArtifactService.GetAssociatedPackageGroupResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.ListAllowedRepositoriesForGroupResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.ListAssociatedPackagesResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupAllowedRepositoryEdit;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupDescriptionView;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupListResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.ResourcePolicy;
+import io.floci.aws.services.codeartifact.CodeArtifactService.UpdatePackageGroupOriginConfigurationResult;
 import io.floci.aws.services.codeartifact.model.CodeArtifactDomain;
 import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
+import io.floci.aws.services.codeartifact.model.PackageGroup;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
@@ -104,6 +112,7 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         packageOriginConfigStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        AccountAwareStorageBackend<PackageGroup> packageGroupStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -123,7 +132,7 @@ class CodeArtifactServiceTest {
         bagetterClient = mock(BagetterSidecarClient.class);
         when(bagetterClient.format()).thenReturn("nuget");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
-                regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
+                packageGroupStore, regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
                         List.of(verdaccioClient, reposiliteClient, pypiserverClient, bagetterClient)));
     }
 
@@ -1184,6 +1193,40 @@ class CodeArtifactServiceTest {
                 "ALLOW", "ALLOW");
         service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
                 "widget");
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: the package-group PUBLISH check used to live only in
+     * {@code publishPackageVersionLocked} (the generic-format path), so a native publish — {@code
+     * mvn deploy}, {@code npm publish}, {@code twine upload}, {@code dotnet nuget push} — could
+     * publish straight past a group's BLOCK, allow-list, or weak-match restriction. Moving it
+     * into {@code requireDirectPublishAllowed} (the one method both the generic and every native
+     * path call) closes that for every format.
+     */
+    @Test
+    void containerBackedPackagePublishIsBlockedByAnAssociatedGroupsBlockMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/maven/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/maven/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                        "widget"));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void containerBackedPackagePublishIsBlockedByAWeakMatchRegardlessOfTheGroupsMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "npm", null,
+                        "asyncstorage"));
+        assertEquals("ConflictException", e.getErrorCode());
     }
 
     /**
@@ -6757,7 +6800,8 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         CodeArtifactService listingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
-                origins, regionResolver, mock(EmulatorConfig.class), true, null,
+                origins, AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(EmulatorConfig.class), true, null,
                 new CodeArtifactSidecarRegistry(List.of(pypiserverClient, bagetterClient)));
         listingService.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository repository = listingService.createRepository(REGION, "dom", null, "repo",
@@ -7462,8 +7506,8 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<PackageOriginConfig> store = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         CodeArtifactService failingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
-                store, regionResolver, mock(EmulatorConfig.class), true, null,
-                new CodeArtifactSidecarRegistry(List.of()));
+                store, AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(EmulatorConfig.class), true, null, new CodeArtifactSidecarRegistry(List.of()));
         failingService.createDomain(REGION, "dom", null, Map.of());
         failingService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         String legacyKey = REGION + "::dom::repo::nuget::::Newtonsoft.Json";
@@ -7608,8 +7652,8 @@ class CodeArtifactServiceTest {
     private CodeArtifactService originLookupService(AccountAwareStorageBackend<PackageOriginConfig> origins) {
         CodeArtifactService lookupService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
-                origins, regionResolver, mock(EmulatorConfig.class), true, null,
-                new CodeArtifactSidecarRegistry(List.of()));
+                origins, AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(EmulatorConfig.class), true, null, new CodeArtifactSidecarRegistry(List.of()));
         lookupService.createDomain(REGION, "dom", null, Map.of());
         lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         return lookupService;
@@ -7627,5 +7671,527 @@ class CodeArtifactServiceTest {
         assertEquals("ValidationException", refused.getErrorCode());
         assertEquals(List.of(),
                 service.describeRepository(REGION, "refused-update", null, "consumer").getUpstreams());
+    }
+
+    // -------------------------------------------------------------- package groups
+
+    @Test
+    void createPackageGroupRequiresTheDomainToExist() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "missing", null, "/npm/*", null, null, Map.of()));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void createPackageGroupRejectsADuplicatePattern() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of()));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void createPackageGroupRejectsAPatternWithNoRecognizedSuffix() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/npm/space/anycompany", null, null, Map.of()));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createPackageGroupStartsEveryRestrictionAtInheritResolvingToAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView view = service.createPackageGroup(REGION, "dom", null, "/npm/*", "contact",
+                "desc", Map.of());
+        assertEquals("/npm/*", view.pattern());
+        assertEquals("dom", view.domainName());
+        assertEquals("contact", view.contactInfo());
+        assertEquals("desc", view.description());
+        assertNull(view.parentPattern());
+        assertEquals("INHERIT", view.restrictions().get("PUBLISH").mode());
+        assertEquals("ALLOW", view.restrictions().get("PUBLISH").effectiveMode());
+        assertNull(view.restrictions().get("PUBLISH").inheritedFromPattern());
+    }
+
+    @Test
+    void describePackageGroupReportsTheMostSpecificAncestorAsParent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/space/*");
+        assertEquals("/npm/*", child.parentPattern());
+        PackageGroupDescriptionView root = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertNull(root.parentPattern());
+    }
+
+    @Test
+    void describePackageGroupThrowsResourceNotFoundForAnUnknownPattern() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describePackageGroup(REGION, "dom", null, "/npm/*"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void updatePackageGroupOnlyChangesContactInfoAndDescription() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", "old-contact", "old-desc", Map.of());
+        PackageGroupDescriptionView updated = service.updatePackageGroup(REGION, "dom", null, "/npm/*",
+                "new-contact", "new-desc");
+        assertEquals("new-contact", updated.contactInfo());
+        assertEquals("new-desc", updated.description());
+        assertEquals("/npm/*", updated.pattern());
+    }
+
+    @Test
+    void deletingAParentReparentsItsChildrenOntoTheGrandparent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/anycompany-ui~", null, null, Map.of());
+
+        service.deletePackageGroup(REGION, "dom", null, "/npm/space/*");
+
+        PackageGroupDescriptionView grandchild = service.describePackageGroup(REGION, "dom", null,
+                "/npm/space/anycompany-ui~");
+        assertEquals("/npm/*", grandchild.parentPattern());
+    }
+
+    @Test
+    void deletePackageGroupThrowsResourceNotFoundForAnUnknownPattern() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.deletePackageGroup(REGION, "dom", null, "/npm/*"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageGroupsFiltersByPrefixAndPaginates() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/pypi/*", null, null, Map.of());
+
+        PackageGroupListResult all = service.listPackageGroups(REGION, "dom", null, null, null, null);
+        assertEquals(2, all.packageGroups().size());
+
+        PackageGroupListResult npmOnly = service.listPackageGroups(REGION, "dom", null, "/npm", null, null);
+        assertEquals(1, npmOnly.packageGroups().size());
+        assertEquals("/npm/*", npmOnly.packageGroups().get(0).pattern());
+
+        PackageGroupListResult firstPage = service.listPackageGroups(REGION, "dom", null, null, 1, null);
+        assertEquals(1, firstPage.packageGroups().size());
+        assertNotNull(firstPage.nextToken());
+    }
+
+    @Test
+    void listSubPackageGroupsReturnsOnlyDirectChildrenNotGrandchildren() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/anycompany-ui~", null, null, Map.of());
+
+        PackageGroupListResult children = service.listSubPackageGroups(REGION, "dom", null, "/npm/*", null, null);
+        assertEquals(1, children.packageGroups().size());
+        assertEquals("/npm/space/*", children.packageGroups().get(0).pattern());
+    }
+
+    @Test
+    void updatePackageGroupOriginConfigurationSetsModeAndTracksAllowedRepositoryEdits() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+
+        UpdatePackageGroupOriginConfigurationResult result = service.updatePackageGroupOriginConfiguration(REGION,
+                "dom", null, "/npm/*", Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH"),
+                        new PackageGroupAllowedRepositoryEdit("repo-b", "PUBLISH")),
+                List.of());
+
+        assertEquals("ALLOW_SPECIFIC_REPOSITORIES", result.packageGroup().restrictions().get("PUBLISH").mode());
+        assertEquals("ALLOW_SPECIFIC_REPOSITORIES",
+                result.packageGroup().restrictions().get("PUBLISH").effectiveMode());
+        assertEquals(2, result.packageGroup().restrictions().get("PUBLISH").repositoriesCount());
+        assertEquals(List.of("repo-a", "repo-b"), result.allowedRepositoryUpdates().get("PUBLISH").get("ADDED"));
+
+        UpdatePackageGroupOriginConfigurationResult afterRemove = service.updatePackageGroupOriginConfiguration(
+                REGION, "dom", null, "/npm/*", Map.of(), List.of(),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")));
+        assertEquals(1, afterRemove.packageGroup().restrictions().get("PUBLISH").repositoriesCount());
+        assertEquals(List.of("repo-a"), afterRemove.allowedRepositoryUpdates().get("PUBLISH").get("REMOVED"));
+        // The mode itself is untouched by an allowed-repository-only edit.
+        assertEquals("ALLOW_SPECIFIC_REPOSITORIES", afterRemove.packageGroup().restrictions().get("PUBLISH").mode());
+    }
+
+    @Test
+    void effectiveModeWalksUpThroughInheritToTheNearestConcreteAncestor() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+
+        PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/space/*");
+        assertEquals("INHERIT", child.restrictions().get("PUBLISH").mode());
+        assertEquals("BLOCK", child.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/npm/*", child.restrictions().get("PUBLISH").inheritedFromPattern());
+    }
+
+    @Test
+    void listAllowedRepositoriesForGroupReturnsTheStoredList() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")), List.of());
+
+        ListAllowedRepositoriesForGroupResult result = service.listAllowedRepositoriesForGroup(REGION, "dom", null,
+                "/npm/*", "PUBLISH", null, null);
+        assertEquals(List.of("repo-a"), result.allowedRepositories());
+    }
+
+    @Test
+    void getAssociatedPackageGroupThrowsResourceNotFoundWhenNoGroupMatches() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null, "react"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void getAssociatedPackageGroupReportsTheMostSpecificMatchAndItsStrength() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        GetAssociatedPackageGroupResult strong = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "AsyncStorage");
+        assertEquals("/npm//AsyncStorage$", strong.packageGroup().pattern());
+        assertEquals("STRONG", strong.associationType());
+
+        GetAssociatedPackageGroupResult weak = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "asyncstorage");
+        assertEquals("/npm//AsyncStorage$", weak.packageGroup().pattern());
+        assertEquals("WEAK", weak.associationType());
+
+        GetAssociatedPackageGroupResult other = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "some-other-package");
+        assertEquals("/npm/*", other.packageGroup().pattern());
+        assertEquals("STRONG", other.associationType());
+    }
+
+    @Test
+    void listAssociatedPackagesReturnsOnlyPackagesTheGroupWinsForAcrossRepositories() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/space/*", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "space", "in-space", "1.0.0",
+                "a.txt", Digests.sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo-b", "generic", "other", "not-in-space", "1.0.0",
+                "a.txt", Digests.sha256Hex(content), "false", content);
+
+        ListAssociatedPackagesResult spaceGroup = service.listAssociatedPackages(REGION, "dom", null,
+                "/generic/space/*", null, null, false);
+        assertEquals(1, spaceGroup.packages().size());
+        assertEquals("in-space", spaceGroup.packages().get(0).packageName());
+
+        ListAssociatedPackagesResult rootGroup = service.listAssociatedPackages(REGION, "dom", null, "/generic/*",
+                null, null, false);
+        assertEquals(1, rootGroup.packages().size());
+        assertEquals("not-in-space", rootGroup.packages().get(0).packageName());
+    }
+
+    @Test
+    void listAssociatedPackagesPreviewWorksForAPatternThatDoesNotExistYet() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "space", "in-space", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        ListAssociatedPackagesResult preview = service.listAssociatedPackages(REGION, "dom", null,
+                "/generic/space/*", null, null, true);
+        assertEquals(1, preview.packages().size());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listAssociatedPackages(REGION, "dom", null, "/generic/space/*", null, null, false));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionIsBlockedByAnAssociatedGroupsBlockMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/generic/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionAllowsOnlyTheRepositoryListedForAllowSpecificRepositories() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/generic/*",
+                Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")), List.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        assertDoesNotThrow(() -> service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "ns",
+                "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo-b", "generic", "ns", "other-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionIsBlockedByAWeakMatchRegardlessOfTheGroupsMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/ns/AsyncStorage$", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "asyncstorage", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionWithNoAssociatedGroupIsUnaffected() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        assertDoesNotThrow(() -> service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+    }
+
+    @Test
+    void packageLevelBlockWinsOverAGroupLevelAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedIsBlockedByAnAssociatedGroupsBlockMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("EXTERNAL_UPSTREAM", "BLOCK"), List.of(), List.of());
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedAllowsOnlyTheRepositoryListedForAllowSpecificRepositories() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("EXTERNAL_UPSTREAM", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "EXTERNAL_UPSTREAM")), List.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo-a", "npm", null, "my-pkg"));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo-b", "npm", null, "other-pkg"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedIsBlockedByAWeakMatchRegardlessOfTheGroupsMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "asyncstorage"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedWithNoAssociatedGroupIsUnaffected() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedPackageLevelBlockWinsOverAGroupLevelAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "npm", null, "my-pkg", "ALLOW", "BLOCK");
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg"));
+    }
+
+    @Test
+    void packageGroupArnCanBeTaggedAndUntagged() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView view = service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null,
+                null, Map.of("env", "prod"));
+
+        assertEquals(Map.of("env", "prod"), service.listTagsForResource(view.arn()));
+
+        service.tagResource(view.arn(), Map.of("team", "platform"));
+        assertEquals(Map.of("env", "prod", "team", "platform"), service.listTagsForResource(view.arn()));
+
+        service.untagResource(view.arn(), List.of("env"));
+        assertEquals(Map.of("team", "platform"), service.listTagsForResource(view.arn()));
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code PACKAGE_GROUP_RESTRICTION_TYPES} is an immutable
+     * {@code List.of(...)}, whose {@code contains(null)} throws {@code NullPointerException}
+     * rather than returning false. Omitting {@code originRestrictionType} on an allowed-repository
+     * edit must fail with a clean {@code ValidationException}, not an internal error.
+     */
+    @Test
+    void updatePackageGroupOriginConfigurationRejectsAnAllowedRepositoryEditWithNoRestrictionType() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updatePackageGroupOriginConfiguration(
+                REGION, "dom", null, "/npm/*", Map.of(),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", null)), List.of()));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    /** Same NPE risk, reached through the query parameter instead of a list entry. */
+    @Test
+    void listAllowedRepositoriesForGroupRejectsAMissingRestrictionType() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listAllowedRepositoriesForGroup(REGION, "dom", null, "/npm/*", null, null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code groupAllowsRestriction}'s {@code
+     * ALLOW_SPECIFIC_REPOSITORIES} branch used to read the allow-list off {@code group} itself
+     * even when the effective mode came from an {@code INHERIT} walk up to an ancestor — so an
+     * {@code INHERIT} child with no restriction of its own rejected every repository its parent
+     * actually allowed.
+     */
+    @Test
+    void inheritedAllowSpecificRepositoriesUsesTheAncestorsOwnAllowList() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/space/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/generic/*",
+                Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")), List.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        // /generic/space/* itself never configured PUBLISH (stays INHERIT), so the effective mode
+        // walks up to /generic/*'s ALLOW_SPECIFIC_REPOSITORIES, and that ancestor's own allow-list
+        // (repo-a) must be what's consulted, not the child's own (absent) one.
+        assertDoesNotThrow(() -> service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "space",
+                "in-space", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo-b", "generic", "space", "other", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code escapeKeySegment} only escaped {@code :} and
+     * {@code \}, so a pattern containing a literal {@code #} (legal in a package-group pattern,
+     * unlike in a namespace/package/version) could collide with another pattern's escaped {@code
+     * :}. {@code /npm//#c$} (literal {@code #} then {@code c}) and {@code /npm//:$} (a literal
+     * {@code :}) must be two independently creatable, independently describable groups.
+     */
+    @Test
+    void packageGroupPatternsContainingHashAndColonDoNotCollide() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//#c$", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//:$", null, null, Map.of());
+
+        assertEquals("/npm//#c$", service.describePackageGroup(REGION, "dom", null, "/npm//#c$").pattern());
+        assertEquals("/npm//:$", service.describePackageGroup(REGION, "dom", null, "/npm//:$").pattern());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code isStrictAncestor} compared pattern components
+     * literally, with no case/separator normalization, even though a package only weakly matching
+     * a pattern is itself documented as "associated with" that group. A child pattern that is only
+     * a case variant of its true ancestor must still find that ancestor and inherit its mode,
+     * rather than resolving INHERIT to the top-of-hierarchy ALLOW default.
+     */
+    @Test
+    void aCaseVariantChildPatternStillInheritsFromItsNormalizedAncestor() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/space/*",
+                Map.of("PUBLISH", "BLOCK"), List.of(), List.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/SPACE/foo$", null, null, Map.of());
+
+        PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/SPACE/foo$");
+        assertEquals("/npm/space/*", child.parentPattern());
+        assertEquals("INHERIT", child.restrictions().get("PUBLISH").mode());
+        assertEquals("BLOCK", child.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/npm/space/*", child.restrictions().get("PUBLISH").inheritedFromPattern());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: when two patterns tie on specificity but differ only by
+     * case/separators, whichever happened to be scanned first used to win, regardless of which one
+     * the package actually strongly matches. A package that strongly matches one of two tied-rank
+     * patterns must resolve to that one, not to the one it only weakly matches.
+     */
+    @Test
+    void anEquallySpecificStrongMatchWinsOverAWeakMatchRegardlessOfCreationOrder() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//Foo$", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//foo$", null, null, Map.of());
+
+        GetAssociatedPackageGroupResult result = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "foo");
+        assertEquals("/npm//foo$", result.packageGroup().pattern());
+        assertEquals("STRONG", result.associationType());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: package groups are domain-scoped but outlive
+     * {@code deleteRepository}'s own cleanup (which only ever runs once the domain already has no
+     * repositories left), so without this, a domain deleted and recreated under the same name
+     * would inherit the previous one's groups, including a PUBLISH:BLOCK a caller has no way to
+     * know about.
+     */
+    @Test
+    void deletingADomainRemovesItsPackageGroupsSoARecreatedDomainDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+
+        service.deleteDomain(REGION, "dom", null);
+        service.createDomain(REGION, "dom", null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describePackageGroup(REGION, "dom", null, "/npm/*"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertDoesNotThrow(() -> service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of()));
     }
 }

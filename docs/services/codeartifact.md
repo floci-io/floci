@@ -52,9 +52,19 @@ behind them yet.
 | `UpdatePackageVersionsStatus` | Moves one or more versions of a package to `Published`, `Unlisted`, or `Archived`; all-or-nothing per call, with `versionRevisions`/`expectedStatus` as optional preconditions. |
 | `DisposePackageVersions` | Permanently deletes a package version's assets and sets its status to `Disposed`; irreversible, and shares `UpdatePackageVersionsStatus`'s all-or-nothing batch semantics. |
 | `DeletePackageVersions` | Permanently removes one or more versions of a package, real assets included; unlike `DisposePackageVersions`, leaves no trace, the freed coordinates can be freely republished, and it is the one action allowed on an already-`Disposed` version. |
-| `TagResource` | Adds or updates tags on a domain or repository ARN. |
-| `UntagResource` | Removes tags by key from a domain or repository ARN. |
-| `ListTagsForResource` | Lists the tags on a domain or repository ARN. |
+| `CreatePackageGroup` | Creates a package group from a pattern (its own identifier); every restriction type starts at `INHERIT`. |
+| `DeletePackageGroup` | Deletes a package group; its direct children reparent onto its own parent, recomputed from the remaining groups. |
+| `DescribePackageGroup` | Returns a package group's pattern, origin configuration (stored and resolved effective mode per restriction type), and parent. |
+| `UpdatePackageGroup` | Updates a package group's `contactInfo`/`description`; the pattern and restrictions are unchanged. |
+| `UpdatePackageGroupOriginConfiguration` | Sets a package group's per-restriction-type mode and/or edits its `ALLOW_SPECIFIC_REPOSITORIES` allow-list. |
+| `ListPackageGroups` | Lists package group summaries in a domain, optionally filtered by pattern prefix, paginated. |
+| `ListSubPackageGroups` | Lists a package group's direct children only (not grandchildren), per the hierarchy computed from the domain's current groups. |
+| `ListAllowedRepositoriesForGroup` | Lists the repositories a package group's `ALLOW_SPECIFIC_REPOSITORIES` allow-list names for one restriction type. |
+| `ListAssociatedPackages` | Lists the packages (across every repository in the domain) for which this group is the most specific match; `preview` answers the same question for a pattern that doesn't exist yet. |
+| `GetAssociatedPackageGroup` | Returns the most specific package group matching a package's coordinate, and whether the match is `STRONG` or `WEAK`; `ResourceNotFoundException` if no group's pattern reaches it at all. |
+| `TagResource` | Adds or updates tags on a domain, repository, or package group ARN. |
+| `UntagResource` | Removes tags by key from a domain, repository, or package group ARN. |
+| `ListTagsForResource` | Lists the tags on a domain, repository, or package group ARN. |
 <!-- floci:actions:end -->
 
 Domains and repositories are account and Region scoped and persisted through `StorageFactory`.
@@ -409,8 +419,6 @@ state.
   miss simply 404s, exactly as AWS documents ("the only workaround is to try again later").
   There is no caching of that failure, so a later retry against a recovered source works
   immediately, but there is also no retry/backoff of its own beyond the client's own.
-  Package-group-level `EXTERNAL_UPSTREAM` (once package groups exist in this emulator) is not
-  consulted yet by this check, only the plain package-level `upstream` restriction.
 - **The npm repository endpoint does not enforce the 5 GB asset size quota.** Unlike
   `PublishPackageVersion` and the Maven endpoint, it streams the request straight through to the
   backing Verdaccio container rather than buffering it first, so there is nowhere in the request
@@ -492,6 +500,23 @@ state.
   too, which this correctly attributes to the real artifact; only the rarer, version-scoped
   snapshot form gets a package name this way. The bytes are still counted toward the domain total
   either way, just under an internal accounting bucket nothing else ever looks up by name.
+- **Package groups enforce `PUBLISH` and `EXTERNAL_UPSTREAM`; `INTERNAL_UPSTREAM` is stored and
+  resolved but never gates anything.** `PUBLISH` is wired into the one package-level origin check
+  every direct-publish path already shares (`PublishPackageVersion`'s own `generic`-format path
+  and every native proxy controller's own publish guard — `mvn deploy`, `npm publish`, `twine
+  upload`, `nuget push` — alike), and every format's external-connection retention (Maven, npm,
+  pypi, NuGet) is wired to the resolved `EXTERNAL_UPSTREAM` mode, both following the "`BLOCK`
+  always wins over `ALLOW`" interaction between a package's own origin configuration and its
+  associated group's, and both blocking a weak pattern match outright regardless of the group's
+  configured mode. `INTERNAL_UPSTREAM` has nothing to gate yet: it governs a repository-to-
+  repository upstream chain (`UpdateRepository`'s `upstreams`), which this emulator does not
+  simulate for any format.
+- **Package group weak-match normalization does not model Unicode confusable characters.** The
+  User Guide's own "Additional variations" section mentions visually-similar characters from
+  different alphabets only in passing, with no concrete testable rule; this emulator's weak match
+  only casefolds and collapses runs of `-`/`.`/`_` into a single `.`, the part of that section with
+  an actual rule to implement. A package name that only a real Unicode confusables table would
+  catch is treated as a non-match rather than a weak one.
 
 See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/latest/APIReference/Welcome.html).
 
