@@ -919,7 +919,7 @@ def test_the_vendored_file_is_well_formed():
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
     # A state machine's version or alias is checked on the state machine.
-    assert document["unqualified"] == {"states": ["statemachine"]}
+    assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}
