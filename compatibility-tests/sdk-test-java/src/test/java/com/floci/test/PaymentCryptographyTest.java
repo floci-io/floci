@@ -645,6 +645,11 @@ class PaymentCryptographyTest {
         assertThat(imported.key().keyArn()).isNotBlank();
         assertThat(imported.key().keyAttributes().keyUsage())
                 .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+        // The key that comes back is the key that left, so its check value is the one the
+        // exported key had.
+        assertThat(imported.key().keyCheckValue()).isEqualTo(key.keyCheckValue());
+        // The key came into the service, so the cleanup has to take it away again.
+        keyArns.add(imported.key().keyArn());
     }
 
 }
