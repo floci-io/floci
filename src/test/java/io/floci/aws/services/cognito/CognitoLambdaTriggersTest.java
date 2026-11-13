@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
+import io.floci.aws.services.cognito.model.CognitoGroup;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.ResourceServerScope;
 import io.floci.aws.services.cognito.model.UserPool;
@@ -1354,6 +1355,61 @@ class CognitoLambdaTriggersTest {
         assertTrue(req.get("scopes") instanceof List<?>);
         assertNotNull(req.get("groupConfiguration"));
         assertNotNull(req.get("userAttributes"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationGroupConfigurationCarriesTheGroupsRoles() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        String admin = "arn:aws:iam::000000000000:role/admin";
+        String reader = "arn:aws:iam::000000000000:role/reader";
+        service.createGroup(pool.getId(), "admins", null, 1, admin);
+        service.createGroup(pool.getId(), "readers", null, 5, reader);
+        service.createGroup(pool.getId(), "no-role", null, 0, null);
+        service.adminAddUserToGroup(pool.getId(), "admins", "alice");
+        service.adminAddUserToGroup(pool.getId(), "readers", "alice");
+        service.adminAddUserToGroup(pool.getId(), "no-role", "alice");
+
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+        service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        Map<String, Object> event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        Map<String, Object> groups = (Map<String, Object>) ((Map<String, Object>) event.get("request"))
+                .get("groupConfiguration");
+        assertEquals(Set.of("admins", "readers", "no-role"), Set.copyOf((List<String>) groups.get("groupsToOverride")));
+        assertEquals(Set.of(admin, reader), Set.copyOf((List<String>) groups.get("iamRolesToOverride")));
+        assertEquals(admin, groups.get("preferredRole"),
+                "the role of the lowest-precedence group that has one, as on AWS");
+    }
+
+    @Test
+    void preferredRoleFollowsAwsPrecedenceRules() {
+        String a = "arn:aws:iam::000000000000:role/a";
+        String b = "arn:aws:iam::000000000000:role/b";
+        assertEquals(a, CognitoAuthFlowHandler.preferredRole(List.of(group(1, a), group(2, b))));
+        assertEquals(a, CognitoAuthFlowHandler.preferredRole(List.of(group(null, b), group(3, a))),
+                "a group without precedence ranks after every group with one");
+        assertEquals(a, CognitoAuthFlowHandler.preferredRole(List.of(group(1, a), group(1, a))),
+                "a tie on the same role keeps that role");
+        assertNull(CognitoAuthFlowHandler.preferredRole(List.of(group(1, a), group(1, b))),
+                "a tie between different roles sets none");
+        assertEquals(b, CognitoAuthFlowHandler.preferredRole(List.of(group(null, b))));
+        assertNull(CognitoAuthFlowHandler.preferredRole(List.of(group(0, null))));
+        assertEquals(b, CognitoAuthFlowHandler.preferredRole(List.of(group(0, null), group(5, b))),
+                "a group without a role does not outrank one with a role (CreateGroup: the lowest "
+                        + "precedence group whose role ARN is given)");
+    }
+
+    private static CognitoGroup group(Integer precedence, String roleArn) {
+        CognitoGroup group = new CognitoGroup();
+        group.setPrecedence(precedence);
+        group.setRoleArn(roleArn);
+        return group;
     }
 
     // =========================================================================
