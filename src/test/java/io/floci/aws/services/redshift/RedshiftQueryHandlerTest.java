@@ -364,6 +364,7 @@ class RedshiftQueryHandlerTest {
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("acc");
         when(regionResolver.resolveRegionFromAuth(anyString())).thenReturn("us-east-1");
+        when(regionResolver.partitionForRegion(anyString())).thenReturn("aws");
         handler = new RedshiftQueryHandler(service, credentialBroker, config, iamDbUserResolver, regionResolver);
     }
 
