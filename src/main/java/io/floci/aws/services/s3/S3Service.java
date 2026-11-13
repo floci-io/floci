@@ -4113,7 +4113,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         try {
             authorizeGetObject(bucket, cfg.getErrorDocument(), null, authorization);
-            return new WebsiteResolution.ErrorDocument(getObject(bucket, cfg.getErrorDocument()), responseStatus);
+            S3Object object = getObject(bucket, cfg.getErrorDocument());
+            requireArchivedObjectReadable(object);
+            return new WebsiteResolution.ErrorDocument(object, responseStatus);
         } catch (AwsException e) {
             if (!isWebsiteErrorDocumentTrigger(e)) {
                 throw e;
@@ -4128,7 +4130,8 @@ public class S3Service implements Resettable, ResourceProvider {
      * attempting at all.
      */
     public static boolean isWebsiteErrorDocumentTrigger(AwsException e) {
-        return "NoSuchKey".equals(e.getErrorCode()) || "AccessDenied".equals(e.getErrorCode());
+        return "NoSuchKey".equals(e.getErrorCode()) || "AccessDenied".equals(e.getErrorCode())
+                || "InvalidObjectState".equals(e.getErrorCode());
     }
 
     public void deleteBucketTagging(String bucketName) {
@@ -6850,6 +6853,17 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public RestoreStatus restoreStatus(S3Object object) {
         return restoreStatus(object, clock.instant());
+    }
+
+    public void requireArchivedObjectReadable(S3Object object) {
+        if ("GLACIER".equals(object.getStorageClass()) || "DEEP_ARCHIVE".equals(object.getStorageClass())) {
+            RestoreStatus restore = restoreStatus(object);
+            if (restore == null || restore.inProgress()) {
+                throw new AwsException("InvalidObjectState",
+                        "The operation is not valid for the object's storage class", 403,
+                        Map.of("StorageClass", object.getStorageClass()));
+            }
+        }
     }
 
     private static RestoreStatus restoreStatus(S3Object object, Instant now) {

@@ -5,6 +5,7 @@ import io.floci.aws.testing.MutableClock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @TestProfile(S3RestoreStateIntegrationTest.DelayedRestoreProfile.class)
 class S3RestoreStateIntegrationTest {
     private static final String RESTORE_REQUEST = "<RestoreRequest><Days>1</Days></RestoreRequest>";
+    private static final String ARCHIVED_OBJECT_ERROR_MESSAGE =
+            "The operation is not valid for the object's storage class";
     private static final String COMPLETED_RESTORE_HEADER =
             "ongoing-request=\"false\", expiry-date=\"Sat, 03 Jan 2026 00:00:00 GMT\"";
 
@@ -61,17 +64,29 @@ class S3RestoreStateIntegrationTest {
 
             given().when().head(olderPath).then().statusCode(200).header("x-amz-restore", nullValue());
             given().when().head(currentPath).then().statusCode(200).header("x-amz-restore", nullValue());
+            given().when().get(olderPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"))
+                    .body("Error.Message", equalTo(ARCHIVED_OBJECT_ERROR_MESSAGE))
+                    .body("Error.StorageClass", equalTo("GLACIER"));
+            given().when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(fixture.path()).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
 
             given().body(RESTORE_REQUEST).when().post(olderPath + "&restore").then().statusCode(202);
             given().when().head(olderPath).then().statusCode(200)
                     .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
-            given().when().get(olderPath).then().statusCode(200)
-                    .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
+            given().when().get(olderPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
             given().when().head(currentPath).then().statusCode(200).header("x-amz-restore", nullValue());
 
             given().body(RESTORE_REQUEST).when().post(currentPath + "&restore").then().statusCode(202);
             given().when().head(currentPath).then().statusCode(200)
                     .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
+            given().header("Range", "bytes=0-1").when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(currentPath + "&partNumber=1").then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
             given().header("x-amz-optional-object-attributes", "RestoreStatus")
                     .queryParam("list-type", "2").when().get(fixture.bucketPath()).then().statusCode(200)
                     .body(containsString("<IsRestoreInProgress>true</IsRestoreInProgress>"));
@@ -92,12 +107,145 @@ class S3RestoreStateIntegrationTest {
             given().when().get(olderPath).then().statusCode(200)
                     .header("x-amz-restore", equalTo(COMPLETED_RESTORE_HEADER))
                     .body(equalTo("older"));
+            given().header("Range", "bytes=0-1").when().get(currentPath).then().statusCode(206)
+                    .body(equalTo("cu"));
             given().header("x-amz-optional-object-attributes", "RestoreStatus")
                     .queryParam("list-type", "2").when().get(fixture.bucketPath()).then().statusCode(200)
                     .body(containsString("<IsRestoreInProgress>false</IsRestoreInProgress>"))
                     .body(containsString("<RestoreExpiryDate>2026-01-03T00:00:00Z</RestoreExpiryDate>"));
             given().body(RESTORE_REQUEST).when().post(olderPath + "&restore").then().statusCode(200);
             given().body(RESTORE_REQUEST).when().post(currentPath + "&restore").then().statusCode(200);
+
+            clock.advance(Duration.ofDays(2));
+            given().when().head(olderPath).then().statusCode(200).header("x-amz-restore", nullValue());
+            given().when().get(olderPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+        }
+    }
+
+    @Test
+    void restoringOneVersionDoesNotUnlockAnother() {
+        try (Fixture fixture = new Fixture()) {
+            String olderPath = fixture.path() + "?versionId=" + fixture.olderVersion();
+            String currentPath = fixture.path() + "?versionId=" + fixture.currentVersion();
+
+            given().body(RESTORE_REQUEST).when().post(olderPath + "&restore").then().statusCode(202);
+            clock.advance(Duration.ofSeconds(61));
+
+            given().when().get(olderPath).then().statusCode(200).body(equalTo("older"));
+            given().when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(fixture.path()).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+        }
+    }
+
+    @Test
+    void deepArchiveGetObjectRequiresCompletedRestore() {
+        try (Fixture fixture = new Fixture()) {
+            String path = fixture.bucketPath() + "/deep.txt";
+            String version = given().header("x-amz-storage-class", "DEEP_ARCHIVE").body("deep")
+                    .when().put(path).then().statusCode(200).extract().header("x-amz-version-id");
+            String versionedPath = path + "?versionId=" + version;
+            try {
+                given().when().head(versionedPath).then().statusCode(200);
+                given().when().get(versionedPath).then().statusCode(403)
+                        .body("Error.Code", equalTo("InvalidObjectState"))
+                        .body("Error.Message", equalTo(ARCHIVED_OBJECT_ERROR_MESSAGE))
+                        .body("Error.StorageClass", equalTo("DEEP_ARCHIVE"));
+
+                given().body(RESTORE_REQUEST).when().post(versionedPath + "&restore").then().statusCode(202);
+                given().when().get(versionedPath).then().statusCode(403)
+                        .body("Error.Code", equalTo("InvalidObjectState"));
+
+                clock.advance(Duration.ofSeconds(61));
+                given().when().get(versionedPath).then().statusCode(200).body(equalTo("deep"));
+
+                clock.advance(Duration.ofDays(2));
+                given().when().get(versionedPath).then().statusCode(403)
+                        .body("Error.Code", equalTo("InvalidObjectState"));
+            } finally {
+                given().when().delete(versionedPath).then().statusCode(204);
+            }
+        }
+    }
+
+    @Test
+    void glacierInstantRetrievalDoesNotRequireRestore() {
+        try (Fixture fixture = new Fixture()) {
+            String path = fixture.bucketPath() + "/instant.txt";
+            String version = given().header("x-amz-storage-class", "GLACIER_IR").body("instant")
+                    .when().put(path).then().statusCode(200).extract().header("x-amz-version-id");
+            try {
+                given().when().get(path + "?versionId=" + version)
+                        .then().statusCode(200).body(equalTo("instant"));
+            } finally {
+                given().when().delete(path + "?versionId=" + version).then().statusCode(204);
+            }
+        }
+    }
+
+    @Test
+    void websiteDoesNotServeArchivedIndexOrErrorDocumentUntilRestored() {
+        try (Fixture fixture = new Fixture()) {
+            String indexPath = fixture.bucketPath() + "/index.html";
+            String errorPath = fixture.bucketPath() + "/error.html";
+            String websiteHost = fixture.bucket + ".s3-website-us-east-1.localhost:" + RestAssured.port;
+            String websiteConfiguration = "<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix>"
+                    + "</IndexDocument><ErrorDocument><Key>error.html</Key></ErrorDocument>"
+                    + "</WebsiteConfiguration>";
+            given().body(websiteConfiguration).when().put(fixture.bucketPath() + "?website")
+                    .then().statusCode(200);
+
+            String indexVersion = null;
+            String errorVersion = null;
+            try {
+                indexVersion = given().header("x-amz-storage-class", "GLACIER").body("archived index")
+                        .when().put(indexPath).then().statusCode(200).extract().header("x-amz-version-id");
+                errorVersion = given().header("x-amz-storage-class", "DEEP_ARCHIVE").body("archived error")
+                        .when().put(errorPath).then().statusCode(200).extract().header("x-amz-version-id");
+
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(not(containsString("archived error")));
+                given().header("Host", websiteHost).when().head("/").then().statusCode(200);
+                given().header("Host", websiteHost).when().head("/index.html").then().statusCode(200);
+                given().header("Host", websiteHost).when().get("/index.html").then().statusCode(403)
+                        .header("Content-Type", containsString("text/html"))
+                        .body(not(containsString("archived index")))
+                        .body(not(containsString("archived error")));
+                given().header("Host", websiteHost).when().get("/").then().statusCode(not(equalTo(200)))
+                        .body(not(containsString("archived index")));
+
+                given().body(RESTORE_REQUEST).when().post(indexPath + "?versionId=" + indexVersion + "&restore")
+                        .then().statusCode(202);
+                given().body(RESTORE_REQUEST).when().post(errorPath + "?versionId=" + errorVersion + "&restore")
+                        .then().statusCode(202);
+                given().header("Host", websiteHost).when().get("/").then().statusCode(not(equalTo(200)))
+                        .body(not(containsString("archived index")));
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(not(containsString("archived error")));
+
+                clock.advance(Duration.ofSeconds(61));
+                given().header("Host", websiteHost).when().get("/").then().statusCode(200)
+                        .body(equalTo("archived index"));
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(equalTo("archived error"));
+
+                clock.advance(Duration.ofDays(2));
+                given().header("Host", websiteHost).when().get("/").then().statusCode(not(equalTo(200)))
+                        .body(not(containsString("archived index")));
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(not(containsString("archived error")));
+            } finally {
+                if (errorVersion != null) {
+                    given().when().delete(errorPath + "?versionId=" + errorVersion).then().statusCode(204);
+                }
+                if (indexVersion != null) {
+                    given().when().delete(indexPath + "?versionId=" + indexVersion).then().statusCode(204);
+                }
+            }
         }
     }
 
@@ -252,6 +400,8 @@ class S3RestoreStateIntegrationTest {
                     .then().statusCode(403).body("Error.Code", equalTo("ObjectAlreadyInActiveTierError"));
             given().when().head(fixture.bucketPath() + "/ordinary.txt").then().statusCode(200)
                     .header("x-amz-restore", nullValue());
+            given().when().get(fixture.bucketPath() + "/ordinary.txt")
+                    .then().statusCode(200).body(equalTo("ordinary"));
             given().when().delete(fixture.bucketPath() + "/ordinary.txt?versionId=" + ordinaryVersion)
                     .then().statusCode(204);
         }
