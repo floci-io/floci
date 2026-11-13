@@ -204,10 +204,19 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
                         and name.lower() not in own_actions and not TAGGING_ACTION_RE.match(action)):
                     mapped = f"{namespace}:{action}"
             answers.setdefault(namespace, {}).setdefault(name, set()).add(mapped)
-    found = {namespace: {name: next(iter(mapped)) for name, mapped in sorted(operations.items())
-                         if len(mapped) == 1 and None not in mapped}
-             for namespace, operations in sorted(answers.items())}
-    return {namespace: operations for namespace, operations in found.items() if operations}
+    found: dict[str, dict[str, str]] = {}
+    for namespace, operations in sorted(answers.items()):
+        resolved: dict[str, str] = {}
+        for name, mapped in sorted(operations.items()):
+            if len(mapped) != 1:
+                continue
+            answer = next(iter(mapped))
+            if answer is None:
+                continue
+            resolved[name] = answer
+        if resolved:
+            found[namespace] = resolved
+    return found
 
 
 def _authorized_actions(namespace: str, operation: dict) -> list[tuple[str, str]]:
