@@ -98,10 +98,11 @@ class RedshiftZeroEtlWriterTest {
     private static final class Target {
         final Connection connection = mock(Connection.class);
         final Statement statement = mock(Statement.class);
+        final RedshiftService redshiftService = mock(RedshiftService.class);
         final RedshiftZeroEtlWriter writer;
 
+        /** {@code columns} are the table's column names, each followed by its information_schema data type. */
         Target(boolean exists, String owner, String... columns) throws SQLException {
-            RedshiftService redshiftService = mock(RedshiftService.class);
             RedshiftDataConnectionFactory connectionFactory = mock(RedshiftDataConnectionFactory.class);
             when(redshiftService.describeClustersForAccount("111111111111", "warehouse")).thenReturn(List.of(cluster()));
             when(connectionFactory.open(any())).thenReturn(connection);
@@ -144,7 +145,7 @@ class RedshiftZeroEtlWriterTest {
 
     @Test
     void keepsATableTheIntegrationMarkedWithTheColumnsItWrites() throws Exception {
-        Target target = new Target(true, "floci-zetl-integration:one", "id", "value");
+        Target target = new Target(true, "floci-zetl-integration:one", "id", "text", "value", "jsonb");
 
         assertFalse(target.create());
 
@@ -154,7 +155,8 @@ class RedshiftZeroEtlWriterTest {
 
     @Test
     void startsAfreshATableAnEarlierIntegrationLeft() throws Exception {
-        Target target = new Target(true, "floci-zetl-integration:earlier", "id", "value");
+        Target target = new Target(true, "floci-zetl-integration:earlier", "id", "text", "value", "jsonb");
+        when(target.redshiftService.integrationExists("111111111111", "earlier")).thenReturn(false);
 
         assertTrue(target.create());
 
@@ -168,7 +170,7 @@ class RedshiftZeroEtlWriterTest {
 
     @Test
     void startsAfreshItsOwnTableWhoseKeysAreNotTheSources() throws Exception {
-        Target target = new Target(true, "floci-zetl-integration:one", "order_id", "value");
+        Target target = new Target(true, "floci-zetl-integration:one", "order_id", "text", "value", "jsonb");
 
         assertTrue(target.create());
 
@@ -176,8 +178,33 @@ class RedshiftZeroEtlWriterTest {
     }
 
     @Test
+    void startsAfreshItsOwnTableWhoseKeyHasAnotherTypeThanTheSources() throws Exception {
+        // The source was made again with the same key name, a number now where it was a string.
+        Target target = new Target(true, "floci-zetl-integration:one", "id", "numeric", "value", "jsonb");
+
+        assertTrue(target.create());
+
+        verify(target.statement).executeUpdate("DROP TABLE public.\"orders\"");
+        verify(target.statement).executeUpdate(contains("\"id\" TEXT NOT NULL"));
+    }
+
+    @Test
+    void refusesATableAnotherLiveIntegrationMarkedAndLeavesItAlone() throws Exception {
+        Target target = new Target(true, "floci-zetl-integration:other", "id", "text", "value", "jsonb");
+        when(target.redshiftService.integrationExists("111111111111", "other")).thenReturn(true);
+
+        AwsException e = assertThrows(AwsException.class, target::create);
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertTrue(e.getMessage().contains("is in use by zero-ETL integration other"));
+        verify(target.statement, never()).executeUpdate(any());
+        verify(target.connection).rollback();
+        verify(target.connection, never()).commit();
+    }
+
+    @Test
     void refusesATableNoIntegrationMadeAndLeavesItAlone() throws Exception {
-        Target target = new Target(true, null, "id", "value");
+        Target target = new Target(true, null, "id", "text", "value", "jsonb");
 
         AwsException e = assertThrows(AwsException.class, target::create);
 
@@ -192,7 +219,7 @@ class RedshiftZeroEtlWriterTest {
 
     @Test
     void refusesATableCarryingSomeoneElsesComment() throws Exception {
-        Target target = new Target(true, "orders of the finance team", "id", "value");
+        Target target = new Target(true, "orders of the finance team", "id", "text", "value", "jsonb");
 
         assertThrows(AwsException.class, target::create);
 
@@ -222,19 +249,27 @@ class RedshiftZeroEtlWriterTest {
     }
 
 
-    /** Stubs the information_schema lookup of a public table's columns. */
-    private static PreparedStatement columnsOf(Connection connection, String... names) throws SQLException {
+    /** Stubs the information_schema lookup of a public table's columns, each name followed by its data type. */
+    private static PreparedStatement columnsOf(Connection connection, String... namesAndTypes) throws SQLException {
+        int count = namesAndTypes.length / 2;
+        String[] names = new String[count];
+        String[] types = new String[count];
+        for (int i = 0; i < count; i++) {
+            names[i] = namesAndTypes[2 * i];
+            types[i] = namesAndTypes[2 * i + 1];
+        }
         PreparedStatement statement = mock(PreparedStatement.class);
         ResultSet rows = mock(ResultSet.class);
         when(connection.prepareStatement(contains("information_schema.columns"))).thenReturn(statement);
         when(statement.executeQuery()).thenReturn(rows);
-        Boolean[] next = new Boolean[names.length + 1];
-        for (int i = 0; i < names.length; i++) {
+        Boolean[] next = new Boolean[count + 1];
+        for (int i = 0; i < count; i++) {
             next[i] = true;
         }
-        next[names.length] = false;
+        next[count] = false;
         when(rows.next()).thenReturn(next[0], Arrays.copyOfRange(next, 1, next.length));
         when(rows.getString(1)).thenReturn(names[0], Arrays.copyOfRange(names, 1, names.length));
+        when(rows.getString(2)).thenReturn(types[0], Arrays.copyOfRange(types, 1, types.length));
         return statement;
     }
 

@@ -22,9 +22,9 @@ import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -45,8 +45,8 @@ public class RedshiftZeroEtlWriter {
     private static final String INSERT_RECORD = "INSERT INTO %s (event_id, event_name, event_source, aws_region, "
             + "sequence_number, approximate_creation_datetime, keys_json, old_image_json, new_image_json) "
             + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING";
-    private static final String COLUMNS_OF_TABLE = "SELECT column_name FROM information_schema.columns "
-            + "WHERE table_schema = 'public' AND table_name = ? ORDER BY ordinal_position";
+    private static final String COLUMNS_OF_TABLE = "SELECT column_name, data_type FROM information_schema.columns "
+            + "WHERE table_schema = 'public' AND table_name = ?";
     /** Whether a table exists, and the comment it carries: the mark of the integration that made it. */
     private static final String TABLE_OWNER = "SELECT to_regclass(?) IS NOT NULL, "
             + "obj_description(to_regclass(?), 'pg_class')";
@@ -88,10 +88,12 @@ public class RedshiftZeroEtlWriter {
      * <ul>
      *   <li>No such table: it is created and marked.</li>
      *   <li>A table this integration marked, with the columns its source's keys give: it is kept.</li>
-     *   <li>A table an earlier integration marked, or this one's with other columns (the source was made again with
-     *       other keys): it is dropped and created afresh, since its rows describe a source that no longer
-     *       exists.</li>
-     *   <li>A table nobody marked, a user's own: it is refused with {@code InvalidParameterValue} and left alone.</li>
+     *   <li>A table an earlier integration marked, that no longer exists, or this one's with other columns or column
+     *       types (the source was made again with other keys): it is dropped and created afresh, since its rows
+     *       describe a source that no longer exists.</li>
+     *   <li>A table nobody marked, a user's own, or one that a live integration marked (two sources sharing a table
+     *       name, such as the same name in two Regions): it is refused with {@code InvalidParameterValue} and left
+     *       alone.</li>
      * </ul>
      *
      * @param integrationId the id of the integration that owns the table, the last segment of its ARN
@@ -119,6 +121,12 @@ public class RedshiftZeroEtlWriter {
                     if (owner == null || !owner.startsWith(OWNER_MARKER_PREFIX)) {
                         throw new AwsException("InvalidParameterValue", "Table " + state.qualifiedName()
                                 + " already exists and was not created by a zero-ETL integration, so integration "
+                                + integrationId + " will not write into it.", 400);
+                    }
+                    String markedBy = owner.substring(OWNER_MARKER_PREFIX.length());
+                    if (!markedBy.equals(integrationId) && redshiftService.integrationExists(accountId, markedBy)) {
+                        throw new AwsException("InvalidParameterValue", "Table " + state.qualifiedName()
+                                + " is in use by zero-ETL integration " + markedBy + ", so integration "
                                 + integrationId + " will not write into it.", 400);
                     }
                     fresh = !owner.equals(marker) || !hasColumns(connection, state);
@@ -152,17 +160,21 @@ public class RedshiftZeroEtlWriter {
         return OWNER_MARKER_PREFIX + integrationId;
     }
 
+    /**
+     * Whether the table has exactly the columns the source's keys give, with their types: a source made again with
+     * the same key name under another type would otherwise keep a column its keys can no longer be bound to.
+     */
     private static boolean hasColumns(Connection connection, RedshiftZeroEtlCurrentState state) throws SQLException {
-        List<String> columns = new ArrayList<>();
+        Map<String, String> columns = new HashMap<>();
         try (PreparedStatement statement = connection.prepareStatement(COLUMNS_OF_TABLE)) {
             statement.setString(1, state.tableName());
             try (ResultSet rows = statement.executeQuery()) {
                 while (rows.next()) {
-                    columns.add(rows.getString(1));
+                    columns.put(rows.getString(1), rows.getString(2));
                 }
             }
         }
-        return new HashSet<>(columns).equals(new HashSet<>(state.expectedColumns()));
+        return columns.equals(state.expectedColumnTypes());
     }
 
     /** Empties the current-state table, for an integration starting its backfill over a table left behind. */

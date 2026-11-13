@@ -12,7 +12,10 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -108,10 +111,16 @@ public final class RedshiftZeroEtlCurrentState {
         return keyColumns.stream().map(KeyColumn::name).toList();
     }
 
-    /** The columns a table of this name must have for the integration to write it: the keys, then {@code value}. */
-    List<String> expectedColumns() {
-        List<String> columns = new ArrayList<>(keyColumnNames());
-        columns.add(VALUE_COLUMN);
+    /**
+     * The columns a table of this name must have for the integration to write it, the keys then {@code value}, with
+     * the type each has as {@code information_schema.columns.data_type} names it.
+     */
+    Map<String, String> expectedColumnTypes() {
+        Map<String, String> columns = new LinkedHashMap<>();
+        for (KeyColumn column : keyColumns) {
+            columns.put(column.name(), sqlType(column).toLowerCase(Locale.ROOT));
+        }
+        columns.put(VALUE_COLUMN, "jsonb");
         return columns;
     }
 

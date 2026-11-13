@@ -883,6 +883,11 @@ public class RedshiftService implements ManagedSecretRotator {
                 .toList();
     }
 
+    /** Whether {@code accountId} holds the integration, which is gone once it is deleted. */
+    public boolean integrationExists(String accountId, String integrationId) {
+        return integrations.getForAccount(accountId, integrationId).isPresent();
+    }
+
     public List<Integration> listS3AutoCopyIntegrations() {
         return integrations.scanAllAccountEntries(key -> true).stream()
                 .filter(entry -> S3_EVENT_SOURCE_TYPE.equals(entry.value().getSourceType()))

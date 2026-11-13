@@ -504,8 +504,10 @@ SELECT id, value->'note'->>'S' AS note FROM public."orders";
 - The integration marks its table as its own, with a comment naming the integration
   (`floci-zetl-integration:<integration-id>`, see `obj_description`). A table that an earlier integration
   of the source marked is dropped and made afresh by the next one, so an item deleted from the source in
-  between does not survive and a source made again with other keys does not meet its predecessor's
-  columns. A table nobody marked, one the user already has under that name, is refused and left alone.
+  between does not survive and a source made again with other keys, or the same key name under another
+  type, does not meet its predecessor's columns. A table nobody marked, one the user already has under that
+  name, is refused and left alone, and so is one that another integration still running marked (two
+  sources sharing a table name, such as the same name in two Regions, cannot share one target table).
 - The current-state table never holds back the landing log. A projection that cannot be written (a
   refused table, a table dropped under the integration, an unreachable target) is logged as a warning
   once, and the integration keeps landing and checkpointing its records. Each poll tries to make the table

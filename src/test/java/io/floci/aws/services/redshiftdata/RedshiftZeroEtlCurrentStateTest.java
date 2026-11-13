@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -37,7 +38,7 @@ class RedshiftZeroEtlCurrentStateTest {
         assertEquals("CREATE TABLE IF NOT EXISTS public.\"orders\" (\"pk\" TEXT NOT NULL, "
                 + "\"sk\" NUMERIC NOT NULL, \"value\" JSONB NOT NULL, PRIMARY KEY (\"pk\", \"sk\"))", state.ddl());
         assertEquals("TRUNCATE TABLE public.\"orders\"", state.resetSql());
-        assertEquals(List.of("pk", "sk", "value"), state.expectedColumns());
+        assertEquals(Map.of("pk", "text", "sk", "numeric", "value", "jsonb"), state.expectedColumnTypes());
         assertEquals("INSERT INTO public.\"orders\" (\"pk\", \"sk\", \"value\") VALUES (?, ?, ?::jsonb) "
                 + "ON CONFLICT (\"pk\", \"sk\") DO UPDATE SET \"value\" = EXCLUDED.\"value\"", state.upsertSql());
         assertEquals("DELETE FROM public.\"orders\" WHERE \"pk\" = ? AND \"sk\" = ?", state.deleteSql());
