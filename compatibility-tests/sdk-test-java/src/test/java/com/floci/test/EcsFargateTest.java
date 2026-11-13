@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.DescribeSubnetsRequest;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.AwsVpcConfiguration;
 import software.amazon.awssdk.services.ecs.model.CapacityProviderStrategyItem;
@@ -38,6 +37,8 @@ import software.amazon.awssdk.services.ecs.model.Task;
 import software.amazon.awssdk.services.ecs.model.TaskDefinition;
 
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,6 +52,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class EcsFargateTest {
 
+    private static final Deque<Runnable> CLEANUP = new ArrayDeque<>();
     private static EcsClient ecs;
     private static Ec2Client ec2;
     private static String clusterName;
@@ -61,37 +63,48 @@ class EcsFargateTest {
     @BeforeAll
     static void setup() {
         ecs = TestFixtures.ecsClient();
+        CLEANUP.addFirst(ecs::close);
         ec2 = TestFixtures.ec2Client();
-        String suffix = String.valueOf(System.currentTimeMillis() % 100000);
+        CLEANUP.addFirst(ec2::close);
+        String suffix = TestFixtures.uniqueName("fargate");
         clusterName = "sdk-fargate-cluster-" + suffix;
         family = "sdk-fargate-task-" + suffix;
-        subnetId = ec2.describeSubnets(DescribeSubnetsRequest.builder().build())
-                .subnets().get(0).subnetId();
+        String vpcId = ec2.createVpc(request -> request.cidrBlock("10.99.0.0/16")).vpc().vpcId();
+        CLEANUP.addFirst(() -> ec2.deleteVpc(request -> request.vpcId(vpcId)));
+        subnetId = ec2.createSubnet(request -> request.vpcId(vpcId).cidrBlock("10.99.0.0/24"))
+                .subnet().subnetId();
+        CLEANUP.addFirst(() -> ec2.deleteSubnet(request -> request.subnetId(subnetId)));
         ecs.createCluster(CreateClusterRequest.builder().clusterName(clusterName).build());
+        CLEANUP.addFirst(() -> ecs.deleteCluster(request -> request.cluster(clusterName)));
     }
 
     @AfterAll
     static void cleanup() {
-        if (ecs == null) {
-            return;
-        }
-        try {
-            if (taskArn != null) {
-                ecs.stopTask(StopTaskRequest.builder().cluster(clusterName).task(taskArn).build());
+        RuntimeException failure = null;
+        while (!CLEANUP.isEmpty()) {
+            try {
+                CLEANUP.removeFirst().run();
+            } catch (RuntimeException error) {
+                if (failure == null) {
+                    failure = error;
+                } else {
+                    failure.addSuppressed(error);
+                }
             }
-        } catch (EcsException ignored) {
-            // The task may already have stopped; cleanup must not fail the run.
         }
-        try {
-            ecs.deregisterTaskDefinition(DeregisterTaskDefinitionRequest.builder()
-                    .taskDefinition(family + ":1").build());
-            ecs.deleteTaskDefinitions(DeleteTaskDefinitionsRequest.builder()
-                    .taskDefinitions(family + ":1").build());
-        } catch (EcsException ignored) {
-            // Same: a failed registration leaves nothing to clean up.
+        if (failure != null) {
+            throw failure;
         }
-        ecs.close();
-        ec2.close();
+    }
+
+    private static Task rememberTask(Task task) {
+        CLEANUP.addFirst(() -> {
+            ecs.stopTask(StopTaskRequest.builder().cluster(clusterName).task(task.taskArn()).build());
+            ecs.waiter().waitUntilTasksStopped(DescribeTasksRequest.builder()
+                            .cluster(clusterName).tasks(task.taskArn()).build(),
+                    TestFixtures.waiterOverride(Duration.ofSeconds(60)));
+        });
+        return task;
     }
 
     @Test
@@ -118,6 +131,10 @@ class EcsFargateTest {
                         .stopTimeout(30)
                         .build())
                 .build()).taskDefinition();
+        CLEANUP.addFirst(() -> ecs.deleteTaskDefinitions(DeleteTaskDefinitionsRequest.builder()
+                .taskDefinitions(registered.taskDefinitionArn()).build()));
+        CLEANUP.addFirst(() -> ecs.deregisterTaskDefinition(DeregisterTaskDefinitionRequest.builder()
+                .taskDefinition(registered.taskDefinitionArn()).build()));
 
         assertThat(registered.compatibilitiesAsStrings()).contains("FARGATE");
         assertThat(registered.ephemeralStorage().sizeInGiB()).isEqualTo(40);
@@ -165,6 +182,7 @@ class EcsFargateTest {
                                 .build())
                         .build())
                 .build()).tasks();
+        tasks.forEach(EcsFargateTest::rememberTask);
 
         assertThat(tasks).hasSize(1);
         Task task = tasks.get(0);
@@ -200,7 +218,7 @@ class EcsFargateTest {
     @Order(4)
     @DisplayName("RunTask - FARGATE_SPOT places through the capacity provider")
     void runTaskOnFargateSpot() {
-        Task task = ecs.runTask(RunTaskRequest.builder()
+        Task task = rememberTask(ecs.runTask(RunTaskRequest.builder()
                 .cluster(clusterName)
                 .taskDefinition(family)
                 .capacityProviderStrategy(CapacityProviderStrategyItem.builder()
@@ -212,7 +230,7 @@ class EcsFargateTest {
                                 .subnets(subnetId)
                                 .build())
                         .build())
-                .build()).tasks().get(0);
+                .build()).tasks().get(0));
 
         assertThat(task.capacityProviderName()).isEqualTo("FARGATE_SPOT");
         // A task reports the launch type its capacity provider resolves to, alongside the provider.
@@ -226,7 +244,7 @@ class EcsFargateTest {
     @Order(5)
     @DisplayName("ExecuteCommand - refused for a task that was not run with it enabled")
     void executeCommandRequiresTheTaskToHaveItEnabled() {
-        Task plain = ecs.runTask(RunTaskRequest.builder()
+        Task plain = rememberTask(ecs.runTask(RunTaskRequest.builder()
                 .cluster(clusterName)
                 .taskDefinition(family)
                 .launchType(LaunchType.FARGATE)
@@ -235,7 +253,7 @@ class EcsFargateTest {
                                 .subnets(subnetId)
                                 .build())
                         .build())
-                .build()).tasks().get(0);
+                .build()).tasks().get(0));
 
         try {
             // ExecuteCommand reaches only a running task, and RunTask answers before the launch.
