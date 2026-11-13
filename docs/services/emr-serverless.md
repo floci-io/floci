@@ -14,6 +14,7 @@ EMR Serverless is an AWS service that provides serverless data analytics environ
 | `floci.services.emrserverless.image-template` | Image for a `docker` job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release |
 | `floci.services.emrserverless.hive-image-template` | Image for a `docker` Hive job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/hive/%s:latest` |
 | `floci.services.emrserverless.executor-containers` | How many executors a `docker` Spark job run may have at once, each in a container of its own (see **Executors** under [Running Spark job runs](#running-spark-job-runs)); `0`, the default, runs a run's executors in its driver's container, in Spark's local mode | `0` |
+| `floci.services.emrserverless.honour-architectures` | Run a `docker` job run's driver and executors for its application's `architecture` (see **Architecture** under [Running Spark job runs](#running-spark-job-runs)); `false` runs them on the Docker host's own platform | `false` |
 | `floci.services.emrserverless.reconcile-containers-on-startup` | Remove the drivers and executors a previous run of this Floci left on the Docker daemon before the first job run starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace | `true` |
 
 ## Endpoints
@@ -228,6 +229,15 @@ worker of its own on EMR Serverless (see **Executors** below).
   wording. An update that leaves `imageUri` out removes that image configuration. Without a custom image,
   `image-template` names another image than the release's, such as a mirror or a dated tag of it:
   `registry.internal/emr-serverless/spark/%s:20250425`.
+* **Architecture**: a run's containers, its driver's and its executors', run on the Docker host's own platform by
+  default. With `honour-architectures` on (`FLOCI_SERVICES_EMRSERVERLESS_HONOUR_ARCHITECTURES=true`) they run the
+  image for its application's `architecture`, `linux/amd64` for `X86_64` and `linux/arm64` for `ARM64`, the
+  release's images being published for both and a custom image pulled for that platform; an application that names
+  none still runs on the host's own, where on EMR Serverless "x86_64 is the default option". It is off by default,
+  as Lambda's is, because tools such as Terraform name `X86_64` unless told otherwise, which on an arm64 host would
+  move every run to emulation. A host of another architecture runs the image under emulation, which Docker Desktop
+  has and a Linux host gets from QEMU's `binfmt_misc` handlers; without it the driver cannot start
+  ("exec format error") and the run fails. Floci does not fall back to the host's platform when the setting is on.
 
 ## Running Hive job runs
 

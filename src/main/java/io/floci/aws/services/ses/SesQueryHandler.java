@@ -376,8 +376,7 @@ public class SesQueryHandler {
         String identityValue = getParam(params, "Identity");
         String notificationType = getParam(params, "NotificationType");
         String snsTopic = getParam(params, "SnsTopic");
-        identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic,
-                region);
+        sesService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityNotificationTopic", AwsNamespaces.SES)).build();
     }
 

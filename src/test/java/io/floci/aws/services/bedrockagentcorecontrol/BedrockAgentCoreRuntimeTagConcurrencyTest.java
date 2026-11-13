@@ -1,24 +1,17 @@
 package io.floci.aws.services.bedrockagentcorecontrol;
 
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntime;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreConcurrencyFixture.REGION;
-import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreConcurrencyFixture.assertBlocked;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BedrockAgentCoreRuntimeTagConcurrencyTest {
 
@@ -27,24 +20,9 @@ class BedrockAgentCoreRuntimeTagConcurrencyTest {
     void deletionWaitsForTagPublication(boolean remove) throws Exception {
         BedrockAgentCoreConcurrencyFixture fixture = taggedRuntime();
         fixture.storage.parkNextWrite();
-        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Future<?> tagging = executor.submit(() -> changeTags(fixture, remove));
-            try {
-                assertTrue(fixture.storage.awaitParked());
-                AtomicReference<Thread> deleteThread = new AtomicReference<>();
-                Future<AgentRuntime> deletion = executor.submit(() -> {
-                    deleteThread.set(Thread.currentThread());
-                    return fixture.delete();
-                });
-                assertBlocked(deleteThread, deletion);
-                fixture.storage.release();
-                tagging.get(5, TimeUnit.SECONDS);
-                deletion.get(5, TimeUnit.SECONDS);
-                assertAbsent(fixture);
-            } finally {
-                fixture.storage.release();
-            }
-        }
+        assertOperationWaitsForParkedStore(fixture.storage,
+                () -> changeTags(fixture, remove), fixture::delete);
+        assertAbsent(fixture);
     }
 
     @ParameterizedTest
@@ -52,24 +30,12 @@ class BedrockAgentCoreRuntimeTagConcurrencyTest {
     void tagWriteRechecksExistenceAfterDeletion(boolean remove) throws Exception {
         BedrockAgentCoreConcurrencyFixture fixture = taggedRuntime();
         fixture.storage.parkNextRead();
-        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Future<AgentRuntime> deletion = executor.submit(fixture::delete);
-            try {
-                assertTrue(fixture.storage.awaitParked());
-                AtomicReference<Thread> tagThread = new AtomicReference<>();
-                Future<AwsException> tagging = executor.submit(() -> {
-                    tagThread.set(Thread.currentThread());
-                    return assertThrows(AwsException.class, () -> changeTags(fixture, remove));
+        assertOperationWaitsForParkedStore(fixture.storage, fixture::delete,
+                () -> {
+                    AwsException failure = assertThrows(AwsException.class, () -> changeTags(fixture, remove));
+                    assertEquals("ResourceNotFoundException", failure.getErrorCode());
                 });
-                assertBlocked(tagThread, tagging);
-                fixture.storage.release();
-                deletion.get(5, TimeUnit.SECONDS);
-                assertEquals("ResourceNotFoundException", tagging.get(5, TimeUnit.SECONDS).getErrorCode());
-                assertAbsent(fixture);
-            } finally {
-                fixture.storage.release();
-            }
-        }
+        assertAbsent(fixture);
     }
 
     @ParameterizedTest
@@ -89,50 +55,24 @@ class BedrockAgentCoreRuntimeTagConcurrencyTest {
     @ValueSource(booleans = {false, true})
     void tagReadWaitsForTagPublication(boolean remove) throws Exception {
         BedrockAgentCoreConcurrencyFixture fixture = taggedRuntime();
+        Map<String, String> expected = remove ? Map.of("other", "retained") : Map.of("key", "new", "other", "retained");
         fixture.storage.parkNextWrite();
-        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Future<?> tagging = executor.submit(() -> changeTags(fixture, remove));
-            try {
-                assertTrue(fixture.storage.awaitParked());
-                AtomicReference<Thread> readThread = new AtomicReference<>();
-                Future<Map<String, String>> reading = executor.submit(() -> {
-                    readThread.set(Thread.currentThread());
-                    return fixture.service.getTagsByArn(REGION, fixture.arn);
-                });
-                assertBlocked(readThread, reading);
-                fixture.storage.release();
-                tagging.get(5, TimeUnit.SECONDS);
-                assertEquals(remove ? Map.of("other", "retained") : Map.of("key", "new", "other", "retained"),
-                        reading.get(5, TimeUnit.SECONDS));
-            } finally {
-                fixture.storage.release();
-            }
-        }
+        assertOperationWaitsForParkedStore(fixture.storage,
+                () -> changeTags(fixture, remove),
+                () -> assertEquals(expected, fixture.service.getTagsByArn(REGION, fixture.arn)));
     }
 
     @Test
     void tagReadRechecksExistenceAfterDeletion() throws Exception {
         BedrockAgentCoreConcurrencyFixture fixture = taggedRuntime();
         fixture.storage.parkNextRead();
-        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Future<AgentRuntime> deletion = executor.submit(fixture::delete);
-            try {
-                assertTrue(fixture.storage.awaitParked());
-                AtomicReference<Thread> readThread = new AtomicReference<>();
-                Future<AwsException> reading = executor.submit(() -> {
-                    readThread.set(Thread.currentThread());
-                    return assertThrows(AwsException.class,
+        assertOperationWaitsForParkedStore(fixture.storage, fixture::delete,
+                () -> {
+                    AwsException failure = assertThrows(AwsException.class,
                             () -> fixture.service.getTagsByArn(REGION, fixture.arn));
+                    assertEquals("ResourceNotFoundException", failure.getErrorCode());
                 });
-                assertBlocked(readThread, reading);
-                fixture.storage.release();
-                deletion.get(5, TimeUnit.SECONDS);
-                assertEquals("ResourceNotFoundException", reading.get(5, TimeUnit.SECONDS).getErrorCode());
-                assertAbsent(fixture);
-            } finally {
-                fixture.storage.release();
-            }
-        }
+        assertAbsent(fixture);
     }
 
     @Test

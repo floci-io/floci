@@ -25,7 +25,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 /**
  * A stack update that changes a custom resource and then fails on a later resource rolls the custom
  * resource back the way CloudFormation does: the handler is sent a second {@code Update} carrying
- * the old properties, so it can undo what the first one applied.
+ * the old properties, so it can undo what the first one applied. A committed update whose handler
+ * answered a new PhysicalResourceId replaced the resource, and its cleanup phase sends the old id a
+ * {@code Delete}.
  *
  * <p>The ServiceToken Lambda is mocked, as in {@code CloudFormationCustomResourceStackIdIntegrationTest},
  * so no Docker is needed. The mock answers like a real handler, by a PUT of its result to the
@@ -136,6 +138,63 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         assertEquals(List.of("Create:1", "Update:2", "Update:1", "Delete:1"), requests());
         assertProperties(probe.events().get(3), "1", null);
         assertEquals(physicalId, probe.events().get(3).get("PhysicalResourceId").asText());
+    }
+
+    @Test
+    void committedReplacementSendsTheReplacedIdADeleteInTheCleanupPhase() throws InterruptedException {
+        probe.physicalId(event -> "probe-" + event.get("ResourceProperties").get("Revision").asText());
+        String stackName = "cr-replaced-" + Long.toString(System.nanoTime(), 36);
+        String stackId = createStack(stackName, template("1", false));
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        updateStack(stackName, template("2", false));
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        assertEquals(List.of("Create:1", "Update:2", "Delete:1"), requests());
+        JsonNode delete = probe.events().get(2);
+        assertProperties(delete, "1", null);
+        assertEquals("probe-1", delete.get("PhysicalResourceId").asText());
+        assertEquals(stackId, delete.get("StackId").asText());
+        assertEquals("probe-2", physicalIdUnauthenticated(stackName, "Probe"));
+        String events = describeStackEvents(stackId);
+        assertTrue(events.contains("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"), events);
+        List<String> probeEvents = probeEvents(stackId);
+        assertEquals(List.of("UPDATE_IN_PROGRESS:probe-1", "UPDATE_COMPLETE:probe-2",
+                "DELETE_IN_PROGRESS:probe-1", "DELETE_COMPLETE:probe-1"),
+                probeEvents.subList(probeEvents.size() - 4, probeEvents.size()));
+    }
+
+    @Test
+    void replacedIdWhoseDeleteFailsDoesNotFailTheUpdate() throws InterruptedException {
+        probe.physicalId(event -> "probe-" + event.get("ResourceProperties").get("Revision").asText());
+        failOn("Delete:1", "still in use");
+        String stackName = "cr-replaced-failed-" + Long.toString(System.nanoTime(), 36);
+        String stackId = createStack(stackName, template("1", false));
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+
+        updateStack(stackName, template("2", false));
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+
+        assertEquals(List.of("Create:1", "Update:2", "Delete:1", "Delete:1", "Delete:1"), requests());
+        List<Map<String, String>> failures = XmlParser.extractGroups(describeStackEvents(stackId), "member")
+                .stream()
+                .filter(e -> "Probe".equals(e.get("LogicalResourceId")))
+                .filter(e -> "DELETE_FAILED".equals(e.get("ResourceStatus")))
+                .toList();
+        assertEquals(1, failures.size(), failures.toString());
+        assertEquals("probe-1", failures.get(0).get("PhysicalResourceId"));
+        assertTrue(failures.get(0).get("ResourceStatusReason").contains("still in use"), failures.toString());
+        assertEquals("probe-2", physicalIdUnauthenticated(stackName, "Probe"));
+    }
+
+    /** The Probe's stack events, oldest first, as their ResourceStatus and PhysicalResourceId. */
+    private static List<String> probeEvents(String stackId) {
+        return XmlParser.extractGroups(describeStackEvents(stackId), "member")
+                .reversed()
+                .stream()
+                .filter(e -> "Probe".equals(e.get("LogicalResourceId")))
+                .map(e -> e.get("ResourceStatus") + ":" + e.get("PhysicalResourceId"))
+                .toList();
     }
 
     /**

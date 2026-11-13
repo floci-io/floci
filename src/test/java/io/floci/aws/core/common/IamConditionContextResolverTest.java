@@ -21,6 +21,7 @@ import io.floci.aws.services.lambdaweb.LambdaWebService;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.inject.Instance;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -50,11 +51,13 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1042,7 +1045,7 @@ class IamConditionContextResolverTest {
     void instanceActionsResolveResourceTagsFromTheFirstNamedInstance() {
         when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
 
-        for (String action : List.of("ec2:TerminateInstances", "ec2:DescribeInstances")) {
+        for (String action : List.of("ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances", "ec2:RebootInstances")) {
             Map<String, List<String>> conditions = resolver.resolve("ec2", action,
                     formRequest("Action=X&InstanceId.1=i-0123456789&InstanceId.2=i-9999999999"));
             assertEquals(List.of("payments"), conditions.get("aws:ResourceTag/Team"), action);
@@ -1054,6 +1057,14 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void describeInstancesHasNoResourceTagContextsEvenWhenInstancesAreNamed() {
+        ContainerRequestContext request = formRequest("Action=DescribeInstances&InstanceId.1=i-first&InstanceId.2=i-second");
+        assertNull(resolver.resolve("ec2", "ec2:DescribeInstances", request));
+        assertEquals(List.of(), resolver.resolveRemainingTargets("ec2", "ec2:DescribeInstances", request));
+        verify(ec2Service, never()).resourceTags(anyString(), anyString());
+    }
+
+    @Test
     void resourceTagsAreReadInTheRequestRegion() {
         requestContext.setRegion("eu-west-1");
         when(ec2Service.resourceTags("eu-west-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
@@ -1061,6 +1072,37 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("payments"), resolver.resolve("ec2", "ec2:TerminateInstances",
                 formRequest("Action=TerminateInstances&InstanceId.1=i-0123456789")).get("aws:ResourceTag/Team"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ec2:StartInstances", "ec2:StopInstances", "ec2:RebootInstances", "ec2:TerminateInstances"})
+    void instanceLifecycleContextsPreserveOrderEmptyTagsAndTheRequestRegion(String action) {
+        requestContext.setRegion("eu-west-1");
+        when(ec2Service.resourceTags("eu-west-1", "i-first")).thenReturn(List.of(new Tag("Env", "development")));
+        when(ec2Service.resourceTags("eu-west-1", "i-second")).thenReturn(List.of(new Tag("Env", "production")));
+        ContainerRequestContext request = formRequest("InstanceId.1=i-first&InstanceId.1=i-decoy"
+                + "&InstanceId.2=i-second&InstanceId.3=i-untagged&InstanceId.4=i-first&InstanceId.6=i-gap"
+                + "&ResourceId.1=i-decoy");
+        Map<String, List<String>> first = Map.of("aws:ResourceTag/Env", List.of("development"),
+                "ec2:ResourceTag/Env", List.of("development"));
+        assertEquals(first, resolver.resolve("ec2", action, request));
+        assertEquals(List.of(Map.of("aws:ResourceTag/Env", List.of("production"),
+                        "ec2:ResourceTag/Env", List.of("production")), Map.of(), first),
+                resolver.resolveRemainingTargets("ec2", action, request));
+        assertNull(resolver.resolve("ec2", action, formRequest("ResourceId.1=i-first&InstanceId.2=i-second")));
+        assertEquals(List.of(), resolver.resolveRemainingTargets("ec2", action,
+                formRequest("ResourceId.1=i-first&InstanceId.2=i-second")));
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", action.substring(4));
+        query.add("InstanceId.1", "i-first");
+        query.add("InstanceId.1", "i-decoy");
+        query.add("InstanceId.2", "i-second");
+        query.add("InstanceId.4", "i-gap");
+        ContainerRequestContext get = queryRequest("ec2", query);
+        assertEquals(first, resolver.resolve("ec2", action, get));
+        assertEquals(List.of(Map.of("aws:ResourceTag/Env", List.of("production"),
+                        "ec2:ResourceTag/Env", List.of("production"))),
+                resolver.resolveRemainingTargets("ec2", action, get));
     }
 
     @Test
@@ -1080,6 +1122,20 @@ class IamConditionContextResolverTest {
 
         verify(containerRequest).setEntityStream(any());
         verify(containerRequest).setProperty(eq("floci.bufferedFormBody"), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Value=%ZZ", "Value=%", "Value=%A", "%ZZ=value"})
+    void malformedFormsNeverReturnOrCachePartialParameters(String malformed) {
+        ContainerRequestContext request = formRequest("Action=StartInstances&InstanceId.1=i-first&" + malformed);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            WebApplicationException error = assertThrows(WebApplicationException.class,
+                    () -> IamConditionContextResolver.formParameters(request));
+            assertEquals(404, error.getResponse().getStatus());
+            assertEquals("application/xml", error.getResponse().getMediaType().toString());
+            assertTrue(error.getResponse().getEntity().toString().contains("<Code>MalformedQueryString</Code>"));
+        }
+        verify(request, never()).setProperty(eq("floci.bufferedFormBody"), any());
     }
 
     // ── The resolved context drives the real evaluator ─────────────────────────

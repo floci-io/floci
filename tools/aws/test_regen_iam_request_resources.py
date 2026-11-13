@@ -1130,21 +1130,62 @@ def test_id_targets_follow_the_model_and_resource_types_not_operation_names():
     assert "targets" not in r.entry_for("ec2:AnnotateResources", upstream, formats, {"ec2": ec2})
 
 
-def test_generated_ec2_targets_match_botocores_actual_serialization():
+@pytest.mark.parametrize("operation,target", [(operation, entry["targets"])
+    for operation, entry in json.loads(r.OUTPUT.read_text())["operations"].items() if "targets" in entry])
+def test_generated_targets_match_botocores_actual_serialization(operation, target):
     import botocore.session
     from botocore.serialize import create_serializer
+    from botocore.utils import ArgumentGenerator
 
     document = json.loads(r.OUTPUT.read_text())
-    model = botocore.session.get_session().get_service_model("ec2")
-    serializer = create_serializer("ec2")
-    for name in ("CreateTags", "DeleteTags"):
-        target = document["operations"]["ec2:" + name]["targets"]
-        request = serializer.serialize_to_request(
-            {"Resources": ["i-first", "vpc-second", "i-first"], "Tags": [{"Key": "Owner", "Value": "team+a"}]},
-            model.operation_model(name))
-        assert target["member"] == "Resources[]"
-        assert [request["body"][target["query"] + "." + str(i)] for i in range(1, 4)] == ["i-first", "vpc-second", "i-first"]
-        assert target["prefixes"] == {"instance": "i-"}
+    namespace, name = operation.split(":", 1)
+    first = next(iter(target["prefixes"].values())) + "first"
+    ids = [first, "unmodelled-second", first]
+    checked = 0
+    for client in document["namespaces"][namespace]:
+        model = botocore.session.get_session().get_service_model(client)
+        if name not in model.operation_names:
+            continue
+        operation_model = model.operation_model(name)
+        parameters = ArgumentGenerator().generate_skeleton(operation_model.input_shape)
+        parameters[target["member"].removesuffix("[]")] = ids
+        request = create_serializer(model.metadata["protocol"]).serialize_to_request(parameters, operation_model)
+        assert [request["body"][target["query"] + "." + str(i)] for i in range(1, 4)] == ids
+        checked += 1
+    assert checked > 0
+
+
+def test_instance_target_member_is_derived_from_the_arn_variable_not_the_action_name():
+    names = ("StartInstances", "StopInstances", "RebootInstances", "TerminateInstances", "InventedAction")
+    ec2 = model({name: {"InstanceIds": "Strings", "Resources": "Strings"} for name in names}, "ec2")
+    formats = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}"}
+    for name in names:
+        member = ec2["shapes"][name + "In"]["members"]["InstanceIds"]
+        member["locationName"] = "instanceId"
+        upstream = {"action": "ec2:" + name, "types": ["instance"]}
+        entry = r.entry_for("ec2:" + name, upstream, formats, {"ec2": ec2})
+        assert entry["targets"] == {"member": "InstanceIds[]", "query": "InstanceId", "prefixes": {"instance": "i-"}}
+        member["queryName"] = "ExactWireName"
+        assert r.entry_for("ec2:" + name, upstream, formats, {"ec2": ec2})["targets"]["query"] == "ExactWireName"
+    # Unrelated lists cannot become instance targets, even with a familiar action name.
+    del ec2["shapes"]["StartInstancesIn"]["members"]["InstanceIds"]
+    del ec2["shapes"]["StartInstancesIn"]["members"]["Resources"]
+    ec2["shapes"]["StartInstancesIn"]["members"]["DecoyInstanceIds"] = {"shape": "Strings"}
+    assert "targets" not in r.entry_for("ec2:StartInstances",
+            {"action": "ec2:StartInstances", "types": ["instance"]}, formats, {"ec2": ec2})
+    renamed = model({"InventedAction": {"MachineIds": "Strings"}}, "ec2")
+    renamed_formats = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${MachineId}"}
+    assert r.entry_for("ec2:InventedAction", {"action": "ec2:InventedAction", "types": ["instance"]},
+                       renamed_formats, {"ec2": renamed})["targets"]["member"] == "MachineIds[]"
+
+
+def test_resource_tag_prefixes_come_only_from_supported_reference_resources():
+    documents = [{"Name": "ec2", "Resources": [
+        {"Name": "instance", "ConditionKeys": ["vendor:ResourceTag/${TagKey}", "aws:RequestTag/${TagKey}",
+                                               "aws:ResourceTag/${TagKey}", "ec2:Region"]},
+        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]}]}]
+    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"]}}
+    assert r.resource_tag_keys([]) == {}
 
 
 def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_members():

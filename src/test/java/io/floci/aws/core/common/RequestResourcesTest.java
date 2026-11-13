@@ -128,7 +128,10 @@ class RequestResourcesTest {
             assertEquals(List.of(), of(operation, json("{\"Resources\":\"i-one\"}")));
         }
         assertFalse(RequestResources.hasIndividualTargets("ec2:DescribeInstances"));
-        assertEquals(List.of(), RequestResources.ofBody("ec2:TerminateInstances",
+        assertEquals(List.of(instance), RequestResources.ofBody("ec2:TerminateInstances",
+                new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
+                "000000000000", null));
+        assertEquals(List.of(), RequestResources.ofBody("ec2:DescribeInstances",
                 new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
                 "000000000000", null));
     }

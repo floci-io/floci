@@ -510,7 +510,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     .withLabels(labels)
                     .withJavaTrustStore()
                     .build();
-            String containerId = lifecycleManager.create(spec);
+            // For the application's architecture, or the Docker host's own where it names none.
+            String containerId = job.platform() == null ? lifecycleManager.create(spec)
+                    : lifecycleManager.create(spec, job.platform());
             launch.started(containerId);
             // A cluster's HDFS is on a network of its own, which only its steps join; on YARN the executors there reach
             // the driver at the name its container has on it.
@@ -809,10 +811,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private String executorImage(Job job) {
         if (job.executors().image() == null) {
             return lifecycleManager.resolveImageForLaunch(image(job.imageTemplate(), job.releaseLabel(), Engine.SPARK),
-                    ImagePullBehavior.PREFER_CACHED, null).imageId();
+                    ImagePullBehavior.PREFER_CACHED, job.platform()).imageId();
         }
         String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.executors().image()));
-        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, null).imageId();
+        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, job.platform()).imageId();
     }
 
     /**
@@ -845,7 +847,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                         .withLabels(labels)
                         .withJavaTrustStore()
                         .build();
-                String containerId = lifecycleManager.createAndStart(spec).containerId();
+                String containerId = (job.platform() == null ? lifecycleManager.createAndStart(spec)
+                        : lifecycleManager.createAndStart(spec, job.platform())).containerId();
                 try {
                     return new SparkExecutors.Worker(containerId,
                             lifecycleManager.resolveContainerNetworkIp(containerId, network));
@@ -877,14 +880,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * image. A custom image's ECR URI leads to Floci's own registry, as a Lambda function's or an ECS task's
      * does, and the image is pulled for every run, as an ECS task's is, so a tag pushed again is what the next
      * run gets ("New workloads submitted after the update automatically will use the new image"). The driver
-     * starts from the image id that pull resolved, which a later push cannot move.
+     * starts from the image id that pull resolved, which a later push cannot move. Either is pulled for the run's
+     * platform, its application's architecture.
      */
     private String launchImage(Job job) {
         if (job.customImage() == null) {
             return image(job.imageTemplate(), job.releaseLabel(), job.engine());
         }
         String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.customImage()));
-        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, null).imageId();
+        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, job.platform()).imageId();
     }
 
     /**

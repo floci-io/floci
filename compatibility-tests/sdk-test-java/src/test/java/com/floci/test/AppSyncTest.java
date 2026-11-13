@@ -552,6 +552,7 @@ class AppSyncTest {
         CreateTypeResponse resp = client.createType(CreateTypeRequest.builder()
                 .apiId(apiId)
                 .definition("type Item { id: ID!, name: String }")
+                .format(TypeDefinitionFormat.SDL)
                 .build());
 
         assertThat(resp.type()).isNotNull();
@@ -601,6 +602,7 @@ class AppSyncTest {
         client.createType(CreateTypeRequest.builder()
                 .apiId(apiId)
                 .definition("type TempType { id: ID }")
+                .format(TypeDefinitionFormat.SDL)
                 .build());
 
         DeleteTypeResponse resp = client.deleteType(DeleteTypeRequest.builder()

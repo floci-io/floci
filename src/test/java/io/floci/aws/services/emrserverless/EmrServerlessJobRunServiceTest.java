@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -38,8 +39,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -313,6 +316,59 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(applicationImage, runner.jobs.get(0).customImage());
         assertEquals(driverImage, runner.jobs.get(1).customImage());
         assertNull(runner.jobs.get(2).customImage());
+    }
+
+    @Test
+    void aRunsContainersRunForItsApplicationsArchitectureElseTheDockerHostsOwn() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = honouringService(runner);
+        CreateApplicationRequest graviton = applicationRequest("graviton", "emr-7.5.0", "SPARK");
+        graviton.setArchitecture("ARM64");
+        CreateApplicationRequest x86 = applicationRequest("x86", "emr-7.5.0", "SPARK");
+        x86.setArchitecture("X86_64");
+        CreateApplicationRequest hive = applicationRequest("hive-graviton", "emr-7.5.0", "HIVE");
+        hive.setArchitecture("ARM64");
+
+        service.startJobRun(applications.createApplication(graviton).getApplicationId(), request(null, null));
+        service.startJobRun(applications.createApplication(x86).getApplicationId(), request(null, null));
+        service.startJobRun(applicationId, request(null, null));
+        service.startJobRun(applications.createApplication(hive).getApplicationId(),
+                hiveRequest("s3://bucket/queries/report.sql", null, null));
+        for (int i = 0; i < 4; i++) {
+            runNext();
+        }
+
+        assertEquals("linux/arm64", runner.jobs.get(0).platform());
+        assertEquals("linux/amd64", runner.jobs.get(1).platform());
+        // An application that names none runs on the Docker host's own platform.
+        assertNull(runner.jobs.get(2).platform());
+        assertEquals("linux/arm64", runner.jobs.get(3).platform());
+    }
+
+    @Test
+    void aRunsContainersRunForItsApplicationsArchitectureOnlyWithHonourArchitecturesOn() {
+        for (boolean honour : List.of(true, false)) {
+            EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+            when(config.services().emrserverless().runnerMode()).thenReturn("docker");
+            when(config.services().emrserverless().honourArchitectures()).thenReturn(honour);
+            EmrServerlessSparkRunner sparkRunner = mock(EmrServerlessSparkRunner.class);
+            when(sparkRunner.run(any(), any())).thenReturn(SparkJobRunner.Outcome.exitedWith(0));
+            EmrServerlessJobRunService service = new EmrServerlessJobRunService(new InMemoryStorageFactory(ACCOUNT_ID),
+                    applications, iamService, new RegionResolver(REGION, ACCOUNT_ID), null, objectMapper, config, clock,
+                    sparkRunner);
+            CreateApplicationRequest graviton = applicationRequest("graviton-" + honour, "emr-7.5.0", "SPARK");
+            graviton.setArchitecture("ARM64");
+            try {
+                service.startJobRun(applications.createApplication(graviton).getApplicationId(), request(null, null));
+
+                // Off, the default, an ARM64 application's run stays on the Docker host's own platform.
+                String platform = honour ? "linux/arm64" : null;
+                verify(sparkRunner, timeout(10_000))
+                        .run(argThat(job -> Objects.equals(platform, job.platform())), any());
+            } finally {
+                service.shutdown();
+            }
+        }
     }
 
     @Test
@@ -1083,6 +1139,12 @@ class EmrServerlessJobRunServiceTest {
     private EmrServerlessJobRunService dockerService(SparkJobRunner runner, int executorContainers) {
         return new EmrServerlessJobRunService(store, applications, iamService, new RegionResolver(REGION, ACCOUNT_ID),
                 null, objectMapper, 0, clock, runner, tasks::add, null, null, null, executorContainers);
+    }
+
+    // A service whose container runs run for their application's architecture, as with honour-architectures on.
+    private EmrServerlessJobRunService honouringService(SparkJobRunner runner) {
+        return new EmrServerlessJobRunService(store, applications, iamService, new RegionResolver(REGION, ACCOUNT_ID),
+                null, objectMapper, 0, clock, runner, tasks::add, null, null, null, 0, true);
     }
 
     private void runNext() {

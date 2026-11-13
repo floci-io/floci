@@ -204,6 +204,7 @@ final class RequestResourceMembers {
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
                  Map<String, Targets> targets,
                  Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
+                 Map<String, Map<String, List<String>>> resourceTagKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces) {
     }
 
@@ -256,6 +257,32 @@ final class RequestResourceMembers {
                 throw new IllegalStateException(RESOURCE_NAME + " gives " + namespace.getKey() + "'s "
                         + namespace.getValue() + " a minted id, no types whose format ends in its one variable");
             }
+        });
+        Map<String, Map<String, List<String>>> resourceTagKeys = new LinkedHashMap<>();
+        if (!document.path("resourceTagKeys").isMissingNode() && !document.path("resourceTagKeys").isObject()) {
+            throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
+        }
+        document.path("resourceTagKeys").properties().forEach(namespace -> {
+            if (!namespace.getValue().isObject()) {
+                throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
+            }
+            Map<String, List<String>> types = new LinkedHashMap<>();
+            namespace.getValue().properties().forEach(type -> {
+                List<String> keys = new ArrayList<>();
+                if (!formats.getOrDefault(namespace.getKey(), Map.of()).containsKey(type.getKey())
+                        || !type.getValue().isArray()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
+                }
+                type.getValue().forEach(key -> {
+                    String prefix = key.asText("");
+                    if (!prefix.matches("[a-z0-9-]+:ResourceTag/") || keys.contains(prefix)) {
+                        throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
+                    }
+                    keys.add(prefix);
+                });
+                types.put(type.getKey(), List.copyOf(keys));
+            });
+            resourceTagKeys.put(namespace.getKey(), Map.copyOf(types));
         });
         Map<String, List<Resource>> entries = new LinkedHashMap<>();
         Map<String, List<String>> actsOn = new LinkedHashMap<>();
@@ -336,7 +363,7 @@ final class RequestResourceMembers {
             }
         });
         return new Table(Map.copyOf(entries), Map.copyOf(actsOn), Map.copyOf(creates), Map.copyOf(makes),
-                Map.copyOf(targets), Map.copyOf(located), Map.copyOf(formats), namespaces,
+                Map.copyOf(targets), Map.copyOf(located), Map.copyOf(formats), Map.copyOf(resourceTagKeys), namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")));

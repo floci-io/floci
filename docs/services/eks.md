@@ -567,7 +567,7 @@ The node name, the instance ID in `spec.providerID`, and the synthetic EC2 insta
 
 Stock Amazon EKS clusters historically define a default `gp2` StorageClass pointing to the legacy in-tree `kubernetes.io/aws-ebs` plugin, but run no active storage provisioner without the EBS CSI driver. Unqualified PersistentVolumeClaims remain `Pending` on EKS because nothing can provision them. Floci matches this behavior by disabling k3s's bundled `local-path` provisioner and StorageClass, preventing unqualified claims from silently binding to the node filesystem.
 
-Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass.
+Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass. As on an EKS node, the cluster node's mounts are shared, so a driver's node plugin can mount volumes under `/var/lib/kubelet` with `Bidirectional` propagation.
 
 For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
 

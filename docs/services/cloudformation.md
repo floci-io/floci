@@ -1026,6 +1026,12 @@ Lambda. floci supports two shapes:
 The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
 reserves that prefix for its own resource state and ignores such keys.
 
+An update whose handler returned a new `PhysicalResourceId` replaced the resource. Once the update
+commits, the stack enters `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS` and the id it replaced gets a
+`Delete` carrying the properties it had, with no `OldResourceProperties`, as on AWS. A `Delete` the
+handler fails is tried three times, then reported as `DELETE_FAILED`, and the update still completes.
+Under `UpdateReplacePolicy: Retain` the replaced id gets no `Delete`.
+
 A failed stack update rolls back a custom resource whose handler was sent an `Update`, as
 CloudFormation does. This holds whether the handler applied the update and a later resource failed,
 or the handler answered `FAILED` itself. The handler is sent a second `Update` under the same

@@ -66,6 +66,27 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void generatedResourceTagKeysValidateTheirPrefixesAndResourceTypes() throws Exception {
+        assertEquals(List.of("aws:ResourceTag/", "ec2:ResourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("ec2").get("instance"));
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {"namespaces":{"example":["example"]},"arnFormats":{"example":{
+                "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
+                "resourceTagKeys":{"example":{"thing":["vendor:ResourceTag/"]}},
+                "operations":{"example:Read":{"resources":[]}}}
+                """);
+        assertEquals(List.of("vendor:ResourceTag/"),
+                parse(document.toString()).resourceTagKeys().get("example").get("thing"));
+        for (String invalid : List.of("{\"missing\":[\"vendor:ResourceTag/\"]}",
+                "{\"thing\":\"vendor:ResourceTag/\"}", "{\"thing\":[\"vendor:ResourceTag\"]}",
+                "{\"thing\":[\"vendor:ResourceTag/\",\"vendor:ResourceTag/\"]}")) {
+            ObjectNode changed = document.deepCopy();
+            ((ObjectNode) changed.path("resourceTagKeys")).set("example", MAPPER.readTree(invalid));
+            assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
+        }
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));

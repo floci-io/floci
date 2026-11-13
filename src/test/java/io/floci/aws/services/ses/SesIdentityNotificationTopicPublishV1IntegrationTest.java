@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -18,6 +19,7 @@ import java.util.Base64;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -85,16 +87,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                 .extract().jsonPath().getString("Attributes.QueueArn");
         assertNotNull(queueArn);
 
-        topicArn = given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH)
-                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
-                .body("{\"Name\":\"ses-id-notif-topic\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().jsonPath().getString("TopicArn");
+        topicArn = createSnsTopic(SNS_AUTH, "ses-id-notif-topic");
         assertNotNull(topicArn);
 
         given()
@@ -256,16 +249,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     void aDeletedBounceTopicIsTakenOutOfTheIdentityAndForwardingTurnsBackOn() {
         String gone = "id-notif-gone@floci.test";
         verifyEmailIdentity(gone);
-        String goneTopic = given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH)
-                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
-                .body("{\"Name\":\"ses-id-notif-gone-topic\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().jsonPath().getString("TopicArn");
+        String goneTopic = createSnsTopic(SNS_AUTH, "ses-id-notif-gone-topic");
         setIdentityNotificationTopic(gone, "Bounce", goneTopic);
         setIdentityNotificationTopic(gone, "Complaint", goneTopic);
         given()
@@ -278,15 +262,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                 .post("/")
         .then()
                 .statusCode(200);
-        given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH)
-                .header("X-Amz-Target", "SNS_20100331.DeleteTopic")
-                .body("{\"TopicArn\":\"" + goneTopic + "\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+        deleteSnsTopic(SNS_AUTH, goneTopic);
 
         sendEmail(gone, "bounce@simulator.amazonses.com", "id-notif-gone");
 
@@ -303,6 +279,152 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
         assertTrue(attributes.contains("<BounceTopic></BounceTopic>"), attributes);
         assertTrue(attributes.contains("<ComplaintTopic></ComplaintTopic>"), attributes);
         assertTrue(attributes.contains("<ForwardingEnabled>true</ForwardingEnabled>"), attributes);
+    }
+
+    @Test
+    @Order(11)
+    void aTopicThatDoesNotExistIsRefusedAndTheStoredTopicStays() {
+        String missing = topicArn + "-missing";
+
+        setIdentityNotificationTopicRaw(SENDER, "Bounce",
+                "&SnsTopic=" + URLEncoder.encode(missing, StandardCharsets.UTF_8))
+                .statusCode(400)
+                .body(containsString("<Type>Sender</Type>"))
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>SNS topic " + missing + " is invalid.</Message>"));
+
+        notificationAttributes(SENDER).body(containsString("<BounceTopic>" + topicArn + "</BounceTopic>"));
+    }
+
+    @Test
+    @Order(12)
+    void aTopicOfAnotherRegionIsRefused() {
+        String elsewhereAuth = SNS_AUTH.replace("us-east-1", "us-west-2");
+        String elsewhere = createSnsTopic(elsewhereAuth, "ses-id-notif-elsewhere-topic");
+
+        try {
+            setIdentityNotificationTopicRaw(SENDER, "Delivery",
+                    "&SnsTopic=" + URLEncoder.encode(elsewhere, StandardCharsets.UTF_8))
+                    .statusCode(400)
+                    .body(containsString("<Message>SNS topic " + elsewhere + " is invalid.</Message>"));
+        } finally {
+            deleteSnsTopic(elsewhereAuth, elsewhere);
+        }
+    }
+
+    @Test
+    @Order(13)
+    void aValueThatIsNotATopicArnGetsTheSameMessage() {
+        setIdentityNotificationTopicRaw(SENDER, "Delivery", "&SnsTopic=not-an-arn")
+                .statusCode(400)
+                .body(containsString("<Message>SNS topic not-an-arn is invalid.</Message>"));
+    }
+
+    @Test
+    @Order(14)
+    void anEmptyTopicIsRefusedAndOnlyAnAbsentOneClears() {
+        setIdentityNotificationTopicRaw(SENDER, "Complaint", "&SnsTopic=")
+                .statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>SNS topic cannot be empty.</Message>"));
+        notificationAttributes(SENDER).body(containsString("<ComplaintTopic>" + topicArn + "</ComplaintTopic>"));
+
+        setIdentityNotificationTopicRaw(SENDER, "Complaint", "").statusCode(200);
+        notificationAttributes(SENDER).body(containsString("<ComplaintTopic></ComplaintTopic>"));
+    }
+
+    @Test
+    @Order(15)
+    void theTopicIsCheckedBeforeTheIdentity() {
+        String unknown = "id-notif-unknown@floci.test";
+
+        setIdentityNotificationTopicRaw(unknown, "Bounce", "&SnsTopic=not-an-arn")
+                .statusCode(400)
+                .body(containsString("<Message>SNS topic not-an-arn is invalid.</Message>"));
+        setIdentityNotificationTopicRaw(unknown, "Bounce",
+                "&SnsTopic=" + URLEncoder.encode(topicArn, StandardCharsets.UTF_8))
+                .statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>Identity " + unknown
+                        + " is invalid. Must be a verified email address or domain.</Message>"));
+        setIdentityNotificationTopicRaw(SENDER, "Bogus", "&SnsTopic=not-an-arn")
+                .statusCode(400)
+                .body(containsString("<Code>ValidationError</Code>"));
+        setIdentityNotificationTopicRaw(" " + SENDER, "Bounce", "&SnsTopic=not-an-arn")
+                .statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("<Message>Identity  " + SENDER
+                        + " is invalid. Must be a valid email address or domain or identity ARN.</Message>"));
+    }
+
+    @Test
+    @Order(16)
+    void theMissingMembersAreReportedTogether() {
+        given()
+                .contentType(FORM)
+                .header("Authorization", SES_AUTH)
+                .body("Action=SetIdentityNotificationTopic&SnsTopic=not-an-arn&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body(containsString("<Code>ValidationError</Code>"))
+                .body(containsString("<Message>2 validation errors detected: Value at &apos;identity&apos; "
+                        + "failed to satisfy constraint: Member must not be null; "
+                        + "Value at &apos;notificationType&apos; failed to satisfy constraint: "
+                        + "Member must not be null</Message>"));
+    }
+
+    private static String createSnsTopic(String auth, String name) {
+        return given()
+                .contentType(JSON_10)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
+                .body("{\"Name\":\"" + name + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract().jsonPath().getString("TopicArn");
+    }
+
+    private static void deleteSnsTopic(String auth, String topicArn) {
+        given()
+                .contentType(JSON_10)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", "SNS_20100331.DeleteTopic")
+                .body("{\"TopicArn\":\"" + topicArn + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+    }
+
+    private ValidatableResponse setIdentityNotificationTopicRaw(String identity, String notificationType,
+                                                                String topicParam) {
+        return given()
+                .contentType(FORM)
+                .header("Authorization", SES_AUTH)
+                .body("Action=SetIdentityNotificationTopic"
+                        + "&Identity=" + URLEncoder.encode(identity, StandardCharsets.UTF_8)
+                        + "&NotificationType=" + notificationType
+                        + topicParam
+                        + "&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then();
+    }
+
+    private ValidatableResponse notificationAttributes(String identity) {
+        return given()
+                .contentType(FORM)
+                .header("Authorization", SES_AUTH)
+                .body("Action=GetIdentityNotificationAttributes&Identities.member.1="
+                        + URLEncoder.encode(identity, StandardCharsets.UTF_8) + "&Version=2010-12-01")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
     }
 
     private void verifyEmailIdentity(String email) {

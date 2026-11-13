@@ -106,8 +106,10 @@ public class SsoPortalService {
         String secretAccessKey = random(SECRET_CHARACTERS, 40);
         String sessionToken = random(SECRET_CHARACTERS, 200);
         String roleArn = role.getArn();
+        // IAM Identity Center names the role session after the user, as GetCallerIdentity and EKS then report it.
+        String sessionName = ssoAdminService.portalSessionName(assignment, session.principalId()).orElse(null);
         iamService.registerSessionForAccount(accountId, accessKeyId, secretAccessKey, sessionToken,
-                roleArn, expiration, null);
+                roleArn, expiration, null, sessionName);
         return new PortalRoleCredentials(accessKeyId, expiration.toEpochMilli(), secretAccessKey, sessionToken);
     }
 
