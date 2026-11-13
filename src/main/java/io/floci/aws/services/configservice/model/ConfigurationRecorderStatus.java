@@ -9,6 +9,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record ConfigurationRecorderStatus(
+        @JsonProperty("arn") String arn,
         @JsonProperty("name") String name,
         @JsonProperty("recording") Boolean recording,
         @JsonProperty("lastStatus") String lastStatus,

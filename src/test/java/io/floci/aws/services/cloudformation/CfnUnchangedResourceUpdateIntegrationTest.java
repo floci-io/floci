@@ -22,9 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * UpdateStack must leave an unchanged resource alone, whatever its type.
  *
- * <p>{@code provision()} re-runs for every resource on every update, changed or not, so a
- * provisioner that calls create unconditionally either collides with itself (rolling the stack
- * back) or quietly mints a new physical id, orphaning everything that referenced the old one.
+ * <p>The update engine skips resources outside the change set. Re-provisioning an unchanged
+ * resource could collide with its existing name (rolling the stack back), or quietly mint a new
+ * physical id, orphaning everything that referenced the old one.
  * Each case here builds a stack holding one resource plus a throwaway queue, updates only the
  * queue, and asserts both that the stack reached UPDATE_COMPLETE and that the untouched resource
  * kept its physical id.

@@ -118,8 +118,7 @@ final class CognitoPoolScopedLifecycle {
         }
         String cleanupPrior = prior.stub() ? prior.physicalId()
                 : prior.identity() == null ? null : encode(prior.identity());
-        ProvisionContext cleanupContext = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(),
-                ctx.stackName(), cleanupPrior, ctx.progress(), ctx.priorProperties());
+        ProvisionContext cleanupContext = ctx.withPriorPhysicalId(cleanupPrior);
         withProjection(resource, projected -> {
             ReplacementCleanup.record(projected, cleanupContext, attributesBefore);
             return null;

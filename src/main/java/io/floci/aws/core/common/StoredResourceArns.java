@@ -20,7 +20,8 @@ import java.util.Optional;
  * connections and API destinations; Application Auto Scaling, for its scalable targets; Redshift Data, for the
  * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
- * permission sets are provisioned to); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
+ * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
+ * invitations and shares of other accounts they act on); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
  * for the namespace a request is of, so IAM never depends on that service directly.</p>
  */
 public interface StoredResourceArns {
@@ -55,6 +56,26 @@ public interface StoredResourceArns {
      */
     default Optional<String> findInAccount(String type, List<String> names, String account, String region) {
         return Optional.empty();
+    }
+
+    /**
+     * The ARN of the caller's resource of the type the service acts on in the Region for a request naming none of
+     * that type (the default view Resource Explorer searches with); empty when there is none, or the type is not one
+     * it acts on so.
+     */
+    default Optional<String> findDefault(String type, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service holds
+     * in that account and acts on there, never as the caller's resource of that name (the sink an OAM link is made
+     * to, a RAM invitation sent to the caller or a share another account owns), so a request naming it is checked on
+     * that ARN alone; false when that account holds no such resource. Whether the caller may use it is the handler's
+     * to answer after the check. Read by the ARN alone, as it runs on every such request.
+     */
+    default boolean reachedInItsAccount(String arn, String accountId) {
+        return false;
     }
 
     /**

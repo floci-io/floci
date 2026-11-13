@@ -353,7 +353,6 @@ AWS::ElasticLoadBalancingV2::TargetGroup	TargetGroupAttributes	accepted and igno
 AWS::ElasticLoadBalancingV2::TargetGroup	Targets	accepted and ignored
 AWS::Events::Archive	KmsKeyIdentifier	documented as ignored (docs/services/cloudformation.md, EventBridge)
 AWS::Events::EventBus	DeadLetterConfig	rejected with a ValidationError, not supported by Floci
-AWS::Events::EventBus	EventSourceName	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	KmsKeyIdentifier	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	LogConfig	rejected with a ValidationError, not supported by Floci
 AWS::IAM::ManagedPolicy	Description	accepted and ignored
@@ -602,7 +601,6 @@ AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
 AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored
 AWS::Route53::RecordSet	Comment	accepted and ignored
 AWS::Route53::RecordSet	GeoLocation	accepted and ignored
-AWS::Route53::RecordSet	MultiValueAnswer	accepted and ignored
 AWS::S3::Bucket	AbacStatus	accepted and ignored
 AWS::S3::Bucket	AccelerateConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AccessControl	silently dropped, as the S3CfnProvisioner javadoc records

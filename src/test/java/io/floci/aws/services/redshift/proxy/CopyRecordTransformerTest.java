@@ -5,12 +5,100 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CopyRecordTransformerTest {
+
+    @Test
+    void expandedDecimalsAreBudgetedBeforeTheNextFieldIsWritten() {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' CSV");
+        AtomicInteger observed = new AtomicInteger();
+        assertThrows(IllegalArgumentException.class, () -> new CopyRecordTransformer(spec, null, null, List.of(0, 0, 0))
+                .apply("1e3,1e3,1e3\n".getBytes(StandardCharsets.UTF_8), size -> {
+                    observed.set(size);
+                    if (size > 3) {
+                        throw new IllegalArgumentException("Output budget exceeded");
+                    }
+                }));
+        assertEquals(4, observed.get());
+    }
+
+    @Test
+    void decimalScaleUsesTruncationByDefaultAndRoundecRoundsTiesAwayFromZero() {
+        for (String option : List.of("", "ROUNDEC")) {
+            CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                    "COPY t FROM 's3://b/k' CSV " + option);
+            byte[] output = new CopyRecordTransformer(spec, null, null, Arrays.asList(2, 2, null))
+                    .apply("20.259,-20.255,20.259\n,,\\N\n".getBytes(StandardCharsets.UTF_8));
+            assertEquals(option.isEmpty() ? "20.25,-20.25,20.259\n,,\\N\n" : "20.26,-20.26,20.259\n,,\\N\n",
+                    new String(output, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void textDecimalsDecodeCopyEscapesBeforeTruncationAndRounding() {
+        String input = "12\\.345|-12\\.345|\\0612.345|12\\056345|12\\x2e345|\\x312.345|12.34\\65\n";
+        assertEquals("12.34|-12.34|12.34|12.34|12.34|12.34|12.34\n",
+                applyDecimals("", input, List.of(2, 2, 2, 2, 2, 2, 2)));
+        assertEquals("12.35|-12.35|12.35|12.35|12.35|12.35|12.35\n",
+                applyDecimals("ROUNDEC", input, List.of(2, 2, 2, 2, 2, 2, 2)));
+    }
+
+    @Test
+    void decimalConversionPreservesInvalidTextAndRawNullMarkers() {
+        String input = "\\N|not\\.numeric|12\\\\.345|12\\.345\n";
+        assertEquals("\\N|not\\.numeric|12\\\\.345|12.34\n",
+                applyDecimals("", input, List.of(2, 2, 2, 2)));
+        assertEquals("12\\.345|12.34\n",
+                applyDecimals("NULL AS '12\\.345'", "12\\.345|12.345\n", List.of(2, 2)));
+        assertEquals("\\00012.345|12.345\\b\n",
+                applyDecimals("", "\\00012.345|12.345\\b\n", List.of(2, 2)));
+        assertEquals("12.34\n", applyDecimals("", "\\t12.345\\v\n", List.of(2)));
+    }
+
+    @Test
+    void csvDecimalsKeepLiteralBackslashes() {
+        String input = "12\\.345,\"12\\.345\",12.345\n";
+        assertEquals("12\\.345,\"12\\.345\",12.34\n", applyDecimals("CSV", input, List.of(2, 2, 2)));
+    }
+
+    @Test
+    void convertedDecimalsEscapePointAndDigitDelimiters() {
+        assertEquals("12\\.34.x\n", applyDecimals("DELIMITER '.'", "12\\.345.x\n", Arrays.asList(2, null)));
+        assertEquals("12.\\06343x\n", applyDecimals("DELIMITER '3'", "12.\\063453x\n", Arrays.asList(2, null)));
+    }
+
+    @Test
+    void convertedDecimalsCannotBecomeCustomNullMarkers() {
+        assertEquals("\\0612.34\n", applyDecimals("NULL AS '12.34'", "12\\.345\n", List.of(2)));
+        assertEquals("\"12.34\"\n", applyDecimals("CSV NULL AS '12.34'", "12.345\n", List.of(2)));
+        assertEquals("\\0612\\.34\n",
+                applyDecimals("DELIMITER '.' NULL AS '12\\.34'", "12\\.345\n", List.of(2)));
+        assertEquals("\\x312.34\n",
+                applyDecimals("DELIMITER '1' NULL AS '\\0612.34'", "\\0612.345\n", List.of(2)));
+    }
+
+    private static String applyDecimals(String options, String input, List<Integer> scales) {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' " + options);
+        byte[] output = new CopyRecordTransformer(spec, null, null, scales)
+                .apply(input.getBytes(StandardCharsets.UTF_8));
+        return new String(output, StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void ignoreBlankLinesDoesNotDiscardWhitespaceOrQuotedEmptyFields() {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' CSV IGNOREBLANKLINES");
+        assertEquals("\"a\n\nb\"\n   \n\"\"\n,\n",
+                new String(new CopyRecordTransformer(spec, null).apply(
+                        "\n\r\n\"a\n\nb\"\n   \n\"\"\n,\n".getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8));
+    }
 
     private static CopyStatementParser.CopyTransforms transforms(
             boolean blanks, boolean empty, boolean removeQuotes, boolean truncate, Character invalid) {

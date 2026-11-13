@@ -237,6 +237,24 @@ class SsmServiceTest {
     }
 
     @Test
+    void restoreParameter_overwritesANameThatPutParameterRejectsUnderThatExactName() {
+        String legacy = " /legacy name ";
+        assertThrows(AwsException.class,
+                () -> ssmService.putParameter(legacy, "v", "String", null, true, "us-east-1"));
+
+        ssmService.restoreParameter(legacy, "v1", "String", null, null, null, null, null, "us-east-1");
+        long version = ssmService.restoreParameter(legacy, "v2", "String", "restored", null, null, null, null,
+                "us-east-1");
+
+        assertEquals(2L, version);
+        Parameter restored = ssmService.getParameter(legacy, "us-east-1");
+        assertEquals(legacy, restored.getName());
+        assertEquals("v2", restored.getValue());
+        assertEquals("restored", restored.getDescription());
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/legacy name", "us-east-1"));
+    }
+
+    @Test
     void putParameter_invalidTagKeyIsRejectedAndTheParameterIsNotCreated() {
         String region = "eu-west-1";
         AwsException ex = assertThrows(AwsException.class, () ->
@@ -1588,6 +1606,39 @@ class SsmServiceTest {
                 ssmService.listTagsForResource(arn.replace(":parameter/", ":parameter"), "us-east-1"));
         ssmService.removeTagsFromResource(arn, List.of("env"), "us-east-1");
         assertEquals(Map.of(), ssmService.listTagsForResource("arn-tagged", "us-east-1"));
+    }
+
+    @Test
+    void tagOperations_byLegacyArnWithoutParameterSlash_tagTheTopLevelParameter() {
+        ssmService.putParameter("legacy-tagged", "v", "String", null, false, "us-east-1");
+        String legacyArn = "arn:aws:ssm:us-east-1:000000000000:parameterlegacy-tagged";
+
+        ssmService.addTagsToResource(legacyArn, Map.of("env", "dev", "team", "core"), "us-east-1");
+        assertEquals(Map.of("env", "dev", "team", "core"), ssmService.listTagsForResource(legacyArn, "us-east-1"));
+        ssmService.removeTagsFromResource(legacyArn, List.of("team"), "us-east-1");
+        assertEquals(Map.of("env", "dev"), ssmService.listTagsForResource("legacy-tagged", "us-east-1"));
+    }
+
+    @Test
+    void tagOperations_byArn_findNothingOutsideTheRequestRegionAndAccount() {
+        ssmService.putParameter("/arn/scoped", "v", "String", null, false, "us-east-1");
+        ssmService.putParameter("secret", "v", "String", null, false, "us-east-1");
+
+        for (String arn : List.of("arn:aws:ssm:us-west-2:000000000000:parameter/arn/scoped",
+                "arn:aws:ssm:us-east-1:111122223333:parameter/arn/scoped",
+                "arn:aws-us-gov:ssm:us-east-1:000000000000:parameter/arn/scoped",
+                "arn:aws:ssm:us-west-2:000000000000:parametersecret",
+                "arn:aws:ssm:us-east-1:111122223333:parametersecret",
+                "arn:aws-us-gov:ssm:us-east-1:000000000000:parametersecret")) {
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> ssmService.addTagsToResource(arn, Map.of("env", "dev"), "us-east-1"));
+            assertEquals("InvalidResourceId", ex.getErrorCode());
+            assertThrows(AwsException.class, () -> ssmService.listTagsForResource(arn, "us-east-1"));
+            assertThrows(AwsException.class,
+                    () -> ssmService.removeTagsFromResource(arn, List.of("env"), "us-east-1"));
+        }
+        assertEquals(Map.of(), ssmService.listTagsForResource("/arn/scoped", "us-east-1"));
+        assertEquals(Map.of(), ssmService.listTagsForResource("secret", "us-east-1"));
     }
 
     @Test

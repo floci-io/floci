@@ -1181,6 +1181,16 @@ public interface EmulatorConfig {
         Optional<String> hiveImageTemplate();
 
         /**
+         * How many executors a {@code docker} Spark job run may have at once, each in a container of its own, as each
+         * has a worker of its own on EMR Serverless; 0, the default, runs a job's executors in its driver's container, in
+         * Spark's local mode. The application's maximum capacity limits them too.
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_EXECUTOR_CONTAINERS
+         */
+        @WithDefault("0")
+        int executorContainers();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
          * previous run of <em>this same</em> Floci left on the daemon (matched by the
          * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci
@@ -2137,6 +2147,16 @@ public interface EmulatorConfig {
          */
         @WithDefault("4")
         int yarnNodeVcores();
+
+        /**
+         * The most core and task nodes a {@code docker} cluster runs as containers of their own, core nodes first; each
+         * costs 300 to 800 MB while idle. With 0 the primary node holds its DataNode and NodeManager, as a cluster of one
+         * node does.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_MAX_WORKER_NODES
+         */
+        @WithDefault("4")
+        int yarnMaxWorkerNodes();
 
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap

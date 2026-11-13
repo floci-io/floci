@@ -53,6 +53,7 @@ final class EmrSparkSteps {
     // The release pages' core-site, which will "Change values in Hadoop's core-site.xml file", and spark-log4j2,
     // which will "Change values in Spark's log4j2.properties file".
     private static final String CORE_SITE = "core-site";
+    private static final String HDFS_SITE = "hdfs-site";
     private static final String SPARK_LOG4J2 = "spark-log4j2";
     // And mapred-site, which will "Change values in the MapReduce application's mapred-site.xml file", hadoop-log4j
     // "Change values in Hadoop's log4j.properties file", and hadoop-env "Change values in the Hadoop environment for
@@ -280,6 +281,11 @@ final class EmrSparkSteps {
                 .forEach((key, value) -> properties.put(SPARK_HADOOP_PREFIX + key, value));
         properties.putAll(properties(configurations, objectMapper, SPARK_DEFAULTS));
         return properties;
+    }
+
+    /** The properties of a cluster's {@code hdfs-site}, of which Floci's HDFS applies {@code dfs.replication}. */
+    static Map<String, String> hdfsSite(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, HDFS_SITE);
     }
 
     /** The properties of a cluster's {@code core-site}, which its steps' {@code hadoop} command gets too. */

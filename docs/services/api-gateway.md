@@ -770,6 +770,15 @@ Gateway v1 (`AWS`/Lambda mapping templates) and the AppSync resolver templates d
 
 ## API Gateway v2 (HTTP and WebSocket APIs) {#v2}
 
+### Integration descriptions
+
+`CreateIntegration` and `UpdateIntegration` retain the optional `description`, which
+is returned by create, update, get, and list operations. Omitting it or supplying null on update
+preserves the stored value; setting it to an empty string clears the description.
+The JSON 1.1 compatibility endpoint exposes the same field as `Description`.
+Non-null descriptions must be strings. Other JSON types return `400 BadRequestException`
+before the integration is created or changed.
+
 ### HTTP and WebSocket integration credentials
 
 V2 management APIs retain `credentialsArn` for integrations and

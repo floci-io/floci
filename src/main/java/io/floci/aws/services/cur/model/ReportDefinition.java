@@ -5,7 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * AWS CUR (Cost and Usage Report) {@code ReportDefinition} record.
@@ -31,6 +33,8 @@ public class ReportDefinition {
     private Instant createdDate;
     private Instant lastUpdatedDate;
     private String reportStatus;        // SUCCESS | ERROR | PENDING
+    /** The report definition resource's tags. Not part of the {@code ReportDefinition} wire shape. */
+    private Map<String, String> tags = new LinkedHashMap<>();
     /**
      * Snapshot of the account that owned the request that created this report.
      * Used by the background emission scheduler to locate the report under the
@@ -86,6 +90,9 @@ public class ReportDefinition {
 
     public String getReportStatus() { return reportStatus; }
     public void setReportStatus(String v) { this.reportStatus = v; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> v) { this.tags = v; }
 
     public String getOwnerAccountId() { return ownerAccountId; }
     public void setOwnerAccountId(String v) { this.ownerAccountId = v; }

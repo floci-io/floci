@@ -4,6 +4,8 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.nullValue;
@@ -44,5 +46,35 @@ class GlobalCorsFilterDefaultIntegrationTest {
         .then()
             .statusCode(200)
             .header("Access-Control-Allow-Origin", nullValue());
+    }
+
+    @Test
+    void sharedJsonPreflightIsNotGrantedWithoutAnAllowedOrigin() {
+        given()
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Headers", "content-type,x-amz-target,x-amz-user-agent")
+        .when()
+            .options("/")
+        .then()
+            .statusCode(405)
+            .header("Access-Control-Allow-Origin", nullValue())
+            .header("Access-Control-Allow-Headers", nullValue());
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"ListUserPools|200|{\"MaxResults\":1}", "InitiateAuth|400|{}"}, delimiter = '|')
+    void cognitoResponsesGetNoCorsHeadersWithoutAnAllowedOrigin(String action, int status, String body) {
+        given()
+            .header("Origin", "http://localhost:3000")
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
+            .contentType("application/x-amz-json-1.1")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(status)
+            .header("Access-Control-Allow-Origin", nullValue())
+            .header("Access-Control-Expose-Headers", nullValue());
     }
 }

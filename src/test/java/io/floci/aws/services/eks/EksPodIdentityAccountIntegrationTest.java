@@ -84,7 +84,7 @@ class EksPodIdentityAccountIntegrationTest {
         cluster.setStatus(ClusterStatus.ACTIVE);
         String issuer = oidcService.newIssuerUrl("us-east-1");
         cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
-        oidcService.ensureKeyForAccount(account, name, issuer);
+        oidcService.ensureKeyForAccount(account, EksService.clusterKey("us-east-1", name), issuer);
         eksService.putClusterForAccount(account, cluster);
         // Persisted clusters lose this @JsonIgnore field; the ARN still names the owner.
         cluster.setAccountId(null);
@@ -108,7 +108,7 @@ class EksPodIdentityAccountIntegrationTest {
 
     private String mintToken(String account, Cluster cluster) {
         return RequestScopes.callAs(account, () -> oidcService.mintServiceAccountToken(
-                cluster.getName(), cluster.getIdentity().getOidc().getIssuer(),
+                EksService.clusterKey("us-east-1", cluster.getName()), cluster.getIdentity().getOidc().getIssuer(),
                 NAMESPACE, SERVICE_ACCOUNT, "pods.eks.amazonaws.com", 3600));
     }
 

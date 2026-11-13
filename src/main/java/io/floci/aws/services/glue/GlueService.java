@@ -16,6 +16,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageOperations;
 import io.floci.aws.services.glue.model.Classifier;
 import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.Connection;
@@ -365,7 +366,7 @@ public class GlueService {
         createDatabase(database, null, regionResolver.getDefaultRegion());
     }
 
-    public void createDatabase(Database database, Map<String, String> tags, String region) {
+    public synchronized void createDatabase(Database database, Map<String, String> tags, String region) {
         String databaseName = normalizeName(database.getName());
         if (databaseStore.get(databaseName).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Database already exists: " + database.getName(), 400);
@@ -409,7 +410,7 @@ public class GlueService {
         }
     }
 
-    public void updateDatabase(String name, Database database) {
+    public synchronized void updateDatabase(String name, Database database) {
         Database existing = getDatabase(name);
         String databaseName = normalizeName(database.getName());
         if (!existing.getName().equals(databaseName)) {
@@ -430,19 +431,21 @@ public class GlueService {
         deleteDatabase(name, regionResolver.getDefaultRegion());
     }
 
-    public void deleteDatabase(String name, String region) {
+    public synchronized void deleteDatabase(String name, String region) {
         String databaseName = getDatabase(name).getName();
         List<String> tableNames = tableStore.scan(k -> true).stream()
                 .filter(table -> databaseName.equals(table.getDatabaseName()))
                 .map(Table::getName)
                 .toList();
         tableNames.forEach(tableName -> deleteTable(name, tableName));
+        StorageOperations.deleteMatchingAtomically(functionStore,
+                function -> databaseName.equals(function.getDatabaseName()));
         databaseStore.delete(databaseName);
         resourceGroupsTaggingService.deleteResources(List.of(databaseArn(region, databaseName)), region);
         LOG.infov("Deleted Glue Database: {0}", name);
     }
 
-    public void createTable(String databaseName, Table table) {
+    public synchronized void createTable(String databaseName, Table table) {
         requireValidSortColumns(sortColumnViolations("tableInput", table.getStorageDescriptor()));
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
@@ -869,10 +872,13 @@ public class GlueService {
         columnStatisticsStore.delete(columnStatisticsKey(databaseName, tableName, columnName));
     }
 
-    public void createPartition(String databaseName, String tableName, Partition partition) {
+    public synchronized void createPartition(String databaseName, String tableName, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
+        if (partitionStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Partition already exists.", 400);
+        }
         partition.setDatabaseName(table.getDatabaseName());
         partition.setTableName(table.getName());
         if (partition.getCreationTime() == null) {
@@ -881,7 +887,7 @@ public class GlueService {
         partitionStore.put(key, partition);
     }
 
-    public List<BatchCreatePartitionError> batchCreatePartitions(
+    public synchronized List<BatchCreatePartitionError> batchCreatePartitions(
             String databaseName,
             String tableName,
             List<Partition> partitions) {
@@ -1277,7 +1283,7 @@ public class GlueService {
         partitionColumnStatisticsStore.delete(partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnName));
     }
 
-    public void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
+    public synchronized void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
         Database database = getDatabase(databaseName);
         String key = functionKey(databaseName, function.getFunctionName());
         if (functionStore.get(key).isPresent()) {
@@ -1290,7 +1296,7 @@ public class GlueService {
         functionStore.put(key, function);
     }
 
-    public UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
+    public synchronized UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
         getDatabase(databaseName);
         return functionStore.get(functionKey(databaseName, functionName))
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
@@ -1332,7 +1338,8 @@ public class GlueService {
         return new UserDefinedFunctionPage(functions.subList(offset, end), newNextToken);
     }
 
-    public void updateUserDefinedFunction(String databaseName, String functionName, UserDefinedFunction function) {
+    public synchronized void updateUserDefinedFunction(
+            String databaseName, String functionName, UserDefinedFunction function) {
         UserDefinedFunction existing = getUserDefinedFunction(databaseName, functionName);
         function.setDatabaseName(existing.getDatabaseName());
         function.setFunctionName(existing.getFunctionName());
@@ -1340,7 +1347,7 @@ public class GlueService {
         functionStore.put(functionKey(databaseName, functionName), function);
     }
 
-    public void deleteUserDefinedFunction(String databaseName, String functionName) {
+    public synchronized void deleteUserDefinedFunction(String databaseName, String functionName) {
         getUserDefinedFunction(databaseName, functionName);
         functionStore.delete(functionKey(databaseName, functionName));
     }

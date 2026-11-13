@@ -430,7 +430,7 @@ class AppSyncIntegrationTest {
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
-                {"definition": "type Query { hello: String, goodbye: String }"}
+                {"definition": "type Query { hello: String, goodbye: String }", "format": "SDL"}
                 """)
         .when()
             .post("/v1/apis/" + apiId + "/types/Query")

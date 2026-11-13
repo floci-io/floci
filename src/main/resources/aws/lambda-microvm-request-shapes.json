@@ -1,0 +1,374 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_lambda_microvm_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "CreateMicrovmImage": "CreateMicrovmImageRequest",
+    "UpdateMicrovmImage": "UpdateMicrovmImageRequest",
+    "RunMicrovm": "RunMicrovmRequest"
+  },
+  "shapes": {
+    "Architecture": {
+      "type": "string",
+      "enum": [
+        "ARM_64"
+      ]
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "Capability": {
+      "type": "string",
+      "enum": [
+        "ALL"
+      ]
+    },
+    "CapabilityList": {
+      "type": "list",
+      "member": "Capability"
+    },
+    "CloudWatchLogging": {
+      "type": "structure",
+      "members": {
+        "logGroup": "CloudWatchLoggingLogGroupString",
+        "logStream": "CloudWatchLoggingLogStreamString"
+      }
+    },
+    "CloudWatchLoggingLogGroupString": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[a-zA-Z0-9_\\-/.#]+"
+    },
+    "CloudWatchLoggingLogStreamString": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[^:*]*"
+    },
+    "CodeArtifact": {
+      "type": "structure",
+      "members": {
+        "uri": "NonBlankString"
+      }
+    },
+    "CpuConfiguration": {
+      "type": "structure",
+      "required": [
+        "architecture"
+      ],
+      "members": {
+        "architecture": "Architecture"
+      }
+    },
+    "CpuConfigurationList": {
+      "type": "list",
+      "member": "CpuConfiguration"
+    },
+    "CreateMicrovmImageRequest": {
+      "type": "structure",
+      "required": [
+        "baseImageArn",
+        "buildRoleArn",
+        "codeArtifact",
+        "name"
+      ],
+      "members": {
+        "baseImageArn": "NonBlankString",
+        "baseImageVersion": "Version",
+        "buildRoleArn": "RoleArn",
+        "description": "String",
+        "codeArtifact": "CodeArtifact",
+        "logging": "Logging",
+        "egressNetworkConnectors": "CreateMicrovmImageRequestEgressNetworkConnectorsList",
+        "cpuConfigurations": "CpuConfigurationList",
+        "resources": "ResourcesList",
+        "additionalOsCapabilities": "CapabilityList",
+        "hooks": "Hooks",
+        "environmentVariables": "EnvironmentVariableMap",
+        "name": "ImageName",
+        "tags": "Tags",
+        "clientToken": "CreateMicrovmImageRequestClientTokenString"
+      }
+    },
+    "CreateMicrovmImageRequestClientTokenString": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "CreateMicrovmImageRequestEgressNetworkConnectorsList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "NetworkConnector"
+    },
+    "EnvironmentVariableKey": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[^\\s]+"
+    },
+    "EnvironmentVariableMap": {
+      "type": "map",
+      "min": 0,
+      "max": 50,
+      "key": "EnvironmentVariableKey",
+      "value": "EnvironmentVariableValue"
+    },
+    "EnvironmentVariableValue": {
+      "type": "string",
+      "min": 0,
+      "max": 4096
+    },
+    "HookState": {
+      "type": "string",
+      "enum": [
+        "DISABLED",
+        "ENABLED"
+      ]
+    },
+    "Hooks": {
+      "type": "structure",
+      "members": {
+        "port": "HooksPortInteger",
+        "microvmHooks": "MicrovmHooks",
+        "microvmImageHooks": "MicrovmImageHooks"
+      }
+    },
+    "HooksPortInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 65535
+    },
+    "IdlePolicy": {
+      "type": "structure",
+      "required": [
+        "maxIdleDurationSeconds",
+        "suspendedDurationSeconds",
+        "autoResumeEnabled"
+      ],
+      "members": {
+        "maxIdleDurationSeconds": "IdlePolicyMaxIdleDurationSecondsInteger",
+        "suspendedDurationSeconds": "IdlePolicySuspendedDurationSecondsInteger",
+        "autoResumeEnabled": "Boolean"
+      }
+    },
+    "IdlePolicyMaxIdleDurationSecondsInteger": {
+      "type": "integer",
+      "min": 60
+    },
+    "IdlePolicySuspendedDurationSecondsInteger": {
+      "type": "integer",
+      "min": 0
+    },
+    "ImageName": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[a-zA-Z0-9-_]+"
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "Logging": {
+      "type": "structure",
+      "members": {
+        "disabled": "LoggingDisabled",
+        "cloudWatch": "CloudWatchLogging"
+      }
+    },
+    "LoggingDisabled": {
+      "type": "structure",
+      "members": {}
+    },
+    "MicrovmHooks": {
+      "type": "structure",
+      "members": {
+        "run": "HookState",
+        "runTimeoutInSeconds": "MicrovmHooksRunTimeoutInSecondsInteger",
+        "resume": "HookState",
+        "resumeTimeoutInSeconds": "MicrovmHooksResumeTimeoutInSecondsInteger",
+        "suspend": "HookState",
+        "suspendTimeoutInSeconds": "MicrovmHooksSuspendTimeoutInSecondsInteger",
+        "terminate": "HookState",
+        "terminateTimeoutInSeconds": "MicrovmHooksTerminateTimeoutInSecondsInteger"
+      }
+    },
+    "MicrovmHooksResumeTimeoutInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 60
+    },
+    "MicrovmHooksRunTimeoutInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 60
+    },
+    "MicrovmHooksSuspendTimeoutInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 60
+    },
+    "MicrovmHooksTerminateTimeoutInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 60
+    },
+    "MicrovmImageHooks": {
+      "type": "structure",
+      "members": {
+        "ready": "HookState",
+        "readyTimeoutInSeconds": "MicrovmImageHooksReadyTimeoutInSecondsInteger",
+        "validate": "HookState",
+        "validateTimeoutInSeconds": "MicrovmImageHooksValidateTimeoutInSecondsInteger"
+      }
+    },
+    "MicrovmImageHooksReadyTimeoutInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 3600
+    },
+    "MicrovmImageHooksValidateTimeoutInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 3600
+    },
+    "MicrovmImageIdentifier": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "NetworkConnector": {
+      "type": "string",
+      "min": 1,
+      "max": 2048
+    },
+    "NetworkConnectorList": {
+      "type": "list",
+      "min": 0,
+      "max": 10,
+      "member": "NetworkConnector"
+    },
+    "NonBlankString": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "[^\\s]+"
+    },
+    "Resources": {
+      "type": "structure",
+      "required": [
+        "minimumMemoryInMiB"
+      ],
+      "members": {
+        "minimumMemoryInMiB": "Integer"
+      }
+    },
+    "ResourcesList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "Resources"
+    },
+    "RoleArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "arn:aws[a-z\\-]*:iam::[0-9]{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+"
+    },
+    "RunHookPayload": {
+      "type": "string",
+      "min": 0,
+      "max": 4096
+    },
+    "RunMicrovmRequest": {
+      "type": "structure",
+      "required": [
+        "imageIdentifier"
+      ],
+      "members": {
+        "ingressNetworkConnectors": "NetworkConnectorList",
+        "egressNetworkConnectors": "NetworkConnectorList",
+        "imageIdentifier": "MicrovmImageIdentifier",
+        "imageVersion": "Version",
+        "executionRoleArn": "RoleArn",
+        "idlePolicy": "IdlePolicy",
+        "logging": "Logging",
+        "runHookPayload": "RunHookPayload",
+        "maximumDurationInSeconds": "RunMicrovmRequestMaximumDurationInSecondsInteger",
+        "clientToken": "RunMicrovmRequestClientTokenString"
+      }
+    },
+    "RunMicrovmRequestClientTokenString": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "RunMicrovmRequestMaximumDurationInSecondsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 28800
+    },
+    "String": {
+      "type": "string"
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)"
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)"
+    },
+    "Tags": {
+      "type": "map",
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "UpdateMicrovmImageRequest": {
+      "type": "structure",
+      "required": [
+        "baseImageArn",
+        "buildRoleArn",
+        "codeArtifact"
+      ],
+      "members": {
+        "baseImageArn": "NonBlankString",
+        "baseImageVersion": "Version",
+        "buildRoleArn": "RoleArn",
+        "description": "String",
+        "codeArtifact": "CodeArtifact",
+        "logging": "Logging",
+        "egressNetworkConnectors": "UpdateMicrovmImageRequestEgressNetworkConnectorsList",
+        "cpuConfigurations": "CpuConfigurationList",
+        "resources": "ResourcesList",
+        "additionalOsCapabilities": "CapabilityList",
+        "hooks": "Hooks",
+        "environmentVariables": "EnvironmentVariableMap",
+        "clientToken": "UpdateMicrovmImageRequestClientTokenString"
+      }
+    },
+    "UpdateMicrovmImageRequestClientTokenString": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "UpdateMicrovmImageRequestEgressNetworkConnectorsList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "NetworkConnector"
+    },
+    "Version": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "[^\\s]+"
+    }
+  }
+}

@@ -981,8 +981,9 @@ public class CloudFrontController {
                         .elem("Status", fn.getStatus())
                         .start("FunctionConfig")
                         .elem("Comment", fn.getComment() != null ? fn.getComment() : "")
-                        .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0")
-                        .end("FunctionConfig")
+                        .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0");
+                appendKeyValueStoreAssociations(xml, fn);
+                xml.end("FunctionConfig")
                         .start("FunctionMetadata")
                         .elem("FunctionARN", service.arn("function/" + fn.getName()))
                         .elem("Stage", fn.getStage())
@@ -994,6 +995,95 @@ public class CloudFrontController {
             }
             xml.end("Items").end("FunctionList");
             return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    // ── Key Value Stores ──────────────────────────────────────────────────────
+
+    @POST
+    @Path("/key-value-store")
+    public Response createKeyValueStore(String body) {
+        try {
+            String name = XmlParser.extractFirst(body, "Name", null);
+            String comment = XmlParser.extractFirst(body, "Comment", null);
+            boolean hasImportSource = XmlParser.extractElementTree(body, "ImportSource") != null;
+            KeyValueStore kvs = service.createKeyValueStore(name, comment, hasImportSource);
+            Map<String, String> tags = parseTags(body);
+            if (!tags.isEmpty()) {
+                service.tagResource(kvs.getArn(), tags);
+            }
+            return Response.created(URI.create("/2020-05-31/key-value-store/" + kvs.getName()))
+                    .type(XML)
+                    .header("ETag", kvs.getEtag())
+                    .entity(xmlKeyValueStore(kvs))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/key-value-store/{Name}")
+    public Response describeKeyValueStore(@PathParam("Name") String name) {
+        try {
+            KeyValueStore kvs = service.describeKeyValueStore(name);
+            return Response.ok(xmlKeyValueStore(kvs), XML)
+                    .header("ETag", kvs.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/key-value-store")
+    public Response listKeyValueStores(@QueryParam("Marker") String marker,
+                                       @QueryParam("Status") String status,
+                                       @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
+        try {
+            Page<KeyValueStore> page = page(
+                    service.listKeyValueStores(marker, paginationFetchLimit(maxItems), status),
+                    maxItems, KeyValueStore::getName);
+            XmlBuilder xml = new XmlBuilder()
+                    .start("KeyValueStoreList", NS)
+                    .elem("NextMarker", page.nextMarker())
+                    .elem("MaxItems", maxItems)
+                    .elem("Quantity", page.items().size())
+                    .start("Items");
+            for (KeyValueStore kvs : page.items()) {
+                appendKeyValueStoreFields(xml.start("KeyValueStore"), kvs).end("KeyValueStore");
+            }
+            xml.end("Items").end("KeyValueStoreList");
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @PUT
+    @Path("/key-value-store/{Name}")
+    public Response updateKeyValueStore(@PathParam("Name") String name,
+                                        @HeaderParam("If-Match") String ifMatch,
+                                        String body) {
+        try {
+            KeyValueStore kvs = service.updateKeyValueStore(name, ifMatch, XmlParser.extractFirst(body, "Comment", null));
+            return Response.ok(xmlKeyValueStore(kvs), XML)
+                    .header("ETag", kvs.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/key-value-store/{Name}")
+    public Response deleteKeyValueStore(@PathParam("Name") String name,
+                                        @HeaderParam("If-Match") String ifMatch) {
+        try {
+            service.deleteKeyValueStore(name, ifMatch);
+            return Response.noContent().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -2433,14 +2523,15 @@ public class CloudFrontController {
     }
 
     private String xmlFunctionResponse(CloudFrontFunction fn) {
-        return new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .start("FunctionSummary")
                 .elem("Name", fn.getName())
                 .elem("Status", fn.getStatus())
                 .start("FunctionConfig")
                 .elem("Comment", fn.getComment() != null ? fn.getComment() : "")
-                .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0")
-                .end("FunctionConfig")
+                .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0");
+        appendKeyValueStoreAssociations(xml, fn);
+        return xml.end("FunctionConfig")
                 .start("FunctionMetadata")
                 .elem("FunctionARN", service.arn("function/" + fn.getName()))
                 .elem("Stage", fn.getStage())
@@ -2450,6 +2541,34 @@ public class CloudFrontController {
                 .end("FunctionMetadata")
                 .end("FunctionSummary")
                 .build();
+    }
+
+    private static void appendKeyValueStoreAssociations(XmlBuilder xml, CloudFrontFunction fn) {
+        List<String> arns = fn.getKeyValueStoreArns();
+        if (arns == null || arns.isEmpty()) {
+            return;
+        }
+        xml.start("KeyValueStoreAssociations").elem("Quantity", arns.size()).start("Items");
+        for (String arn : arns) {
+            xml.start("KeyValueStoreAssociation").elem("KeyValueStoreARN", arn).end("KeyValueStoreAssociation");
+        }
+        xml.end("Items").end("KeyValueStoreAssociations");
+    }
+
+    private String xmlKeyValueStore(KeyValueStore kvs) {
+        return appendKeyValueStoreFields(new XmlBuilder().start("KeyValueStore", NS), kvs)
+                .end("KeyValueStore")
+                .build();
+    }
+
+    private static XmlBuilder appendKeyValueStoreFields(XmlBuilder xml, KeyValueStore kvs) {
+        return xml.elem("Name", kvs.getName())
+                .elem("Id", kvs.getId())
+                .elem("Comment", kvs.getComment() != null ? kvs.getComment() : "")
+                .elem("ARN", kvs.getArn())
+                .elem("Status", kvs.getStatus())
+                .elem("LastModifiedTime",
+                        kvs.getLastModifiedTime() != null ? kvs.getLastModifiedTime().toString() : "");
     }
 
     /** Renders a possibly-null value as a string, using the empty string for {@code null}. */
@@ -3598,6 +3717,7 @@ public class CloudFrontController {
         fn.setComment(XmlParser.extractFirst(body, "Comment", null));
         fn.setRuntime(XmlParser.extractFirst(body, "Runtime", "cloudfront-js-2.0"));
         fn.setFunctionCode(XmlParser.extractFirst(body, "FunctionCode", null));
+        fn.setKeyValueStoreArns(new ArrayList<>(XmlParser.extractAll(body, "KeyValueStoreARN")));
         return fn;
     }
 

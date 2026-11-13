@@ -155,7 +155,7 @@ def test_a_tag_list_and_a_tag_map_are_read_with_their_key_and_value_names():
         "KmsTag": structure(TagKey="String", TagValue="String"),
         **TAG_SHAPES,
     })
-    assert r.tag_members(m, "Op") == [
+    assert r.tag_members(m, "Op")[0] == [
         {"member": "Tags[]", "key": "Key", "value": "Value"},
         {"member": "ResourceTags[]", "key": "TagKey", "value": "TagValue"},
         {"member": "UserPoolTags{}"},
@@ -171,14 +171,14 @@ def test_tag_specifications_are_read_through_their_list():
         "Ec2Tag": structure(Key={"shape": "String", "locationName": "key"},
                             Value={"shape": "String", "locationName": "value"}),
     }, protocol="ec2")
-    assert r.tag_members(m, "Op") == [
+    assert r.tag_members(m, "Op")[0] == [
         {"member": "TagSpecification[item].Tag[item]", "key": "Key", "value": "Value", "resourceType": "ResourceType"}]
 
 
 def test_a_specification_naming_no_resource_type_gives_none():
     m = model({"Op": "In"}, {"In": structure(TagSpecifications="Specs"), "Specs": {"type": "list", "member": {"shape": "Spec"}},
                              "Spec": structure(Tags="TagList"), **TAG_SHAPES})
-    assert r.tag_members(m, "Op") == [{"member": "TagSpecifications[].Tags[]", "key": "Key", "value": "Value"}]
+    assert r.tag_members(m, "Op")[0] == [{"member": "TagSpecifications[].Tags[]", "key": "Key", "value": "Value"}]
 
 
 def test_each_resource_type_s_arn_keeps_the_partition_region_and_account_and_leaves_the_rest_open():
@@ -196,7 +196,7 @@ def test_each_resource_type_s_arn_keeps_the_partition_region_and_account_and_lea
 def test_an_ec2_query_name_wins_over_its_location_name():
     m = model({"Op": "In"}, {"In": structure(Tags={"shape": "TagList", "locationName": "tags", "queryName": "Tag"}),
                              **TAG_SHAPES}, protocol="ec2")
-    assert r.tag_members(m, "Op") == [{"member": "Tag[]", "key": "Key", "value": "Value"}]
+    assert r.tag_members(m, "Op")[0] == [{"member": "Tag[]", "key": "Key", "value": "Value"}]
 
 
 def test_members_named_otherwise_nested_deeper_or_holding_no_tags_are_not_read():
@@ -207,19 +207,19 @@ def test_members_named_otherwise_nested_deeper_or_holding_no_tags_are_not_read()
         "Keys": {"type": "list", "member": {"shape": "String"}},
         **TAG_SHAPES,
     })
-    assert r.tag_members(m, "Op") == []
+    assert r.tag_members(m, "Op") == ([], r.NO_TAGS)
 
 
 def test_a_member_bound_to_the_uri_a_header_or_the_query_string_is_not_read():
     m = model({"Op": "In"}, {"In": structure(Tags={"shape": "TagMap", "location": "header"},
                                              tags="TagMap"), **TAG_SHAPES}, protocol="rest-json")
-    assert r.tag_members(m, "Op") == [{"member": "tags{}"}]
+    assert r.tag_members(m, "Op")[0] == [{"member": "tags{}"}]
 
 
 @pytest.mark.parametrize("protocol", ["rest-xml"])
 def test_a_model_whose_requests_are_not_read_has_no_members(protocol):
     m = model({"Op": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES}, protocol=protocol)
-    assert r.tag_members(m, "Op") == []
+    assert r.tag_members(m, "Op") == ([], r.UNREADABLE_PROTOCOL)
 
 
 # --------------------------------------------------------------------------- #
@@ -238,6 +238,89 @@ def test_an_operation_reads_its_members_for_its_one_tagging_action(corrections):
                                    "tags": [{"member": "Tags[]", "key": "Key", "value": "Value"}]}
 
 
+def test_a_modeled_operation_without_tag_members_derives_no_tags(corrections):
+    models = {"svc": model({"CreateThing": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": r.NO_TAGS}
+
+
+def test_an_unreadable_client_does_not_derive_no_tags_from_another_client(corrections):
+    models = {
+        "svc": model({"CreateThing": "In"}, {"In": structure(Name="String")}),
+        "svc-xml": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES},
+                         protocol="rest-xml"),
+    }
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": r.UNREADABLE_PROTOCOL}
+
+
+def test_an_unreadable_client_does_not_hide_another_client_s_tag_members(corrections):
+    models = {
+        "svc": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES}),
+        "svc-xml": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES},
+                         protocol="rest-xml"),
+    }
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "tags": [{"member": "Tags[]", "key": "Key", "value": "Value"}]}
+
+
+def test_an_opaque_client_does_not_hide_another_client_s_tag_members(corrections):
+    opaque = model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})
+    opaque["shapes"]["In"]["payload"] = "Tags"
+    models = {"svc": opaque, "svcv2": SIMPLE["svc"]}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "tags": [{"member": "Tags[]", "key": "Key", "value": "Value"}]}
+
+
+def test_an_unreadable_client_derives_its_reason_without_a_hand_entry(corrections):
+    models = {"svc-xml": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES},
+                               protocol="rest-xml")}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": r.UNREADABLE_PROTOCOL}
+
+
+def test_an_opaque_payload_does_not_derive_no_tags(corrections):
+    opaque = model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})
+    opaque["shapes"]["In"]["payload"] = "Tags"
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), {"svc": opaque}) == {
+        "tagging": ["svc:TagResource"], "notRead": r.OPAQUE_PAYLOAD}
+    tagless = model({"CreateThing": "In"}, {"In": structure(Name="String")})
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), {"svc": tagless, "svcv2": opaque}) == {
+        "tagging": ["svc:TagResource"], "notRead": r.OPAQUE_PAYLOAD}
+
+
+def test_an_operation_absent_from_the_pinned_models_derives_not_in_botocore(corrections):
+    models = {"svc": model({"CreateOther": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": r.NOT_IN_BOTOCORE}
+
+
+def test_a_modeled_operation_without_input_derives_no_tags(corrections):
+    no_input = model({}, {})
+    no_input["operations"]["CreateThing"] = {}
+    assert r.tag_members(no_input, "CreateThing") == ([], r.NO_TAGS)
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), {"svc": no_input}) == {
+        "tagging": ["svc:TagResource"], "notRead": r.NO_TAGS}
+
+
+def test_a_malformed_modeled_operation_is_not_reported_as_absent(corrections):
+    malformed = model({}, {})
+    malformed["operations"]["CreateThing"] = None
+    with pytest.raises(ValueError, match="botocore operation is not an object"):
+        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), {"svc": malformed})
+
+
+@pytest.mark.parametrize("operation, client, member", [
+    ("ecs:CreateGateway", "ecs", {"member": "tags[]", "key": "key", "value": "value"}),
+    ("rds:CreateDBCapacityReservation", "rds", {"member": "Tags[Tag]", "key": "Key", "value": "Value"}),
+])
+def test_a_stale_no_tags_verdict_cannot_hide_modeled_request_tags(operation, client, member):
+    data, _ = r.resolve_botocore_data(None)
+    models = r.load_models(data, {client})
+    assert r.entry_for(operation, upstream(f"{client}:TagResource"), models) == {
+        "tagging": [f"{client}:TagResource"], "tags": [member]}
+
+
 def test_several_tagging_actions_must_be_checked_by_hand(corrections):
     with pytest.raises(ValueError, match="BY_HAND"):
         r.entry_for("svc:CreateThing", upstream("svc:TagResource", "svc:TagThing"), SIMPLE)
@@ -246,23 +329,20 @@ def test_several_tagging_actions_must_be_checked_by_hand(corrections):
         "tagging": ["svc:TagResource", "svc:TagThing"], "byHand": "either action"}
 
 
-def test_an_operation_carrying_no_tags_must_say_why(corrections):
-    models = {"svc": model({"CreateThing": "In"}, {"In": structure(Name="String")})}
-    with pytest.raises(ValueError, match="NOT_READ"):
-        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models)
-    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": "no member of the request carries tags"})
-    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
-        "tagging": ["svc:TagResource"], "notRead": "no member of the request carries tags"}
-
-
-def test_an_operation_botocore_does_not_have_yet_is_not_read_until_a_bump_brings_it(corrections):
-    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": r.NOT_IN_BOTOCORE})
+def test_an_operation_absent_from_botocore_is_read_after_a_model_bump(corrections):
     before = {"svc": model({"CreateOther": "In"}, {"In": structure(Name="String")})}
     assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), before) == {
         "tagging": ["svc:TagResource"], "notRead": r.NOT_IN_BOTOCORE}
     bumped = {"svc": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})}
-    with pytest.raises(ValueError, match="take it out of NOT_READ"):
-        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), bumped)
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), bumped) == {
+        "tagging": ["svc:TagResource"], "tags": [{"member": "Tags[]", "key": "Key", "value": "Value"}]}
+
+
+def test_an_explicit_exception_keeps_its_reason(corrections):
+    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": "tags nested deeper than this file reads"})
+    models = {"svc": model({"CreateThing": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": "tags nested deeper than this file reads"}
 
 
 def test_an_exclusion_drops_a_member_and_a_query_name_is_added(corrections):
@@ -304,6 +384,15 @@ def test_a_hand_edited_member_does_not_match_botocore(corrections, tmp_path):
     write_models(tmp_path, SIMPLE)
     document = r.build([reference("svc", {"CreateThing": ["svc:TagResource"]})], "test", tmp_path, "botocore test")
     document["operations"]["svc:CreateThing"]["tags"].append({"member": "Other{}"})
+    assert r.validate(document) == []
+    assert len(r.derive(document, tmp_path)) == 1
+
+
+def test_a_stale_not_read_verdict_does_not_match_botocore(corrections, tmp_path):
+    write_models(tmp_path, SIMPLE)
+    document = r.build([reference("svc", {"CreateThing": ["svc:TagResource"]})], "test", tmp_path, "botocore test")
+    document["operations"]["svc:CreateThing"] = {
+        "tagging": ["svc:TagResource"], "notRead": r.NO_TAGS}
     assert r.validate(document) == []
     assert len(r.derive(document, tmp_path)) == 1
 
@@ -423,6 +512,12 @@ def test_the_vendored_file_is_well_formed():
     assert document["resourceArns"]["ec2"]["instance"] == "arn:${Partition}:ec2:${Region}:${Account}:instance/*"
     assert document["resourceArns"]["ec2"]["image"] == "arn:${Partition}:ec2:${Region}::image/*"
     assert operations["budgets:CreateBudget"]["requestTags"] is True
+    assert operations["ecs:CreateGateway"]["tags"] == [
+        {"member": "tags[]", "key": "key", "value": "value"}]
+    assert operations["rds:CreateDBCapacityReservation"]["tags"] == [
+        {"member": "Tags[Tag]", "key": "Key", "value": "Value"}]
+    assert operations["network-firewall:CreateFirewallPolicyV2"]["notRead"] == r.NOT_IN_BOTOCORE
+    assert operations["ec2:RequestSpotFleet"]["notRead"] == r.NOT_READ["ec2:RequestSpotFleet"]
     # The opensearch client's CreateDomain, which the reference does not list, as es's CreateElasticsearchDomain.
     assert document["namespaces"]["es"] == ["es", "opensearch"]
     for operation in ("es:CreateDomain", "es:CreateElasticsearchDomain"):

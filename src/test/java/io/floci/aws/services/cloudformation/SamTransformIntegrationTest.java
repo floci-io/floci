@@ -913,6 +913,56 @@ class SamTransformIntegrationTest {
     }
 
     @Test
+    void samDurableFunctionKeepsDurableAndLoggingConfig() {
+        String stackName = "sam-durable-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Globals:
+              Function:
+                LoggingConfig:
+                  LogFormat: JSON
+                  ApplicationLogLevel: DEBUG
+            Resources:
+              DurableFunc:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-durable-func
+                  Handler: app.handler
+                  Runtime: python3.13
+                  InlineCode: "def handler(event, context): return event"
+                  DurableConfig:
+                    ExecutionTimeout: 60
+                    RetentionPeriodInDays: 3
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/sam-durable-func")
+        .then()
+            .statusCode(200)
+            .body("Configuration.DurableConfig.ExecutionTimeout", equalTo(60))
+            .body("Configuration.DurableConfig.RetentionPeriodInDays", equalTo(3))
+            .body("Configuration.LoggingConfig.LogFormat", equalTo("JSON"))
+            .body("Configuration.LoggingConfig.ApplicationLogLevel", equalTo("DEBUG"));
+    }
+
+    @Test
     void samSimpleTable_createsDynamoDbTable() {
         String stackName = "sam-table-stack";
         stacksToDelete.add(stackName);

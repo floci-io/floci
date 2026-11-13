@@ -459,6 +459,26 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         deleteAllAtomicallyForAccounts(Map.of(prefix(), keys));
     }
 
+    /**
+     * Deletes matching values in one commit, including unprefixed legacy
+     * keys only for the configured default account. Does not migrate or rewrite survivors.
+     */
+    public synchronized void deleteMatchingIncludingLegacyAtomically(Predicate<V> valueFilter) {
+        String account = prefix();
+        String accountPrefix = account + "/";
+        Set<String> rawKeys = new LinkedHashSet<>();
+        for (String rawKey : delegate.keys()) {
+            boolean owned = hasAccountPrefix(rawKey)
+                    ? rawKey.startsWith(accountPrefix) : defaultAccountId.equals(account);
+            if (owned) {
+                if (delegate.get(rawKey).filter(valueFilter).isPresent()) {
+                    rawKeys.add(rawKey);
+                }
+            }
+        }
+        delegate.deleteAllAtomically(rawKeys);
+    }
+
     public void deleteAllAtomicallyForAccounts(Map<String, Set<String>> keysByAccount) {
         Set<String> rawKeys = new LinkedHashSet<>();
         keysByAccount.forEach((account, keys) -> keys.forEach(key -> rawKeys.add(account + "/" + key)));

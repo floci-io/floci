@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsServiceNamespaces;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
+import io.floci.aws.services.iam.IamPolicyEvaluator.SimulationDecision;
 import io.floci.aws.services.iam.model.CallerContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -1458,6 +1459,44 @@ class IamPolicyEvaluatorTest {
         // denies: it is one that has nothing to say.
         assertEquals(List.of("s3"), evaluator.servicesAllowedByScpLevels(
                 List.of(List.of(), List.of(ALLOW_S3_ONLY))));
+    }
+
+    /**
+     * What a request supplies has to read as a policy document: an object carrying the element the
+     * grammar requires of every policy, {@code Statement}, "the main element for a policy. This
+     * element is required." A text that does not parse, JSON that is no object, and an object
+     * without that element are alike no policy, which is why one sentence refuses all three.
+     */
+    @Test
+    void aSuppliedDocumentReadsAsAPolicyOnlyWithTheElementTheGrammarRequires() {
+        assertTrue(evaluator.readsAsPolicyDocument(ALLOW_ALL));
+        assertTrue(evaluator.readsAsPolicyDocument("{\"Statement\":{\"Effect\":\"Allow\","
+                + "\"Action\":\"*\",\"Resource\":\"*\"}}"));
+        assertTrue(evaluator.readsAsPolicyDocument("{\"Version\":\"2012-10-17\",\"Statement\":[]}"));
+
+        assertFalse(evaluator.readsAsPolicyDocument(MALFORMED));
+        assertFalse(evaluator.readsAsPolicyDocument("{not json"));
+        assertFalse(evaluator.readsAsPolicyDocument("[]"));
+        assertFalse(evaluator.readsAsPolicyDocument("7"));
+        assertFalse(evaluator.readsAsPolicyDocument("{}"));
+        assertFalse(evaluator.readsAsPolicyDocument("{\"Version\":\"2012-10-17\"}"));
+        assertFalse(evaluator.readsAsPolicyDocument(" "));
+        assertFalse(evaluator.readsAsPolicyDocument(null));
+    }
+
+    /**
+     * The reading above answers an input and nothing else. A document already stored stays as it
+     * was read: it contributes no statements and the decision is made on the rest, because a
+     * policy the account accepted once must not make every later call fail.
+     */
+    @Test
+    void aStoredDocumentThatIsNoPolicyStillLeavesTheDecisionToTheRest() {
+        assertEquals(Decision.ALLOW,
+                evaluator.evaluate(List.of(MALFORMED, ALLOW_S3_ONLY), "s3:GetObject", "*"));
+        assertEquals(SimulationDecision.IMPLICIT_DENY, evaluator.simulatePrincipalPolicy(
+                CallerContext.of(List.of(MALFORMED)), "s3:GetObject", "*", Map.of()));
+        assertEquals(SimulationDecision.ALLOWED, evaluator.simulatePrincipalPolicy(
+                CallerContext.of(List.of(MALFORMED, ALLOW_S3_ONLY)), "s3:GetObject", "*", Map.of()));
     }
 
     private static String allowOnlyAction(String action) {

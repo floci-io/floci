@@ -431,4 +431,165 @@ class ConfigurationRecorderIntegrationTest {
             .body("ConfigurationRecorders[0].recordingGroup", not(hasKey("exclusionByResourceTypes")))
             .body("ConfigurationRecorders[0]", not(hasKey("recordingMode")));
     }
+
+    /** PutConfigurationRecorder's Tags is a TagsList, and the operation models ValidationException,
+     *  not the InvalidParameterValueException PutConfigRule answers. */
+    @Test
+    @Order(19)
+    void putConfigurationRecorderRejectsAnInvalidTagWithoutStoringIt() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r"},
+                 "Tags": [{"Key": "", "Value": "red"}]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigurationRecorders")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigurationRecorders", hasSize(0));
+    }
+
+    @Test
+    @Order(20)
+    void recorderTagsAreListedUnderItsArnUntilItIsDeleted() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r"},
+                 "Tags": [{"Key": "team", "Value": "red"}]}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String arn = given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigurationRecorders")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigurationRecorders[0].arn",
+                matchesPattern("arn:aws:config:us-east-1:\\d{12}:configuration-recorder/default/\\w+"))
+            .extract().path("ConfigurationRecorders[0].arn");
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ResourceArn": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("team"))
+            .body("Tags[0].Value", equalTo("red"));
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DeleteConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorderName": "default"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ResourceArn": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(21)
+    void bothDescribeCallsReturnAndFilterByTheRecorderArn() {
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "PutConfigurationRecorder", """
+            {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r"}}
+            """)
+            .then().statusCode(200);
+        String arn = RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", "{}")
+            .then().statusCode(200)
+            .extract().path("ConfigurationRecorders[0].arn");
+
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", "{}")
+            .then().statusCode(200)
+            .body("ConfigurationRecordersStatus[0].arn", equalTo(arn));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", """
+            {"Arn": "%s"}
+            """.formatted(arn))
+            .then().statusCode(200)
+            .body("ConfigurationRecorders.arn", contains(arn));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", """
+            {"Arn": "%s", "ConfigurationRecorderNames": ["default"]}
+            """.formatted(arn))
+            .then().statusCode(200)
+            .body("ConfigurationRecordersStatus.arn", contains(arn));
+    }
+
+    @Test
+    @Order(22)
+    void anArnOrNameThatMissesTheRecorderIsNoSuchConfigurationRecorder() {
+        String arn = RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", "{}")
+            .then().statusCode(200)
+            .extract().path("ConfigurationRecorders[0].arn");
+        String ghost = "arn:aws:config:us-east-1:000000000000:configuration-recorder/default/ghost";
+
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", """
+            {"Arn": "%s"}
+            """.formatted(ghost))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", """
+            {"Arn": "%s"}
+            """.formatted(ghost))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", """
+            {"Arn": "%s", "ConfigurationRecorderNames": ["other"]}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", """
+            {"Arn": "%s", "ConfigurationRecorderNames": ["other"]}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+    }
 }

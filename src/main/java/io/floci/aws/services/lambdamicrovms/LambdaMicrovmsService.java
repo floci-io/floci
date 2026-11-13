@@ -108,6 +108,22 @@ public class LambdaMicrovmsService implements ResourceProvider {
     // ---------------------------------------------------------------- images
 
     @RegisterForReflection
+    public record RuntimeSettings(List<String> egressNetworkConnectors, String logGroup, boolean loggingDisabled,
+                                  Map<String, String> environmentVariables, List<String> additionalOsCapabilities,
+                                  List<String> architectures) {
+        public RuntimeSettings {
+            egressNetworkConnectors = egressNetworkConnectors == null ? null : List.copyOf(egressNetworkConnectors);
+            environmentVariables = environmentVariables == null ? Map.of() : Map.copyOf(environmentVariables);
+            additionalOsCapabilities = additionalOsCapabilities == null ? List.of() : List.copyOf(additionalOsCapabilities);
+            architectures = architectures == null ? List.of() : List.copyOf(architectures);
+        }
+
+        public static RuntimeSettings defaults() {
+            return new RuntimeSettings(null, null, false, Map.of(), List.of(), List.of());
+        }
+    }
+
+    @RegisterForReflection
     public static final class MicrovmImage {
         public String name;
         public String imageArn;
@@ -118,6 +134,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         public String buildRoleArn;
         public String codeArtifactUri;
         public String latestActiveImageVersion;
+        public RuntimeSettings runtimeSettings = RuntimeSettings.defaults();
         public Instant createdAt;
         public Instant updatedAt;
         public final Map<String, String> tags = new LinkedHashMap<>();
@@ -131,6 +148,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         public String status;
         public Instant createdAt;
         public final List<MicrovmBuild> builds = new ArrayList<>();
+        public RuntimeSettings runtimeSettings;
     }
 
     @RegisterForReflection
@@ -145,6 +163,13 @@ public class LambdaMicrovmsService implements ResourceProvider {
     public MicrovmImage createImage(String region, String accountId, String name,
                                     String baseImageArn, String buildRoleArn,
                                     String codeArtifactUri, String description) {
+        return createImage(region, accountId, name, baseImageArn, buildRoleArn, codeArtifactUri, description,
+                null, RuntimeSettings.defaults(), Map.of());
+    }
+
+    public MicrovmImage createImage(String region, String accountId, String name,
+                                    String baseImageArn, String buildRoleArn, String codeArtifactUri, String description,
+                                    String baseImageVersion, RuntimeSettings runtimeSettings, Map<String, String> tags) {
         if (name == null || !NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "name must match [a-zA-Z0-9-_]{1,64}", 400);
@@ -167,7 +192,11 @@ public class LambdaMicrovmsService implements ResourceProvider {
         image.state = "CREATING";
         image.description = description;
         image.baseImageArn = baseImageArn;
-        image.baseImageVersion = "1.0";
+        image.baseImageVersion = baseImageVersion != null ? baseImageVersion : "1.0";
+        image.runtimeSettings = runtimeSettings;
+        synchronized (tagLock) {
+            image.tags.putAll(tags);
+        }
         image.buildRoleArn = buildRoleArn;
         image.codeArtifactUri = codeArtifactUri;
         image.createdAt = Instant.now();
@@ -187,6 +216,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         version.state = "SUCCESSFUL";
         version.status = "ACTIVE";
         version.createdAt = Instant.now();
+        version.runtimeSettings = image.runtimeSettings;
         // A version is built once per Graviton generation the service targets,
         // newest first. Recorded live: two builds per version, not one.
         for (String generation : CHIPSET_GENERATIONS) {
@@ -235,6 +265,13 @@ public class LambdaMicrovmsService implements ResourceProvider {
 
     public MicrovmImage updateImage(String region, String name, String baseImageArn,
                                     String buildRoleArn, String codeArtifactUri, String description) {
+        return updateImage(region, name, baseImageArn, buildRoleArn, codeArtifactUri, description,
+                null, RuntimeSettings.defaults());
+    }
+
+    public MicrovmImage updateImage(String region, String name, String baseImageArn,
+                                    String buildRoleArn, String codeArtifactUri, String description,
+                                    String baseImageVersion, RuntimeSettings runtimeSettings) {
         MicrovmImage image = getImage(region, name);
         if (baseImageArn == null || buildRoleArn == null || codeArtifactUri == null) {
             // Recorded live: the PUT is a full replace, not a patch.
@@ -245,6 +282,8 @@ public class LambdaMicrovmsService implements ResourceProvider {
         image.buildRoleArn = buildRoleArn;
         image.codeArtifactUri = codeArtifactUri;
         image.description = description;
+        image.baseImageVersion = baseImageVersion != null ? baseImageVersion : "1.0";
+        image.runtimeSettings = runtimeSettings;
         // A full-replace update rebuilds: it mints a new version and walks the
         // image to UPDATED rather than back to CREATED. Recorded live, and a
         // consumer polling for UPDATED after a PUT never converges without it.
@@ -339,8 +378,25 @@ public class LambdaMicrovmsService implements ResourceProvider {
     // ------------------------------------------------------------------- vms
 
     @RegisterForReflection
+    public record RunSettings(String imageVersion, String executionRoleArn, List<String> ingressNetworkConnectors,
+                              List<String> egressNetworkConnectors, Integer maximumDurationInSeconds,
+                              Boolean autoResumeEnabled, Integer maxIdleDurationSeconds,
+                              Integer suspendedDurationSeconds) {
+        public RunSettings {
+            ingressNetworkConnectors = ingressNetworkConnectors == null ? List.of() : List.copyOf(ingressNetworkConnectors);
+            egressNetworkConnectors = egressNetworkConnectors == null ? List.of() : List.copyOf(egressNetworkConnectors);
+
+        }
+
+        public static RunSettings defaults() {
+            return new RunSettings(null, null, null, null, null, null, null, null);
+        }
+    }
+
+    @RegisterForReflection
     public static final class Microvm {
         public String microvmId;
+        public RunSettings runSettings = RunSettings.defaults();
         public String state;
         public String imageArn;
         public String imageVersion;
@@ -351,6 +407,10 @@ public class LambdaMicrovmsService implements ResourceProvider {
     }
 
     public Microvm runMicrovm(String region, String accountId, String imageIdentifier) {
+        return runMicrovm(region, accountId, imageIdentifier, RunSettings.defaults());
+    }
+
+    public Microvm runMicrovm(String region, String accountId, String imageIdentifier, RunSettings settings) {
         if (imageIdentifier == null || imageIdentifier.isBlank()) {
             throw new AwsException("ValidationException", "imageIdentifier is required", 400);
         }
@@ -359,10 +419,14 @@ public class LambdaMicrovmsService implements ResourceProvider {
             throw new AwsException("ResourceNotFoundException",
                     "MicroVM image not found: " + imageIdentifier, 404);
         }
+        if (settings.imageVersion() != null) {
+            getVersion(region, imageIdentifier, settings.imageVersion());
+        }
         Microvm vm = new Microvm();
+        vm.runSettings = settings;
         vm.microvmId = "microvm-" + UUID.randomUUID();
         vm.imageArn = image.imageArn;
-        vm.imageVersion = image.latestActiveImageVersion;
+        vm.imageVersion = settings.imageVersion() != null ? settings.imageVersion() : image.latestActiveImageVersion;
         vm.endpoint = UUID.randomUUID() + ".lambda-microvm." + region + ".on.aws";
         vm.startedAt = Instant.now();
         // Settle instantly: the response carries PENDING, the next read RUNNING.
@@ -370,6 +434,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         microvms.put(key(region, vm.microvmId), vm);
         Microvm response = new Microvm();
         response.microvmId = vm.microvmId;
+        response.runSettings = vm.runSettings;
         response.state = "PENDING";
         response.imageArn = vm.imageArn;
         response.imageVersion = vm.imageVersion;

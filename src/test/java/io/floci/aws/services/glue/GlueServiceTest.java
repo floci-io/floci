@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.AuthenticationConfiguration;
@@ -42,21 +43,38 @@ import io.floci.aws.services.glue.schemaregistry.model.RegistryId;
 import io.floci.aws.services.glue.schemaregistry.model.SchemaId;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -65,6 +83,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -83,6 +102,9 @@ class GlueServiceTest {
                     + "\"fields\":[{\"name\":\"id\",\"type\":\"long\"},"
                     + "{\"name\":\"email\",\"type\":[\"null\",\"string\"],\"default\":null}]}";
 
+    @TempDir
+    Path tempDir;
+
     private GlueService glueService;
     private GlueSchemaRegistryService schemaRegistryService;
     private KmsService kmsService;
@@ -94,15 +116,30 @@ class GlueServiceTest {
 
     @BeforeEach
     void setUp() {
+        setUp(new InMemoryStorage<>());
+    }
+
+    private void setUp(StorageBackend<String, Partition> partitions) {
+        setUp(partitions, new InMemoryStorage<>());
+    }
+
+    private void setUp(StorageBackend<String, Partition> partitions,
+                       StorageBackend<String, UserDefinedFunction> functions) {
+        setUp(partitions, functions, new InMemoryStorage<>());
+    }
+
+    private void setUp(StorageBackend<String, Partition> partitions,
+                       StorageBackend<String, UserDefinedFunction> functions,
+                       StorageBackend<String, Table> tables) {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
         kmsService = new KmsService(storageFactory, regionResolver);
         databaseStore = new InMemoryStorage<>();
-        tableStore = new InMemoryStorage<>();
+        tableStore = tables;
         tableVersionStore = new InMemoryStorage<>();
         columnStatisticsStore = new InMemoryStorage<>();
-        partitionStore = new InMemoryStorage<>();
+        partitionStore = partitions;
         glueService = new GlueService(
                 databaseStore,
                 tableStore,
@@ -111,7 +148,7 @@ class GlueServiceTest {
                 partitionStore,
                 new InMemoryStorage<String, PartitionIndexDescriptor>(),
                 new InMemoryStorage<String, Map<String, Object>>(),
-                new InMemoryStorage<String, UserDefinedFunction>(),
+                functions,
                 new InMemoryStorage<String, Job>(),
                 new InMemoryStorage<String, Crawler>(),
                 new InMemoryStorage<String, Classifier>(),
@@ -546,6 +583,121 @@ class GlueServiceTest {
         assertThrows(AwsException.class, () -> glueService.getTable("db1", "plain"));
         assertTrue(tableStore.scan(k -> true).isEmpty());
         assertTrue(partitionStore.scan(k -> true).isEmpty());
+    }
+
+    @Test
+    void createPartitionRefusesValuesThatAlreadyExist() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setPartitionKeys(List.of(new Column("year", "string")));
+        glueService.createTable("db1", table);
+        Partition first = new Partition();
+        first.setValues(List.of("2026"));
+        first.setParameters(Map.of("kept", "yes"));
+        glueService.createPartition("db1", "plain", first);
+
+        Partition second = new Partition();
+        second.setValues(List.of("2026"));
+        second.setParameters(Map.of("kept", "no"));
+        AwsException refused = assertThrows(AwsException.class,
+                () -> glueService.createPartition("db1", "plain", second));
+
+        assertEquals("AlreadyExistsException", refused.getErrorCode());
+        assertEquals(Map.of("kept", "yes"),
+                glueService.getPartition("db1", "plain", List.of("2026")).getParameters());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void concurrentPartitionCreatesPreserveTheFirstWrite(boolean firstInBatch, boolean duplicateInBatch)
+            throws Exception {
+        PausingPartitionStore store = new PausingPartitionStore();
+        setUp(store);
+        Table table = new Table();
+        table.setName("plain");
+        table.setPartitionKeys(List.of(new Column("year", "string")));
+        glueService.createTable("db1", table);
+        Partition first = new Partition();
+        first.setValues(List.of("2026"));
+        first.setParameters(Map.of("revision", "first"));
+        Partition duplicate = new Partition();
+        duplicate.setValues(first.getValues());
+        duplicate.setParameters(Map.of("revision", "duplicate"));
+        Partition other = new Partition();
+        other.setValues(List.of("2027"));
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<List<GlueService.BatchCreatePartitionError>> original = pool.submit(() -> {
+                if (firstInBatch) {
+                    return glueService.batchCreatePartitions("db1", "plain", List.of(first));
+                }
+                glueService.createPartition("db1", "plain", first);
+                return List.of();
+            });
+            assertTrue(store.firstRead.await(5, TimeUnit.SECONDS), "first create did not read the partition");
+            CountDownLatch duplicateStarted = new CountDownLatch(1);
+            Future<List<GlueService.BatchCreatePartitionError>> competing = pool.submit(() -> {
+                duplicateStarted.countDown();
+                if (duplicateInBatch) {
+                    return glueService.batchCreatePartitions("db1", "plain", List.of(duplicate, other));
+                }
+                glueService.createPartition("db1", "plain", duplicate);
+                return List.of();
+            });
+            assertTrue(duplicateStarted.await(5, TimeUnit.SECONDS), "duplicate create did not start");
+            try {
+                competing.get(500, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException expected) {
+                // The duplicate waits while the first create holds its read open.
+            } catch (ExecutionException expected) {
+                // Check the request's result below after releasing the first create.
+            }
+            store.release.countDown();
+
+            assertEquals(List.of(), assertDoesNotThrow(() -> original.get(5, TimeUnit.SECONDS)));
+            if (duplicateInBatch) {
+                assertEquals(List.of(new GlueService.BatchCreatePartitionError(first.getValues(),
+                                new GlueService.ErrorDetail("AlreadyExistsException", "Partition already exists."))),
+                        assertDoesNotThrow(() -> competing.get(5, TimeUnit.SECONDS)));
+                assertEquals(other.getValues(),
+                        glueService.getPartition("db1", "plain", other.getValues()).getValues());
+            } else {
+                ExecutionException rejected = assertThrows(ExecutionException.class,
+                        () -> competing.get(5, TimeUnit.SECONDS));
+                AwsException failure = assertInstanceOf(AwsException.class, rejected.getCause());
+                assertEquals("AlreadyExistsException", failure.getErrorCode());
+                assertEquals(400, failure.getHttpStatus());
+            }
+            assertEquals(first.getParameters(),
+                    glueService.getPartition("db1", "plain", first.getValues()).getParameters());
+            assertEquals(duplicateInBatch ? 2 : 1, glueService.getPartitions("db1", "plain").size());
+        } finally {
+            store.release.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS), "partition creates did not stop");
+        }
+    }
+
+    private static final class PausingPartitionStore extends InMemoryStorage<String, Partition> {
+        private final AtomicBoolean pause = new AtomicBoolean(true);
+        private final CountDownLatch firstRead = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public Optional<Partition> get(String key) {
+            Optional<Partition> found = super.get(key);
+            if (pause.compareAndSet(true, false)) {
+                firstRead.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS), "first partition read was not released");
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while holding the first partition read", interrupted);
+                }
+            }
+            return found;
+        }
     }
 
     @Test
@@ -2176,5 +2328,130 @@ class GlueServiceTest {
 
     private static List<String> names(GlueService.Page<Table> page) {
         return page.items().stream().map(Table::getName).toList();
+    }
+
+    @Test
+    void deleteDatabaseDeletesItsUserDefinedFunctions() {
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setFunctionName("fn");
+        glueService.createUserDefinedFunction("db1", function);
+        glueService.deleteDatabase("db1");
+        glueService.createDatabase(new Database("db1"));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "fn"));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void deleteDatabaseRemovesLegacyFunctionsWithoutTouchingOtherAccounts() {
+        Path file = tempDir.resolve("functions.json");
+        PersistentStorage<String, UserDefinedFunction> persisted = new PersistentStorage<>(file, new TypeReference<>() {});
+        persisted.putAll(Map.of(
+                "db1:legacy", function("db1", "legacy"),
+                ACCOUNT_ID + "/db1:current", function("db1", "current"),
+                "111111111111/db1:legacy", function("db1", "legacy"),
+                ACCOUNT_ID + "/db1:neighbor:legacy", function("db1:neighbor", "legacy")));
+        PersistentStorage<String, UserDefinedFunction> reloaded = new PersistentStorage<>(file, new TypeReference<>() {});
+        reloaded.load();
+        setUp(new InMemoryStorage<>(), new AccountAwareStorageBackend<>(reloaded, null, ACCOUNT_ID));
+
+        glueService.deleteDatabase("db1");
+        glueService.createDatabase(new Database("db1"));
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "legacy"));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+        assertTrue(glueService.getUserDefinedFunctions("db1", ".*").isEmpty());
+        reloaded.load();
+        assertEquals(Set.of("111111111111/db1:legacy", ACCOUNT_ID + "/db1:neighbor:legacy"), reloaded.keys());
+        glueService.createUserDefinedFunction("db1", function("db1", "legacy"));
+        assertEquals("legacy", glueService.getUserDefinedFunction("db1", "legacy").getFunctionName());
+    }
+
+    @Test
+    void deleteDatabaseCommitsFunctionRemovalOnce() {
+        InMemoryStorage<String, UserDefinedFunction> functions = spy(new InMemoryStorage<>());
+        setUp(new InMemoryStorage<>(), functions);
+        glueService.createUserDefinedFunction("db1", function("db1", "one"));
+        glueService.createUserDefinedFunction("db1", function("db1", "two"));
+        clearInvocations(functions);
+
+        glueService.deleteDatabase("db1");
+
+        assertTrue(functions.isEmpty());
+        verify(functions).deleteAllAtomically(Set.of("db1:one", "db1:two"));
+        verify(functions, never()).delete(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void databaseDeletionWaitsForFunctionPublication(boolean update) throws Exception {
+        ParkingStore<UserDefinedFunction> functions = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), functions);
+        if (update) {
+            glueService.createUserDefinedFunction("db1", function("db1", "fn"));
+        }
+        functions.parkNextWrite();
+        assertOperationWaitsForParkedStore(functions, () -> {
+            if (update) {
+                glueService.updateUserDefinedFunction("db1", "fn", function("db1", "fn"));
+            } else {
+                glueService.createUserDefinedFunction("db1", function("db1", "fn"));
+            }
+        }, () -> glueService.deleteDatabase("db1"));
+
+        glueService.createDatabase(new Database("db1"));
+        assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "fn")).getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void databaseDeletionWaitsForTablePublication(boolean update) throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        if (update) {
+            glueService.createTable("db1", paginationTable("table"));
+        }
+        tables.parkNextWrite();
+        assertOperationWaitsForParkedStore(tables, () -> {
+            if (update) {
+                glueService.updateTable("db1", paginationTable("table"), null, false);
+            } else {
+                glueService.createTable("db1", paginationTable("table"));
+            }
+        }, () -> glueService.deleteDatabase("db1"));
+
+        glueService.createDatabase(new Database("db1"));
+        assertTrue(glueService.getTables("db1").isEmpty());
+        assertTrue(tableVersionStore.keys().isEmpty());
+        glueService.createTable("db1", paginationTable("table"));
+        assertEquals("0", glueService.getTable("db1", "table").getVersionId());
+    }
+
+    @Test
+    void tableCreationWaitsForDatabaseDeletionAndThenRejectsTheMissingDatabase() throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        glueService.createTable("db1", paginationTable("existing"));
+        tables.parkNextRead();
+        assertOperationWaitsForParkedStore(tables, () -> glueService.deleteDatabase("db1"), () -> {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> glueService.createTable("db1", paginationTable("new")));
+            assertEquals("EntityNotFoundException", refused.getErrorCode());
+        });
+
+        glueService.createDatabase(new Database("db1"));
+        assertTrue(glueService.getTables("db1").isEmpty());
+        glueService.createTable("db1", paginationTable("new"));
+        assertEquals("new", glueService.getTable("db1", "new").getName());
+    }
+
+    private static UserDefinedFunction function(String database, String name) {
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setDatabaseName(database);
+        function.setFunctionName(name);
+        function.setClassName("example.Function");
+        return function;
     }
 }

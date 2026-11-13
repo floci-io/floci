@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -62,6 +63,31 @@ class LambdaDurableProtocolIntegrationTest {
         .then()
             .statusCode(anyOf(is(201), is(409)));
         invoker.drain();
+    }
+
+    @Test
+    void anInvokeTraceHeaderReachesTheInvocationAndTheExecution() throws Exception {
+        String traceHeader = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "traced-1")
+                .header("X-Amzn-Trace-Id", traceHeader)
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        String arn = MAPPER.readTree(invocation.payload()).get("DurableExecutionArn").asText();
+        assertEquals(traceHeader, invocation.traceId());
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn)
+        .then()
+            .statusCode(200)
+            .body("TraceHeader.XAmznTraceId", equalTo(traceHeader));
+
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"{}\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
     }
 
     @Test
@@ -193,6 +219,51 @@ class LambdaDurableProtocolIntegrationTest {
         .then()
             .statusCode(200)
             .body("DurableExecutionArn", equalTo(arn));
+    }
+
+    @Test
+    void aCloseWithoutPayloadOrErrorKeepsTheEmptyWrapperInTheHistory() throws Exception {
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "empty-close-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(invocation.payload());
+        String arn = event.get("DurableExecutionArn").asText();
+        String token = checkpoint(arn, event.get("CheckpointToken").asText(), """
+                {"Id": "s1", "Type": "STEP", "SubType": "Step", "Action": "START"},
+                {"Id": "c1", "Type": "CONTEXT", "SubType": "RunInChildContext", "Action": "START"}
+                """);
+        token = checkpoint(arn, token, """
+                {"Id": "s1", "Type": "STEP", "SubType": "Step", "Action": "FAIL"},
+                {"Id": "c1", "Type": "CONTEXT", "SubType": "RunInChildContext", "Action": "SUCCEED"}
+                """);
+        checkpoint(arn, token, """
+                {"Id": "x", "Type": "EXECUTION", "Action": "SUCCEED", "Payload": "\\"done\\""}
+                """);
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/history?IncludeExecutionData=true")
+        .then()
+            .statusCode(200)
+            .body("Events[3].EventType", equalTo("StepFailed"))
+            .body("Events[3].StepFailedDetails.Error", equalTo(Map.of("Truncated", false)))
+            .body("Events[4].EventType", equalTo("ContextSucceeded"))
+            .body("Events[4].ContextSucceededDetails.Result", equalTo(Map.of("Truncated", false)));
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/history")
+        .then()
+            .statusCode(200)
+            .body("Events[3].StepFailedDetails.Error", equalTo(Map.of("Truncated", true)))
+            .body("Events[4].ContextSucceededDetails.Result", equalTo(Map.of("Truncated", true)));
     }
 
     @Test
@@ -486,6 +557,18 @@ class LambdaDurableProtocolIntegrationTest {
             .body("Events[1].ChainedInvokeStartedDetails.FunctionName", equalTo(FUNCTION))
             .body("Events[2].ChainedInvokeFailedDetails.Error.Truncated", equalTo(true));
         second.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"\\\"ok\\\"\"}"));
+    }
+
+    private static String checkpoint(String arn, String token, String updates) {
+        return given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("{\"CheckpointToken\": \"" + token + "\", \"Updates\": [" + updates + "]}")
+        .when()
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CheckpointToken");
     }
 
     private static DurableInvocationResult handlerResponse(String json) {

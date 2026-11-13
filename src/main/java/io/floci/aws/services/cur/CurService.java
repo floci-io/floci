@@ -42,6 +42,7 @@ public class CurService {
 
     /** AWS hard limit per account: 5 report definitions. */
     private static final int MAX_REPORTS_PER_ACCOUNT = 5;
+    private static final int MAX_TAGS_PER_REPORT = 50;
     /** AWS allows the report name to contain alphanumerics, hyphens, and underscores. */
     private static final Pattern REPORT_NAME_PATTERN =
             Pattern.compile("[A-Za-z0-9_-]+");
@@ -76,8 +77,9 @@ public class CurService {
     }
 
     /** {@code PutReportDefinition} — creates a new report. Fails if one already exists. */
-    public ReportDefinition putReportDefinition(ReportDefinition definition, String region) {
+    public synchronized ReportDefinition putReportDefinition(ReportDefinition definition, String region) {
         validateReportDefinition(definition);
+        requireTagLimit(definition.getTags());
         String key = compositeKey(region, definition.getReportName());
 
         if (store.get(key).isPresent()) {
@@ -101,8 +103,8 @@ public class CurService {
         return definition;
     }
 
-    /** {@code ModifyReportDefinition} — replaces an existing report's definition. */
-    public ReportDefinition modifyReportDefinition(String reportName, ReportDefinition incoming, String region) {
+    /** {@code ModifyReportDefinition}: replaces an existing report's definition, keeping its tags. */
+    public synchronized ReportDefinition modifyReportDefinition(String reportName, ReportDefinition incoming, String region) {
         requireNonEmpty(reportName, "ReportName");
         if (!reportName.equals(incoming.getReportName())) {
             throw new AwsException("ValidationException",
@@ -116,6 +118,7 @@ public class CurService {
                 "Report " + reportName + " not found.", 400));
 
         incoming.setCreatedDate(existing.getCreatedDate());
+        incoming.setTags(existing.getTags());
         incoming.setLastUpdatedDate(Instant.now());
         incoming.setReportStatus(existing.getReportStatus() == null ? "PENDING" : existing.getReportStatus());
         incoming.setOwnerAccountId(existing.getOwnerAccountId() != null
@@ -179,7 +182,7 @@ public class CurService {
      * success/error to {@code DescribeReportDefinitions} consumers. Silent
      * no-op if the report has been deleted in the meantime.
      */
-    public void markReportStatus(String reportName, String region, String status) {
+    public synchronized void markReportStatus(String reportName, String region, String status) {
         if (reportName == null || region == null || status == null) {
             return;
         }
@@ -197,7 +200,7 @@ public class CurService {
      * directly under {@code accountId} rather than relying on the request
      * context.
      */
-    public void markReportStatusForAccount(String accountId, String reportName, String region, String status) {
+    public synchronized void markReportStatusForAccount(String accountId, String reportName, String region, String status) {
         if (accountId == null || reportName == null || region == null || status == null) {
             return;
         }
@@ -216,8 +219,46 @@ public class CurService {
         });
     }
 
+    /** {@code ListTagsForResource}: the tags of the named report definition. */
+    public Map<String, String> listTags(String reportName, String region) {
+        return existingReport(reportName, region).getTags();
+    }
+
+    /** {@code TagResource}: adds the tags, replacing the value of a key the report already has. */
+    public synchronized void tagResource(String reportName, Map<String, String> tags, String region) {
+        ReportDefinition report = existingReport(reportName, region);
+        Map<String, String> merged = new LinkedHashMap<>(report.getTags());
+        merged.putAll(tags);
+        requireTagLimit(merged);
+        report.setTags(merged);
+        store.put(compositeKey(region, reportName), report);
+    }
+
+    /** {@code UntagResource}: removes the keys; a key the report does not have is ignored. */
+    public synchronized void untagResource(String reportName, List<String> tagKeys, String region) {
+        ReportDefinition report = existingReport(reportName, region);
+        Map<String, String> remaining = new LinkedHashMap<>(report.getTags());
+        tagKeys.forEach(remaining::remove);
+        report.setTags(remaining);
+        store.put(compositeKey(region, reportName), report);
+    }
+
+    private static void requireTagLimit(Map<String, String> tags) {
+        if (tags.size() > MAX_TAGS_PER_REPORT) {
+            throw new AwsException("ValidationException",
+                    "A report definition can have up to " + MAX_TAGS_PER_REPORT + " tags.", 400);
+        }
+    }
+
+    private ReportDefinition existingReport(String reportName, String region) {
+        requireNonEmpty(reportName, "ReportName");
+        return store.get(compositeKey(region, reportName)).orElseThrow(() -> new AwsException(
+                "ResourceNotFoundException",
+                "The specified report (" + reportName + ") in the request doesn't exist.", 400));
+    }
+
     /** {@code DeleteReportDefinition} — removes a report; idempotent (returns null when absent). */
-    public ReportDefinition deleteReportDefinition(String reportName, String region) {
+    public synchronized ReportDefinition deleteReportDefinition(String reportName, String region) {
         requireNonEmpty(reportName, "ReportName");
         String key = compositeKey(region, reportName);
         ReportDefinition existing = store.get(key).orElse(null);

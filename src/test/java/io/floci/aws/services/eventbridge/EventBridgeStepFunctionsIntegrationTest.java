@@ -138,7 +138,7 @@ class EventBridgeStepFunctionsIntegrationTest {
     }
 
     private String createRule(String suffix, String eventPattern) {
-        String name = "eventbridge-sfn-" + suffix + "-" + UUID.randomUUID();
+        String name = "eb-sfn-" + suffix + "-" + UUID.randomUUID();
         eventBridgeService.putRule(
                 name, null, eventPattern, null, RuleState.ENABLED, null, null, null, SOURCE_REGION);
         ruleNames.add(name);

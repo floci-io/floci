@@ -21,6 +21,7 @@ import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.LambdaLayerService;
 import io.floci.aws.services.lambda.LambdaLogDestinations;
 import io.floci.aws.services.lambda.model.ContainerState;
+import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
@@ -458,6 +459,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             RetryingTarCopier.copyBytes(dockerClient, containerId, RUNTIME_DIR, "bootstrap",
                     ProvidedRuntimeBootstrap.SCRIPT.getBytes(StandardCharsets.UTF_8), 0755,
                     COPY_MAX_ATTEMPTS, COPY_RETRY_BACKOFF_MS);
+        }
+
+        // AWS runs an image as its own user, not the image's USER; init fails when that user
+        // cannot enter the working directory.
+        if ("Image".equals(fn.getPackageType())) {
+            List<String> mountPaths = fn.getFileSystemConfigs() == null ? List.of()
+                    : fn.getFileSystemConfigs().stream().map(LambdaFileSystemConfig::getLocalMountPath).toList();
+            WorkingDirectoryAccess.requireLambdaUserCanEnter(dockerClient, containerId, mountPaths);
         }
 
         // Now start the container with code in place

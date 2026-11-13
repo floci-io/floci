@@ -270,7 +270,7 @@ public class LambdaController {
         String durableExecutionName = headers.getHeaderString("X-Amz-Durable-Execution-Name");
 
         InvokeResult result = lambdaService.invoke(region, functionName, qualifier, payload, type, clientContext,
-                durableExecutionName);
+                durableExecutionName, headers.getHeaderString("X-Amzn-Trace-Id"));
 
         if (type != InvocationType.Event
                 && result.getPayload() != null

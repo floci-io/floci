@@ -42,11 +42,13 @@ class AwsConfigServicePersistenceTest {
         ConfigRule rule = first.putConfigRule(REGION,
                 rule("s3-public-read", "AWS", "S3_BUCKET_PUBLIC_READ_PROHIBITED"));
         first.putConformancePack(REGION, "ops-pack", "s3://bucket/template.yaml", null);
-        first.putConfigurationRecorder(REGION, new ConfigurationRecorder("default",
-                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null));
+        first.putConfigurationRecorder(REGION, new ConfigurationRecorder(null, "default",
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null),
+                null);
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.tagResource(REGION, rule.configRuleArn(), List.of(Map.of("Key", "env", "Value", "prod")));
+        String recorderArn = first.describeConfigurationRecorders(REGION, null, null).getFirst().arn();
 
         AwsConfigService reloaded = restartedService();
 
@@ -56,7 +58,8 @@ class AwsConfigServicePersistenceTest {
                 reloaded.describeConformancePacks(REGION, null).stream()
                         .map(p -> p.conformancePackName()).toList());
         assertEquals("default",
-                reloaded.describeConfigurationRecorders(REGION, null).getFirst().name());
+                reloaded.describeConfigurationRecorders(REGION, null, null).getFirst().name());
+        assertEquals(recorderArn, reloaded.describeConfigurationRecorders(REGION, null, null).getFirst().arn());
         assertEquals("config-bucket",
                 reloaded.describeDeliveryChannels(REGION, null).getFirst().s3BucketName());
         assertEquals("prod", reloaded.listTagsForResource(REGION, rule.configRuleArn()).getFirst().get("Value"));
@@ -139,27 +142,28 @@ class AwsConfigServicePersistenceTest {
     @Test
     void aStartedRecorderIsStillRecordingAfterRestart() {
         AwsConfigService first = restartedService();
-        first.putConfigurationRecorder(REGION, new ConfigurationRecorder("default",
-                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null));
+        first.putConfigurationRecorder(REGION, new ConfigurationRecorder(null, "default",
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null),
+                null);
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.startConfigurationRecorder(REGION, "default");
-        Long startedAt = first.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStartTime();
+        Long startedAt = first.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStartTime();
         assertNotNull(startedAt);
 
         AwsConfigService reloaded = restartedService();
 
         ConfigurationRecorderStatus afterStart =
-                reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+                reloaded.describeConfigurationRecorderStatus(REGION, null, null).getFirst();
         assertTrue(afterStart.recording());
         assertEquals(startedAt, afterStart.lastStartTime());
 
         reloaded.stopConfigurationRecorder(REGION, "default");
-        Long stoppedAt = reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStopTime();
+        Long stoppedAt = reloaded.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStopTime();
         assertNotNull(stoppedAt);
 
         ConfigurationRecorderStatus afterStop =
-                restartedService().describeConfigurationRecorderStatus(REGION, null).getFirst();
+                restartedService().describeConfigurationRecorderStatus(REGION, null, null).getFirst();
         assertFalse(afterStop.recording());
         assertEquals(startedAt, afterStop.lastStartTime());
         assertEquals(stoppedAt, afterStop.lastStopTime());
@@ -168,19 +172,19 @@ class AwsConfigServicePersistenceTest {
     @Test
     void aDeletedRecorderDoesNotComeBackRecordingAfterRestart() {
         AwsConfigService first = restartedService();
-        ConfigurationRecorder recorder = new ConfigurationRecorder("default",
+        ConfigurationRecorder recorder = new ConfigurationRecorder(null, "default",
                 "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null);
-        first.putConfigurationRecorder(REGION, recorder);
+        first.putConfigurationRecorder(REGION, recorder, null);
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.startConfigurationRecorder(REGION, "default");
         first.deleteConfigurationRecorder(REGION, "default");
 
         AwsConfigService reloaded = restartedService();
-        reloaded.putConfigurationRecorder(REGION, recorder);
+        reloaded.putConfigurationRecorder(REGION, recorder, null);
 
         ConfigurationRecorderStatus status =
-                reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+                reloaded.describeConfigurationRecorderStatus(REGION, null, null).getFirst();
         assertFalse(status.recording());
         assertNull(status.lastStartTime());
     }

@@ -478,8 +478,7 @@ class OrganizationsCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         // putResourcePolicy replaces the tag map, so handing it exactly the template's set is what
-        // removes the dropped key. The other three types reach the same end via replaceTags, which
-        // cannot be used here because a resource policy is not a TagResource target.
+        // removes the dropped key. The other three types reach the same end via replaceTags.
         verify(organizations).putResourcePolicy(eq(ACCOUNT), anyString(), eq(Map.of("env", "prod")));
     }
 

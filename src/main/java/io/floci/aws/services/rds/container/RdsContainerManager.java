@@ -621,6 +621,39 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 handle.getContainerId(), engine.defaultPort(), preferredNetwork);
     }
 
+    /**
+     * Moves a runtime to a new id, as a blue/green switchover does when it renames an instance and
+     * so changes its ARN. The running container, its storage claims, pending cleanup and
+     * auto-pause follow the instance, so a later stop or delete under the new ARN still finds
+     * them. The container itself is not touched.
+     */
+    public void renameRuntime(String oldRuntimeId, String newRuntimeId, String newInstanceId) {
+        if (oldRuntimeId == null || newRuntimeId == null || oldRuntimeId.equals(newRuntimeId)) {
+            return;
+        }
+        if (activeContainers.containsKey(newRuntimeId) || claimedRuntimes.contains(newRuntimeId)) {
+            throw new IllegalStateException("RDS runtime " + newRuntimeId + " already has an active container");
+        }
+        RdsContainerHandle handle = activeContainers.remove(oldRuntimeId);
+        if (handle != null) {
+            RdsContainerHandle moved = new RdsContainerHandle(handle.getContainerId(), newRuntimeId,
+                    newInstanceId, handle.getHost(), handle.getPort(),
+                    handle.getStorageKey(), handle.getContainerKey());
+            moved.setLogStream(handle.getLogStream());
+            activeContainers.put(newRuntimeId, moved);
+        }
+        activeStorageOwners.replaceAll((key, owner) -> owner.equals(oldRuntimeId) ? newRuntimeId : owner);
+        for (Set<String> runtimes : List.of(claimedRuntimes, cleanupPending, preCreateCleanupPending)) {
+            if (runtimes.remove(oldRuntimeId)) {
+                runtimes.add(newRuntimeId);
+            }
+        }
+        AutoPauseController autoPause = autoPauses.remove(oldRuntimeId);
+        if (autoPause != null) {
+            autoPauses.put(newRuntimeId, autoPause);
+        }
+    }
+
     /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */
     public RdsContainerHandle getActiveHandle(String runtimeId) {
         if (runtimeId == null || runtimeId.isBlank()) {

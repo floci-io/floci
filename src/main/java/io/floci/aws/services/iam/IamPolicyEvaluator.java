@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -1676,6 +1677,32 @@ public class IamPolicyEvaluator {
     // -----------------------------------------------------------------------
     // Policy document parsing
     // -----------------------------------------------------------------------
+
+    /**
+     * Whether {@code document} reads as an IAM policy document at all: a value that parses as a
+     * JSON object and carries the element the grammar requires of every policy, {@code Statement},
+     * "the main element for a policy. This element is required."
+     *
+     * <p>Only a document a request SUPPLIED is asked this. An operation taking one takes "the
+     * complete, valid JSON text of an IAM policy", so a value that is not one is an input the
+     * operation answers rather than a document the evaluation reads nothing out of. A document
+     * already stored is read by {@link #parseAll} instead, which contributes no statements for one
+     * it cannot parse and leaves the decision to the rest: a policy the account accepted once must
+     * not make every later call fail.
+     */
+    public boolean readsAsPolicyDocument(String document) {
+        if (document == null) {
+            return false;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(document);
+            return root.isObject() && root.has("Statement");
+        } catch (JsonProcessingException unreadable) {
+            // Not JSON, so no policy document either, and the caller words the refusal. A stored
+            // document carrying the same text is logged where it is parsed, in parseUncached.
+            return false;
+        }
+    }
 
     private List<PolicyStatement> parseAll(List<String> documents) {
         return parseAllTracked(documents).statements();

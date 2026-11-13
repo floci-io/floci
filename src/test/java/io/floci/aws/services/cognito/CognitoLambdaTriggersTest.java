@@ -27,8 +27,11 @@ import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.invocation.InvocationOnMock;
@@ -81,6 +84,7 @@ import static org.mockito.Mockito.when;
  * Verifies that Cognito user-pool Lambda triggers fire on the right events with the right
  * triggerSource, and that their responses are correctly applied to the auth flow.
  */
+@Execution(ExecutionMode.CONCURRENT)
 class CognitoLambdaTriggersTest {
     private static final List<String> AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
             "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_CUSTOM_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");
@@ -1895,11 +1899,14 @@ class CognitoLambdaTriggersTest {
         verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
     }
 
-    @Test
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"ENABLED", "LEGACY"})
     @SuppressWarnings("unchecked")
-    void userMigrationCreatesAndAuthenticatesMissingUser() {
+    void userMigrationCreatesAndAuthenticatesMissingUser(String prevention) {
         UserPool pool = createPoolWithLambdaConfig(Map.of("UserMigration", "arn:aws:lambda:::migrate"));
         UserPoolClient client = createClient(pool);
+        client.setPreventUserExistenceErrors(prevention);
 
         Map<String, Object> migrationResp = Map.of(
                 "userAttributes", Map.of(
@@ -1923,10 +1930,13 @@ class CognitoLambdaTriggersTest {
         assertTrue(user.isEnabled());
     }
 
-    @Test
-    void userMigrationLambdaErrorPropagatesUserNotFound() {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"ENABLED", "LEGACY"})
+    void userMigrationLambdaErrorHonorsUserExistenceErrorSetting(String prevention) {
         UserPool pool = createPoolWithLambdaConfig(Map.of("UserMigration", "arn:aws:lambda:::migrate"));
         UserPoolClient client = createClient(pool);
+        client.setPreventUserExistenceErrors(prevention);
 
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::migrate"), any(byte[].class), any()))
                 .thenReturn(lambdaError("Unhandled"));
@@ -1934,7 +1944,9 @@ class CognitoLambdaTriggersTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "ghost", "PASSWORD", "x")));
-        assertEquals("UserNotFoundException", ex.getErrorCode());
+        boolean hidden = "ENABLED".equals(prevention);
+        assertEquals(hidden ? "NotAuthorizedException" : "UserNotFoundException", ex.getErrorCode());
+        assertEquals(hidden ? "Incorrect username or password" : "User not found", ex.getMessage());
     }
 
     @Test

@@ -87,6 +87,91 @@ class RedshiftCopyEtlIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"simple", "extended"})
+    void escapedDecimalsConvertInBothBulkAndTolerantLoads(String mode) throws Exception {
+        String table = table();
+        put(table, "12\\.345\n\\0612.345\n12\\056345\n");
+        try (Connection connection = connect(mode); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + table + " (amount decimal(8,2))");
+            for (String options : List.of("", "ROUNDEC", "IGNOREALLERRORS", "ROUNDEC IGNOREALLERRORS")) {
+                assertEquals(3, statement.executeUpdate(copy(table, table, options)));
+                try (ResultSet rows = statement.executeQuery("SELECT min(amount), max(amount) FROM " + table)) {
+                    assertTrue(rows.next());
+                    String expected = options.contains("ROUNDEC") ? "12.35" : "12.34";
+                    assertEquals(expected, rows.getString(1));
+                    assertEquals(expected, rows.getString(2));
+                }
+                statement.execute("TRUNCATE " + table);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"simple", "extended"})
+    void decimalCopyTruncatesByDefaultAndRoundsOnlyWithRoundec(String mode) throws Exception {
+        String table = table();
+        put(table, "20.259|text\n-20.255|negative\n");
+        try (Connection connection = connect(mode); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + table + " (amount decimal(8,2), label text)");
+            for (String option : List.of("", "ROUNDEC")) {
+                assertEquals(2, statement.executeUpdate(copy(table, table, option)));
+                try (ResultSet rows = statement.executeQuery("SELECT amount FROM " + table + " ORDER BY amount")) {
+                    assertTrue(rows.next());
+                    assertEquals(option.isEmpty() ? "-20.25" : "-20.26", rows.getString(1));
+                    assertTrue(rows.next());
+                    assertEquals(option.isEmpty() ? "20.25" : "20.26", rows.getString(1));
+                }
+                statement.execute("TRUNCATE " + table);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"simple", "extended"})
+    void ignoreBlankLinesPreservesWhitespaceAndQuotedNewlines(String mode) throws Exception {
+        String table = table();
+        put(table, "\n\r\n\"hello\n\nworld\"\n   \n\"\"\n");
+        try (Connection connection = connect(mode); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + table + " (label text)");
+            assertEquals(3, statement.executeUpdate(copy(table, table, "CSV IGNOREBLANKLINES")));
+            assertEquals(3, count(statement, table));
+            try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM " + table + " WHERE label = E'hello\\n\\nworld'")) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"simple", "extended"})
+    void loadErrorsSurviveFailedCopyAndExplicitRollback(String mode) throws Exception {
+        String table = table();
+        put(table, "id|label\n1|good\nbad|broken\n2|last\n");
+        try (Connection connection = connect(mode); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + table + " (id int, label text)");
+            assertThrows(SQLException.class, () -> statement.execute(copy(table, table, "IGNOREHEADER 1")));
+            assertEquals(0, count(statement, table));
+            connection.setAutoCommit(false);
+            assertEquals(2, statement.executeUpdate(copy(table, table, "IGNOREHEADER 1 IGNOREALLERRORS")));
+            connection.rollback();
+            connection.setAutoCommit(true);
+            assertEquals(0, count(statement, table));
+            try (ResultSet rows = statement.executeQuery("SELECT filename, line_number, colname, raw_line, err_code "
+                    + "FROM stl_load_errors WHERE filename = 's3://" + id + "/" + table + "'")) {
+                for (int error = 0; error < 2; error++) {
+                    assertTrue(rows.next());
+                    assertEquals("s3://" + id + "/" + table, rows.getString(1));
+                    assertEquals(3, rows.getLong(2));
+                    assertEquals("id", rows.getString(3).trim());
+                    assertEquals("bad|broken", rows.getString(4).trim());
+                    assertEquals(1207, rows.getInt(5));
+                }
+                assertFalse(rows.next());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"simple", "extended"})
     void maxErrorLoadsGoodRowsAndCountsErrorsAcrossObjects(String mode) throws Exception {
         String table = table();
         String prefix = table + "/";
