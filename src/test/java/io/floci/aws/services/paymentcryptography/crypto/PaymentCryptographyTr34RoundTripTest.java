@@ -1,11 +1,16 @@
 package io.floci.aws.services.paymentcryptography.crypto;
 
 import org.bouncycastle.asn1.ASN1Encodable;
+import org.bouncycastle.asn1.ASN1EncodableVector;
 import org.bouncycastle.asn1.ASN1InputStream;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
+import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.ASN1OctetString;
+import org.bouncycastle.asn1.DEROctetString;
 import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.DERSequence;
 import org.bouncycastle.asn1.ASN1Set;
+import org.bouncycastle.asn1.DERSet;
 import org.bouncycastle.asn1.ASN1TaggedObject;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -226,6 +231,26 @@ public class PaymentCryptographyTr34RoundTripTest {
 
         assertEquals(HEX_UPPER.formatHex(clear), recovered.keyHex);
         assertEquals(header, recovered.header);
+    }
+
+    @Test
+    void aKeyBlockIsReadWhateverFollowsIt() throws Exception {
+        // The bytes the cipher needed follow the key block, and a block whose plaintext was
+        // already a whole number of cipher blocks carries none of them, so the sequence is
+        // read from the front and the bytes after it are left alone.
+        ASN1EncodableVector elements = new ASN1EncodableVector();
+        elements.add(new ASN1Integer(1));
+        elements.add(new DERSequence(new ASN1Integer(0)));
+        elements.add(new DEROctetString(new byte[16]));
+        elements.add(new DERSequence(new ASN1ObjectIdentifier("1.2.840.113549.1.7.1"),
+                new DERSet(new DEROctetString(
+                        "B0010P0TB00E0000".getBytes(StandardCharsets.US_ASCII)))));
+        byte[] keyBlock = new DERSequence(elements).getEncoded();
+
+        Tr34.Recovered recovered = Tr34.readKeyBlock(keyBlock);
+
+        assertEquals("B0010P0TB00E0000", recovered.header);
+        assertEquals(HEX_UPPER.formatHex(new byte[16]), recovered.keyHex);
     }
 
     @Test

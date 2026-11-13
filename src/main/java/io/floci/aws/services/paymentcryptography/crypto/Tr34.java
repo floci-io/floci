@@ -449,9 +449,9 @@ public final class Tr34 {
             throw new IllegalArgumentException("ephemeral key did not unwrap under the import-token "
                     + "key (wrong token)", e);
         }
-        byte[] clearBlock = stripPadding(aes
+        byte[] clearBlock = aes
                 ? Ciphers.aesCbcDecrypt(encryptedBlock, ephemeral, iv)
-                : Ciphers.tdesCbcDecrypt(encryptedBlock, Ciphers.widenTdesKey(ephemeral), iv));
+                : Ciphers.tdesCbcDecrypt(encryptedBlock, Ciphers.widenTdesKey(ephemeral), iv);
 
         Recovered recovered = readKeyBlock(clearBlock);
 
@@ -630,8 +630,18 @@ public final class Tr34 {
     }
 
     /** The decrypted key block: the clear symmetric key and its TR-31 header. */
-    private static Recovered readKeyBlock(byte[] clearBlock) {
-        ASN1Sequence keyBlock = ASN1Sequence.getInstance(clearBlock);
+    static Recovered readKeyBlock(byte[] clearBlock) {
+        // The key block is a sequence, and the bytes the cipher needed follow it. A block
+        // whose plaintext was already a whole number of cipher blocks carries none of them,
+        // so the sequence is read from the front and the bytes after it are left alone.
+        // The signature covers the digest of the envelope, so they are authenticated either
+        // way.
+        ASN1Sequence keyBlock;
+        try (ASN1InputStream stream = new ASN1InputStream(clearBlock)) {
+            keyBlock = ASN1Sequence.getInstance(stream.readObject());
+        } catch (IOException e) {
+            throw new IllegalArgumentException("the key block does not parse: " + e.getMessage(), e);
+        }
         byte[] key = null;
         String header = "";
         for (int i = 0; i < keyBlock.size(); i++) {
@@ -675,19 +685,6 @@ public final class Tr34 {
     }
 
     /** Strip PKCS#7 padding, rejecting malformed padding rather than truncating. */
-    private static byte[] stripPadding(byte[] buffer) {
-        int pad = buffer[buffer.length - 1] & 0xff;
-        if (pad < 1 || pad > buffer.length) {
-            throw new IllegalArgumentException("invalid PKCS#7 padding");
-        }
-        for (int i = buffer.length - pad; i < buffer.length; i++) {
-            if ((buffer[i] & 0xff) != pad) {
-                throw new IllegalArgumentException("invalid PKCS#7 padding");
-            }
-        }
-        return Arrays.copyOfRange(buffer, 0, buffer.length - pad);
-    }
-
     /** The SHA-256 digest of the given bytes. */
     private static byte[] digest(byte[] data) {
         try {
