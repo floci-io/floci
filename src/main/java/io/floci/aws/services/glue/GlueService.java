@@ -85,6 +85,7 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    private static final int MAX_BATCH_DELETE_TABLES = 100;
     private static final int MAX_SECURITY_CONFIGURATION_NAME_LENGTH = 255;
     private static final int MAX_DATA_QUALITY_NAME_LENGTH = 255;
     private static final int MAX_DATA_QUALITY_DESCRIPTION_LENGTH = 2048;
@@ -812,21 +813,28 @@ public class GlueService {
         LOG.infov("Deleted Glue Table: {0}.{1}", databaseName, tableName);
     }
 
-    public synchronized List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
-        getDatabase(databaseName);
-        List<BatchDeleteTableError> errors = new ArrayList<>();
-        for (String tableName : tableNames) {
-            String key = tableKey(databaseName, tableName);
-            Optional<Table> table = tableStore.get(key);
-            if (table.isEmpty()) {
-                errors.add(new BatchDeleteTableError(
-                        tableName,
-                        new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
-                continue;
-            }
-            deleteTable(databaseName, tableName);
+    public List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
+        validateRequired(tableNames, "TablesToDelete");
+        if (tableNames.size() > MAX_BATCH_DELETE_TABLES) {
+            throw new AwsException("InvalidInputException",
+                    "TablesToDelete must have at most " + MAX_BATCH_DELETE_TABLES + " items.", 400);
         }
-        return errors;
+        synchronized (this) {
+            getDatabase(databaseName);
+            List<BatchDeleteTableError> errors = new ArrayList<>();
+            for (String tableName : tableNames) {
+                String key = tableKey(databaseName, tableName);
+                Optional<Table> table = tableStore.get(key);
+                if (table.isEmpty()) {
+                    errors.add(new BatchDeleteTableError(
+                            tableName,
+                            new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
+                    continue;
+                }
+                deleteTable(databaseName, tableName);
+            }
+            return errors;
+        }
     }
 
     public void updateColumnStatisticsForTable(

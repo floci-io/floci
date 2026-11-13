@@ -1226,6 +1226,59 @@ class GlueServiceTest {
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {101, 1000})
+    void batchDeleteTablesRejectsOversizedRequestsBeforeDeletingTables(int size) {
+        createVersions("table_0", 1);
+        List<String> names = IntStream.range(0, size).mapToObj(index -> "table_" + index).toList();
+
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> glueService.batchDeleteTables("db1", names));
+
+        assertEquals("InvalidInputException", invalid.getErrorCode());
+        assertEquals(400, invalid.getHttpStatus());
+        assertTrue(invalid.getMessage().contains("TablesToDelete"));
+        assertEquals("table_0", glueService.getTable("db1", "table_0").getName());
+        assertFalse(tableVersionStore.keys().isEmpty());
+    }
+
+    @Test
+    void batchDeleteTablesRequiresNames() {
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> glueService.batchDeleteTables("db1", null));
+
+        assertEquals("InvalidInputException", invalid.getErrorCode());
+        assertEquals(400, invalid.getHttpStatus());
+        assertTrue(invalid.getMessage().contains("TablesToDelete"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 100})
+    void batchDeleteTablesAcceptsApiBoundarySizes(int size) {
+        List<String> names = IntStream.range(0, size).mapToObj(index -> "missing_" + index).toList();
+
+        List<GlueService.BatchDeleteTableError> errors = glueService.batchDeleteTables("db1", names);
+
+        assertEquals(names, errors.stream().map(GlueService.BatchDeleteTableError::tableName).toList());
+        assertTrue(errors.stream().allMatch(error -> "EntityNotFoundException".equals(error.errorDetail().errorCode())));
+    }
+
+    @Test
+    void oversizedTableDeletionDoesNotWaitForTheCatalogMonitor() throws Exception {
+        List<String> names = IntStream.range(0, 101).mapToObj(index -> "table_" + index).toList();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            synchronized (glueService) {
+                Future<AwsException> rejected = executor.submit(() -> assertThrows(AwsException.class,
+                        () -> glueService.batchDeleteTables("db1", names)));
+                assertEquals("InvalidInputException", rejected.get(5, TimeUnit.SECONDS).getErrorCode());
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
     void getTableVersionsReturnsCurrentAndArchivedVersions() {
         Table table = new Table();

@@ -1,19 +1,54 @@
 package io.floci.aws.services.glue;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.services.glue.model.BatchDeleteTableResponse;
 import software.amazon.awssdk.services.glue.model.EntityNotFoundException;
+import software.amazon.awssdk.services.glue.model.InvalidInputException;
 import software.amazon.awssdk.services.glue.model.TableVersion;
 
 import java.util.List;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class GlueTableDeletionIntegrationTest {
+
+    @Test
+    void batchSizeValidationPrecedesDeletionAndAcceptsTheApiBoundaries() {
+        GlueCatalogPaginationTestSupport.withCatalog("814800000002", "batch_deletion_", (client, database) -> {
+            client.createTable(request -> request.databaseName(database).tableInput(input -> input.name("table_0")));
+            List<String> oversized = IntStream.range(0, 101).mapToObj(index -> "table_" + index).toList();
+
+            InvalidInputException tooMany = assertThrows(InvalidInputException.class,
+                    () -> client.batchDeleteTable(request -> request.databaseName(database).tablesToDelete(oversized)));
+            assertEquals(400, tooMany.statusCode());
+            assertTrue(tooMany.getMessage().contains("TablesToDelete"));
+            InvalidInputException missing = assertThrows(InvalidInputException.class,
+                    () -> client.batchDeleteTable(request -> request.databaseName(database)));
+            assertEquals(400, missing.statusCode());
+            assertTrue(missing.getMessage().contains("TablesToDelete"));
+
+            assertTrue(client.batchDeleteTable(request -> request.databaseName(database)
+                    .tablesToDelete(List.of())).errors().isEmpty());
+            assertEquals("table_0", client.getTable(request -> request.databaseName(database).name("table_0"))
+                    .table().name());
+
+            List<String> maximum = oversized.subList(0, 100);
+            BatchDeleteTableResponse response = client.batchDeleteTable(request -> request.databaseName(database)
+                    .tablesToDelete(maximum));
+            assertEquals(maximum.subList(1, 100), response.errors().stream().map(error -> error.tableName()).toList());
+            assertTrue(response.errors().stream()
+                    .allMatch(error -> "EntityNotFoundException".equals(error.errorDetail().errorCode())));
+            assertThrows(EntityNotFoundException.class,
+                    () -> client.getTable(request -> request.databaseName(database).name("table_0")));
+        });
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
