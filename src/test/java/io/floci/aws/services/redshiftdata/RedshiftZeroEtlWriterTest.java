@@ -17,16 +17,20 @@ import org.mockito.InOrder;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -90,22 +94,148 @@ class RedshiftZeroEtlWriterTest {
         verify(connection).close();
     }
 
+    /** A target whose {@code public.orders} is absent ({@code owner} null, {@code exists} false) or held as given. */
+    private static final class Target {
+        final Connection connection = mock(Connection.class);
+        final Statement statement = mock(Statement.class);
+        final RedshiftZeroEtlWriter writer;
+
+        Target(boolean exists, String owner, String... columns) throws SQLException {
+            RedshiftService redshiftService = mock(RedshiftService.class);
+            RedshiftDataConnectionFactory connectionFactory = mock(RedshiftDataConnectionFactory.class);
+            when(redshiftService.describeClustersForAccount("111111111111", "warehouse")).thenReturn(List.of(cluster()));
+            when(connectionFactory.open(any())).thenReturn(connection);
+            when(connection.createStatement()).thenReturn(statement);
+            PreparedStatement ownerQuery = mock(PreparedStatement.class);
+            ResultSet ownerRow = mock(ResultSet.class);
+            when(connection.prepareStatement(contains("to_regclass"))).thenReturn(ownerQuery);
+            when(ownerQuery.executeQuery()).thenReturn(ownerRow);
+            when(ownerRow.next()).thenReturn(true);
+            when(ownerRow.getBoolean(1)).thenReturn(exists);
+            when(ownerRow.getString(2)).thenReturn(owner);
+            if (columns.length > 0) {
+                columnsOf(connection, columns);
+            }
+            writer = new RedshiftZeroEtlWriter(redshiftService, mock(RedshiftZeroEtlEndpoints.class), connectionFactory,
+                    new ObjectMapper());
+        }
+
+        boolean create() {
+            return writer.createCurrentStateTable("111111111111", WAREHOUSE_ARN, orders(), "one");
+        }
+    }
+
     @Test
-    void createsTheCurrentStateTableUnderTheDynamoDbTableName() throws Exception {
-        RedshiftService redshiftService = mock(RedshiftService.class);
-        RedshiftDataConnectionFactory connectionFactory = mock(RedshiftDataConnectionFactory.class);
-        Connection connection = mock(Connection.class);
-        Statement statement = mock(Statement.class);
-        when(redshiftService.describeClustersForAccount("111111111111", "warehouse")).thenReturn(List.of(cluster()));
-        when(connectionFactory.open(any())).thenReturn(connection);
-        when(connection.createStatement()).thenReturn(statement);
+    void createsAndMarksTheCurrentStateTableUnderTheDynamoDbTableName() throws Exception {
+        Target target = new Target(false, null);
 
-        new RedshiftZeroEtlWriter(redshiftService, mock(RedshiftZeroEtlEndpoints.class), connectionFactory,
-                new ObjectMapper()).createCurrentStateTable("111111111111", WAREHOUSE_ARN, orders());
+        assertTrue(target.create());
 
-        verify(statement).executeUpdate(contains("CREATE TABLE IF NOT EXISTS public.\"orders\" (\"id\" TEXT NOT NULL, "
-                + "\"value\" JSONB NOT NULL"));
-        verify(connection).close();
+        InOrder inOrder = inOrder(target.connection, target.statement);
+        inOrder.verify(target.connection).setAutoCommit(false);
+        inOrder.verify(target.statement).executeUpdate(contains("CREATE TABLE IF NOT EXISTS public.\"orders\" "
+                + "(\"id\" TEXT NOT NULL, \"value\" JSONB NOT NULL"));
+        inOrder.verify(target.statement).executeUpdate(
+                "COMMENT ON TABLE public.\"orders\" IS 'floci-zetl-integration:one'");
+        inOrder.verify(target.connection).commit();
+        verify(target.statement, never()).executeUpdate(contains("DROP TABLE"));
+        verify(target.connection).close();
+    }
+
+    @Test
+    void keepsATableTheIntegrationMarkedWithTheColumnsItWrites() throws Exception {
+        Target target = new Target(true, "floci-zetl-integration:one", "id", "value");
+
+        assertFalse(target.create());
+
+        verify(target.statement, never()).executeUpdate(any());
+        verify(target.connection).commit();
+    }
+
+    @Test
+    void startsAfreshATableAnEarlierIntegrationLeft() throws Exception {
+        Target target = new Target(true, "floci-zetl-integration:earlier", "id", "value");
+
+        assertTrue(target.create());
+
+        InOrder inOrder = inOrder(target.statement);
+        inOrder.verify(target.statement).executeUpdate("DROP TABLE public.\"orders\"");
+        inOrder.verify(target.statement).executeUpdate(contains("CREATE TABLE IF NOT EXISTS public.\"orders\""));
+        inOrder.verify(target.statement).executeUpdate(
+                "COMMENT ON TABLE public.\"orders\" IS 'floci-zetl-integration:one'");
+        verify(target.connection).commit();
+    }
+
+    @Test
+    void startsAfreshItsOwnTableWhoseKeysAreNotTheSources() throws Exception {
+        Target target = new Target(true, "floci-zetl-integration:one", "order_id", "value");
+
+        assertTrue(target.create());
+
+        verify(target.statement).executeUpdate("DROP TABLE public.\"orders\"");
+    }
+
+    @Test
+    void refusesATableNoIntegrationMadeAndLeavesItAlone() throws Exception {
+        Target target = new Target(true, null, "id", "value");
+
+        AwsException e = assertThrows(AwsException.class, target::create);
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertTrue(e.getMessage().contains("public.\"orders\""));
+        assertTrue(e.getMessage().contains("was not created by a zero-ETL integration"));
+        verify(target.statement, never()).executeUpdate(any());
+        verify(target.connection).rollback();
+        verify(target.connection, never()).commit();
+        verify(target.connection).close();
+    }
+
+    @Test
+    void refusesATableCarryingSomeoneElsesComment() throws Exception {
+        Target target = new Target(true, "orders of the finance team", "id", "value");
+
+        assertThrows(AwsException.class, target::create);
+
+        verify(target.statement, never()).executeUpdate(any());
+    }
+
+    @Test
+    void emptiesTheCurrentStateTable() throws Exception {
+        Target target = new Target(true, "floci-zetl-integration:one");
+
+        target.writer.resetCurrentStateTable("111111111111", WAREHOUSE_ARN, orders());
+
+        verify(target.statement).executeUpdate("TRUNCATE TABLE public.\"orders\"");
+        verify(target.connection).close();
+    }
+
+    @Test
+    void aFailureNamesTheTableAndCarriesThePostgresMessage() throws Exception {
+        Target target = new Target(false, null);
+        when(target.statement.executeUpdate(any())).thenThrow(new SQLException("permission denied for schema public"));
+
+        AwsException e = assertThrows(AwsException.class, target::create);
+
+        assertEquals("Could not create Redshift zero-ETL table public.\"orders\": permission denied for schema public",
+                e.getMessage());
+        verify(target.connection).rollback();
+    }
+
+
+    /** Stubs the information_schema lookup of a public table's columns. */
+    private static PreparedStatement columnsOf(Connection connection, String... names) throws SQLException {
+        PreparedStatement statement = mock(PreparedStatement.class);
+        ResultSet rows = mock(ResultSet.class);
+        when(connection.prepareStatement(contains("information_schema.columns"))).thenReturn(statement);
+        when(statement.executeQuery()).thenReturn(rows);
+        Boolean[] next = new Boolean[names.length + 1];
+        for (int i = 0; i < names.length; i++) {
+            next[i] = true;
+        }
+        next[names.length] = false;
+        when(rows.next()).thenReturn(next[0], Arrays.copyOfRange(next, 1, next.length));
+        when(rows.getString(1)).thenReturn(names[0], Arrays.copyOfRange(names, 1, names.length));
+        return statement;
     }
 
     @Test
@@ -151,7 +281,7 @@ class RedshiftZeroEtlWriterTest {
         when(redshiftService.describeClustersForAccount("111111111111", "warehouse")).thenReturn(List.of(cluster()));
         when(connectionFactory.open(any())).thenReturn(connection);
         when(connection.prepareStatement(any())).thenReturn(upsert);
-        when(upsert.executeUpdate()).thenThrow(new SQLException("numeric field overflow"));
+        when(upsert.executeUpdate()).thenThrow(new SQLException("relation \"public.orders\" does not exist"));
         ObjectNode keys = new ObjectMapper().createObjectNode();
         keys.putObject("id").put("S", "1");
 
@@ -161,6 +291,8 @@ class RedshiftZeroEtlWriterTest {
                 orders(), List.of(new RedshiftZeroEtlCurrentState.Change(keys, keys))));
 
         assertEquals("InternalFailure", e.getErrorCode());
+        assertEquals("Could not apply Redshift zero-ETL changes to public.\"orders\": relation \"public.orders\" "
+                + "does not exist", e.getMessage());
         verify(connection).rollback();
         verify(connection, never()).commit();
     }

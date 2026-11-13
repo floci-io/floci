@@ -55,6 +55,11 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
     private final ConcurrentHashMap<String, Set<String>> finishedShards = new ConcurrentHashMap<>();
     /** Per integration, the current-state table its source projects into, created on the target once resolved. */
     private final ConcurrentHashMap<String, RedshiftZeroEtlCurrentState> currentStates = new ConcurrentHashMap<>();
+    /**
+     * The integrations whose current-state table could not be written. Their landing log carries on regardless;
+     * each poll tries to make the table again, and rebuilds it from a scan once that works.
+     */
+    private final Set<String> stalledProjections = ConcurrentHashMap.newKeySet();
     private final ExecutorService pollExecutor = Executors.newCachedThreadPool(runnable -> {
         Thread thread = new Thread(runnable, "redshift-zero-etl");
         thread.setDaemon(true);
@@ -111,6 +116,12 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
             if (streamReader.checkpointLifetime() == DynamoDbStreamReader.CheckpointLifetime.PROCESS) {
                 integration.getShardSequenceNumbers().clear();
             }
+            if (integration.isBackfillCompleted() && !integration.isCurrentStateProjected()) {
+                // An integration whose backfill ran before the current-state table existed scans its source
+                // again to fill it; the landing log keeps each event once, so the rerun adds no rows there.
+                integration.setBackfillCompleted(false);
+                integration.setBackfillLastEvaluatedKey(null);
+            }
             if (integration.isPollingEnabled()) {
                 startPolling(integration);
             }
@@ -133,6 +144,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         activePolls.remove(integrationArn);
         finishedShards.remove(integrationArn);
         currentStates.remove(integrationArn);
+        stalledProjections.remove(integrationArn);
     }
 
     void pollOnce(Integration integration) {
@@ -145,6 +157,9 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         }
         writer.createLandingTable(integration.getAccountId(), integration.getTargetArn(),
                 integration.getLandingTableName());
+        if (stalledProjections.contains(integration.getIntegrationArn())) {
+            restoreProjection(integration);
+        }
         if (!integration.isBackfillCompleted()) {
             pollBackfillPage(integration);
             return;
@@ -220,6 +235,8 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         }
         integration.getShardSequenceNumbers().clear();
         finishedShards.remove(integration.getIntegrationArn());
+        // A new stream may belong to a table made again with other keys, so its projection is resolved afresh.
+        currentStates.remove(integration.getIntegrationArn());
         integration.setSourceStreamArn(latest);
         redshiftService.updateIntegrationSourceStream(integration.getAccountId(), integration.getIntegrationArn(),
                 latest);
@@ -270,7 +287,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         List<JsonNode> awsRecords = records.stream().map(DynamoDbStreamReader.Record::awsRecord).toList();
         writer.writeBatch(integration.getAccountId(), integration.getTargetArn(),
                 integration.getLandingTableName(), awsRecords);
-        project(integration, null, awsRecords);
+        projectSafely(integration, null, awsRecords);
         committed.put(shardId, records.get(records.size() - 1).sequenceNumber());
         redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
                 committed, true, null);
@@ -287,8 +304,22 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
             TableDefinition table = dynamoDb.tables().describeTable(scope, tableName);
             JsonNode exclusiveStartKey = parseBackfillKey(integration.getBackfillLastEvaluatedKey());
             // The current-state table exists from the first backfill page on, as AWS creates it before the
-            // initial export lands, so an empty source still shows as an empty table.
-            RedshiftZeroEtlCurrentState currentState = currentState(integration, table);
+            // initial export lands, so an empty source still shows as an empty table. Its first page empties it:
+            // the scan only upserts, so a row an earlier run left would otherwise outlive its item. A table that
+            // cannot be made stalls the projection alone; the scan still lands.
+            RedshiftZeroEtlCurrentState currentState = null;
+            if (!stalledProjections.contains(integration.getIntegrationArn())) {
+                try {
+                    currentState = currentState(integration, table);
+                    if (exclusiveStartKey == null) {
+                        writer.resetCurrentStateTable(integration.getAccountId(), integration.getTargetArn(),
+                                currentState);
+                    }
+                } catch (RuntimeException e) {
+                    stallProjection(integration, e);
+                    currentState = null;
+                }
+            }
 
             ScanPage result = dynamoDb.items().scan(scope, tableName, null, null, null, null,
                     BATCH_SIZE, exclusiveStartKey);
@@ -298,7 +329,9 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
                         .toList();
                 writer.writeBatch(integration.getAccountId(), integration.getTargetArn(),
                         integration.getLandingTableName(), records);
-                project(integration, currentState, records);
+                if (currentState != null) {
+                    projectSafely(integration, currentState, records);
+                }
             }
 
             boolean completed = result.lastEvaluatedKey() == null;
@@ -307,7 +340,83 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
                     nextKey, completed);
             integration.setBackfillLastEvaluatedKey(nextKey);
             integration.setBackfillCompleted(completed);
+            if (completed && !stalledProjections.contains(integration.getIntegrationArn())) {
+                integration.setCurrentStateProjected(true);
+                redshiftService.updateIntegrationCurrentState(integration.getAccountId(),
+                        integration.getIntegrationArn(), true);
+            }
         });
+    }
+
+    /**
+     * Applies the records to the current-state table without ever failing the poll: the records have landed, and a
+     * projection that cannot be written must not hold the landing log back. A failure stalls the projection, and
+     * {@link #restoreProjection} rebuilds the table from a scan once it can be written again.
+     */
+    private void projectSafely(Integration integration, RedshiftZeroEtlCurrentState currentState,
+                               List<JsonNode> records) {
+        if (stalledProjections.contains(integration.getIntegrationArn())) {
+            return;
+        }
+        try {
+            project(integration, currentState, records);
+        } catch (RuntimeException e) {
+            stallProjection(integration, e);
+        }
+    }
+
+    private void stallProjection(Integration integration, RuntimeException cause) {
+        String integrationArn = integration.getIntegrationArn();
+        currentStates.remove(integrationArn);
+        if (stalledProjections.add(integrationArn)) {
+            LOG.warnv(cause, "The current-state table of zero-ETL integration {0} cannot be written; the landing "
+                    + "log carries on and the table is rebuilt once it can be", integrationArn);
+        }
+        integration.setCurrentStateProjected(false);
+        redshiftService.updateIntegrationCurrentState(integration.getAccountId(), integrationArn, false);
+    }
+
+    /**
+     * Tries to make the stalled integration's table again, the one thing that can have been wrong being the table:
+     * dropped, a user's own of that name, or the target unreachable. Changes landed since the stall never reached
+     * it, so once it is made the backfill starts over to rebuild it.
+     */
+    private void restoreProjection(Integration integration) {
+        String integrationArn = integration.getIntegrationArn();
+        try {
+            TableDefinition table = describeSource(integration);
+            currentStates.remove(integrationArn);
+            currentState(integration, table);
+        } catch (RuntimeException e) {
+            LOG.debugv(e, "The current-state table of zero-ETL integration {0} still cannot be written",
+                    integrationArn);
+            return;
+        }
+        stalledProjections.remove(integrationArn);
+        // Making the table afresh has already started the backfill over; otherwise it is past some pages, or done.
+        if (integration.isBackfillCompleted() || integration.getBackfillLastEvaluatedKey() != null) {
+            resyncProjection(integration);
+        }
+    }
+
+    /** Starts the backfill over so that the scan fills a current-state table that is missing items. */
+    private void resyncProjection(Integration integration) {
+        integration.setBackfillCompleted(false);
+        integration.setBackfillLastEvaluatedKey(null);
+        integration.setCurrentStateProjected(false);
+        redshiftService.updateIntegrationBackfillProgress(integration.getAccountId(), integration.getIntegrationArn(),
+                null, false);
+        redshiftService.updateIntegrationCurrentState(integration.getAccountId(), integration.getIntegrationArn(),
+                false);
+    }
+
+    private TableDefinition describeSource(Integration integration) {
+        String sourceArn = integration.getSourceArn() != null
+                ? integration.getSourceArn() : integration.getSourceStreamArn();
+        String tableName = RedshiftZeroEtlEndpoints.tableName(sourceArn);
+        String region = AwsArnUtils.parse(sourceArn).region();
+        return RequestScopes.callAs(integration.getAccountId(), region,
+                () -> dynamoDb.tables().describeTable(new Scope(integration.getAccountId(), region), tableName));
     }
 
     /**
@@ -339,19 +448,33 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         RedshiftZeroEtlCurrentState state = currentState != null
                 ? currentState : currentStates.get(integration.getIntegrationArn());
         if (state == null) {
-            state = currentState(integration, RequestScopes.callAs(integration.getAccountId(), region,
-                    () -> dynamoDb.tables().describeTable(scope, tableName)));
+            state = currentState(integration, describeSource(integration));
         }
         writer.applyChanges(integration.getAccountId(), integration.getTargetArn(), state, changes);
     }
 
-    /** The integration's current-state table, created on the target the first time it is resolved. */
+    /**
+     * The integration's current-state table, made its own on the target the first time it is resolved. A table made
+     * afresh over a running integration (dropped by a user, or the source made again with other keys) holds none of
+     * the source's items, so the backfill starts over to fill it.
+     */
     private RedshiftZeroEtlCurrentState currentState(Integration integration, TableDefinition table) {
-        return currentStates.computeIfAbsent(integration.getIntegrationArn(), ignored -> {
-            RedshiftZeroEtlCurrentState state = RedshiftZeroEtlCurrentState.of(table);
-            writer.createCurrentStateTable(integration.getAccountId(), integration.getTargetArn(), state);
-            return state;
+        boolean[] fresh = new boolean[1];
+        RedshiftZeroEtlCurrentState state = currentStates.computeIfAbsent(integration.getIntegrationArn(), ignored -> {
+            RedshiftZeroEtlCurrentState created = RedshiftZeroEtlCurrentState.of(table);
+            fresh[0] = writer.createCurrentStateTable(integration.getAccountId(), integration.getTargetArn(), created,
+                    integrationId(integration));
+            return created;
         });
+        if (fresh[0] && integration.isBackfillCompleted()) {
+            resyncProjection(integration);
+        }
+        return state;
+    }
+
+    private static String integrationId(Integration integration) {
+        String arn = integration.getIntegrationArn();
+        return arn.substring(arn.lastIndexOf(':') + 1);
     }
 
     /** The item as an AWS stream {@code INSERT} record, with an event id stable across scans. */
@@ -415,6 +538,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         activePolls.clear();
         finishedShards.clear();
         currentStates.clear();
+        stalledProjections.clear();
     }
 
     /** Lets the polls submitted from now on write again. */

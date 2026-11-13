@@ -7,6 +7,7 @@ import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -22,14 +23,18 @@ import java.util.stream.Collectors;
  * data plane holds it as {@code jsonb}, so {@code value->'payload'->'L'->0->>'S'} reads what
  * {@code "value"."payload"."L"[0]."S"} reads on Redshift.
  *
- * <p>Key columns take the DynamoDB key types: a string is {@code TEXT}, a number {@code NUMERIC(38,18)}, the
- * precision and scale AWS documents as the maximum for keys, and binary {@code BYTEA}. Every other attribute lives in
- * {@code value} alone, so items that differ in shape need no schema change.
+ * <p>Key columns take the DynamoDB key types: a string is {@code TEXT}, a number an unbounded {@code NUMERIC},
+ * which holds every DynamoDB number exactly where AWS's {@code NUMERIC(38,18)} would round or overflow, and binary
+ * {@code BYTEA}. Every other attribute lives in {@code value} alone, so items that differ in shape need no schema
+ * change.
  */
 public final class RedshiftZeroEtlCurrentState {
 
-    /** The longest table or key column name AWS replicates. PostgreSQL truncates identifiers past 63 bytes. */
-    static final int MAX_IDENTIFIER = 127;
+    /**
+     * The longest identifier PostgreSQL keeps whole. AWS replicates names up to 127 characters, but a longer name
+     * would be truncated here, and two names sharing their first 63 bytes would silently share a table.
+     */
+    static final int MAX_IDENTIFIER_BYTES = 63;
     static final String VALUE_COLUMN = "value";
 
     /** One projected change: the item to upsert under its keys, or, with a null item, the keys to delete. */
@@ -52,9 +57,9 @@ public final class RedshiftZeroEtlCurrentState {
     /** The projection of a DynamoDB table, its partition key column before its sort key's. */
     public static RedshiftZeroEtlCurrentState of(TableDefinition table) {
         String tableName = table.getTableName();
-        if (tableName == null || tableName.isBlank() || tableName.length() > MAX_IDENTIFIER) {
-            throw new AwsException("InvalidParameterValue",
-                    "Table names from DynamoDB greater than " + MAX_IDENTIFIER + " characters are not supported.", 400);
+        if (tableName == null || tableName.isBlank() || tooLong(tableName)) {
+            throw new AwsException("InvalidParameterValue", "Table names from DynamoDB longer than "
+                    + MAX_IDENTIFIER_BYTES + " bytes, the PostgreSQL identifier limit, are not supported.", 400);
         }
         List<KeyColumn> columns = new ArrayList<>();
         for (String keyType : List.of("HASH", "RANGE")) {
@@ -68,9 +73,10 @@ public final class RedshiftZeroEtlCurrentState {
             throw new AwsException("InternalFailure", "DynamoDB table " + tableName + " has no key schema.", 500);
         }
         for (KeyColumn column : columns) {
-            if (column.name().length() > MAX_IDENTIFIER) {
+            if (tooLong(column.name())) {
                 throw new AwsException("InvalidParameterValue", "Column names for the partition key or sort key "
-                        + "greater than " + MAX_IDENTIFIER + " characters are not supported.", 400);
+                        + "longer than " + MAX_IDENTIFIER_BYTES + " bytes, the PostgreSQL identifier limit, are not "
+                        + "supported.", 400);
             }
             if (VALUE_COLUMN.equals(column.name())) {
                 throw new AwsException("InvalidParameterValue",
@@ -78,6 +84,10 @@ public final class RedshiftZeroEtlCurrentState {
             }
         }
         return new RedshiftZeroEtlCurrentState(tableName, columns);
+    }
+
+    private static boolean tooLong(String identifier) {
+        return identifier.getBytes(StandardCharsets.UTF_8).length > MAX_IDENTIFIER_BYTES;
     }
 
     private static String attributeType(TableDefinition table, String attributeName) {
@@ -96,6 +106,18 @@ public final class RedshiftZeroEtlCurrentState {
 
     List<String> keyColumnNames() {
         return keyColumns.stream().map(KeyColumn::name).toList();
+    }
+
+    /** The columns a table of this name must have for the integration to write it: the keys, then {@code value}. */
+    List<String> expectedColumns() {
+        List<String> columns = new ArrayList<>(keyColumnNames());
+        columns.add(VALUE_COLUMN);
+        return columns;
+    }
+
+    /** Empties the table, for an integration starting its backfill over a table a previous one left behind. */
+    String resetSql() {
+        return "TRUNCATE TABLE " + qualifiedName();
     }
 
     /**
@@ -173,7 +195,7 @@ public final class RedshiftZeroEtlCurrentState {
 
     private static String sqlType(KeyColumn column) {
         return switch (column.dynamoDbType()) {
-            case "N" -> "NUMERIC(38,18)";
+            case "N" -> "NUMERIC";
             case "B" -> "BYTEA";
             default -> "TEXT";
         };

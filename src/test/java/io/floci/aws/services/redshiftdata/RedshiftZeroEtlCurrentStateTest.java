@@ -35,7 +35,9 @@ class RedshiftZeroEtlCurrentStateTest {
         assertEquals("orders", state.tableName());
         assertEquals(List.of("pk", "sk"), state.keyColumnNames());
         assertEquals("CREATE TABLE IF NOT EXISTS public.\"orders\" (\"pk\" TEXT NOT NULL, "
-                + "\"sk\" NUMERIC(38,18) NOT NULL, \"value\" JSONB NOT NULL, PRIMARY KEY (\"pk\", \"sk\"))", state.ddl());
+                + "\"sk\" NUMERIC NOT NULL, \"value\" JSONB NOT NULL, PRIMARY KEY (\"pk\", \"sk\"))", state.ddl());
+        assertEquals("TRUNCATE TABLE public.\"orders\"", state.resetSql());
+        assertEquals(List.of("pk", "sk", "value"), state.expectedColumns());
         assertEquals("INSERT INTO public.\"orders\" (\"pk\", \"sk\", \"value\") VALUES (?, ?, ?::jsonb) "
                 + "ON CONFLICT (\"pk\", \"sk\") DO UPDATE SET \"value\" = EXCLUDED.\"value\"", state.upsertSql());
         assertEquals("DELETE FROM public.\"orders\" WHERE \"pk\" = ? AND \"sk\" = ?", state.deleteSql());
@@ -52,15 +54,24 @@ class RedshiftZeroEtlCurrentStateTest {
     }
 
     @Test
-    void refusesWhatAwsDoesNotReplicate() {
+    void refusesNamesPostgresWouldTruncate() {
+        // 63 bytes is kept whole; 64 would be cut, and two names cut to the same prefix would share a table.
+        assertEquals("x".repeat(63), RedshiftZeroEtlCurrentState.of(table("x".repeat(63),
+                List.of(new KeySchemaElement("id", "HASH")), List.of(new AttributeDefinition("id", "S")))).tableName());
         AwsException longName = assertThrows(AwsException.class, () -> RedshiftZeroEtlCurrentState.of(
-                table("x".repeat(128), List.of(new KeySchemaElement("id", "HASH")),
+                table("x".repeat(64), List.of(new KeySchemaElement("id", "HASH")),
                         List.of(new AttributeDefinition("id", "S")))));
         assertEquals("InvalidParameterValue", longName.getErrorCode());
+        assertTrue(longName.getMessage().contains("63 bytes"));
+        // Bytes, not characters: a multibyte name is cut sooner.
+        AwsException multibyte = assertThrows(AwsException.class, () -> RedshiftZeroEtlCurrentState.of(
+                table("é".repeat(32), List.of(new KeySchemaElement("id", "HASH")),
+                        List.of(new AttributeDefinition("id", "S")))));
+        assertEquals("InvalidParameterValue", multibyte.getErrorCode());
 
         AwsException longKey = assertThrows(AwsException.class, () -> RedshiftZeroEtlCurrentState.of(
-                table("orders", List.of(new KeySchemaElement("k".repeat(128), "HASH")),
-                        List.of(new AttributeDefinition("k".repeat(128), "S")))));
+                table("orders", List.of(new KeySchemaElement("k".repeat(64), "HASH")),
+                        List.of(new AttributeDefinition("k".repeat(64), "S")))));
         assertEquals("InvalidParameterValue", longKey.getErrorCode());
 
         AwsException valueKey = assertThrows(AwsException.class, () -> RedshiftZeroEtlCurrentState.of(
@@ -84,6 +95,21 @@ class RedshiftZeroEtlCurrentStateTest {
         verify(statement).setString(1, "customer#1");
         verify(statement).setBigDecimal(2, new BigDecimal("42.5"));
         verifyNoMoreInteractions(statement);
+    }
+
+    @Test
+    void bindsNumericKeysExactlyHoweverLargeOrFine() throws Exception {
+        RedshiftZeroEtlCurrentState state = RedshiftZeroEtlCurrentState.of(table("metrics",
+                List.of(new KeySchemaElement("n", "HASH")), List.of(new AttributeDefinition("n", "N"))));
+        PreparedStatement statement = mock(PreparedStatement.class);
+        // 38 significant digits with 30 before the point, and a difference past the 18th decimal: both exact.
+        for (String number : List.of("123456789012345678901234567890.12345678", "0.1234567890123456789",
+                "0.1234567890123456788", "-1e125")) {
+            ObjectNode keys = MAPPER.createObjectNode();
+            keys.putObject("n").put("N", number);
+            state.bindKeys(statement, keys);
+            verify(statement).setBigDecimal(1, new BigDecimal(number));
+        }
     }
 
     @Test

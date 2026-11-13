@@ -11,15 +11,19 @@ import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -41,6 +45,14 @@ public class RedshiftZeroEtlWriter {
     private static final String INSERT_RECORD = "INSERT INTO %s (event_id, event_name, event_source, aws_region, "
             + "sequence_number, approximate_creation_datetime, keys_json, old_image_json, new_image_json) "
             + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING";
+    private static final String COLUMNS_OF_TABLE = "SELECT column_name FROM information_schema.columns "
+            + "WHERE table_schema = 'public' AND table_name = ? ORDER BY ordinal_position";
+    /** Whether a table exists, and the comment it carries: the mark of the integration that made it. */
+    private static final String TABLE_OWNER = "SELECT to_regclass(?) IS NOT NULL, "
+            + "obj_description(to_regclass(?), 'pg_class')";
+    private static final String OWNER_MARKER_PREFIX = "floci-zetl-integration:";
+    private static final Pattern INTEGRATION_ID = Pattern.compile("[A-Za-z0-9-]{1,64}");
+    private static final Logger LOG = Logger.getLogger(RedshiftZeroEtlWriter.class);
 
     private final RedshiftService redshiftService;
     private final RedshiftZeroEtlEndpoints endpoints;
@@ -69,14 +81,99 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
-    /** Creates the table the integration projects its source's current item state into, if it does not exist. */
-    public void createCurrentStateTable(String accountId, String targetArn, RedshiftZeroEtlCurrentState state) {
+    /**
+     * Makes the table the integration projects its source's current item state into its own: the table carries a
+     * comment naming the integration, so a later run knows whose it is.
+     *
+     * <ul>
+     *   <li>No such table: it is created and marked.</li>
+     *   <li>A table this integration marked, with the columns its source's keys give: it is kept.</li>
+     *   <li>A table an earlier integration marked, or this one's with other columns (the source was made again with
+     *       other keys): it is dropped and created afresh, since its rows describe a source that no longer
+     *       exists.</li>
+     *   <li>A table nobody marked, a user's own: it is refused with {@code InvalidParameterValue} and left alone.</li>
+     * </ul>
+     *
+     * @param integrationId the id of the integration that owns the table, the last segment of its ARN
+     * @return whether the table was made afresh, so that it holds none of its source's items yet
+     */
+    public boolean createCurrentStateTable(String accountId, String targetArn, RedshiftZeroEtlCurrentState state,
+                                           String integrationId) {
+        String marker = ownerMarker(integrationId);
+        try (Connection connection = connectionFactory.open(target(accountId, targetArn))) {
+            connection.setAutoCommit(false);
+            try {
+                boolean exists;
+                String owner;
+                try (PreparedStatement statement = connection.prepareStatement(TABLE_OWNER)) {
+                    statement.setString(1, state.qualifiedName());
+                    statement.setString(2, state.qualifiedName());
+                    try (ResultSet rows = statement.executeQuery()) {
+                        rows.next();
+                        exists = rows.getBoolean(1);
+                        owner = rows.getString(2);
+                    }
+                }
+                boolean fresh = true;
+                if (exists) {
+                    if (owner == null || !owner.startsWith(OWNER_MARKER_PREFIX)) {
+                        throw new AwsException("InvalidParameterValue", "Table " + state.qualifiedName()
+                                + " already exists and was not created by a zero-ETL integration, so integration "
+                                + integrationId + " will not write into it.", 400);
+                    }
+                    fresh = !owner.equals(marker) || !hasColumns(connection, state);
+                }
+                if (fresh) {
+                    try (Statement statement = connection.createStatement()) {
+                        if (exists) {
+                            statement.executeUpdate("DROP TABLE " + state.qualifiedName());
+                        }
+                        statement.executeUpdate(state.ddl());
+                        statement.executeUpdate("COMMENT ON TABLE " + state.qualifiedName() + " IS '" + marker + "'");
+                    }
+                }
+                connection.commit();
+                return fresh;
+            } catch (SQLException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            }
+        } catch (SQLException e) {
+            LOG.warnv(e, "Could not create Redshift zero-ETL table {0}", state.qualifiedName());
+            throw new AwsException("InternalFailure", "Could not create Redshift zero-ETL table "
+                    + state.qualifiedName() + ": " + e.getMessage(), 500);
+        }
+    }
+
+    private static String ownerMarker(String integrationId) {
+        if (integrationId == null || !INTEGRATION_ID.matcher(integrationId).matches()) {
+            throw new AwsException("InvalidParameterValue", "Integration id is invalid.", 400);
+        }
+        return OWNER_MARKER_PREFIX + integrationId;
+    }
+
+    private static boolean hasColumns(Connection connection, RedshiftZeroEtlCurrentState state) throws SQLException {
+        List<String> columns = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(COLUMNS_OF_TABLE)) {
+            statement.setString(1, state.tableName());
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    columns.add(rows.getString(1));
+                }
+            }
+        }
+        return new HashSet<>(columns).equals(new HashSet<>(state.expectedColumns()));
+    }
+
+    /** Empties the current-state table, for an integration starting its backfill over a table left behind. */
+    public void resetCurrentStateTable(String accountId, String targetArn, RedshiftZeroEtlCurrentState state) {
         try (Connection connection = connectionFactory.open(target(accountId, targetArn));
              Statement statement = connection.createStatement()) {
-            statement.executeUpdate(state.ddl());
+            statement.executeUpdate(state.resetSql());
         } catch (SQLException e) {
-            throw new AwsException("InternalFailure",
-                    "Could not create Redshift zero-ETL table " + state.tableName() + ".", 500);
+            LOG.warnv(e, "Could not empty Redshift zero-ETL table {0}", state.qualifiedName());
+            throw new AwsException("InternalFailure", "Could not empty Redshift zero-ETL table "
+                    + state.qualifiedName() + ": " + e.getMessage(), 500);
         }
     }
 
@@ -110,8 +207,9 @@ public class RedshiftZeroEtlWriter {
                 throw e;
             }
         } catch (SQLException e) {
-            throw new AwsException("InternalFailure",
-                    "Could not apply Redshift zero-ETL changes to " + state.tableName() + ".", 500);
+            LOG.warnv(e, "Could not apply Redshift zero-ETL changes to {0}", state.qualifiedName());
+            throw new AwsException("InternalFailure", "Could not apply Redshift zero-ETL changes to "
+                    + state.qualifiedName() + ": " + e.getMessage(), 500);
         } catch (JsonProcessingException e) {
             throw new AwsException("InternalFailure", "Could not serialize a DynamoDB item.", 500);
         }

@@ -944,6 +944,27 @@ public class RedshiftService implements ManagedSecretRotator {
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
+    /**
+     * Records whether the integration's current-state table holds its source's items: true once a backfill has
+     * filled it, false while it is being rebuilt. It is not an integration state, so no event is sent.
+     */
+    public synchronized void updateIntegrationCurrentState(String accountId, String integrationArn,
+                                                           boolean projected) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            if (integration.isCurrentStateProjected() != projected) {
+                integration.setCurrentStateProjected(projected);
+                integrations.putForAccount(accountId, key, integration);
+            }
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
     /** Records that the integration now reads {@code sourceStreamArn}, from its trim horizon. */
     public synchronized void updateIntegrationSourceStream(String accountId, String integrationArn,
                                                            String sourceStreamArn) {

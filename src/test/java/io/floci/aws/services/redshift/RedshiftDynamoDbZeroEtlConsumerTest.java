@@ -53,6 +53,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -609,6 +610,13 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         assertEquals("backfill", written.path("dynamodb").path("SequenceNumber").asText());
         assertEquals(written.path("dynamodb").path("Keys").path("id"),
                 written.path("dynamodb").path("NewImage").path("id"));
+
+        consumer.pollOnce(integration);
+
+        // Only the first page empties the current-state table; the second continues the same backfill.
+        assertTrue(integration.isBackfillCompleted());
+        verify(writer, times(1)).resetCurrentStateTable(any(), any(), any());
+        verify(writer, times(2)).applyChanges(any(), any(), any(), any());
     }
 
     @Test
@@ -840,7 +848,8 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         InOrder inOrder = inOrder(writer);
         inOrder.verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
                 List.of(inserted.awsRecord(), removed.awsRecord()));
-        inOrder.verify(writer).createCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), state.capture());
+        inOrder.verify(writer).createCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), state.capture(),
+                eq("one"));
         inOrder.verify(writer).applyChanges(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), eq(state.getValue()),
                 changes.capture());
         assertEquals(tableName, state.getValue().tableName());
@@ -875,30 +884,124 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
     }
 
     @Test
-    void theCurrentStateTableIsCreatedOnceAndTheProjectionFailureKeepsTheCheckpoint() {
+    void aFailedProjectionDoesNotHoldBackTheLandingLogAndTheTableIsRebuiltOnceItCanBeWritten() {
         FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
         RedshiftService redshiftService = mock(RedshiftService.class);
         RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
         doThrow(new AwsException("InternalFailure", "Could not apply Redshift zero-ETL changes to orders.", 500))
-                .doNothing()
                 .when(writer).applyChanges(any(), any(), any(), any());
         String tableName = "orders-retried-" + System.nanoTime();
         TableDefinition table = createTableAs("111111111111", tableName, true);
         Integration integration = tableSourceIntegration(table);
         integration.setBackfillCompleted(true);
+        integration.setCurrentStateProjected(true);
         DynamoDbStreamReader.Record first = imageRecord("s1", "INSERT", "1", "first");
+        DynamoDbStreamReader.Record second = imageRecord("s2", "INSERT", "2", "second");
         streams.shard(table.getStreamArn(), SHARD_ID, null).add(first);
         RedshiftDynamoDbZeroEtlConsumer consumer =
                 new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer);
 
-        assertThrows(AwsException.class, () -> consumer.pollOnce(integration));
-        assertTrue(integration.getShardSequenceNumbers().isEmpty());
-
         consumer.pollOnce(integration);
 
-        verify(writer, times(1)).createCurrentStateTable(any(), any(), any());
-        verify(writer, times(2)).applyChanges(any(), any(), any(), any());
+        // The record landed and its checkpoint advanced; only the projection stalled.
+        verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
+                List.of(first.awsRecord()));
         assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+        assertFalse(integration.isCurrentStateProjected());
+        verify(redshiftService).updateIntegrationCurrentState(integration.getAccountId(),
+                integration.getIntegrationArn(), false);
+
+        // While the table cannot be written, later batches still land and none is projected.
+        doThrow(new AwsException("InvalidParameterValue", "Table public.\"x\" is not ours.", 400))
+                .when(writer).createCurrentStateTable(any(), any(), any(), any());
+        streams.shard(table.getStreamArn(), SHARD_ID, null).add(second);
+        consumer.pollOnce(integration);
+
+        verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
+                List.of(second.awsRecord()));
+        assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+        verify(writer, times(1)).applyChanges(any(), any(), any(), any());
+        assertTrue(integration.isBackfillCompleted());
+
+        // Once the table can be made, the backfill starts over to fill it, and a scan that completes marks it so.
+        doReturn(true).when(writer).createCurrentStateTable(any(), any(), any(), any());
+        consumer.pollOnce(integration);
+
+        assertTrue(integration.isBackfillCompleted());
+        assertTrue(integration.isCurrentStateProjected());
+        verify(redshiftService, times(1)).updateIntegrationBackfillProgress(integration.getAccountId(),
+                integration.getIntegrationArn(), null, false);
+        verify(redshiftService).updateIntegrationCurrentState(integration.getAccountId(),
+                integration.getIntegrationArn(), true);
+        verify(writer, times(1)).resetCurrentStateTable(any(), any(), any());
+    }
+
+    @Test
+    void aTableTheIntegrationCannotMakeStallsTheProjectionAloneWhileTheScanLands() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        doThrow(new AwsException("InvalidParameterValue", "Table public.\"x\" is not ours.", 400))
+                .when(writer).createCurrentStateTable(any(), any(), any(), any());
+        String tableName = "orders-refused-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, false);
+        RequestScopes.runAs("111111111111", () -> dynamoDbService.putItem(tableName, itemWithId("1"), "us-east-1"));
+        Integration integration = tableSourceIntegration(table);
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer).pollOnce(integration);
+
+        verify(writer).writeBatch(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), eq("floci_zetl_orders"), any());
+        verify(writer, never()).applyChanges(any(), any(), any(), any());
+        verify(writer, never()).resetCurrentStateTable(any(), any(), any());
+        assertTrue(integration.isBackfillCompleted());
+        assertFalse(integration.isCurrentStateProjected());
+        verify(redshiftService).updateIntegrationBackfillProgress(integration.getAccountId(),
+                integration.getIntegrationArn(), null, true);
+        verify(redshiftService, never()).updateIntegrationCurrentState(any(), any(), eq(true));
+    }
+
+    @Test
+    void aTableMadeAfreshOverARunningIntegrationIsFilledByAnotherScan() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        doReturn(true).when(writer).createCurrentStateTable(any(), any(), any(), any());
+        String tableName = "orders-dropped-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        integration.setCurrentStateProjected(true);
+        streams.shard(table.getStreamArn(), SHARD_ID, null).add(imageRecord("s1", "INSERT", "1", "first"));
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer).pollOnce(integration);
+
+        // The user dropped the table: it is made again and holds nothing but this batch, so the scan refills it.
+        assertFalse(integration.isBackfillCompleted());
+        assertFalse(integration.isCurrentStateProjected());
+        verify(redshiftService).updateIntegrationBackfillProgress(integration.getAccountId(),
+                integration.getIntegrationArn(), null, false);
+    }
+
+    @Test
+    void aPersistedIntegrationWithoutACurrentStateScansItsSourceAgainAtStartup() {
+        Integration integration = streamingIntegration();
+        integration.setBackfillLastEvaluatedKey(null);
+        assertTrue(integration.isBackfillCompleted());
+        assertFalse(integration.isCurrentStateProjected());
+
+        startPersisted(CheckpointLifetime.STREAM, integration);
+
+        assertFalse(integration.isBackfillCompleted());
+    }
+
+    @Test
+    void aPersistedIntegrationWhoseCurrentStateIsFilledKeepsItsBackfill() {
+        Integration integration = streamingIntegration();
+        integration.setCurrentStateProjected(true);
+
+        startPersisted(CheckpointLifetime.STREAM, integration);
+
+        assertTrue(integration.isBackfillCompleted());
     }
 
     @Test
@@ -917,7 +1020,10 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Change>> changes = ArgumentCaptor.forClass(List.class);
         InOrder inOrder = inOrder(writer);
-        inOrder.verify(writer).createCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any());
+        inOrder.verify(writer).createCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any(),
+                eq("one"));
+        // A table left behind by an earlier integration of the source is emptied before the first page lands.
+        inOrder.verify(writer).resetCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any());
         inOrder.verify(writer).writeBatch(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), eq("floci_zetl_orders"), any());
         inOrder.verify(writer).applyChanges(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any(), changes.capture());
         assertEquals(List.of(new Change(item, item)), changes.getValue());

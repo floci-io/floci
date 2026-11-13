@@ -488,22 +488,36 @@ the JSON operators: `value->'payload'->'L'->0->>'S'` here is `"value"."payload".
 SELECT id, value->'note'->>'S' AS note FROM public."orders";
 ```
 
-- Key columns take the DynamoDB key types: `S` is `TEXT`, `N` is `NUMERIC(38,18)` (the precision and
-  scale AWS documents as the maximum for keys), `B` is `BYTEA`. The partition key comes first, then the
-  sort key, and together they are the primary key. Every other attribute lives only in `value`, so items
-  of differing shape need no schema change.
+- Key columns take the DynamoDB key types: `S` is `TEXT`, `N` is an unbounded `NUMERIC`, which holds
+  every DynamoDB number exactly where AWS's `NUMERIC(38,18)` would round or overflow, `B` is `BYTEA`. The
+  partition key comes first, then the sort key, and together they are the primary key. Every other
+  attribute lives only in `value`, so items of differing shape need no schema change.
 - Each `INSERT` and `MODIFY` replaces the item under its keys with the record's new image, each `REMOVE`
   deletes it, and the backfill scan upserts each item it reads. A record of a stream with no new image
   (a `KEYS_ONLY` or `OLD_IMAGE` view) is projected from the item as the source holds it at that moment.
-- Changes are applied in shard order after the batch has landed, and the shard checkpoint advances only
-  once both are written. The projection is idempotent, so an item that lands twice, once from the scan
-  and once from the stream, or a batch written again after a failed poll, leaves the same state. AWS
-  refreshes every 15 to 30 minutes; Floci applies each poll.
-- A table name or key column name longer than 127 characters is refused, as AWS refuses it. PostgreSQL
-  truncates identifiers past 63 bytes, so two names that differ only after that point share a table.
+- Changes are applied in shard order after the batch has landed. The projection is idempotent, so an
+  item that lands twice, once from the scan and once from the stream, leaves the same state. While the
+  stream catches up after the backfill, a replayed older image can briefly replace a newer one the scan
+  read; the table holds the source's state once the stream is drained, as AWS's full export followed by
+  incremental exports does. AWS refreshes every 15 to 30 minutes; Floci applies each poll.
+- The integration marks its table as its own, with a comment naming the integration
+  (`floci-zetl-integration:<integration-id>`, see `obj_description`). A table that an earlier integration
+  of the source marked is dropped and made afresh by the next one, so an item deleted from the source in
+  between does not survive and a source made again with other keys does not meet its predecessor's
+  columns. A table nobody marked, one the user already has under that name, is refused and left alone.
+- The current-state table never holds back the landing log. A projection that cannot be written (a
+  refused table, a table dropped under the integration, an unreachable target) is logged as a warning
+  once, and the integration keeps landing and checkpointing its records. Each poll tries to make the table
+  again, and once it can, the backfill starts over (`syncing`) and the scan fills it, since changes that
+  landed in the meantime never reached it. A table dropped and made again while the integration runs is
+  filled the same way.
+- A table name or key column name longer than 63 bytes is refused. AWS accepts up to 127 characters, but
+  PostgreSQL truncates identifiers past 63 bytes, so two longer names could silently share a table.
 - The table lives in the same database as the user's own tables (`dev` on a cluster, the namespace's
   database on Serverless), not in a database created from the integration, and is kept when the
   integration is deleted, as AWS keeps replicated data.
+- An integration persisted before this table existed scans its source again at the next start to fill
+  it; the landing log keeps each event once, so the rerun adds no rows there.
 
 ### S3 event integrations
 
