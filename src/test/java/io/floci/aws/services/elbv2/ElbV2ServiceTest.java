@@ -1076,6 +1076,21 @@ class ElbV2ServiceTest {
     }
 
     @Test
+    void describeTargetHealthMatchesAFilterTargetWithoutPortOnTheGroupPort() {
+        String tgArn = createTargetGroup("filter-default-port-tg");
+        service.registerTargets(REGION, tgArn, List.of(target("i-default", 9999)));
+        when(healthChecker.getHealth(tgArn, "i-default", 9999))
+                .thenReturn(new ElbV2HealthChecker.TargetHealthStatus("healthy", null, null));
+
+        TargetHealth health = service.describeTargetHealth(
+                REGION, tgArn, List.of(target("i-default", null))).getFirst();
+
+        assertEquals("healthy", health.getState());
+        assertNull(health.getReason());
+        assertEquals("9999", health.getHealthCheckPort());
+    }
+
+    @Test
     void registerTargetsRejectsLinkLocalAndMetadataAddresses() {
         String tgArn = createTargetGroup("metadata-tg");
 
