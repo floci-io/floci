@@ -21,6 +21,8 @@ import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import io.floci.aws.services.codeartifact.model.PackageAsset;
+import io.floci.aws.services.codeartifact.model.PackageGroup;
+import io.floci.aws.services.codeartifact.model.PackageGroupRestriction;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -41,6 +43,7 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -114,6 +117,22 @@ public class CodeArtifactService implements Resettable {
      * than {@link #UPDATE_EXPECTED_STATUSES} by exactly {@code Disposed} itself. */
     private static final Set<String> DISPOSE_EXPECTED_STATUSES =
             Set.of("Published", "Unlisted", "Archived", "Unfinished", "Disposed");
+
+    /** The real {@code PackageGroupOriginRestrictionType} wire enum, in the order every
+     * restrictions map this service returns iterates them. */
+    private static final List<String> PACKAGE_GROUP_RESTRICTION_TYPES =
+            List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM");
+    /** The real {@code PackageGroupOriginRestrictionMode} wire enum. */
+    private static final Set<String> PACKAGE_GROUP_MODES =
+            Set.of("ALLOW", "ALLOW_SPECIFIC_REPOSITORIES", "BLOCK", "INHERIT");
+    /** {@code PackageGroupPattern}'s own wire pattern: any run of characters that are neither a
+     * Unicode "Other" category codepoint nor whitespace, 2-520 characters long. Deliberately not
+     * reused from {@link #PACKAGE_TOKEN}: that pattern forbids {@code #}/{@code /}/whitespace,
+     * but a package group pattern's own {@code /}-separated shape and {@code $}/{@code ~}/{@code *}
+     * terminators are exactly what {@link PackageGroupPatterns#parse} exists to interpret, so this
+     * only rejects what AWS itself rejects at the wire level, leaving syntax validation to parse().
+     */
+    private static final Pattern PACKAGE_GROUP_PATTERN_TOKEN = Pattern.compile("[^\\p{C}\\p{IsWhitespace}]+");
 
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
@@ -207,11 +226,34 @@ public class CodeArtifactService implements Resettable {
     public record AuthorizationTokenScope(String owner, String region) {}
     private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
 
+    // ------------------------------------------------------------- package groups (views)
+
+    public record PackageGroupOriginRestrictionView(String mode, String effectiveMode, String inheritedFromArn,
+            String inheritedFromPattern, long repositoriesCount) {}
+    public record PackageGroupDescriptionView(String arn, String pattern, String domainName, String domainOwner,
+            long createdTime, String contactInfo, String description,
+            Map<String, PackageGroupOriginRestrictionView> restrictions, String parentArn, String parentPattern) {}
+    public record PackageGroupListResult(List<PackageGroupDescriptionView> packageGroups, String nextToken) {}
+    public record ListAllowedRepositoriesForGroupResult(List<String> allowedRepositories, String nextToken) {}
+    public record AssociatedPackageView(String format, String namespace, String packageName, String associationType) {}
+    public record ListAssociatedPackagesResult(List<AssociatedPackageView> packages, String nextToken) {}
+    public record GetAssociatedPackageGroupResult(PackageGroupDescriptionView packageGroup, String associationType) {}
+    public record UpdatePackageGroupOriginConfigurationResult(PackageGroupDescriptionView packageGroup,
+            Map<String, Map<String, List<String>>> allowedRepositoryUpdates) {}
+    /** The most specific existing group whose pattern matches a package path, with how strongly
+     * it matched; {@code null} fields are never used, {@link Optional#empty} models "no group in
+     * this domain matches this package at all" (see {@link #findAssociatedGroup}'s own javadoc). */
+    private record AssociatedGroupMatch(PackageGroup group, PackageGroupPatterns.MatchStrength strength) {}
+    /** One restriction type's resolved mode for a group, and the ancestor it was inherited from
+     * (if any) — see {@link #resolveEffectiveMode}'s own javadoc. */
+    private record EffectiveModeResult(String mode, PackageGroup inheritedFrom) {}
+
     private final AccountAwareStorageBackend<CodeArtifactDomain> domains;
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
     private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
     private final AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs;
     private final Set<String> migratedOriginConfigAccounts = new HashSet<>();
+    private final AccountAwareStorageBackend<PackageGroup> packageGroups;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CodeArtifactSidecarRegistry sidecarRegistry;
@@ -390,6 +432,8 @@ public class CodeArtifactService implements Resettable {
                         new TypeReference<Map<String, CodeArtifactPackageVersion>>() {}),
                 storageFactory.create("codeartifact", "codeartifact-package-origin-configs.json",
                         new TypeReference<Map<String, PackageOriginConfig>>() {}),
+                storageFactory.create("codeartifact", "codeartifact-package-groups.json",
+                        new TypeReference<Map<String, PackageGroup>>() {}),
                 regionResolver, config,
                 "memory".equals(serviceConfigAccess.storageMode("codeartifact")),
                 Path.of(config.storage().persistentPath()).resolve(ASSET_STORAGE_DIR),
@@ -401,12 +445,14 @@ public class CodeArtifactService implements Resettable {
                          AccountAwareStorageBackend<CodeArtifactRepository> repositories,
                          AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions,
                          AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs,
+                         AccountAwareStorageBackend<PackageGroup> packageGroups,
                          RegionResolver regionResolver, EmulatorConfig config,
                          boolean inMemory, Path assetRoot, CodeArtifactSidecarRegistry sidecarRegistry) {
         this.domains = domains;
         this.repositories = repositories;
         this.packageVersions = packageVersions;
         this.packageOriginConfigs = packageOriginConfigs;
+        this.packageGroups = packageGroups;
         this.regionResolver = regionResolver;
         this.config = config;
         this.sidecarRegistry = sidecarRegistry;
@@ -463,6 +509,17 @@ public class CodeArtifactService implements Resettable {
                     + "until they are deleted.", domain, "domain");
         }
         domains.deleteForAccount(owner, key);
+        // Unlike packageOriginConfigs/packageVersions (repository-scoped, already cleaned up by
+        // deleteRepository above this point in the call chain), package groups are domain-scoped
+        // and outlive every repository in the domain being gone: without this, a domain deleted
+        // and recreated under the same name would inherit the previous one's package groups,
+        // including a PUBLISH/EXTERNAL_UPSTREAM BLOCK that would reject a publish or retention
+        // with no way for the caller to know why, and creating a group under an old pattern would
+        // fail as a duplicate.
+        String groupPrefix = region + "::" + domain + "::";
+        packageGroups.keysForAccount(owner).stream()
+                .filter(k -> k.startsWith(groupPrefix))
+                .forEach(k -> packageGroups.deleteForAccount(owner, k));
         return new DomainView(d, 0, 0L);
     }
 
@@ -2329,6 +2386,17 @@ public class CodeArtifactService implements Resettable {
      * the same config {@link #putPackageOriginConfiguration} and {@link
      * #isUpstreamRetentionBlocked} key by for a format (nuget, pypi) whose names are
      * case/punctuation normalized.
+     *
+     * <p>Both the generic {@link #publishPackageVersion} and every native proxy controller (via
+     * {@link #requireContainerBackedPackagePublishAllowed}) call this one method before their own
+     * real write, so the package-level check below and the package-group check that follows it
+     * apply identically regardless of format. Raised by Qodo's review of this PR: the group check
+     * originally lived inline in {@code publishPackageVersionLocked} (the generic-only caller),
+     * so {@code mvn deploy}/{@code npm publish}/{@code twine upload}/{@code dotnet nuget push}
+     * could publish straight past a package group's {@code PUBLISH: BLOCK}, allow-list, or
+     * weak-match block. Moving it here, below the package-level check both callers already
+     * shared, closes that gap for every format at once instead of duplicating the check in each
+     * native controller.
      */
     private void requireDirectPublishAllowed(String owner, String region, String domain, String repository,
             String format, String namespace, String packageName) {
@@ -2340,6 +2408,29 @@ public class CodeArtifactService implements Resettable {
         if ("BLOCK".equals(publishRestriction)) {
             throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
                     + "blocks direct publish.", packageName, "package");
+        }
+        // The package's own origin configuration isn't BLOCK (just enforced above), which the
+        // User Guide describes as "effectively deferring to the associated package group's
+        // origin control settings": resolve this package's associated group (if any) and apply
+        // "How package origin controls interact with package group origin controls" (BLOCK
+        // always wins over ALLOW). A weak match (see PackageGroupPatterns' own javadoc) is
+        // blocked outright, regardless of the group's configured mode, as CodeArtifact's defense
+        // against a dependency-confusion attack that spells a package to just barely dodge a
+        // strong match.
+        List<PackageGroup> groupsInDomain = allPackageGroupsInDomain(owner, region, domain);
+        Optional<AssociatedGroupMatch> associatedGroup = findAssociatedGroup(groupsInDomain,
+                PackageGroupPatterns.packagePath(format, namespace, packageName));
+        if (associatedGroup.isPresent()) {
+            if (associatedGroup.get().strength() == PackageGroupPatterns.MatchStrength.WEAK) {
+                throw conflict("Package '" + packageName + "' cannot be published because it only weakly "
+                        + "matches package group '" + associatedGroup.get().group().getPattern() + "', which "
+                        + "blocks direct publish for weak matches.", packageName, "package");
+            }
+            if (!groupAllowsPublish(groupsInDomain, associatedGroup.get().group(), repository)) {
+                throw conflict("Package '" + packageName + "' cannot be published because its associated "
+                        + "package group '" + associatedGroup.get().group().getPattern() + "' blocks direct "
+                        + "publish for this repository.", packageName, "package");
+            }
         }
     }
 
@@ -3030,6 +3121,17 @@ public class CodeArtifactService implements Resettable {
      * real content yet, so it is itself the proof this package's real origin is external,
      * without weakening the default block a package that has never had such a claim, and so can
      * only have gotten real content from a direct publish, still gets.
+     *
+     * <p>Once the package's own setting resolves to allowed, this also defers to the package's
+     * associated package group's {@code EXTERNAL_UPSTREAM} mode, the same "{@code BLOCK} always
+     * wins over {@code ALLOW}" interaction {@link #publishPackageVersion}'s own group check
+     * applies for {@code PUBLISH} (see that method's own javadoc). A weak pattern match (see
+     * {@link PackageGroupPatterns}' own javadoc) is blocked outright here too: the User Guide's
+     * package group pattern-matching page states the weak-match block applies to a package
+     * being "pulled from upstreams" just as much as published, not to {@code PUBLISH} alone.
+     * {@code INTERNAL_UPSTREAM} is deliberately never resolved here: it gates retention from a
+     * same-domain upstream repository chain, which this emulator has no real mechanism for yet
+     * (tracked separately, 16f-UPSTREAM-REPO).
      */
     public boolean isUpstreamRetentionBlocked(String region, String domain, String domainOwner, String repository,
             String format, String namespace, String packageName) {
@@ -3042,14 +3144,30 @@ public class CodeArtifactService implements Resettable {
         String key = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
         Optional<PackageOriginConfig> config = packageOriginConfig(owner, key, format);
+        boolean packageLevelBlocked;
         if (config.isPresent()) {
-            return "BLOCK".equals(config.get().getUpstreamRestriction());
-        }
-        if (hasRetainedVersionOriginClaimForAnyVersion(region, domain, owner, repository, format, namespace,
+            packageLevelBlocked = "BLOCK".equals(config.get().getUpstreamRestriction());
+        } else if (hasRetainedVersionOriginClaimForAnyVersion(region, domain, owner, repository, format, namespace,
                 packageName)) {
+            packageLevelBlocked = false;
+        } else {
+            packageLevelBlocked = packageExistsViaVersionsOrSidecar(region, domain, owner, repository, format,
+                    namespace, packageName);
+        }
+        if (packageLevelBlocked) {
+            return true;
+        }
+        List<PackageGroup> groupsInDomain = allPackageGroupsInDomain(owner, region, domain);
+        Optional<AssociatedGroupMatch> associatedGroup = findAssociatedGroup(groupsInDomain,
+                PackageGroupPatterns.packagePath(format, namespace, packageName));
+        if (associatedGroup.isEmpty()) {
             return false;
         }
-        return packageExistsViaVersionsOrSidecar(region, domain, owner, repository, format, namespace, packageName);
+        if (associatedGroup.get().strength() == PackageGroupPatterns.MatchStrength.WEAK) {
+            return true;
+        }
+        return !groupAllowsRestriction(groupsInDomain, associatedGroup.get().group(), "EXTERNAL_UPSTREAM",
+                repository);
     }
 
     /**
@@ -5020,11 +5138,448 @@ public class CodeArtifactService implements Resettable {
         return Base64Url.encode(bytes);
     }
 
+    // -------------------------------------------------------------- package groups
+
+    /**
+     * Creates a package group. Per the User Guide, a brand-new group starts with every
+     * restriction type at {@code INHERIT} (see {@link #resolveEffectiveMode}'s own javadoc for
+     * how that resolves): nothing is configured here until a caller calls
+     * {@link #updatePackageGroupOriginConfiguration}.
+     */
+    public synchronized PackageGroupDescriptionView createPackageGroup(String region, String domain,
+            String domainOwner, String pattern, String contactInfo, String description, Map<String, String> tags) {
+        validatePackageGroupPattern(pattern);
+        validateDescription(description);
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        requireDomain(owner, domainKey(region, domain), domain);
+        if (packageGroups.getForAccount(owner, key).isPresent()) {
+            throw conflict("A package group with pattern '" + pattern + "' already exists.", pattern,
+                    "package-group");
+        }
+        // Unlike domains and repositories (MAX_DOMAINS_PER_ACCOUNT, repositoryCountForDomain's own
+        // caller), the real CodeArtifact quotas page publishes no numbered "package groups per
+        // domain" limit at all (confirmed against docs.aws.amazon.com/codeartifact/latest/ug/
+        // service-limits.html's full table), so there is no documented threshold to enforce here.
+        String arn = regionResolver.buildArn("codeartifact", region, "package-group/" + domain + pattern);
+        PackageGroup group = new PackageGroup(pattern, arn, domain, owner, region, contactInfo, description,
+                Instant.now().getEpochSecond());
+        group.setTags(validateTags(tags, Map.of(), pattern, "package-group"));
+        packageGroups.putForAccount(owner, key, group);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return toDescriptionView(all, group);
+    }
+
+    public synchronized PackageGroupDescriptionView deletePackageGroup(String region, String domain,
+            String domainOwner, String pattern) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        PackageGroup group = requirePackageGroup(owner, key, pattern);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        // Computed before the delete removes it from storage: DeletePackageGroup's own documented
+        // behavior ("the direct child package groups will become children of the package group's
+        // direct parent") is a property of the hierarchy as it stood right before this group was
+        // removed, and the response describes this now-deleted group's own view as it last was.
+        PackageGroupDescriptionView view = toDescriptionView(all, group);
+        packageGroups.deleteForAccount(owner, key);
+        return view;
+    }
+
+    public PackageGroupDescriptionView describePackageGroup(String region, String domain, String domainOwner,
+            String pattern) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        PackageGroup group = requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return toDescriptionView(all, group);
+    }
+
+    /** Unlike every other package group action, this one cannot change {@code pattern} or
+     * {@code restrictions}: the wire model's own {@code UpdatePackageGroupRequest} carries only
+     * {@code contactInfo}/{@code description}, confirmed against {@code service-2.json}. */
+    public synchronized PackageGroupDescriptionView updatePackageGroup(String region, String domain,
+            String domainOwner, String pattern, String contactInfo, String description) {
+        validateDescription(description);
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        PackageGroup group = requirePackageGroup(owner, key, pattern);
+        group.setContactInfo(contactInfo);
+        group.setDescription(description);
+        packageGroups.putForAccount(owner, key, group);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return toDescriptionView(all, group);
+    }
+
+    public synchronized UpdatePackageGroupOriginConfigurationResult updatePackageGroupOriginConfiguration(
+            String region, String domain, String domainOwner, String pattern, Map<String, String> restrictions,
+            List<PackageGroupAllowedRepositoryEdit> addAllowedRepositories,
+            List<PackageGroupAllowedRepositoryEdit> removeAllowedRepositories) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        PackageGroup group = requirePackageGroup(owner, key, pattern);
+        if (restrictions != null) {
+            restrictions.forEach((type, mode) -> {
+                if (!PACKAGE_GROUP_RESTRICTION_TYPES.contains(type)) {
+                    throw validation("restrictions key must be one of " + PACKAGE_GROUP_RESTRICTION_TYPES + ".");
+                }
+                if (!PACKAGE_GROUP_MODES.contains(mode)) {
+                    throw validation("restrictions value must be one of " + PACKAGE_GROUP_MODES + ".");
+                }
+            });
+        }
+        Map<String, PackageGroupRestriction> stored = new LinkedHashMap<>(group.getRestrictions());
+        Map<String, Map<String, List<String>>> allowedRepositoryUpdates = new LinkedHashMap<>();
+        if (restrictions != null) {
+            restrictions.forEach((type, mode) ->
+                    stored.put(type, new PackageGroupRestriction(mode, copyAllowedRepositories(stored.get(type)))));
+        }
+        applyAllowedRepositoryEdits(stored, addAllowedRepositories, "ADDED", allowedRepositoryUpdates);
+        applyAllowedRepositoryEdits(stored, removeAllowedRepositories, "REMOVED", allowedRepositoryUpdates);
+        group.setRestrictions(stored);
+        packageGroups.putForAccount(owner, key, group);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return new UpdatePackageGroupOriginConfigurationResult(toDescriptionView(all, group), allowedRepositoryUpdates);
+    }
+
+    /** One {@code addAllowedRepositories}/{@code removeAllowedRepositories} list entry. */
+    public record PackageGroupAllowedRepositoryEdit(String repositoryName, String originRestrictionType) {}
+
+    /**
+     * {@code existing}'s own allowed-repository list, copied so a caller can mutate it without
+     * reaching back into stored state, or a fresh empty list when there is no existing restriction
+     * to copy from yet. Shared by {@link #updatePackageGroupOriginConfiguration} and {@link
+     * #applyAllowedRepositoryEdits}, which both start from the same "copy what's there, or start
+     * empty" rule before making their own edit.
+     */
+    private static List<String> copyAllowedRepositories(PackageGroupRestriction existing) {
+        return existing == null ? new ArrayList<>() : new ArrayList<>(existing.getAllowedRepositories());
+    }
+
+    private void applyAllowedRepositoryEdits(Map<String, PackageGroupRestriction> stored,
+            List<PackageGroupAllowedRepositoryEdit> edits, String updateType,
+            Map<String, Map<String, List<String>>> allowedRepositoryUpdates) {
+        if (edits == null) {
+            return;
+        }
+        for (PackageGroupAllowedRepositoryEdit edit : edits) {
+            // Raised by Qodo's review of this PR: PACKAGE_GROUP_RESTRICTION_TYPES is an immutable
+            // List.of(...), whose contains(null) throws NullPointerException rather than returning
+            // false, so a request that omits originRestrictionType must be rejected explicitly
+            // before reaching it, not left to fall through to a 500.
+            if (edit.originRestrictionType() == null
+                    || !PACKAGE_GROUP_RESTRICTION_TYPES.contains(edit.originRestrictionType())) {
+                throw validation("originRestrictionType must be one of " + PACKAGE_GROUP_RESTRICTION_TYPES + ".");
+            }
+            validateRepositoryName(edit.repositoryName());
+            PackageGroupRestriction existing = stored.get(edit.originRestrictionType());
+            List<String> allowedRepositories = copyAllowedRepositories(existing);
+            String mode = existing == null ? "INHERIT" : existing.getMode();
+            if ("ADDED".equals(updateType)) {
+                if (!allowedRepositories.contains(edit.repositoryName())) {
+                    allowedRepositories.add(edit.repositoryName());
+                }
+            } else {
+                allowedRepositories.remove(edit.repositoryName());
+            }
+            stored.put(edit.originRestrictionType(), new PackageGroupRestriction(mode, allowedRepositories));
+            allowedRepositoryUpdates
+                    .computeIfAbsent(edit.originRestrictionType(), ignored -> new LinkedHashMap<>())
+                    .computeIfAbsent(updateType, ignored -> new ArrayList<>())
+                    .add(edit.repositoryName());
+        }
+    }
+
+    public PackageGroupListResult listPackageGroups(String region, String domain, String domainOwner,
+            String prefix, Integer maxResults, String nextToken) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        requireDomain(owner, domainKey(region, domain), domain);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        List<PackageGroup> matching = all.stream()
+                .filter(g -> prefix == null || g.getPattern().startsWith(prefix))
+                .toList();
+        PaginatedResult<PackageGroup> page = Pagination.paginate(matching, PackageGroup::getPattern, maxResults,
+                nextToken, 100, 1000, "ValidationException");
+        List<PackageGroupDescriptionView> views = page.items().stream().map(g -> toDescriptionView(all, g)).toList();
+        return new PackageGroupListResult(views, page.nextToken());
+    }
+
+    public PackageGroupListResult listSubPackageGroups(String region, String domain, String domainOwner,
+            String pattern, Integer maxResults, String nextToken) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        PackageGroup group = requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        List<PackageGroup> children = all.stream()
+                .filter(candidate -> !candidate.getPattern().equals(group.getPattern()))
+                .filter(candidate -> findParent(all, parsedPattern(candidate))
+                        .map(PackageGroup::getPattern).filter(p -> p.equals(group.getPattern())).isPresent())
+                .toList();
+        PaginatedResult<PackageGroup> page = Pagination.paginate(children, PackageGroup::getPattern, maxResults,
+                nextToken, 100, 1000, "ValidationException");
+        List<PackageGroupDescriptionView> views = page.items().stream().map(g -> toDescriptionView(all, g)).toList();
+        return new PackageGroupListResult(views, page.nextToken());
+    }
+
+    public ListAllowedRepositoriesForGroupResult listAllowedRepositoriesForGroup(String region, String domain,
+            String domainOwner, String pattern, String originRestrictionType, Integer maxResults, String nextToken) {
+        requireNonBlank(domain, "domain");
+        if (originRestrictionType == null || !PACKAGE_GROUP_RESTRICTION_TYPES.contains(originRestrictionType)) {
+            throw validation("originRestrictionType must be one of " + PACKAGE_GROUP_RESTRICTION_TYPES + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        PackageGroup group = requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        PackageGroupRestriction restriction = group.getRestrictions().get(originRestrictionType);
+        List<String> repositories = restriction == null ? List.of() : restriction.getAllowedRepositories();
+        PaginatedResult<String> page = Pagination.paginate(repositories, Function.identity(), maxResults, nextToken,
+                100, 1000, "ValidationException");
+        return new ListAllowedRepositoriesForGroupResult(page.items(), page.nextToken());
+    }
+
+    public ListAssociatedPackagesResult listAssociatedPackages(String region, String domain, String domainOwner,
+            String pattern, Integer maxResults, String nextToken, boolean preview) {
+        requireNonBlank(domain, "domain");
+        validatePackageGroupPattern(pattern);
+        String owner = effectiveOwner(domainOwner);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        if (!preview) {
+            requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        }
+        PackageGroupPatterns.ParsedPattern target = PackageGroupPatterns.parse(pattern);
+        List<AssociatedPackageView> associated = new ArrayList<>();
+        for (PackageCoordinate coordinate : allPackageCoordinatesInDomain(owner, region, domain)) {
+            PackageGroupPatterns.PackagePath path = PackageGroupPatterns.packagePath(coordinate.format(),
+                    coordinate.namespace(), coordinate.packageName());
+            Optional<AssociatedGroupMatch> match = findAssociatedGroup(all, path);
+            // preview=true answers "what would be associated with this pattern if it existed",
+            // so a package only counts if this hypothetical pattern would actually win the
+            // specificity contest against every group that is already real.
+            PackageGroupPatterns.MatchStrength targetStrength = PackageGroupPatterns.matchStrength(target, path);
+            if (targetStrength == null) {
+                continue;
+            }
+            boolean targetWins = match.isEmpty()
+                    || PackageGroupPatterns.compareSpecificity(target, parsedPattern(match.get().group())) > 0
+                    || match.get().group().getPattern().equals(pattern);
+            if (!targetWins) {
+                continue;
+            }
+            associated.add(new AssociatedPackageView(coordinate.format(), coordinate.namespace(),
+                    coordinate.packageName(), targetStrength.name()));
+        }
+        PaginatedResult<AssociatedPackageView> page = Pagination.paginate(associated,
+                v -> v.format() + "::" + escapeKeySegment(v.namespace()) + "::" + escapeKeySegment(v.packageName()),
+                maxResults, nextToken, 100, 1000, "ValidationException");
+        return new ListAssociatedPackagesResult(page.items(), page.nextToken());
+    }
+
+    public GetAssociatedPackageGroupResult getAssociatedPackageGroup(String region, String domain,
+            String domainOwner, String format, String namespace, String packageName) {
+        requireNonBlank(domain, "domain");
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        requireNonBlank(packageName, "package");
+        String owner = effectiveOwner(domainOwner);
+        requireDomain(owner, domainKey(region, domain), domain);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        PackageGroupPatterns.PackagePath path = PackageGroupPatterns.packagePath(format, namespace, packageName);
+        AssociatedGroupMatch match = findAssociatedGroup(all, path)
+                .orElseThrow(() -> notFound("No package group in domain '" + domain + "' is associated with "
+                        + "package '" + packageName + "'.", packageName, "package"));
+        return new GetAssociatedPackageGroupResult(toDescriptionView(all, match.group()), match.strength().name());
+    }
+
+    private List<PackageGroup> allPackageGroupsInDomain(String owner, String region, String domain) {
+        String prefix = region + "::" + domain + "::";
+        return packageGroups.scanForAccount(owner, k -> k.startsWith(prefix));
+    }
+
+    private static PackageGroupPatterns.ParsedPattern parsedPattern(PackageGroup group) {
+        return PackageGroupPatterns.parse(group.getPattern());
+    }
+
+    /**
+     * The most specific OTHER group in {@code all} that structurally contains {@code pattern}
+     * (every package {@code pattern} can ever match also matches that other group), per the User
+     * Guide's own hierarchy rule: "a group's parent is the most specific other existing group
+     * that is a strict superset." Recomputed from the current set of groups on every call rather
+     * than stored, since {@link #deletePackageGroup}'s own documented behavior (children
+     * reparent onto the deleted group's own parent) means this relationship is never stable
+     * across a create/delete elsewhere in the domain.
+     */
+    private Optional<PackageGroup> findParent(List<PackageGroup> all, PackageGroupPatterns.ParsedPattern pattern) {
+        PackageGroup best = null;
+        PackageGroupPatterns.ParsedPattern bestParsed = null;
+        for (PackageGroup candidate : all) {
+            PackageGroupPatterns.ParsedPattern candidateParsed = parsedPattern(candidate);
+            if (!PackageGroupPatterns.isStrictAncestor(candidateParsed, pattern)) {
+                continue;
+            }
+            if (best == null || PackageGroupPatterns.compareSpecificity(candidateParsed, bestParsed) > 0) {
+                best = candidate;
+                bestParsed = candidateParsed;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * The single group a package is associated with: the most specific group in {@code all}
+     * whose pattern matches {@code path} at all (strong or weak), per the User Guide's own
+     * "a package is associated with exactly one package group" rule. {@link Optional#empty}
+     * models a domain where no created group's pattern reaches this package at all — real
+     * CodeArtifact has no implicit catch-all root group (confirmed by {@code
+     * GetAssociatedPackageGroup}'s own documented {@code ResourceNotFoundException}), so callers
+     * must treat that as "this package has no group," not fall back to a synthesized default.
+     */
+    private Optional<AssociatedGroupMatch> findAssociatedGroup(List<PackageGroup> all,
+            PackageGroupPatterns.PackagePath path) {
+        PackageGroup best = null;
+        PackageGroupPatterns.ParsedPattern bestParsed = null;
+        PackageGroupPatterns.MatchStrength bestStrength = null;
+        for (PackageGroup candidate : all) {
+            PackageGroupPatterns.ParsedPattern candidateParsed = parsedPattern(candidate);
+            PackageGroupPatterns.MatchStrength strength = PackageGroupPatterns.matchStrength(candidateParsed, path);
+            if (strength == null) {
+                continue;
+            }
+            int rank = best == null ? 1 : PackageGroupPatterns.compareSpecificity(candidateParsed, bestParsed);
+            // Raised by Qodo's review of this PR: two patterns can tie on specificity while
+            // differing only by case or separators (e.g. /npm//foo$ and /npm//Foo$), in which case
+            // whichever happened to be scanned first used to win regardless of match strength. A
+            // package that strongly matches one of them must prefer that one over a tied-rank
+            // pattern it only weakly matches, so its enforcement isn't decided by storage order.
+            boolean strongDisplacesWeakTie = rank == 0 && strength == PackageGroupPatterns.MatchStrength.STRONG
+                    && bestStrength == PackageGroupPatterns.MatchStrength.WEAK;
+            if (best == null || rank > 0 || strongDisplacesWeakTie) {
+                best = candidate;
+                bestParsed = candidateParsed;
+                bestStrength = strength;
+            }
+        }
+        return best == null ? Optional.empty() : Optional.of(new AssociatedGroupMatch(best, bestStrength));
+    }
+
+    /**
+     * Resolves {@code restrictionType}'s real effective mode for {@code group}, walking up to its
+     * nearest ancestor with a concrete (non-{@code INHERIT}) setting, per {@code
+     * PackageGroupOriginRestriction}'s own documented resolution rule ("the first parent group
+     * which does not have a value of INHERIT"). A brand-new group, and the top of any hierarchy
+     * that never set this restriction type at all, defaults to {@code ALLOW}: not directly stated
+     * for this exact case, but the only reading consistent with the User Guide's "Default package
+     * origin control settings" section, which describes a package associated with such a group as
+     * seeing {@code ALLOW} for every restriction type.
+     */
+    private EffectiveModeResult resolveEffectiveMode(List<PackageGroup> all, PackageGroup group,
+            String restrictionType) {
+        PackageGroup current = group;
+        while (true) {
+            PackageGroupRestriction restriction = current.getRestrictions().get(restrictionType);
+            String mode = restriction == null ? "INHERIT" : restriction.getMode();
+            if (!"INHERIT".equals(mode)) {
+                return new EffectiveModeResult(mode, current == group ? null : current);
+            }
+            Optional<PackageGroup> parent = findParent(all, parsedPattern(current));
+            if (parent.isEmpty()) {
+                return new EffectiveModeResult("ALLOW", null);
+            }
+            current = parent.get();
+        }
+    }
+
+    private Map<String, PackageGroupOriginRestrictionView> buildRestrictionsView(List<PackageGroup> all,
+            PackageGroup group) {
+        Map<String, PackageGroupOriginRestrictionView> views = new LinkedHashMap<>();
+        for (String type : PACKAGE_GROUP_RESTRICTION_TYPES) {
+            PackageGroupRestriction stored = group.getRestrictions().get(type);
+            String rawMode = stored == null ? "INHERIT" : stored.getMode();
+            EffectiveModeResult effective = resolveEffectiveMode(all, group, type);
+            long repositoriesCount = stored == null ? 0 : stored.getAllowedRepositories().size();
+            String inheritedFromArn = effective.inheritedFrom() == null ? null : effective.inheritedFrom().getArn();
+            String inheritedFromPattern = effective.inheritedFrom() == null ? null
+                    : effective.inheritedFrom().getPattern();
+            views.put(type, new PackageGroupOriginRestrictionView(rawMode, effective.mode(), inheritedFromArn,
+                    inheritedFromPattern, repositoriesCount));
+        }
+        return views;
+    }
+
+    private PackageGroupDescriptionView toDescriptionView(List<PackageGroup> all, PackageGroup group) {
+        Optional<PackageGroup> parent = findParent(all, parsedPattern(group));
+        return new PackageGroupDescriptionView(group.getArn(), group.getPattern(), group.getDomainName(),
+                group.getDomainOwner(), group.getCreatedTime(), group.getContactInfo(), group.getDescription(),
+                buildRestrictionsView(all, group), parent.map(PackageGroup::getArn).orElse(null),
+                parent.map(PackageGroup::getPattern).orElse(null));
+    }
+
+    /**
+     * Resolves {@code group}'s own effective {@code PUBLISH} mode for {@code repository}, folding
+     * in {@code ALLOW_SPECIFIC_REPOSITORIES}'s own per-repository allow-list: used by {@link
+     * #publishPackageVersion} to decide a direct publish once the package's own origin
+     * configuration has already deferred to its group (see that method's own javadoc for the
+     * full "BLOCK always wins" interaction this is one half of).
+     */
+    private boolean groupAllowsPublish(List<PackageGroup> all, PackageGroup group, String repository) {
+        return groupAllowsRestriction(all, group, "PUBLISH", repository);
+    }
+
+    /**
+     * Resolves {@code group}'s own effective mode for {@code restrictionType} (one of {@code
+     * PUBLISH}, {@code EXTERNAL_UPSTREAM}, {@code INTERNAL_UPSTREAM}), folding in {@code
+     * ALLOW_SPECIFIC_REPOSITORIES}'s own per-repository allow-list: the User Guide's package
+     * group origin controls page documents the exact same three modes, the same allow-list
+     * shape, for all three restriction types alike, not something specific to {@code PUBLISH}.
+     */
+    private boolean groupAllowsRestriction(List<PackageGroup> all, PackageGroup group, String restrictionType,
+            String repository) {
+        EffectiveModeResult effective = resolveEffectiveMode(all, group, restrictionType);
+        return switch (effective.mode()) {
+            case "ALLOW" -> true;
+            case "BLOCK" -> false;
+            case "ALLOW_SPECIFIC_REPOSITORIES" -> {
+                // Raised by Qodo's review of this PR: ALLOW_SPECIFIC_REPOSITORIES can itself be an
+                // INHERITed mode (resolveEffectiveMode walked up to inheritedFrom to find it), in
+                // which case the allow-list living on it belongs to that ancestor, not to `group`
+                // itself, which has no restriction of its own here at all (its own mode was
+                // INHERIT). Reading group's own (absent) restriction instead of the ancestor's
+                // rejected every repository the ancestor actually allowed.
+                PackageGroup source = effective.inheritedFrom() == null ? group : effective.inheritedFrom();
+                PackageGroupRestriction restriction = source.getRestrictions().get(restrictionType);
+                yield restriction != null && restriction.getAllowedRepositories().contains(repository);
+            }
+            default -> throw new IllegalStateException("resolveEffectiveMode must never return " + effective.mode());
+        };
+    }
+
+    /** Every (format, namespace, packageName) coordinate with at least one real package anywhere
+     * in {@code domain}, across every repository, for {@link #listAssociatedPackages}: package
+     * groups are domain-wide, so association is checked against every package the domain holds,
+     * not just one repository's. */
+    private List<PackageCoordinate> allPackageCoordinatesInDomain(String owner, String region, String domain) {
+        Set<PackageCoordinate> coordinates = new LinkedHashSet<>();
+        String repositoryPrefix = region + "::" + domain + "::";
+        for (CodeArtifactRepository repository : repositories.scanForAccount(owner, k -> k.startsWith(repositoryPrefix))) {
+            coordinates.addAll(allPackagesInRepository(region, domain, owner, owner, repository.getName(), null)
+                    .coordinates());
+        }
+        return new ArrayList<>(coordinates);
+    }
+
     // -------------------------------------------------------------------- tags
 
     public synchronized void tagResource(String resourceArn, Map<String, String> newTags) {
         ResourceRef ref = parseResourceArn(resourceArn);
-        if (ref.repository() == null) {
+        if ("package-group".equals(ref.type())) {
+            String key = packageGroupKey(ref.region(), ref.domain(), ref.packageGroupPattern());
+            PackageGroup g = requirePackageGroup(ref.owner(), key, ref.packageGroupPattern());
+            g.setTags(validateTags(newTags, g.getTags(), ref.packageGroupPattern(), "package-group"));
+            packageGroups.putForAccount(ref.owner(), key, g);
+        } else if (ref.repository() == null) {
             String key = domainKey(ref.region(), ref.domain());
             CodeArtifactDomain d = requireDomain(ref.owner(), key, ref.domain());
             d.setTags(validateTags(newTags, d.getTags(), ref.domain(), "domain"));
@@ -5039,7 +5594,14 @@ public class CodeArtifactService implements Resettable {
 
     public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         ResourceRef ref = parseResourceArn(resourceArn);
-        if (ref.repository() == null) {
+        if ("package-group".equals(ref.type())) {
+            String key = packageGroupKey(ref.region(), ref.domain(), ref.packageGroupPattern());
+            PackageGroup g = requirePackageGroup(ref.owner(), key, ref.packageGroupPattern());
+            Map<String, String> tags = new LinkedHashMap<>(g.getTags());
+            tagKeys.forEach(tags::remove);
+            g.setTags(tags);
+            packageGroups.putForAccount(ref.owner(), key, g);
+        } else if (ref.repository() == null) {
             String key = domainKey(ref.region(), ref.domain());
             CodeArtifactDomain d = requireDomain(ref.owner(), key, ref.domain());
             Map<String, String> tags = new LinkedHashMap<>(d.getTags());
@@ -5058,6 +5620,10 @@ public class CodeArtifactService implements Resettable {
 
     public Map<String, String> listTagsForResource(String resourceArn) {
         ResourceRef ref = parseResourceArn(resourceArn);
+        if ("package-group".equals(ref.type())) {
+            return requirePackageGroup(ref.owner(), packageGroupKey(ref.region(), ref.domain(),
+                    ref.packageGroupPattern()), ref.packageGroupPattern()).getTags();
+        }
         if (ref.repository() == null) {
             return requireDomain(ref.owner(), domainKey(ref.region(), ref.domain()), ref.domain()).getTags();
         }
@@ -5074,6 +5640,7 @@ public class CodeArtifactService implements Resettable {
             packageOriginConfigs.clear();
             migratedOriginConfigAccounts.clear();
         }
+        packageGroups.clear();
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
         containerBackedVersionDeletionFence.clear();
@@ -5092,7 +5659,8 @@ public class CodeArtifactService implements Resettable {
 
     // ----------------------------------------------------------------- helpers
 
-    private record ResourceRef(String type, String region, String owner, String domain, String repository) {}
+    private record ResourceRef(String type, String region, String owner, String domain, String repository,
+            String packageGroupPattern) {}
 
     private ResourceRef parseResourceArn(String resourceArn) {
         AwsArnUtils.Arn arn;
@@ -5104,14 +5672,23 @@ public class CodeArtifactService implements Resettable {
         if (!"codeartifact".equals(arn.service())) {
             throw validation("resourceArn must be a CodeArtifact ARN.");
         }
-        String[] parts = arn.resource().split("/");
+        // split(..., -1) keeps a trailing empty segment, since a package group pattern can itself
+        // end in a '/' component (a namespace-less format's pattern, e.g. "/python//requests$"),
+        // which the default split() would otherwise silently drop.
+        String[] parts = arn.resource().split("/", -1);
         if (parts.length == 2 && "domain".equals(parts[0])) {
-            return new ResourceRef("domain", arn.region(), arn.accountId(), parts[1], null);
+            return new ResourceRef("domain", arn.region(), arn.accountId(), parts[1], null, null);
         }
         if (parts.length == 3 && "repository".equals(parts[0])) {
-            return new ResourceRef("repository", arn.region(), arn.accountId(), parts[1], parts[2]);
+            return new ResourceRef("repository", arn.region(), arn.accountId(), parts[1], parts[2], null);
         }
-        throw validation("resourceArn must reference a domain or a repository.");
+        if (parts.length >= 3 && "package-group".equals(parts[0])) {
+            // The pattern's own literal '/' separators were split apart along with the ARN's;
+            // rejoin everything after the domain and restore the pattern's leading '/'.
+            String pattern = "/" + String.join("/", Arrays.asList(parts).subList(2, parts.length));
+            return new ResourceRef("package-group", arn.region(), arn.accountId(), parts[1], null, pattern);
+        }
+        throw validation("resourceArn must reference a domain, a repository, or a package group.");
     }
 
     private String effectiveOwner(String domainOwner) {
@@ -5486,6 +6063,30 @@ public class CodeArtifactService implements Resettable {
         }
         return repositories.getForAccount(owner, key)
                 .orElseThrow(() -> notFound("Repository not found.", repositoryName, "repository"));
+    }
+
+    private PackageGroup requirePackageGroup(String owner, String key, String pattern) {
+        if (pattern == null || pattern.isBlank()) {
+            throw validation("packageGroup is required.");
+        }
+        return packageGroups.getForAccount(owner, key)
+                .orElseThrow(() -> notFound("Package group with pattern '" + pattern + "' was not found.",
+                        pattern, "package-group"));
+    }
+
+    private static void validatePackageGroupPattern(String pattern) {
+        if (pattern == null || pattern.length() < 2 || pattern.length() > 520
+                || !PACKAGE_GROUP_PATTERN_TOKEN.matcher(pattern).matches()) {
+            throw validation("packageGroup must be 2-520 characters with no control characters or whitespace.");
+        }
+        // Surfaces a malformed pattern (missing '/', bad terminator, too many components) as a
+        // clean ValidationException up front, rather than letting it reach matching/hierarchy
+        // logic later and fail in a way that looks like an internal error.
+        try {
+            PackageGroupPatterns.parse(pattern);
+        } catch (IllegalArgumentException e) {
+            throw validation("packageGroup pattern is invalid: " + e.getMessage());
+        }
     }
 
     private void checkRevision(String currentRevision, String requestedRevision, String resourceId,
@@ -5912,32 +6513,49 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * Escapes a namespace/package/version segment before it goes into a {@code ::}-joined storage
-     * key. {@code region}/{@code domain}/{@code repository}/{@code format} never need this: they're
-     * each validated against a pattern that already excludes {@code :}. Namespace, package name, and
-     * version are different, {@link #PACKAGE_TOKEN} only excludes {@code #}, {@code /}, and
-     * whitespace, so {@code ::} itself is a legal character sequence in any of them. Without
-     * escaping, namespace {@code "a::b"} + package {@code "c"} and namespace {@code "a"} + package
-     * {@code "b::c"} join to the identical key, so one package's stored origin configuration (or
-     * published version) silently answers for the other.
+     * {@code escapeKeySegment} applies here too: {@code PackageGroupPattern}'s own wire regex
+     * ({@code [^\p{C}\p{IsWhitespace}]+}) does not forbid {@code :} or {@code #}, unlike
+     * {@link #PACKAGE_TOKEN}, so a pattern containing {@code ::} or a literal {@code #} could
+     * otherwise collide with this store's own {@code ::}-joined key separator, or with this
+     * method's own escape introducer (see that method's own javadoc for why escaping {@code #}
+     * too keeps this safe).
+     */
+    private static String packageGroupKey(String region, String domain, String pattern) {
+        return region + "::" + domain + "::" + escapeKeySegment(pattern);
+    }
+
+    /**
+     * Escapes a namespace/package/version segment, or a package-group pattern, before it goes
+     * into a {@code ::}-joined storage key. {@code region}/{@code domain}/{@code repository}/
+     * {@code format} never need this: they're each validated against a pattern that already
+     * excludes {@code :}. Namespace, package name, and version are different: {@link
+     * #PACKAGE_TOKEN} only excludes {@code #}, {@code /}, and whitespace, so {@code ::} itself is
+     * a legal character sequence in any of them. Without escaping, namespace {@code "a::b"} +
+     * package {@code "c"} and namespace {@code "a"} + package {@code "b::c"} join to the
+     * identical key, so one package's stored origin configuration (or published version) silently
+     * answers for the other. A package-group pattern (see {@link #packageGroupKey}) is looser
+     * still: unlike a namespace/package/version, its own wire pattern permits a literal {@code #}
+     * or {@code :} outright.
      *
-     * <p>{@code #} is the escape introducer, not {@code \}: every {@code \} becomes {@code #b} and
-     * every {@code :} becomes {@code #c}. {@code #} is itself one of the three characters
-     * {@link #PACKAGE_TOKEN} (and AWS's own {@code PackageName}/{@code PackageNamespace} wire
-     * pattern) forbids, so no namespace/package/version ever validated through this service, before
-     * or after this method existed, can contain one. An escaped segment therefore never collides
-     * with a pre-existing stored key built from a segment that happened to contain a literal
-     * backslash: that old raw key cannot contain {@code #}, and this method's output only does when
-     * it actually escaped something. For the overwhelming majority of packages, whose
-     * namespace/name/version never contain a backslash or colon, this returns the input unchanged,
-     * so the key built from those segments is byte-identical to the one built before this method
-     * existed.
+     * <p>{@code #} is the escape introducer, not {@code \}: every {@code \} becomes {@code #b},
+     * every {@code :} becomes {@code #c}, and every literal {@code #} becomes {@code #h} (escaping
+     * the introducer itself, not just the two characters it was first added for). Raised by
+     * Qodo's review of this PR: before this, a literal {@code #} passed through unescaped, so
+     * pattern {@code /npm//#c$} (literal {@code #} then {@code c}) and pattern {@code /npm//:$}
+     * (a literal {@code :}, escaped to {@code #c}) produced the identical key. Escaping every
+     * literal {@code #} as well means a bare {@code #} can never appear in this method's output
+     * except as the first character of one of its own three two-character escape sequences, which
+     * keeps every output injective: no two distinct inputs can ever produce the same escaped
+     * string. For namespace/package/version, this is a pure no-op change: {@link #PACKAGE_TOKEN}
+     * already forbids {@code #} there, so no existing stored key built from one of those segments
+     * can contain a literal {@code #} for this to newly escape, and the output for every such
+     * segment is byte-identical to what this method returned before.
      */
     private static String escapeKeySegment(String value) {
         if (value == null) {
             return "";
         }
-        if (value.indexOf(':') < 0 && value.indexOf('\\') < 0) {
+        if (value.indexOf(':') < 0 && value.indexOf('\\') < 0 && value.indexOf('#') < 0) {
             return value;
         }
         StringBuilder escaped = new StringBuilder(value.length() + 4);
@@ -5947,6 +6565,8 @@ public class CodeArtifactService implements Resettable {
                 escaped.append("#b");
             } else if (c == ':') {
                 escaped.append("#c");
+            } else if (c == '#') {
+                escaped.append("#h");
             } else {
                 escaped.append(c);
             }
