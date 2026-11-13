@@ -973,7 +973,7 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"))
-            .body("message", containsString("A type name is required"));
+            .body("message", containsString("A type definition is required"));
     }
 
     @Test

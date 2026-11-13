@@ -710,6 +710,33 @@ class AppSyncServiceTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void createTypeRejectsMissingDefinitionEvenWithAnExplicitName(boolean explicitNull) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, Object> request = new HashMap<>();
+        request.put("name", "Item");
+        request.put("format", "SDL");
+        if (explicitNull) {
+            request.put("definition", null);
+        }
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createType(api.getApiId(), request));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertTrue(refused.getMessage().contains("definition"));
+        assertTrue(service.listTypes(api.getApiId(), null, null).items().isEmpty());
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getType(api.getApiId(), "Item")).getErrorCode());
+
+        request.put("definition", "type Item { id: ID }");
+        service.createType(api.getApiId(), request);
+        assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void createTypeRejectsMissingFormatWithoutStoringTheType(boolean explicitNull) {
         GraphqlApi api = service.createGraphqlApi(
                 Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");

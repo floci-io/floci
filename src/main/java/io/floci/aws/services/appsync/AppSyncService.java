@@ -579,8 +579,11 @@ public class AppSyncService {
     public synchronized AppSyncType createType(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
-        String name = (String) request.get("name");
         String definition = (String) request.get("definition");
+        if (definition == null) {
+            throw new AwsException("BadRequestException", "A type definition is required", 400);
+        }
+        String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
             name = extractTypeNameFromDefinition(definition);
         }
@@ -599,7 +602,7 @@ public class AppSyncService {
         AppSyncType type = new AppSyncType();
         type.setApiId(apiId);
         type.setName(name);
-        type.setDefinition((String) request.get("definition"));
+        type.setDefinition(definition);
         type.setDescription((String) request.get("description"));
         type.setFormat(format);
 
