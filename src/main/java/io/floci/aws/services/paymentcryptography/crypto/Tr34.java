@@ -214,7 +214,8 @@ public final class Tr34 {
      *
      * @param clearKey the key the block carries
      * @param tr31Header the TR-31 header that names the key
-     * @param nonce the two-pass nonce
+     * @param nonce the two-pass nonce, or null for a one-pass block, which carries no nonce
+     *     attribute
      * @param signingKey the signing key of the host
      * @param wrappingKey the receiver's public key
      * @param receiverCertDer the receiver's certificate in DER, or null to leave the recipient
@@ -279,8 +280,11 @@ public final class Tr34 {
         // so a block cannot carry one header outside and another inside.
         ASN1EncodableVector attributes = new ASN1EncodableVector();
         attributes.add(attribute(OID_CONTENT_TYPE, OID_ENVELOPED_DATA));
-        attributes.add(attribute(OID_RANDOM_NONCE,
-                new DEROctetString(nonce == null ? new byte[0] : nonce)));
+        // A block with a nonce is a two-pass block, and one without is a one-pass block,
+        // which carries no nonce attribute at all.
+        if (nonce != null) {
+            attributes.add(attribute(OID_RANDOM_NONCE, new DEROctetString(nonce)));
+        }
         attributes.add(attribute(OID_DATA, new DEROctetString(header)));
         attributes.add(attribute(OID_MESSAGE_DIGEST, new DEROctetString(digest(envelope))));
 
@@ -432,11 +436,12 @@ public final class Tr34 {
 
         // The two-pass nonce has to be the one the request quotes. A request that quotes
         // none expects a block that carries none, so a block that carries one may not come
-        // in under a request that names no nonce.
+        // in under a request that names no nonce. A block that carries no nonce attribute
+        // is a one-pass block, and it carries an empty one.
         String quoted = randomNonceHex == null ? "" : randomNonceHex;
         byte[] nonceAttribute = attributeValue(signedAttributes, OID_RANDOM_NONCE);
-        if (nonceAttribute == null
-                || !HEX_UPPER.formatHex(nonceAttribute).equalsIgnoreCase(quoted)) {
+        String carried = nonceAttribute == null ? "" : HEX_UPPER.formatHex(nonceAttribute);
+        if (!carried.equalsIgnoreCase(quoted)) {
             throw new IllegalArgumentException(
                     "RandomNonce does not match the nonce in the signed payload");
         }

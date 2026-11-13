@@ -254,6 +254,28 @@ public class PaymentCryptographyTr34RoundTripTest {
     }
 
     @Test
+    void aOnePassBlockIsReadWithoutANonce() throws Exception {
+        // A block with no nonce is a one-pass block, and it carries no nonce attribute at
+        // all, which reads as an empty one.
+        KeyPair krd = rsaKeyPair();
+        KeyPair kdh = rsaKeyPair();
+        Certificates.Minted kdhCertificate = CertificatesTest.mint(kdh.getPublic(), "kdh",
+                kdh.getPrivate(), "kdh");
+
+        byte[] clear = HEX.parseHex("404142434445464748494A4B4C4D4E4F");
+        String header = "B0010P0TB00E0000";
+
+        byte[] block = Tr34.build(clear, header, null, kdh.getPrivate(), krd.getPublic(),
+                null, kdhCertificate.der());
+
+        Tr34.Recovered recovered = Tr34.recoverAndVerify(HEX_UPPER.formatHex(block),
+                krd.getPrivate(), kdhCertificate.pem(), null, null);
+
+        assertEquals(HEX_UPPER.formatHex(clear), recovered.keyHex);
+        assertEquals(header, recovered.header);
+    }
+
+    @Test
     void refusesATamperedBlock() throws Exception {
         KeyPair krd = rsaKeyPair();
         KeyPair kdh = rsaKeyPair();

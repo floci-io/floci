@@ -781,6 +781,7 @@ final class PaymentCryptographyKeyExchange {
         String mode = modeCode(key, headers);
         String exportability = exportabilityCode(key, headers);
         String version = versionCode(headers);
+        List<String[]> blocks = optionalBlocks(headers);
         // The type names the cipher that protects the key, and the cipher is the one the
         // key needs, so a Triple DES key is protected with Triple DES and an AES key with
         // AES.
@@ -788,7 +789,11 @@ final class PaymentCryptographyKeyExchange {
         // The length field is the placeholder the reference writes, because the field is
         // ignored in a TR-34 block: what the block carries is the key, not a block of a
         // length that the receiver would have to compute.
-        return type + "9999" + usage + algorithm + mode + version + exportability + "0000";
+        String header = type + "9999" + usage + algorithm + mode + version + exportability
+                + PaymentCryptographyTr31.two(blocks.size(), 10) + "00";
+        // The optional blocks follow the header, each its identifier over two characters,
+        // its length over two and then its value, the way a TR-31 block carries them.
+        return header + PaymentCryptographyTr31.optionalBlocks(blocks);
     }
 
     /** The modes of use the attributes name, as the service reads them. */
@@ -1257,13 +1262,9 @@ final class PaymentCryptographyKeyExchange {
         if (!nonce.isEmpty() && !isHex(nonce)) {
             throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
         }
-        // The headers the request names are the ones the block carries, and the optional
-        // blocks are not among them: a TR-34 block's header names the key and carries
-        // nothing else.
+        // The headers the request names are the ones the block carries, the optional
+        // blocks among them.
         Map<String, Object> headers = object(material, "KeyBlockHeaders");
-        if (!optionalBlocks(headers).isEmpty()) {
-            throw validation("a TR-34 key block's header carries no optional blocks");
-        }
         String header = tr31Header(key, headers);
         // The block names its recipient: the receiver's certificate identifier is the
         // issuer and serial number of the certificate the request brought. And the key

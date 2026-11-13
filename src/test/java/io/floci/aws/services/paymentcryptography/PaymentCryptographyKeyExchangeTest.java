@@ -513,19 +513,30 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
-    void aTr34ExportWithOptionalBlocksIsRefused() {
-        // The TR-34 block's header names the key and carries nothing else, so a request
-        // that names optional blocks is refused rather than answered without them.
+    void aTr34ExportCarriesTheOptionalBlocks() throws Exception {
+        // The header of a TR-34 block carries the optional blocks the request names, the
+        // way the header of a TR-31 block does.
         Tr34Exchange exchange = tr34Exchange();
         PaymentCryptographyKey key = createKey("TDES_2KEY",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        exchange.exportMaterial().put("KeyBlockHeaders", Map.of("OptionalBlocks", Map.of("AB", "0011")));
+        exchange.exportMaterial().put("KeyBlockHeaders",
+                Map.of("OptionalBlocks", Map.of("AB", "0011")));
 
-        AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                        exchange.exportMaterial(), "", ""));
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                exchange.exportMaterial(), "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
-        assertEquals("ValidationException", refused.getErrorCode());
+        // The header travels in the clear, so it can be read without opening the block. It
+        // says how many optional blocks there are, and they follow it.
+        String header = PaymentCryptographyTr34RoundTripTest.clearHeader(
+                HexFormat.of().parseHex((String) wrapped.get("KeyMaterial")));
+        assertEquals("01", header.substring(12, 14), "the number of optional blocks");
+        assertTrue(header.endsWith("AB080011"), "the optional block is not in the header");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock",
+                exchange.importMaterial((String) wrapped.get("KeyMaterial")), "", true, Map.of());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
     }
 
     @Test
