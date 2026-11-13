@@ -13,9 +13,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.sts.StsClient;
@@ -59,7 +57,8 @@ class RequestTimeConditionKeysIntegrationTest {
         String roleName = "revoked-role-" + suffix();
         UserCredentials source = user("revoker-source-" + suffix(), ALLOW_ASSUME);
         try (IamClient admin = admin(); StsClient sts = stsClient(source)) {
-            String roleArn = role(admin, roleName, ALLOW_LIST_USERS);
+            String roleArn = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", roleName,
+                    ALLOW_LIST_USERS);
             Credentials older = sts.assumeRole(r -> r.roleArn(roleArn).roleSessionName("older")).credentials();
             try (IamClient olderSession = sessionClient(older)) {
                 olderSession.listUsers();
@@ -124,15 +123,6 @@ class RequestTimeConditionKeysIntegrationTest {
         return keys;
     }
 
-    private String role(IamClient admin, String name, String policy) {
-        String arn = admin.createRole(r -> r.roleName(name).assumeRolePolicyDocument("""
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-                "Principal":{"AWS":"arn:aws:iam::%s:root"}}]}""".formatted(ACCOUNT))).role().arn();
-        cleanup.register(() -> EnforcementFixtures.removeRole(baseUri.getPort(), auth(ACCOUNT, "iam"), name));
-        admin.putRolePolicy(r -> r.roleName(name).policyName("base").policyDocument(policy));
-        return arn;
-    }
-
     private static IamClient admin() {
         return AwsTestClients.create(IamClient.builder(), ACCOUNT, Region.US_EAST_1);
     }
@@ -146,11 +136,9 @@ class RequestTimeConditionKeysIntegrationTest {
     }
 
     private IamClient sessionClient(Credentials session) {
-        return IamClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                        session.accessKeyId(), session.secretAccessKey(), session.sessionToken())))
-                .build();
+        return AwsTestClients.create(IamClient.builder(),
+                AwsSessionCredentials.create(session.accessKeyId(), session.secretAccessKey(), session.sessionToken()),
+                Region.US_EAST_1, baseUri);
     }
 
     private static void denied(Runnable operation) {
