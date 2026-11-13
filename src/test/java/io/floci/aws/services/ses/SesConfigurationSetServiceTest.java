@@ -24,6 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 /**
  * Unit test for the extracted configuration-set domain: store ownership, key derivation and name
@@ -44,7 +45,7 @@ class SesConfigurationSetServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new SesConfigurationSetService(new InMemoryStorage<>());
+        service = new SesConfigurationSetService(new InMemoryStorage<>(), mock(SesEventPublisher.class));
     }
 
     @Test
@@ -203,7 +204,8 @@ class SesConfigurationSetServiceTest {
     void messageSecurityOptions_surviveAPersistentStorageReload(@TempDir Path dir) {
         Path file = dir.resolve("ses-config-sets.json");
         SesConfigurationSetService writer = new SesConfigurationSetService(
-                new PersistentStorage<>(file, new TypeReference<Map<String, ConfigurationSet>>() {}));
+                new PersistentStorage<>(file, new TypeReference<Map<String, ConfigurationSet>>() {}),
+                mock(SesEventPublisher.class));
         writer.create(cs("smime-cs"), REGION);
         writer.create(cs("default-cs"), REGION);
         writer.updateMessageSecurityOptions("smime-cs",
@@ -214,7 +216,7 @@ class SesConfigurationSetServiceTest {
         PersistentStorage<String, ConfigurationSet> reloaded =
                 new PersistentStorage<>(file, new TypeReference<Map<String, ConfigurationSet>>() {});
         reloaded.load();
-        SesConfigurationSetService reader = new SesConfigurationSetService(reloaded);
+        SesConfigurationSetService reader = new SesConfigurationSetService(reloaded, mock(SesEventPublisher.class));
 
         SigningScheme smime = reader.get("smime-cs", REGION).getMessageSecurityOptions().getSigningScheme();
         assertEquals("DETACHED", smime.getSmimeScheme().getSignatureFormat());

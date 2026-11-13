@@ -3,6 +3,8 @@ package io.floci.aws.services.ses;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsPartitions;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
@@ -59,20 +61,29 @@ public class SesConfigurationSetService implements SesTaggable {
 
     private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
+    private static final String INVALID_SNS_DESTINATION = "InvalidSNSDestination";
+    private static final Pattern SNS_TOPIC_NAME = Pattern.compile("[A-Za-z0-9_-]{1,256}(\\.fifo)?");
+    // The pattern SES declares for the stored value, quoted in the violation it answers on v2.
+    private static final Pattern STORED_SNS_TOPIC_ARN = Pattern.compile(
+            "arn:aws[^:]*:sns:[a-zA-Z0-9\\-]*:\\d{12}:[a-zA-Z_0-9+=,.@\\-_/:]+"); // partition-literal: AWS's fixed wording
     private static final List<String> VALID_EVENT_TYPES = List.of(
             "SEND", "REJECT", "BOUNCE", "COMPLAINT", "DELIVERY", "OPEN", "CLICK",
             "RENDERING_FAILURE", "DELIVERY_DELAY", "SUBSCRIPTION");
 
     private final StorageBackend<String, ConfigurationSet> configSetStore;
 
+    private final SesEventPublisher eventPublisher;
+
     @Inject
-    public SesConfigurationSetService(StorageFactory storageFactory) {
+    public SesConfigurationSetService(StorageFactory storageFactory, SesEventPublisher eventPublisher) {
         this(storageFactory.create("ses", "ses-config-sets.json",
-                new TypeReference<Map<String, ConfigurationSet>>() {}));
+                new TypeReference<Map<String, ConfigurationSet>>() {}), eventPublisher);
     }
 
-    SesConfigurationSetService(StorageBackend<String, ConfigurationSet> configSetStore) {
+    SesConfigurationSetService(StorageBackend<String, ConfigurationSet> configSetStore,
+                               SesEventPublisher eventPublisher) {
         this.configSetStore = configSetStore;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -524,15 +535,26 @@ public class SesConfigurationSetService implements SesTaggable {
 
     // ──────────────────────────── Event destinations ────────────────────────────
 
+    /**
+     * @param v2 whether the call came through the v2 API. Probed: v2 create checks the SNS topic
+     *           before it looks up the configuration set, while v1 create and both updates
+     *           look up the set and the destination name first.
+     */
     public void createEventDestination(String configSetName, String eventDestinationName,
-                                       EventDestination dest, String accountId, String region) {
+                                       EventDestination dest, String accountId, String region, boolean v2) {
         validateEventDestinationName(eventDestinationName);
         validateEventDestination(dest, accountId, region);
+        if (v2) {
+            validateSnsTopic(dest, configSetName, accountId, region, true);
+        }
         ConfigurationSet cs = get(configSetName, region);
         if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
             throw new AwsException("AlreadyExists",
                     "An event destination with name <" + eventDestinationName
                             + "> already exists for configuration set <" + configSetName + ">.", 400);
+        }
+        if (!v2) {
+            validateSnsTopic(dest, configSetName, accountId, region, false);
         }
         dest.setName(eventDestinationName);
         cs.getEventDestinations().add(dest);
@@ -546,7 +568,7 @@ public class SesConfigurationSetService implements SesTaggable {
     }
 
     public void updateEventDestination(String configSetName, String eventDestinationName,
-                                       EventDestination dest, String accountId, String region) {
+                                       EventDestination dest, String accountId, String region, boolean v2) {
         validateEventDestinationName(eventDestinationName);
         validateEventDestination(dest, accountId, region);
         ConfigurationSet cs = get(configSetName, region);
@@ -556,6 +578,7 @@ public class SesConfigurationSetService implements SesTaggable {
                     "An event destination with name <" + eventDestinationName
                             + "> does not exist for configuration set <" + configSetName + ">.", 404);
         }
+        validateSnsTopic(dest, configSetName, accountId, region, v2);
         dest.setName(eventDestinationName);
         cs.getEventDestinations().set(index, dest);
         configSetStore.put(configSetKey(region, configSetName), cs);
@@ -624,12 +647,6 @@ public class SesConfigurationSetService implements SesTaggable {
                     "Please provide only one destination with each request. Either a Firehose Destination "
                             + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
         }
-        if (dest.getSnsDestination() != null
-                && (dest.getSnsDestination().getTopicArn() == null
-                || dest.getSnsDestination().getTopicArn().isBlank())) {
-            throw new AwsException("InvalidParameterValue",
-                    "SnsDestination requires a non-blank TopicArn.", 400);
-        }
         if (dest.getKinesisFirehoseDestination() != null
                 && (dest.getKinesisFirehoseDestination().getIamRoleArn() == null
                 || dest.getKinesisFirehoseDestination().getIamRoleArn().isBlank()
@@ -671,6 +688,63 @@ public class SesConfigurationSetService implements SesTaggable {
         if (dest.getEventBridgeDestination() != null) {
             validateEventBridgeDestination(dest.getEventBridgeDestination(), accountId, region);
         }
+    }
+
+    // Probed against SES: each way a topic can be unusable has its own message, the same on
+    // v1 and v2 except for a missing or empty value, and a disabled destination is checked too.
+    // AWS answers a topic of an unknown account with "No account can be found for SNS topic";
+    // Floci cannot tell an unknown account from a missing topic and answers "not found".
+    private void validateSnsTopic(EventDestination dest, String configSetName, String accountId,
+                                  String region, boolean v2) {
+        if (dest.getSnsDestination() == null) {
+            return;
+        }
+        String given = dest.getSnsDestination().getTopicArn();
+        if (given == null || given.isEmpty()) {
+            throw new AwsException(INVALID_SNS_DESTINATION, v2
+                    ? "Invalid topic ARN provided: " + given + "."
+                    : "Invalid ARN provided: topic ARN = .", 400);
+        }
+        // Probed: SES judges the value without its padding, and refuses the padding itself last.
+        String topicArn = given.strip();
+        AwsArnUtils.Arn arn = snsTopicArn(topicArn);
+        if (!arn.partition().equals(AwsRegions.partitionFor(region))
+                || !SNS_TOPIC_NAME.matcher(arn.resource()).matches()) {
+            throw new AwsException(INVALID_SNS_DESTINATION, "Invalid parameter for SNS topic <" + topicArn
+                    + ">. Verify the SNS topic configuration is correct.", 400);
+        }
+        if (!arn.region().equals(region)) {
+            throw new AwsException(INVALID_SNS_DESTINATION,
+                    "SNS topic must be located in same region as SES <" + region + ">", 400);
+        }
+        SesEventPublisher.TopicAccess access =
+                eventPublisher.eventDestinationTopicAccess(topicArn, configSetName, accountId, region);
+        if (access == SesEventPublisher.TopicAccess.NOT_FOUND) {
+            throw new AwsException(INVALID_SNS_DESTINATION, "SNS topic <" + topicArn + "> not found.", 400);
+        }
+        if (access == SesEventPublisher.TopicAccess.DENIED) {
+            throw new AwsException(INVALID_SNS_DESTINATION, "Access denied to SNS topic <" + topicArn
+                    + ">. Verify the SNS topic policy grants Amazon SES the sns:Publish permission.", 400);
+        }
+        if (!STORED_SNS_TOPIC_ARN.matcher(given).matches()) {
+            throw v2
+                    ? SmithyValidationErrors.badRequest(SmithyValidationErrors.pattern(
+                            "destinations.1.member.snsTopicArn", given, STORED_SNS_TOPIC_ARN.pattern()))
+                    : new AwsException(INVALID_SNS_DESTINATION, "Invalid SNSDestination", 400);
+        }
+    }
+
+    private static AwsArnUtils.Arn snsTopicArn(String topicArn) {
+        if (AwsArnUtils.isArnFor(topicArn, "sns")) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(topicArn);
+            if (AwsPartitions.find(arn.partition()).isPresent()
+                    && arn.region().matches("[a-z0-9-]*")
+                    && arn.accountId().matches("[0-9]{12}")) {
+                return arn;
+            }
+        }
+        throw new AwsException(INVALID_SNS_DESTINATION, "Invalid SNS topic ARN <" + topicArn
+                + "> should have the form <arn:aws:sns:region:[account-id]:[topic-name]>", 400); // partition-literal: AWS's fixed wording
     }
 
     // SES publishes email events only to the default EventBridge bus, so the

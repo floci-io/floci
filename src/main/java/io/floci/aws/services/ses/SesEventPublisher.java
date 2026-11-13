@@ -157,9 +157,8 @@ public class SesEventPublisher {
                         ed.getName(), eventType);
                 return;
             }
-            String configurationSetArn = AwsArnUtils.Arn.of("ses", defaultRegion, sendingAccountId,
-                    "configuration-set/" + configurationSetName).toString();
-            if (!sesMayPublish(topicArn, configurationSetArn, sendingAccountId)) {
+            if (!sesMayPublish(topicArn, configurationSetArn(configurationSetName, sendingAccountId, defaultRegion),
+                    sendingAccountId)) {
                 LOG.warnf("SES SNS destination %s: event %s not delivered (topic %s does not allow SES to publish).",
                         ed.getName(), eventType, topicArn);
                 return;
@@ -210,6 +209,27 @@ public class SesEventPublisher {
     public boolean mayNotifyIdentityTopic(String topicArn, String identityArn, String identityAccountId,
                                           String region) {
         return snsService.topicExists(topicArn, region) && sesMayPublish(topicArn, identityArn, identityAccountId);
+    }
+
+    /** What SES finds when it looks at the topic an event destination names. */
+    public enum TopicAccess { PUBLISHABLE, NOT_FOUND, DENIED }
+
+    /**
+     * How the topic of an event destination on {@code configurationSetName} answers SES: whether
+     * it exists in {@code region}, and whether its policy lets SES publish for that configuration
+     * set. Probed: the event destination actions refuse both cases when the destination is set.
+     */
+    public TopicAccess eventDestinationTopicAccess(String topicArn, String configurationSetName,
+                                                   String accountId, String region) {
+        if (!snsService.topicExists(topicArn, region)) {
+            return TopicAccess.NOT_FOUND;
+        }
+        return sesMayPublish(topicArn, configurationSetArn(configurationSetName, accountId, region), accountId)
+                ? TopicAccess.PUBLISHABLE : TopicAccess.DENIED;
+    }
+
+    private static String configurationSetArn(String configurationSetName, String accountId, String region) {
+        return AwsArnUtils.Arn.of("ses", region, accountId, "configuration-set/" + configurationSetName).toString();
     }
 
     /** Whether the topic's policy lets SES publish to it for {@code sourceArn}, owned by {@code sourceAccount}. */

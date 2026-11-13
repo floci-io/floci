@@ -32,6 +32,7 @@ import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetEventDesti
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetEventDestinationsResponse;
 import software.amazon.awssdk.services.sesv2.model.SnsDestination;
 import software.amazon.awssdk.services.sesv2.model.UpdateConfigurationSetEventDestinationRequest;
+import software.amazon.awssdk.services.sns.SnsClient;
 
 import java.util.Optional;
 import java.util.stream.Stream;
@@ -52,11 +53,12 @@ class SesConfigurationSetEventDestinationTest {
 
     private static SesClient sesV1;
     private static SesV2Client sesV2;
+    private static SnsClient sns;
     private static String v1CsName;
     private static String v2CsName;
     private static final String ED_NAME = "ed-sns";
-    private static final String TOPIC_ARN = TestFixtures.arn("sns", "000000000000", "ses-events");
-    private static final String TOPIC_ARN_2 = TestFixtures.arn("sns", "000000000000", "ses-events-2");
+    private static String topicArn;
+    private static String topicArn2;
     private static final String DEFAULT_BUS_ARN = TestFixtures.arn("events", "000000000000", "event-bus/default");
     private static final String CUSTOM_BUS_ARN = TestFixtures.arn("events", "000000000000", "event-bus/custom");
 
@@ -64,7 +66,11 @@ class SesConfigurationSetEventDestinationTest {
     static void setup() {
         sesV1 = TestFixtures.sesClient();
         sesV2 = TestFixtures.sesV2Client();
+        // SES checks an SNS destination's topic when the destination is set.
+        sns = TestFixtures.snsClient();
         String suffix = TestFixtures.uniqueName();
+        topicArn = sns.createTopic(b -> b.name("sdk-ed-t-" + suffix)).topicArn();
+        topicArn2 = sns.createTopic(b -> b.name("sdk-ed-t2-" + suffix)).topicArn();
         v1CsName = "sdk-v1-ed-cs-" + suffix;
         v2CsName = "sdk-v2-ed-cs-" + suffix;
         sesV1.createConfigurationSet(software.amazon.awssdk.services.ses.model.CreateConfigurationSetRequest.builder()
@@ -77,6 +83,14 @@ class SesConfigurationSetEventDestinationTest {
 
     @AfterAll
     static void cleanup() {
+        if (sns != null) {
+            for (String arn : new String[] {topicArn, topicArn2}) {
+                try {
+                    sns.deleteTopic(b -> b.topicArn(arn));
+                } catch (Exception ignored) {}
+            }
+            sns.close();
+        }
         if (sesV2 != null) {
             try {
                 sesV2.deleteConfigurationSetEventDestination(DeleteConfigurationSetEventDestinationRequest.builder()
@@ -117,7 +131,7 @@ class SesConfigurationSetEventDestinationTest {
                 .eventDestination(EventDestinationDefinition.builder()
                         .enabled(true)
                         .matchingEventTypes(EventType.SEND, EventType.BOUNCE)
-                        .snsDestination(SnsDestination.builder().topicArn(TOPIC_ARN).build())
+                        .snsDestination(SnsDestination.builder().topicArn(topicArn).build())
                         .build())
                 .build());
     }
@@ -135,7 +149,7 @@ class SesConfigurationSetEventDestinationTest {
         assertThat(response.eventDestinations().get(0).enabled()).isTrue();
         assertThat(response.eventDestinations().get(0).matchingEventTypes())
                 .contains(EventType.SEND, EventType.BOUNCE);
-        assertThat(response.eventDestinations().get(0).snsDestination().topicArn()).isEqualTo(TOPIC_ARN);
+        assertThat(response.eventDestinations().get(0).snsDestination().topicArn()).isEqualTo(topicArn);
     }
 
     @Test
@@ -147,7 +161,7 @@ class SesConfigurationSetEventDestinationTest {
                         .eventDestinationName(ED_NAME)
                         .eventDestination(EventDestinationDefinition.builder()
                                 .matchingEventTypes(EventType.SEND)
-                                .snsDestination(SnsDestination.builder().topicArn(TOPIC_ARN).build())
+                                .snsDestination(SnsDestination.builder().topicArn(topicArn).build())
                                 .build())
                         .build()))
                 .isInstanceOf(AwsServiceException.class)
@@ -164,7 +178,7 @@ class SesConfigurationSetEventDestinationTest {
                 .eventDestination(EventDestinationDefinition.builder()
                         .enabled(false)
                         .matchingEventTypes(EventType.DELIVERY)
-                        .snsDestination(SnsDestination.builder().topicArn(TOPIC_ARN_2).build())
+                        .snsDestination(SnsDestination.builder().topicArn(topicArn2).build())
                         .build())
                 .build());
 
@@ -175,7 +189,7 @@ class SesConfigurationSetEventDestinationTest {
         assertThat(response.eventDestinations()).hasSize(1);
         assertThat(response.eventDestinations().get(0).enabled()).isFalse();
         assertThat(response.eventDestinations().get(0).matchingEventTypes()).contains(EventType.DELIVERY);
-        assertThat(response.eventDestinations().get(0).snsDestination().topicArn()).isEqualTo(TOPIC_ARN_2);
+        assertThat(response.eventDestinations().get(0).snsDestination().topicArn()).isEqualTo(topicArn2);
     }
 
     @Test
@@ -187,7 +201,7 @@ class SesConfigurationSetEventDestinationTest {
                         .eventDestinationName("ed-ghost")
                         .eventDestination(EventDestinationDefinition.builder()
                                 .matchingEventTypes(EventType.SEND)
-                                .snsDestination(SnsDestination.builder().topicArn(TOPIC_ARN).build())
+                                .snsDestination(SnsDestination.builder().topicArn(topicArn).build())
                                 .build())
                         .build()))
                 .isInstanceOf(AwsServiceException.class)
@@ -232,7 +246,7 @@ class SesConfigurationSetEventDestinationTest {
                         .eventDestinationName("ed-x")
                         .eventDestination(EventDestinationDefinition.builder()
                                 .matchingEventTypes(EventType.SEND)
-                                .snsDestination(SnsDestination.builder().topicArn(TOPIC_ARN).build())
+                                .snsDestination(SnsDestination.builder().topicArn(topicArn).build())
                                 .build())
                         .build()))
                 .isInstanceOf(AwsServiceException.class)
@@ -336,7 +350,7 @@ class SesConfigurationSetEventDestinationTest {
                                         software.amazon.awssdk.services.ses.model.EventType.SEND,
                                         software.amazon.awssdk.services.ses.model.EventType.BOUNCE)
                                 .snsDestination(SNSDestination.builder()
-                                        .topicARN(TOPIC_ARN)
+                                        .topicARN(topicArn)
                                         .build())
                                 .build())
                         .build());
@@ -360,7 +374,7 @@ class SesConfigurationSetEventDestinationTest {
                 software.amazon.awssdk.services.ses.model.EventType.SEND,
                 software.amazon.awssdk.services.ses.model.EventType.BOUNCE);
         assertThat(ed.snsDestination()).isNotNull();
-        assertThat(ed.snsDestination().topicARN()).isEqualTo(TOPIC_ARN);
+        assertThat(ed.snsDestination().topicARN()).isEqualTo(topicArn);
     }
 
     @Test
@@ -385,7 +399,7 @@ class SesConfigurationSetEventDestinationTest {
                                 .enabled(true)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.SEND)
                                 .snsDestination(SNSDestination.builder()
-                                        .topicARN(TOPIC_ARN)
+                                        .topicARN(topicArn)
                                         .build())
                                 .build())
                         .build()))
@@ -405,7 +419,7 @@ class SesConfigurationSetEventDestinationTest {
                                 .enabled(false)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.COMPLAINT)
                                 .snsDestination(SNSDestination.builder()
-                                        .topicARN(TOPIC_ARN_2)
+                                        .topicARN(topicArn2)
                                         .build())
                                 .build())
                         .build());
@@ -421,7 +435,7 @@ class SesConfigurationSetEventDestinationTest {
         assertThat(ed.enabled()).isFalse();
         assertThat(ed.matchingEventTypes())
                 .containsExactly(software.amazon.awssdk.services.ses.model.EventType.COMPLAINT);
-        assertThat(ed.snsDestination().topicARN()).isEqualTo(TOPIC_ARN_2);
+        assertThat(ed.snsDestination().topicARN()).isEqualTo(topicArn2);
     }
 
     @Test
@@ -435,7 +449,7 @@ class SesConfigurationSetEventDestinationTest {
                                 .enabled(true)
                                 .matchingEventTypes(software.amazon.awssdk.services.ses.model.EventType.SEND)
                                 .snsDestination(SNSDestination.builder()
-                                        .topicARN(TOPIC_ARN)
+                                        .topicARN(topicArn)
                                         .build())
                                 .build())
                         .build()))
