@@ -63,7 +63,7 @@ class DurableExecutionServicePersistenceTest {
             return "{\"Status\":\"PENDING\"}";
         });
         String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{\"a\":1}",
-                false)).getExecutionArn();
+                false, null)).getExecutionArn();
         String oldToken = token(before.events.get(0));
         firstStorage.flushAll();
 
@@ -105,7 +105,7 @@ class DurableExecutionServicePersistenceTest {
             return "{\"Status\":\"PENDING\"}";
         });
         String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
-                false)).getExecutionArn();
+                false, null)).getExecutionArn();
         String callbackId = first.get(executionArn).getOperations().get("approve").getCallbackId();
         firstStorage.flushAll();
 
@@ -149,7 +149,7 @@ class DurableExecutionServicePersistenceTest {
             return "{\"Status\":\"PENDING\"}";
         });
         String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
-                false)).getExecutionArn();
+                false, null)).getExecutionArn();
         assertEquals("STARTED", first.get(executionArn).getOperations().get("i1").getStatus().name());
         firstStorage.flushAll();
 
@@ -184,7 +184,7 @@ class DurableExecutionServicePersistenceTest {
             return "{\"Status\":\"PENDING\"}";
         });
         String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
-                false)).getExecutionArn();
+                false, null)).getExecutionArn();
         String childArn = first.get(executionArn).getOperations().get("i1").getChildExecutionArn();
         firstStorage.flushAll();
 
@@ -226,7 +226,7 @@ class DurableExecutionServicePersistenceTest {
             return "{\"Status\":\"PENDING\"}";
         });
         String parentArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
-                false)).getExecutionArn();
+                false, null)).getExecutionArn();
         String childArn = first.get(parentArn).getOperations().get("i1").getChildExecutionArn();
         executions(firstStorage).deleteForAccount(ACCOUNT,
                 "us-east-1/" + DurableExecutionService.parseArn(childArn).executionId());
@@ -267,7 +267,7 @@ class DurableExecutionServicePersistenceTest {
                             null)));
             return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\"}";
         });
-        first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}", false));
+        first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}", false, null));
         firstStorage.flushAll();
 
         ScriptedInvoker second = new ScriptedInvoker();
@@ -361,7 +361,7 @@ class DurableExecutionServicePersistenceTest {
         public ResolvedDurableTarget resolve(String accountId, String region, String functionName, String qualifier) {
             if ("plain-fn".equals(functionName)) {
                 return new ResolvedDurableTarget(accountId, region, functionName,
-                        "arn:aws:lambda:us-east-1:000000000000:function:plain-fn", "$LATEST", false, 0, 0);
+                        "arn:aws:lambda:us-east-1:000000000000:function:plain-fn", "$LATEST", false, 0, 0, false);
             }
             String version = "live".equals(qualifier) ? liveVersion : "1";
             if (qualifier != null && !"live".equals(qualifier)) {
@@ -369,11 +369,12 @@ class DurableExecutionServicePersistenceTest {
             }
             return new ResolvedDurableTarget(accountId, region, functionName,
                     "arn:aws:lambda:us-east-1:000000000000:function:" + functionName + ":" + version, version, true,
-                    3600, 7);
+                    3600, 7, false);
         }
 
         @Override
-        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
+        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                             String traceId) {
             if (!target.durable()) {
                 plainPayloads.add(new String(payload, StandardCharsets.UTF_8));
                 return new DurableInvocationResult("req", plainOutput.getBytes(StandardCharsets.UTF_8), null);

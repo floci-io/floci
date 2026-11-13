@@ -110,10 +110,11 @@ public class EksController {
     private Cluster toClusterResponse(Cluster cluster) {
         if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
-                && cluster.getJoinedInstanceIds() == null)) {
+                && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null)) {
             return cluster;
         }
         Cluster response = cluster.copy();
+        response.setDockerNameRegion(null);
         response.setExplicitVersion(false);
         response.setNodeInstanceType(null);
         response.setClusterArgs(null);

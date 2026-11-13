@@ -55,6 +55,8 @@ public class KinesisService implements ResourceProvider {
     private static final int MAX_RECORD_SIZE_KIB = 10240;
     private static final int MAX_RECORDS_PER_REQUEST = 500;
     private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
+    private static final Pattern VALID_RESOURCE_TAG_CHARACTERS =
+            Pattern.compile("[\\p{L}\\p{Nd}\\s_./=+%@:-]*", Pattern.UNICODE_CHARACTER_CLASS);
     /**
      * UpdateShardCount's documented default limits: the per-account/region shard-per-stream
      * ceiling, and how many scaling calls a stream may take in a rolling 24-hour window.
@@ -221,23 +223,34 @@ public class KinesisService implements ResourceProvider {
     }
 
     public KinesisConsumer registerStreamConsumer(String streamArn, String consumerName, String region) {
+        return registerStreamConsumer(streamArn, consumerName, Map.of(), region);
+    }
+
+    public KinesisConsumer registerStreamConsumer(String streamArn, String consumerName,
+                                                   Map<String, String> tags, String region) {
+        validateResourceTagLimit(Map.of(), tags);
         String consumerArn = streamArn + "/consumer/" + consumerName + ":" + System.currentTimeMillis();
         KinesisConsumer consumer = new KinesisConsumer(consumerName, consumerArn, streamArn);
-        consumerStore.put(region + "::" + consumerArn, consumer);
+        consumer.getTags().putAll(tags);
+        synchronized (consumerStore) {
+            consumerStore.put(regionKey(region, consumerArn), consumer);
+        }
         LOG.infov("Registered Kinesis consumer: {0} for stream {1}", consumerName, streamArn);
         return consumer;
     }
 
     public void deregisterStreamConsumer(String streamArn, String consumerName, String consumerArn, String region) {
-        String resolvedArn = consumerArn;
-        if (resolvedArn == null && streamArn != null && consumerName != null) {
-            resolvedArn = consumerStore.scan(k -> true).stream()
-                    .filter(c -> c.getStreamArn().equals(streamArn) && c.getConsumerName().equals(consumerName))
-                    .findFirst().map(KinesisConsumer::getConsumerArn).orElse(null);
-        }
-        if (resolvedArn != null) {
-            consumerStore.delete(region + "::" + resolvedArn);
-            LOG.infov("Deregistered Kinesis consumer: {0}", resolvedArn);
+        synchronized (consumerStore) {
+            String resolvedArn = consumerArn;
+            if (resolvedArn == null && streamArn != null && consumerName != null) {
+                resolvedArn = consumerStore.scan(k -> true).stream()
+                        .filter(c -> c.getStreamArn().equals(streamArn) && c.getConsumerName().equals(consumerName))
+                        .findFirst().map(KinesisConsumer::getConsumerArn).orElse(null);
+            }
+            if (resolvedArn != null) {
+                consumerStore.delete(regionKey(region, resolvedArn));
+                LOG.infov("Deregistered Kinesis consumer: {0}", resolvedArn);
+            }
         }
     }
 
@@ -289,6 +302,95 @@ public class KinesisService implements ResourceProvider {
 
     public Map<String, String> listTagsForStream(String streamName, String region) {
         return resolveStream(streamName, region).getTags();
+    }
+
+    public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+        if (isConsumerTagResource(resourceArn, region)) {
+            String key = regionKey(region, resourceArn);
+            synchronized (consumerStore) {
+                KinesisConsumer consumer = resolveConsumerForTags(key);
+                validateResourceTagLimit(consumer.getTags(), tags);
+                consumer.getTags().putAll(tags);
+                consumerStore.put(key, consumer);
+            }
+            return;
+        }
+        String streamName = streamNameFromTagArn(resourceArn);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = describeStreamByArn(resourceArn, region);
+            validateResourceTagLimit(stream.getTags(), tags);
+            stream.getTags().putAll(tags);
+            store.put(key, stream);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        if (isConsumerTagResource(resourceArn, region)) {
+            String key = regionKey(region, resourceArn);
+            synchronized (consumerStore) {
+                KinesisConsumer consumer = resolveConsumerForTags(key);
+                tagKeys.forEach(consumer.getTags()::remove);
+                consumerStore.put(key, consumer);
+            }
+            return;
+        }
+        String streamName = streamNameFromTagArn(resourceArn);
+        String key = regionKey(region, streamName);
+        synchronized (lockFor(key)) {
+            KinesisStream stream = describeStreamByArn(resourceArn, region);
+            tagKeys.forEach(stream.getTags()::remove);
+            store.put(key, stream);
+        }
+    }
+
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        if (isConsumerTagResource(resourceArn, region)) {
+            synchronized (consumerStore) {
+                return new HashMap<>(resolveConsumerForTags(regionKey(region, resourceArn)).getTags());
+            }
+        }
+        String streamName = streamNameFromTagArn(resourceArn);
+        synchronized (lockFor(regionKey(region, streamName))) {
+            return new HashMap<>(describeStreamByArn(resourceArn, region).getTags());
+        }
+    }
+
+    private boolean isConsumerTagResource(String resourceArn, String region) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parseIfArnIn(resourceArn, "kinesis", region)
+                .orElseThrow(() -> new AwsException("InvalidArgumentException",
+                        "ResourceARN must name a Kinesis resource in this region", 400));
+        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("ResourceNotFoundException", "Kinesis resource not found", 400);
+        }
+        if (!arn.resource().startsWith("stream/")) {
+            throw new AwsException("InvalidArgumentException", "ResourceARN must name a stream or consumer", 400);
+        }
+        return arn.resource().contains("/consumer/");
+    }
+
+    private String streamNameFromTagArn(String resourceArn) {
+        return AwsArnUtils.parse(resourceArn).resource().substring("stream/".length());
+    }
+
+    private KinesisConsumer resolveConsumerForTags(String key) {
+        return consumerStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Consumer not found", 400));
+    }
+
+    private void validateResourceTagLimit(Map<String, String> current, Map<String, String> added) {
+        for (Map.Entry<String, String> entry : added.entrySet()) {
+            if (entry.getKey() == null || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getKey()).matches()
+                    || entry.getKey().regionMatches(true, 0, "aws:", 0, 4)
+                    || entry.getValue() == null || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getValue()).matches()) {
+                throw new AwsException("InvalidArgumentException", "Invalid tag key or value", 400);
+            }
+        }
+        Set<String> keys = new HashSet<>(current.keySet());
+        keys.addAll(added.keySet());
+        if (keys.size() > 50 && added.keySet().stream().anyMatch(key -> !current.containsKey(key))) {
+            throw new AwsException("LimitExceededException", "A Kinesis resource can have at most 50 tags", 400);
+        }
     }
 
     public void startStreamEncryption(String streamName, String encryptionType, String keyId, String region) {

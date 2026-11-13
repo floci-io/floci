@@ -13,6 +13,7 @@ import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.Microvm;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmBuild;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmImage;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmImageVersion;
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.RunSettings;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.RuntimeSettings;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -64,15 +65,6 @@ public class LambdaMicrovmsController {
     private static final long DISK_SNAPSHOT_SIZE_BYTES = 25600000L;
     private static final long MEMORY_SNAPSHOT_SIZE_BYTES = 609087488L;
 
-    /**
-     * Every image carries a managed default egress connector, attached by the
-     * service rather than by the caller. The account segment is the literal
-     * {@code aws} because the connector is AWS-owned, not the caller's.
-     */
-    private static String managedEgressConnector(String region) {
-        return AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:INTERNET_EGRESS").toString();
-    }
-
     private final LambdaMicrovmsService service;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -93,7 +85,7 @@ public class LambdaMicrovmsController {
     public Response createMicrovmImage(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = parse(body);
-        LambdaMicrovmImageRequestShapes.check("CreateMicrovmImage", request);
+        LambdaMicrovmRequestShapes.check("CreateMicrovmImage", request);
         JsonNode codeArtifact = request.path("codeArtifact");
         MicrovmImage image = service.createImage(
                 region,
@@ -135,7 +127,7 @@ public class LambdaMicrovmsController {
                                        String body) {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = parse(body);
-        LambdaMicrovmImageRequestShapes.check("UpdateMicrovmImage", request);
+        LambdaMicrovmRequestShapes.check("UpdateMicrovmImage", request);
         JsonNode updArtifact = request.path("codeArtifact");
         // Read the active version before the update mints a new one.
         String activeBefore = service.getImage(region, imageIdentifier).latestActiveImageVersion;
@@ -277,8 +269,9 @@ public class LambdaMicrovmsController {
     public Response runMicrovm(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = parse(body);
+        LambdaMicrovmRequestShapes.check("RunMicrovm", request);
         Microvm vm = service.runMicrovm(region, regionResolver.getAccountId(),
-                text(request, "imageIdentifier"));
+                text(request, "imageIdentifier"), runSettings(request));
         return Response.ok(vmNode(vm)).build();
     }
 
@@ -459,12 +452,8 @@ public class LambdaMicrovmsController {
     }
 
     private void putRuntimeSettings(ObjectNode node, String region, RuntimeSettings settings) {
-        ArrayNode egress = node.putArray("egressNetworkConnectors");
-        if (settings.egressNetworkConnectors() == null || settings.egressNetworkConnectors().isEmpty()) {
-            egress.add(managedEgressConnector(region));
-        } else {
-            settings.egressNetworkConnectors().forEach(egress::add);
-        }
+        putConnectors(node.putArray("egressNetworkConnectors"), settings.egressNetworkConnectors(), region,
+                "INTERNET_EGRESS");
         if (settings.loggingDisabled()) {
             node.putObject("logging").putObject("disabled");
         } else if (settings.logGroup() != null) {
@@ -539,6 +528,28 @@ public class LambdaMicrovmsController {
         return node;
     }
 
+    private RunSettings runSettings(JsonNode request) {
+        JsonNode idle = request.path("idlePolicy");
+        return new RunSettings(text(request, "imageVersion"), text(request, "executionRoleArn"),
+                listMember(request, "ingressNetworkConnectors"), listMember(request, "egressNetworkConnectors"),
+                integerMember(request, "maximumDurationInSeconds"),
+                idle.hasNonNull("autoResumeEnabled") ? idle.get("autoResumeEnabled").booleanValue() : null,
+                integerMember(idle, "maxIdleDurationSeconds"), integerMember(idle, "suspendedDurationSeconds"));
+    }
+
+    private static Integer integerMember(JsonNode request, String name) {
+        return request.hasNonNull(name) ? request.get(name).intValue() : null;
+    }
+
+    private static void putConnectors(ArrayNode node, List<String> connectors, String region, String defaultName) {
+        if (connectors == null || connectors.isEmpty()) {
+            node.add(AwsArnUtils.Arn.of("lambda", region, "aws",
+                    "network-connector:aws-network-connector:" + defaultName).toString());
+        } else {
+            connectors.forEach(node::add);
+        }
+    }
+
     private ObjectNode vmNode(Microvm vm) {
         // Field set and defaults mirror the recorded live responses: managed
         // default connectors, the 8h maximumDurationInSeconds, and null-valued
@@ -549,14 +560,23 @@ public class LambdaMicrovmsController {
         node.put("imageArn", vm.imageArn);
         node.put("imageVersion", vm.imageVersion);
         node.put("endpoint", vm.endpoint);
-        node.put("maximumDurationInSeconds", 28800);
+        RunSettings settings = vm.runSettings != null
+                ? vm.runSettings : RunSettings.defaults();
+        node.put("maximumDurationInSeconds", settings.maximumDurationInSeconds() != null
+                ? settings.maximumDurationInSeconds() : 28800);
         String region = regionOf(vm.imageArn);
-        node.putArray("egressNetworkConnectors")
-                .add(AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:INTERNET_EGRESS").toString());
-        node.putArray("ingressNetworkConnectors")
-                .add(AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:HTTP_INGRESS").toString());
-        node.putNull("executionRoleArn");
-        node.putNull("idlePolicy");
+        putConnectors(node.putArray("egressNetworkConnectors"), settings.egressNetworkConnectors(), region,
+                "INTERNET_EGRESS");
+        putConnectors(node.putArray("ingressNetworkConnectors"), settings.ingressNetworkConnectors(), region,
+                "HTTP_INGRESS");
+        node.put("executionRoleArn", settings.executionRoleArn());
+        if (settings.autoResumeEnabled() == null) {
+            node.putNull("idlePolicy");
+        } else {
+            node.putObject("idlePolicy").put("autoResumeEnabled", settings.autoResumeEnabled())
+                    .put("maxIdleDurationSeconds", settings.maxIdleDurationSeconds())
+                    .put("suspendedDurationSeconds", settings.suspendedDurationSeconds());
+        }
         node.putNull("terminationReasonCode");
         if (vm.stateReason == null) {
             node.putNull("stateReason");

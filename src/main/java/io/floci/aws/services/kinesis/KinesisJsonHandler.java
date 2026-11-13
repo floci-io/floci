@@ -67,6 +67,9 @@ public class KinesisJsonHandler {
             case "AddTagsToStream" -> () -> handleAddTagsToStream(request, region);
             case "RemoveTagsFromStream" -> () -> handleRemoveTagsFromStream(request, region);
             case "ListTagsForStream" -> () -> handleListTagsForStream(request, region);
+            case "TagResource" -> () -> handleTagResource(request, region);
+            case "UntagResource" -> () -> handleUntagResource(request, region);
+            case "ListTagsForResource" -> () -> handleListTagsForResource(request, region);
             case "StartStreamEncryption" -> () -> handleStartStreamEncryption(request, region);
             case "StopStreamEncryption" -> () -> handleStopStreamEncryption(request, region);
             case "SplitShard" -> () -> handleSplitShard(request, region);
@@ -346,7 +349,8 @@ public class KinesisJsonHandler {
     private Response handleRegisterStreamConsumer(JsonNode request, String region) {
         String streamArn = request.path("StreamARN").asText();
         String consumerName = request.path("ConsumerName").asText();
-        KinesisConsumer consumer = service.registerStreamConsumer(streamArn, consumerName, region);
+        Map<String, String> tags = parseTags(request);
+        KinesisConsumer consumer = service.registerStreamConsumer(streamArn, consumerName, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Consumer", consumerToNode(consumer));
         return Response.ok(response).build();
@@ -467,26 +471,54 @@ public class KinesisJsonHandler {
 
     private Response handleRemoveTagsFromStream(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
+        service.removeTagsFromStream(streamName, parseTagKeys(request.path("TagKeys")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private List<String> parseTagKeys(JsonNode tagKeysNode) {
         List<String> tagKeys = new ArrayList<>();
-        for (JsonNode node : request.path("TagKeys")) {
+        for (JsonNode node : tagKeysNode) {
             tagKeys.add(node.textValue());
         }
-        service.removeTagsFromStream(streamName, tagKeys, region);
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return tagKeys;
     }
 
     private Response handleListTagsForStream(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
         Map<String, String> tags = service.listTagsForStream(streamName, region);
         ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode tagsArray = response.putArray("Tags");
+        response.set("Tags", tagsToArray(tags));
+        response.put("HasMoreTags", false);
+        return Response.ok(response).build();
+    }
+
+    private Response handleTagResource(JsonNode request, String region) {
+        Map<String, String> tags = parseTags(request);
+        service.tagResource(request.path("ResourceARN").asText(null), tags, region);
+        return Response.ok().build();
+    }
+
+    private Response handleUntagResource(JsonNode request, String region) {
+        List<String> keys = parseTagKeys(request.path("TagKeys"));
+        service.untagResource(request.path("ResourceARN").asText(null), keys, region);
+        return Response.ok().build();
+    }
+
+    private Response handleListTagsForResource(JsonNode request, String region) {
+        Map<String, String> tags = service.listTagsForResource(request.path("ResourceARN").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Tags", tagsToArray(tags));
+        return Response.ok(response).build();
+    }
+
+    private ArrayNode tagsToArray(Map<String, String> tags) {
+        ArrayNode tagsArray = objectMapper.createArrayNode();
         tags.forEach((k, v) -> {
             ObjectNode tagNode = tagsArray.addObject();
             tagNode.put("Key", k);
             tagNode.put("Value", v);
         });
-        response.put("HasMoreTags", false);
-        return Response.ok(response).build();
+        return tagsArray;
     }
 
     private Map<String, String> parseTags(JsonNode request) {

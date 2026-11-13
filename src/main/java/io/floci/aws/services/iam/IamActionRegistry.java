@@ -11,7 +11,6 @@ import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.eks.EksController;
-import io.floci.aws.services.route53.Route53Controller;
 import io.floci.aws.services.s3.S3BucketSubresources;
 import io.floci.aws.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -43,12 +42,6 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class IamActionRegistry {
-
-    private static final Map<String, String> ROUTE53_DELEGATION_ACTIONS = Map.of(
-            "createReusableDelegationSet", "route53:CreateReusableDelegationSet",
-            "getReusableDelegationSet", "route53:GetReusableDelegationSet",
-            "listReusableDelegationSets", "route53:ListReusableDelegationSets",
-            "deleteReusableDelegationSet", "route53:DeleteReusableDelegationSet");
 
     private static final Logger LOG = Logger.getLogger(IamActionRegistry.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -289,19 +282,6 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/BeginTransaction/?$",     "rds-data:BeginTransaction"),
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
-
-        // ── API Gateway ────────────────────────────────────────────────────────
-        // The management API, v1 and v2, is authorized by HTTP method on the resource path:
-        // apigateway:GET, POST, PUT, PATCH or DELETE. Two operations have an action of their own. The
-        // others AWS authorizes only by an action of their own name, the v2 routing rules, portals and
-        // portal products, are not served by Floci and need their own rules when they are.
-        rule("apigateway", "POST",   "^/rejectdomainnameaccessassociations$",       "apigateway:RejectAccessAssociation"),
-        rule("apigateway", "PUT",    "^/v2/domainnames/[^/]+/routingrules/[^/]+$",  "apigateway:UpdateRoutingRule"),
-        rule("apigateway", "GET",    ".*",                                          "apigateway:GET"),
-        rule("apigateway", "POST",   ".*",                                          "apigateway:POST"),
-        rule("apigateway", "PUT",    ".*",                                          "apigateway:PUT"),
-        rule("apigateway", "PATCH",  ".*",                                          "apigateway:PATCH"),
-        rule("apigateway", "DELETE", ".*",                                          "apigateway:DELETE"),
 
         // ── EventBridge Scheduler ──────────────────────────────────────────────
         rule("scheduler", "GET",    "^/schedules/[^/]+$",       "scheduler:GetSchedule"),
@@ -669,11 +649,6 @@ public class IamActionRegistry {
 
     /** The serving method identifies these actions even when path encoding or matrix parameters vary. */
     public String resolveMatchedRoute(String credentialScope, ResourceInfo resourceInfo) {
-        if ("route53".equals(credentialScope) && resourceInfo != null
-                && Route53Controller.class.equals(resourceInfo.getResourceClass())
-                && resourceInfo.getResourceMethod() != null) {
-            return ROUTE53_DELEGATION_ACTIONS.get(resourceInfo.getResourceMethod().getName());
-        }
         if (resourceInfo == null || resourceInfo.getResourceClass() == null) {
             return null;
         }
@@ -694,13 +669,15 @@ public class IamActionRegistry {
      * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
      *
      * <p>A request no rule matches is the operation whose route, in botocore's model of its service, it
-     * matches, and is checked as that operation's action ({@link IamAuthorizedActions#actionFor}), as a
-     * request naming its operation is, when Floci can check it as AWS does ({@code checkedAsAws}). One it
-     * cannot is left unmapped rather than checked on {@code *}, which would refuse a grant scoped to the
+     * matches, and is checked as that operation's action for the request's method
+     * ({@link IamAuthorizedActions#actionFor(String, String, String)}): the one a request naming the operation
+     * is checked as, or, for an operation AWS authorizes by method as it does API Gateway's management API,
+     * {@code apigateway:PUT} for a PUT. That is when Floci can check it as AWS does ({@code checkedAsAws}). One
+     * it cannot is left unmapped rather than checked on {@code *}, which would refuse a grant scoped to the
      * resource AWS checks it on. A request a route filter moved under an internal prefix is matched on its
-     * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. The scopes the
-     * vendored routes list as hand-routed, S3's and API Gateway's, have their rules alone. Returns
-     * {@code null} when nothing maps the request (caller treats this as ALLOW).
+     * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. S3, the scope the
+     * vendored routes list as hand-routed, has its rules alone. Returns {@code null} when nothing maps the
+     * request (caller treats this as ALLOW).
      */
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
@@ -736,7 +713,7 @@ public class IamActionRegistry {
         Optional<String> operation = restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, path),
                 ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx));
         if (operation.isPresent()) {
-            String action = IamAuthorizedActions.actionFor(credentialScope, operation.get());
+            String action = IamAuthorizedActions.actionFor(credentialScope, operation.get(), method);
             if (checkedAsAws(credentialScope, operation.get(), action)) {
                 return action;
             }

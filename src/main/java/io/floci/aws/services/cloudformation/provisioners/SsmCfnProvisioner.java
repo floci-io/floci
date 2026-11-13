@@ -21,7 +21,9 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}.
+ * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}, without the
+ * surrounding spaces {@code PutParameter} strips before it stores the parameter. A prior physical id recorded
+ * with those spaces is a different name, so the update replaces that parameter.
  *
  * <p>A create, and the replacement a changed name makes, is one {@code PutParameter} that carries
  * the template's tags and does not overwrite, as AWS's handler sends it: a name that already exists
@@ -59,8 +61,8 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"),
-                r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false);
+        String name = SsmService.withoutSurroundingSpaces(ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false));
         String value = ctx.resolveOptional(props, "Value");
         if (value == null) {
             value = "";
@@ -252,8 +254,8 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
                 && Objects.equals(tier, current.getTier())
                 && Objects.equals(policies, current.getPolicies());
         if (!unchanged) {
-            ssmService.putParameter(name, value, type, description, true, null, keyId, allowedPattern, tier,
-                    policies, region);
+            ssmService.restoreParameter(name, value, type, description, keyId, allowedPattern, tier, policies,
+                    region);
         }
         reconcileTags(name, CfnRollback.snapshotTagKeys(snapshot), CfnRollback.snapshotTags(snapshot), region);
     }

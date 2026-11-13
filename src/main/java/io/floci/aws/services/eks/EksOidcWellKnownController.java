@@ -11,6 +11,7 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -53,12 +54,14 @@ public class EksOidcWellKnownController {
 
     @GET
     @Path(".well-known/openid-configuration")
-    public Response openIdConfiguration(@PathParam("name") String clusterName) {
-        String issuer = requireIssuer(clusterName);
+    public Response openIdConfiguration(@PathParam("name") String clusterName,
+                                        @QueryParam("region") String region) {
+        Cluster cluster = eksService.findClusterForFlociRoute(clusterName, region);
+        String issuer = requireIssuer(cluster, clusterName);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("issuer", issuer);
-        body.put("jwks_uri", jwksUri(clusterName));
+        body.put("jwks_uri", jwksUri(clusterName, eksService.clusterRegion(cluster)));
         body.put("authorization_endpoint", "urn:kubernetes:programmatic_authorization");
         body.put("response_types_supported", List.of("id_token"));
         body.put("subject_types_supported", List.of("public"));
@@ -69,9 +72,10 @@ public class EksOidcWellKnownController {
 
     @GET
     @Path("keys")
-    public Response keys(@PathParam("name") String clusterName) {
-        requireIssuer(clusterName);
-        ClusterOidcKey key = oidcService.findKeyByCluster(clusterName)
+    public Response keys(@PathParam("name") String clusterName, @QueryParam("region") String region) {
+        Cluster cluster = eksService.findClusterForFlociRoute(clusterName, region);
+        requireIssuer(cluster, clusterName);
+        ClusterOidcKey key = oidcService.findKeyByCluster(eksService.clusterKey(cluster))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No OIDC signing key for cluster: " + clusterName, 404));
 
@@ -87,8 +91,7 @@ public class EksOidcWellKnownController {
         return Response.ok(Map.of("keys", List.of(jwk))).build();
     }
 
-    private String requireIssuer(String clusterName) {
-        Cluster cluster = eksService.describeCluster(clusterName);
+    private String requireIssuer(Cluster cluster, String clusterName) {
         String issuer = cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
                 ? cluster.getIdentity().getOidc().getIssuer()
                 : null;
@@ -99,8 +102,13 @@ public class EksOidcWellKnownController {
         return issuer;
     }
 
-    private String jwksUri(String clusterName) {
-        return config.effectiveBaseUrl() + "/_floci/eks/clusters/" + clusterName + "/oidc/keys";
+    /**
+     * The key route of the cluster discovery resolved. It names the cluster's Region, since a verifier
+     * follows it without the discovery request's context, and cluster names are unique only within a
+     * Region of an account.
+     */
+    private String jwksUri(String clusterName, String region) {
+        return config.effectiveBaseUrl() + "/_floci/eks/clusters/" + clusterName + "/oidc/keys?region=" + region;
     }
 
     /**

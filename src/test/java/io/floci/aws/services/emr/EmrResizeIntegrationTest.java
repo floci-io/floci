@@ -204,7 +204,7 @@ class EmrResizeIntegrationTest {
                 .body(primary + ".Ec2InstanceId", equalTo("i-00000000000000001"))
                 .body(primary + ".PrivateDnsName", equalTo("ip-10-0-0-1.ec2.internal"))
                 .body("Instances.findAll { it.InstanceGroupId == '" + core + "' }.PrivateIpAddress",
-                        equalTo(List.of("10.0.0.2", "10.0.0.3", "10.0.0.4")));
+                        equalTo(List.of("10.1.0.1", "10.1.0.2", "10.1.0.3")));
         emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
@@ -222,7 +222,30 @@ class EmrResizeIntegrationTest {
         emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000000000000002", "i-00000000000000001",
                         "i-00000000000000003")))
-                .body("Instances.PrivateIpAddress", equalTo(List.of("10.0.0.2", "10.0.0.1", "10.0.0.3")));
+                .body("Instances.PrivateIpAddress", equalTo(List.of("10.1.0.1", "10.0.0.1", "10.2.0.1")));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(10)
+    void anInstanceKeepsItsAddressWhileAGroupListedBeforeItResizes() {
+        String id = emr("RunJobFlow", "{\"Name\":\"stable-addresses\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":2}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String core = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
+        String task = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'TASK' }.Id");
+        emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":["
+                + "{\"InstanceGroupId\":\"" + core + "\",\"InstanceCount\":2}]}").then().statusCode(200);
+
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances.findAll { it.InstanceGroupId == '" + task + "' }.PrivateIpAddress",
+                        equalTo(List.of("10.2.0.1", "10.2.0.2")))
+                .body("Instances.findAll { it.InstanceGroupId == '" + task + "' }.PrivateDnsName",
+                        equalTo(List.of("ip-10-2-0-1.ec2.internal", "ip-10-2-0-2.ec2.internal")));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
     }
 }

@@ -733,7 +733,7 @@ public class EksClusterManager
             try {
                 String accountId = resolveClusterAccountId(cluster);
                 String issuer = resolveClusterIssuer(cluster);
-                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, oidcKeyName(cluster), issuer);
                 signingKeyFiles = writeSigningKeyFiles(cluster, oidcKey);
                 if (signingKeyFiles != null) {
                     serverArgs.addAll(buildIrsaServerArgs(oidcKey.getIssuer()));
@@ -1404,8 +1404,9 @@ public class EksClusterManager
     }
 
     /**
-     * Account-qualified Docker name for a cluster. Cluster names are unique only within an
-     * account, so a non-default account's cluster is qualified with its account ID — otherwise
+     * Account-qualified Docker name for a cluster. Cluster names are unique only within a Region
+     * of an account, so a non-default account's cluster is qualified with its account ID (and,
+     * where needed, its Region; see {@link #accountQualifiedClusterName}) — otherwise
      * two accounts' same-named clusters would resolve to the same container and data volume,
      * letting one account reach (or, via startCluster's stale-container removal, destroy) the
      * other's workloads. The default account keeps the historical unqualified name so existing
@@ -1425,10 +1426,19 @@ public class EksClusterManager
         return ContainerStorageHelper.resourceName(config, "eks", null, accountQualifiedClusterName(cluster));
     }
 
+    /**
+     * The cluster's name qualified by its account and, when {@link Cluster#getDockerNameRegion()}
+     * is set, by its Region, which leads: {@code [<region>.][<accountId>.]<name>}. Cluster names
+     * are unique only within a Region of an account, so same-named clusters in two Regions need
+     * distinct containers and volumes. The forms cannot collide: a name holds no dot, an account
+     * id is all digits, and a Region never is.
+     */
     private String accountQualifiedClusterName(Cluster cluster) {
         String accountId = cluster.getAccountId();
         boolean defaultAccount = accountId == null || accountId.equals(config.defaultAccountId());
-        return defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
+        String qualified = defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
+        String region = cluster.getDockerNameRegion();
+        return region == null || region.isBlank() ? qualified : region + "." + qualified;
     }
 
     /**
@@ -1446,6 +1456,11 @@ public class EksClusterManager
      */
     private String resolveRestoredDockerName(Cluster cluster) {
         String qualified = accountQualifiedName(cluster);
+        if (cluster.getDockerNameRegion() != null) {
+            // Region qualification postdates both the account qualifier and the floci-aws- rename,
+            // so no older name can hold this cluster's resources.
+            return qualified;
+        }
 
         // A cluster created after account qualification but before the floci-aws- rename lives
         // under the qualified name with the old prefix. Nothing else about it changed, so adopt
@@ -1704,8 +1719,7 @@ public class EksClusterManager
      */
     private String writeWebhookKubeconfig(Cluster cluster) {
         String clusterName = cluster.getName();
-        Path localFile = Paths.get(config.services().eks().dataPath(), "webhook", clusterName, WEBHOOK_CONFIG_FILE)
-                .toAbsolutePath().normalize();
+        Path localFile = localClusterFile(cluster, "webhook", WEBHOOK_CONFIG_FILE);
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildWebhookKubeconfig("http://" + dockerHostResolver.resolve() + ":"
@@ -1746,8 +1760,7 @@ public class EksClusterManager
             if (dataPath == null || dataPath.isBlank()) {
                 return null;
             }
-            Path localFile = Paths.get(dataPath, "audit", clusterName, AUDIT_POLICY_FILE)
-                    .toAbsolutePath().normalize();
+            Path localFile = localClusterFile(cluster, "audit", AUDIT_POLICY_FILE);
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildAuditPolicy());
             return localFile.toString();
@@ -2011,6 +2024,24 @@ public class EksClusterManager
         return "000000000000";
     }
 
+    /**
+     * The key of {@code cluster}'s OIDC signing key in {@link EksOidcService}: the cluster's storage
+     * key, which carries its Region, as {@link EksService} creates, publishes and migrates it.
+     */
+    private String oidcKeyName(Cluster cluster) {
+        return EksService.clusterKey(clusterRegion(cluster), cluster.getName());
+    }
+
+    /**
+     * A file Floci writes for {@code cluster} under {@code <dataPath>/<kind>/<account>/<region>/<name>/},
+     * the layout of {@link #resolveKeysDir}. Cluster names are unique only within a Region of an
+     * account, so a shorter path would let same-named clusters overwrite each other's files.
+     */
+    Path localClusterFile(Cluster cluster, String kind, String fileName) {
+        return Paths.get(config.services().eks().dataPath(), kind, resolveClusterAccountId(cluster),
+                clusterRegion(cluster), cluster.getName(), fileName).toAbsolutePath().normalize();
+    }
+
     Path resolveKeysDir(Cluster cluster) {
         String accountId = resolveClusterAccountId(cluster);
         String region = clusterRegion(cluster);
@@ -2107,7 +2138,7 @@ public class EksClusterManager
         try {
             String accountId = resolveClusterAccountId(cluster);
             String issuer = resolveClusterIssuer(cluster);
-            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, oidcKeyName(cluster), issuer);
             SigningKeyFiles keyFiles = writeSigningKeyFiles(cluster, oidcKey);
             if (keyFiles != null) {
                 copySigningKeysIntoContainer(containerId, keyFiles, cluster.getName());
@@ -2145,8 +2176,7 @@ public class EksClusterManager
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
         String content = buildRegistriesYaml(mirrorAccounts(resolveClusterAccountId(cluster), config.defaultAccountId()),
                 mirrorRegions(region), ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
-        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
-                "registries.yaml"), content, clusterName);
+        writeLocalCopy(localClusterFile(cluster, "registries", "registries.yaml"), content, clusterName);
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
                     REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644,
@@ -2232,10 +2262,9 @@ public class EksClusterManager
             return;
         }
         String url = "https://" + dockerHostResolver.resolve() + ":" + config.port()
-                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster));
+                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster), clusterRegion(cluster));
         String manifest = buildPodIdentityWebhookConfiguration(url, certificateAuthority.caPem());
-        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
-                POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
+        writeLocalCopy(localClusterFile(cluster, "webhook", POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
         try {
             byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
@@ -2253,8 +2282,8 @@ public class EksClusterManager
      * token webhook puts its scope there: the API server calls Floci with no AWS credentials, so a
      * cluster owned by a non-default account would otherwise never be found.
      */
-    static String podIdentityWebhookPath(String clusterName, String accountId) {
-        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId;
+    static String podIdentityWebhookPath(String clusterName, String accountId, String region) {
+        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId + "/" + region;
     }
 
     /**
@@ -2709,7 +2738,7 @@ public class EksClusterManager
         if (nodeGroupStorage == null || cluster == null || cluster.getName() == null) {
             return List.of();
         }
-        String prefix = cluster.getName() + "/";
+        String prefix = EksService.clusterKey(clusterRegion(cluster), cluster.getName()) + "/";
         String accountId = resolveClusterAccountId(cluster);
         List<Nodegroup> groups;
         if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {

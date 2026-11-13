@@ -42,7 +42,10 @@ class CognitoUserInfoIntegrationTest {
     void createPoolClientAndUser() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """
                 {
-                  "PoolName": "UserInfoPool"
+                  "PoolName": "UserInfoPool",
+                  "Schema": [
+                    { "Name": "tenant_id", "AttributeDataType": "String", "Mutable": true }
+                  ]
                 }
                 """);
         poolId = poolResponse.path("UserPool").path("Id").asText();

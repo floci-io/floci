@@ -794,6 +794,7 @@ public class ApiGatewayV2Service {
 
         Integration integration = new Integration();
         integration.setIntegrationId(shortId(8));
+        integration.setDescription(integrationDescription(request));
         integration.setIntegrationType((String) request.get("integrationType"));
         integration.setIntegrationSubtype(integrationSubtype);
         integration.setCredentialsArn((String) request.get("credentialsArn"));
@@ -863,6 +864,10 @@ public class ApiGatewayV2Service {
                 updatedValue(request, "integrationSubtype", integration.getIntegrationSubtype()),
                 payloadFormatVersion, requestParameters);
 
+        String description = integrationDescription(request);
+        if (description != null) {
+            integration.setDescription(description);
+        }
         if (request.get("credentialsArn") != null) {
             integration.setCredentialsArn((String) request.get("credentialsArn"));
         }
@@ -905,6 +910,14 @@ public class ApiGatewayV2Service {
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;
+    }
+
+    private static String integrationDescription(Map<String, Object> request) {
+        Object description = request.get("description");
+        if (description != null && !(description instanceof String)) {
+            throw new AwsException("BadRequestException", "Description must be a string.", 400);
+        }
+        return (String) description;
     }
 
     @SuppressWarnings("unchecked")

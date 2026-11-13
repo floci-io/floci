@@ -26,6 +26,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -97,6 +98,36 @@ class SchedulerScheduleCfnProvisionerTest {
         assertEquals("schedule", resource.getPhysicalId());
         assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/group/schedule",
                 resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void theCleanupContextKeepsTheEnginesChanges() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        trackScheduleUpdates("same", "a");
+        ProvisionContext engineContext = CarriedChanges.withEngineStatement(context("same"));
+        ObjectNode desired = properties("same", "a").put("ScheduleExpression", "rate(10 minutes)");
+
+        ProvisionContext recorded = CarriedChanges.contextRecorded(
+                () -> provisioner.provision(resource, desired, engineContext));
+
+        assertSame(CarriedChanges.ENGINE_STATEMENT, recorded.changes("AWS::Scheduler::Schedule", null));
+    }
+
+    @Test
+    void aRecoveredRollbackKeepsTheEnginesChangesOnTheCleanupContext() throws Exception {
+        StackResource resource = resource();
+        provisioner.provision(resource, properties("same", "a"), context(null));
+        trackScheduleUpdates("same", "a");
+        provisioner.provision(resource, properties("same", "a").put("ScheduleExpression", "rate(10 minutes)"),
+                context("same"));
+        ProvisionContext engineContext = CarriedChanges.withEngineStatement(context("same"));
+        ObjectNode desired = properties("same", "a").put("ScheduleExpression", "rate(15 minutes)");
+
+        ProvisionContext recorded = CarriedChanges.contextRecorded(
+                () -> provisioner.provision(resource, desired, engineContext));
+
+        assertSame(CarriedChanges.ENGINE_STATEMENT, recorded.changes("AWS::Scheduler::Schedule", null));
     }
 
     @Test

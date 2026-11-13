@@ -378,8 +378,25 @@ public class LambdaMicrovmsService implements ResourceProvider {
     // ------------------------------------------------------------------- vms
 
     @RegisterForReflection
+    public record RunSettings(String imageVersion, String executionRoleArn, List<String> ingressNetworkConnectors,
+                              List<String> egressNetworkConnectors, Integer maximumDurationInSeconds,
+                              Boolean autoResumeEnabled, Integer maxIdleDurationSeconds,
+                              Integer suspendedDurationSeconds) {
+        public RunSettings {
+            ingressNetworkConnectors = ingressNetworkConnectors == null ? List.of() : List.copyOf(ingressNetworkConnectors);
+            egressNetworkConnectors = egressNetworkConnectors == null ? List.of() : List.copyOf(egressNetworkConnectors);
+
+        }
+
+        public static RunSettings defaults() {
+            return new RunSettings(null, null, null, null, null, null, null, null);
+        }
+    }
+
+    @RegisterForReflection
     public static final class Microvm {
         public String microvmId;
+        public RunSettings runSettings = RunSettings.defaults();
         public String state;
         public String imageArn;
         public String imageVersion;
@@ -390,6 +407,10 @@ public class LambdaMicrovmsService implements ResourceProvider {
     }
 
     public Microvm runMicrovm(String region, String accountId, String imageIdentifier) {
+        return runMicrovm(region, accountId, imageIdentifier, RunSettings.defaults());
+    }
+
+    public Microvm runMicrovm(String region, String accountId, String imageIdentifier, RunSettings settings) {
         if (imageIdentifier == null || imageIdentifier.isBlank()) {
             throw new AwsException("ValidationException", "imageIdentifier is required", 400);
         }
@@ -398,10 +419,14 @@ public class LambdaMicrovmsService implements ResourceProvider {
             throw new AwsException("ResourceNotFoundException",
                     "MicroVM image not found: " + imageIdentifier, 404);
         }
+        if (settings.imageVersion() != null) {
+            getVersion(region, imageIdentifier, settings.imageVersion());
+        }
         Microvm vm = new Microvm();
+        vm.runSettings = settings;
         vm.microvmId = "microvm-" + UUID.randomUUID();
         vm.imageArn = image.imageArn;
-        vm.imageVersion = image.latestActiveImageVersion;
+        vm.imageVersion = settings.imageVersion() != null ? settings.imageVersion() : image.latestActiveImageVersion;
         vm.endpoint = UUID.randomUUID() + ".lambda-microvm." + region + ".on.aws";
         vm.startedAt = Instant.now();
         // Settle instantly: the response carries PENDING, the next read RUNNING.
@@ -409,6 +434,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         microvms.put(key(region, vm.microvmId), vm);
         Microvm response = new Microvm();
         response.microvmId = vm.microvmId;
+        response.runSettings = vm.runSettings;
         response.state = "PENDING";
         response.imageArn = vm.imageArn;
         response.imageVersion = vm.imageVersion;
