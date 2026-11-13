@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.Resettable;
@@ -1457,9 +1458,17 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return apiKeyStore.get(apiKeyGlobalKey(region, apiKeyId));
     }
 
-    public List<ApiKey> getApiKeys(String region) {
-        String prefix = region + "::";
-        return apiKeyStore.scan(k -> k.startsWith(prefix));
+    public PaginatedResult<ApiKey> getApiKeys(String region, Integer limit, String position) {
+        List<ApiKey> keys = apiKeyStore.scan(key -> key.startsWith(region + "::")).stream()
+                .sorted(Comparator.comparing(ApiKey::getId)).toList();
+        int start = 0;
+        if (position != null && !position.isBlank()) {
+            start = keys.stream().map(ApiKey::getId).toList().indexOf(position) + 1;
+            if (start == 0) throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+        }
+        int end = Math.min(start + resolveUsageLimit(limit), keys.size());
+        return new PaginatedResult<>(List.copyOf(keys.subList(start, end)),
+                end < keys.size() ? keys.get(end - 1).getId() : null);
     }
 
     /**
