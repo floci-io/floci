@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.ssm.model.ParameterType;
 
 import java.util.List;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.replacement;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -44,17 +46,17 @@ class CfnReplacementFromResolvedValueIntegrationTest {
                     .type(ParameterType.STRING).overwrite(true));
             client.createStack(request -> request.stackName(stack).templateBody(template(reference, "first")));
             CfnStackWaits.awaitStatus(client, stack, "CREATE_COMPLETE");
-            String before = physicalId(client, stack);
+            String before = physicalId(client, stack, "Subject");
 
             ssm.putParameter(request -> request.name(parameter).value("ssm-parameter://two")
                     .type(ParameterType.STRING).overwrite(true));
             client.createChangeSet(request -> request.stackName(stack).changeSetName("move")
                     .changeSetType(ChangeSetType.UPDATE).templateBody(template(reference, "second")));
-            assertEquals(List.of("True"), replacement(client, stack, "move"));
+            assertEquals(List.of("True"), replacement(client, stack, "move", "Subject"));
 
             client.executeChangeSet(request -> request.stackName(stack).changeSetName("move"));
             CfnStackWaits.awaitStatus(client, stack, "UPDATE_COMPLETE");
-            assertNotEquals(before, physicalId(client, stack), "the profile is replaced, as the preview said");
+            assertNotEquals(before, physicalId(client, stack, "Subject"), "the profile is replaced, as the preview said");
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
@@ -70,15 +72,15 @@ class CfnReplacementFromResolvedValueIntegrationTest {
             client.createStack(request -> request.stackName(stack)
                     .templateBody(applicationTemplate(asRef, "first")));
             CfnStackWaits.awaitStatus(client, stack, "CREATE_COMPLETE");
-            String before = physicalId(client, stack);
+            String before = physicalId(client, stack, "Subject");
 
             client.createChangeSet(request -> request.stackName(stack).changeSetName("rewrite")
                     .changeSetType(ChangeSetType.UPDATE).templateBody(applicationTemplate(asJoin, "second")));
-            assertEquals(List.of("False"), replacement(client, stack, "rewrite"));
+            assertEquals(List.of("False"), replacement(client, stack, "rewrite", "Subject"));
 
             client.executeChangeSet(request -> request.stackName(stack).changeSetName("rewrite"));
             CfnStackWaits.awaitStatus(client, stack, "UPDATE_COMPLETE");
-            assertEquals(before, physicalId(client, stack), "the same ApplicationId keeps the profile");
+            assertEquals(before, physicalId(client, stack, "Subject"), "the same ApplicationId keeps the profile");
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
@@ -90,16 +92,5 @@ class CfnReplacementFromResolvedValueIntegrationTest {
                 + "\"Subject\": {\"Type\": \"AWS::AppConfig::ConfigurationProfile\", \"Properties\": {"
                 + "\"ApplicationId\": " + applicationId + ", \"Name\": \"settings\", \"LocationUri\": \"hosted\","
                 + " \"Description\": \"" + description + "\"}}}}";
-    }
-
-    private static List<String> replacement(CloudFormationClient client, String stack, String changeSet) {
-        return client.describeChangeSet(request -> request.stackName(stack).changeSetName(changeSet)).changes()
-                .stream().filter(change -> "Subject".equals(change.resourceChange().logicalResourceId()))
-                .map(change -> change.resourceChange().replacementAsString()).toList();
-    }
-
-    private static String physicalId(CloudFormationClient client, String stack) {
-        return client.describeStackResource(request -> request.stackName(stack).logicalResourceId("Subject"))
-                .stackResourceDetail().physicalResourceId();
     }
 }

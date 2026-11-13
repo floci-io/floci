@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.ssm.SsmClient;
 import java.util.List;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -103,7 +104,7 @@ class CfnCreateOnlyReplacementIntegrationTest {
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             client.createStack(request -> request.stackName(stack).templateBody(row.template(row.before(), false)));
             CfnStackWaits.awaitStatus(client, stack, "CREATE_COMPLETE");
-            String before = physicalId(client, stack);
+            String before = physicalId(client, stack, "Subject");
 
             client.createChangeSet(request -> request.stackName(stack).changeSetName("change")
                     .changeSetType(ChangeSetType.UPDATE).templateBody(row.template(row.after(), true)));
@@ -115,7 +116,7 @@ class CfnCreateOnlyReplacementIntegrationTest {
 
             client.executeChangeSet(request -> request.stackName(stack).changeSetName("change"));
             CfnStackWaits.awaitStatus(client, stack, "UPDATE_COMPLETE");
-            String after = physicalId(client, stack);
+            String after = physicalId(client, stack, "Subject");
 
             assertEquals("True".equals(row.replacement()), !before.equals(after),
                     row.label() + ": physical id " + before + " then " + after);
@@ -145,7 +146,7 @@ class CfnCreateOnlyReplacementIntegrationTest {
             ssm.putParameter(request -> request.name(parameter).type("String").value("ssm-parameter://orders-a"));
             cfn.createStack(request -> request.stackName(stack).templateBody(row.template(row.before(), false)));
             CfnStackWaits.awaitStatus(cfn, stack, "CREATE_COMPLETE");
-            String before = physicalId(cfn, stack);
+            String before = physicalId(cfn, stack, "Subject");
 
             ssm.putParameter(request -> request.name(parameter).type("String").value("ssm-parameter://orders-b")
                     .overwrite(true));
@@ -159,7 +160,7 @@ class CfnCreateOnlyReplacementIntegrationTest {
 
             cfn.executeChangeSet(request -> request.stackName(stack).changeSetName("change"));
             CfnStackWaits.awaitStatus(cfn, stack, "UPDATE_COMPLETE");
-            String after = physicalId(cfn, stack);
+            String after = physicalId(cfn, stack, "Subject");
 
             assertNotEquals(before, after, "the changed SSM value replaces the profile");
             String application = cfn.describeStackResource(request -> request.stackName(stack)
@@ -170,10 +171,5 @@ class CfnCreateOnlyReplacementIntegrationTest {
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
-    }
-
-    private static String physicalId(CloudFormationClient client, String stack) {
-        return client.describeStackResource(request -> request.stackName(stack).logicalResourceId("Subject"))
-                .stackResourceDetail().physicalResourceId();
     }
 }

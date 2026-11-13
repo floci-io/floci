@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import java.net.URI;
 import java.util.List;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -83,10 +84,5 @@ class CfnReplacementFromChangeSetIntegrationTest {
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
-    }
-
-    private static String physicalId(CloudFormationClient client, String stack, String logicalId) {
-        return client.describeStackResource(request -> request.stackName(stack).logicalResourceId(logicalId))
-                .stackResourceDetail().physicalResourceId();
     }
 }

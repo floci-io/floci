@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
@@ -35,20 +36,15 @@ class CfnReplacementAtExecutionIntegrationTest {
                 CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             client.createStack(request -> request.stackName(stack).templateBody(template("t3.micro")));
             CfnStackWaits.awaitStatus(client, stack, "CREATE_COMPLETE");
-            String before = physicalId(client, stack);
+            String before = physicalId(client, stack, "Subject");
 
             client.updateStack(request -> request.stackName(stack).templateBody(template("t3.small")));
             CfnStackWaits.awaitStatus(client, stack, "UPDATE_COMPLETE");
 
-            assertNotEquals(before, physicalId(client, stack),
+            assertNotEquals(before, physicalId(client, stack, "Subject"),
                     "the profile's LocationUri resolves to another version, so it is replaced");
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
-    }
-
-    private static String physicalId(CloudFormationClient client, String stack) {
-        return client.describeStackResource(request -> request.stackName(stack).logicalResourceId("Subject"))
-                .stackResourceDetail().physicalResourceId();
     }
 }
