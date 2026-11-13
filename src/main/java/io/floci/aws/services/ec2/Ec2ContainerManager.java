@@ -1089,13 +1089,18 @@ public class Ec2ContainerManager {
         instance.setState(pending);
         submitLifecycleOperation(containerId, () -> RequestScopes.runAs(accountId, instance.getRegion(), () -> {
             boolean setUpMetadataEndpoint = false;
+            String protectedMetadataAddress = null;
+            boolean retainedMetadataRegistration = false;
             try {
                 String instanceId = instance.getInstanceId();
                 ProtectedNamespace namespace = protectedNamespace(instance);
                 if (namespace != null) {
                     // The helper survives a workload stop. Migrate its old TCP/80 listener before
                     // a restarted guest can bind a wildcard HTTP server during boot.
-                    metadataServer.registerContainer(namespace.transportAddress(), instanceId, instance);
+                    protectedMetadataAddress = namespace.transportAddress();
+                    retainedMetadataRegistration = metadataServer.registeredContainer(protectedMetadataAddress)
+                            .filter(registered -> registered == instance).isPresent();
+                    metadataServer.registerContainer(protectedMetadataAddress, instanceId, instance);
                     configureLinkLocalMetadataEndpoint(namespace.helperId(), instanceId,
                             dockerHostResolver.resolve(), config.services().ec2().imdsPort());
                 }
@@ -1137,16 +1142,19 @@ public class Ec2ContainerManager {
                     setUpMetadataEndpoint = namespace == null;
                 }
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
                 instance.compareAndSetState(pending, InstanceState.stopped());
+                rollbackProtectedMetadataRegistration(instance, protectedMetadataAddress, retainedMetadataRegistration);
+                Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
                 LOG.warnv("Error starting EC2 container {0}: {1}", containerId, e.getMessage());
                 instance.compareAndSetState(pending, InstanceState.stopped());
+                rollbackProtectedMetadataRegistration(instance, protectedMetadataAddress, retainedMetadataRegistration);
                 return;
             }
             InstanceState running = InstanceState.running();
             if (!instance.compareAndSetState(pending, running)) {
+                rollbackProtectedMetadataRegistration(instance, protectedMetadataAddress, retainedMetadataRegistration);
                 return;
             }
             if (postStart != null) {
@@ -1161,6 +1169,13 @@ public class Ec2ContainerManager {
                 setUpMetadataEndpointWhileRunning(instance, containerId, running);
             }
         }));
+    }
+
+    private void rollbackProtectedMetadataRegistration(Instance instance, String address, boolean retained) {
+        if (address == null || retained) {
+            return;
+        }
+        metadataServer.rollbackContainerRegistration(address, instance);
     }
 
     /**

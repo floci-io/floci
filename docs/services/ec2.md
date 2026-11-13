@@ -254,6 +254,12 @@ instance ID. The check bypasses any HTTP proxy the image configures, a failed or
 response does not fall back to a tokenless request, and the check passes on an instance that
 requires tokens.
 
+For EC2 guests, a working `iptables` or `nft` NAT backend routes link-local port `80` to the IMDS
+relay on port `42169`, leaving the guest's wildcard port `80` available. If no NAT backend works
+(for example, an offline image without firewall tools), Floci uses the older link-local port `80`
+listener to preserve IMDS access. That fallback can still conflict with a guest server binding
+`0.0.0.0:80`.
+
 `iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
 profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
 profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no

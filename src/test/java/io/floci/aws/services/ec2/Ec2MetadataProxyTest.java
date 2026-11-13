@@ -125,10 +125,10 @@ class Ec2MetadataProxyTest {
     }
 
     @Test
-    void imdsStartDoesNotReserveGuestPort80() {
+    void imdsStartPrefersRoutedRelay() {
         String script = Ec2ContainerManager.metadataProxyStartCommand("10.0.0.1", 9169)[2];
 
-        assertFalse(script.contains("nohup socat TCP-LISTEN:80,"), script);
+        assertTrue(script.contains("if [ -z \"$rule_backend\" ]; then"), script);
         assertTrue(script.contains("nohup socat TCP-LISTEN:42169,bind=169.254.169.254,fork,reuseaddr"
                 + " TCP:10.0.0.1:9169"), script);
         assertTrue(script.contains("iptables -t nat -C OUTPUT -d 169.254.169.254/32 -p tcp --dport 80"
@@ -210,6 +210,156 @@ class Ec2MetadataProxyTest {
 
         assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.installEc2Command(), directory,
                 Map.of("PATH", bin.toString())), HelperShellFixture.output(directory));
+    }
+
+    @Test
+    void ec2InstallKeepsExistingImdsToolsWhenOfflineAndNoNatBackend(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path packageCalls = directory.resolve("package-calls");
+        for (String tool : List.of("ip", "socat", "curl")) {
+            HelperShellFixture.writeTool(bin, tool, "exit 0\n");
+        }
+        HelperShellFixture.writeTool(bin, "apk", "printf '%s\\n' apk >> \"$TEST_RECORD\"\nexit 1\n");
+
+        assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.installEc2Command(), directory,
+                Map.of("PATH", bin.toString(), "TEST_RECORD", packageCalls.toString())),
+                HelperShellFixture.output(directory));
+        assertFalse(Files.exists(packageCalls), "a guest with core IMDS tools must not wait on a package repository");
+    }
+
+    @Test
+    void ec2StartTriesNftWhenIptablesCannotInsertNatRule(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("nft-commands");
+        writeEc2StartTools(bin);
+        HelperShellFixture.writeTool(bin, "iptables", "exit 1\n");
+        HelperShellFixture.writeTool(bin, "nft", "printf '%s\\n' \"$*\" >> \"$TEST_RECORD\"\n"
+                + "case \"$*\" in\n"
+                + "  '-f -') cat >> \"$TEST_RECORD\" ;;\n"
+                + "  'list table ip floci_imds') exit 1 ;;\n"
+                + "esac\n");
+
+        try {
+            assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.startEc2Command("127.0.0.1", 9169),
+                    directory, Map.of("PATH", bin + ":/usr/bin:/bin", "TEST_RECORD", record.toString())),
+                    HelperShellFixture.output(directory));
+            assertTrue(Files.readString(record).contains("insert rule ip floci_imds output"));
+        } finally {
+            deleteEc2ProxyFiles();
+        }
+    }
+
+    @Test
+    void ec2StartReusesIptablesRuleDespiteEmptyNftTable(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("iptables-commands");
+        writeEc2StartTools(bin);
+        HelperShellFixture.writeTool(bin, "iptables", "printf '%s\\n' \"$*\" >> \"$TEST_RECORD\"\n"
+                + "case \"$*\" in\n"
+                + "  *' -C OUTPUT '*) exit 0 ;;\n"
+                + "  *) exit 1 ;;\n"
+                + "esac\n");
+        HelperShellFixture.writeTool(bin, "nft", "case \"$*\" in\n"
+                + "  'list table ip floci_imds') exit 0 ;;\n"
+                + "  *) exit 1 ;;\n"
+                + "esac\n");
+
+        try {
+            assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.startEc2Command("127.0.0.1", 9169),
+                    directory, Map.of("PATH", bin + ":/usr/bin:/bin", "TEST_RECORD", record.toString())),
+                    HelperShellFixture.output(directory));
+            String commands = Files.readString(record);
+            assertTrue(commands.contains("-C OUTPUT"), commands);
+            assertFalse(commands.contains("-I OUTPUT"), commands);
+        } finally {
+            deleteEc2ProxyFiles();
+        }
+    }
+
+    @Test
+    void ec2StartTriesIptablesWhenNftCannotCreateChain(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("iptables-commands");
+        writeEc2StartTools(bin);
+        HelperShellFixture.writeTool(bin, "iptables", "printf '%s\\n' \"$*\" >> \"$TEST_RECORD\"\n"
+                + "case \"$*\" in\n"
+                + "  *' -C OUTPUT '*) exit 1 ;;\n"
+                + "  *' -I OUTPUT '*) exit 0 ;;\n"
+                + "esac\n");
+        HelperShellFixture.writeTool(bin, "nft", "case \"$*\" in\n"
+                + "  'list table ip floci_imds') exit 0 ;;\n"
+                + "  *) exit 1 ;;\n"
+                + "esac\n");
+
+        try {
+            assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.startEc2Command("127.0.0.1", 9169),
+                    directory, Map.of("PATH", bin + ":/usr/bin:/bin", "TEST_RECORD", record.toString())),
+                    HelperShellFixture.output(directory));
+            assertTrue(Files.readString(record).contains("-I OUTPUT"));
+        } finally {
+            deleteEc2ProxyFiles();
+        }
+    }
+
+    @Test
+    void ec2StartPreservesOtherRulesInExistingNftTable(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("nft-commands");
+        writeEc2StartTools(bin);
+        HelperShellFixture.writeTool(bin, "nft", "printf '%s\\n' \"$*\" >> \"$TEST_RECORD\"\n"
+                + "case \"$*\" in\n"
+                + "  'list chain ip floci_imds output') printf '%s\\n'"
+                + " 'ip daddr 192.0.2.1 accept comment \"guest-rule\" # handle 7' ;;\n"
+                + "  '-f -') cat >> \"$TEST_RECORD\" ;;\n"
+                + "esac\n");
+
+        try {
+            assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.startEc2Command("127.0.0.1", 9169),
+                    directory, Map.of("PATH", bin + ":/usr/bin:/bin", "TEST_RECORD", record.toString())),
+                    HelperShellFixture.output(directory));
+            String commands = Files.readString(record);
+            assertFalse(commands.contains("delete table ip floci_imds"), commands);
+            assertTrue(commands.contains("insert rule ip floci_imds output"), commands);
+        } finally {
+            deleteEc2ProxyFiles();
+        }
+    }
+
+    @Test
+    void ec2StartFallsBackToLegacyListenerWhenNoNatBackendExists(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path record = directory.resolve("listeners");
+        writeEc2StartTools(bin);
+        HelperShellFixture.writeTool(bin, "socat", "printf '%s\\n' \"$*\" >> \"$TEST_RECORD\"\n");
+        HelperShellFixture.writeTool(bin, "curl", "grep -q 'TCP-LISTEN:80' \"$TEST_RECORD\" || exit 1\n"
+                + "case \"$*\" in\n"
+                + "  *'/latest/api/token') printf '%s' fixture-token ;;\n"
+                + "  *'/latest/meta-data/instance-id') printf '%s' i-fixture ;;\n"
+                + "esac\n");
+
+        try {
+            assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.startEc2Command("127.0.0.1", 9169),
+                    directory, Map.of("PATH", bin + ":/usr/bin:/bin", "TEST_RECORD", record.toString())),
+                    HelperShellFixture.output(directory));
+            assertTrue(Files.readString(record).contains("TCP-LISTEN:80,bind=169.254.169.254"));
+        } finally {
+            deleteEc2ProxyFiles();
+        }
+    }
+
+    private static void writeEc2StartTools(Path bin) throws Exception {
+        HelperShellFixture.writeTool(bin, "ip", "printf '%s\\n' 'inet 169.254.169.254/32'\n");
+        HelperShellFixture.writeTool(bin, "socat", "exit 0\n");
+        HelperShellFixture.writeTool(bin, "curl", "case \"$*\" in\n"
+                + "  *'/latest/api/token') printf '%s' fixture-token ;;\n"
+                + "  *'/latest/meta-data/instance-id') printf '%s' i-fixture ;;\n"
+                + "esac\n");
+    }
+
+    private static void deleteEc2ProxyFiles() throws Exception {
+        Files.deleteIfExists(Path.of("/tmp/floci-imds-proxy.pid"));
+        Files.deleteIfExists(Path.of("/tmp/floci-imds-proxy-42169.pid"));
+        Files.deleteIfExists(Path.of("/tmp/floci-imds-proxy.log"));
     }
 
     @Test

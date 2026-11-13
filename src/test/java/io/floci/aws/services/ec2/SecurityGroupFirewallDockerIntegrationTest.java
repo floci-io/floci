@@ -115,17 +115,10 @@ class SecurityGroupFirewallDockerIntegrationTest {
                     .withCmd(List.of(METADATA_AND_WEB_SERVERS, "metadata"))
                     .build()).containerId();
 
-            ContainerExec.Result fixture = null;
-            for (int attempt = 0; attempt < 30; attempt++) {
-                fixture = ContainerExec.runMerged(docker, namespace.helperId(), new String[]{"curl", "--noproxy", "*",
-                        "-fsS", "--max-time", "1", "-X", "PUT", "-H",
-                        "X-aws-ec2-metadata-token-ttl-seconds: 60",
-                        "http://127.0.0.1:9169/latest/api/token"}, 3);
-                if (fixture.exitCode() == 0) {
-                    break;
-                }
-                Thread.sleep(100);
-            }
+            ContainerExec.Result fixture = pollCurl(docker, namespace.helperId(), "--noproxy", "*",
+                    "-fsS", "--max-time", "1", "-X", "PUT", "-H",
+                    "X-aws-ec2-metadata-token-ttl-seconds: 60",
+                    "http://127.0.0.1:9169/latest/api/token");
             assertEquals(0, fixture.exitCode(), "IMDS fixture did not start: " + fixture.summary());
             assertEquals("fixture-token", fixture.stdout().trim());
 
@@ -153,15 +146,8 @@ class SecurityGroupFirewallDockerIntegrationTest {
                     .withEntrypoint(List.of("python", "-c"))
                     .withCmd(List.of(METADATA_AND_WEB_SERVERS, "web"))
                     .build()).containerId();
-            ContainerExec.Result web = null;
-            for (int attempt = 0; attempt < 30; attempt++) {
-                web = ContainerExec.runMerged(docker, namespace.helperId(), new String[]{"curl", "--noproxy", "*",
-                        "-fsS", "--max-time", "1", "http://127.0.0.1:80/"}, 3);
-                if (web.exitCode() == 0) {
-                    break;
-                }
-                Thread.sleep(100);
-            }
+            ContainerExec.Result web = pollCurl(docker, namespace.helperId(), "--noproxy", "*",
+                    "-fsS", "--max-time", "1", "http://127.0.0.1:80/");
             assertEquals(0, web.exitCode(), "Wildcard port 80 did not serve HTTP: " + web.summary());
             assertEquals("web-ok", web.stdout().trim());
 
@@ -175,6 +161,14 @@ class SecurityGroupFirewallDockerIntegrationTest {
             ContainerExec.Result stale = ContainerExec.runMerged(docker, namespace.helperId(),
                     new String[]{"nft", "flush", "chain", "ip", "floci_imds", "output"}, 5);
             assertEquals(0, stale.exitCode(), stale.summary());
+            ContainerExec.Result otherRule = ContainerExec.runMerged(docker, namespace.helperId(),
+                    new String[]{"sh", "-c", "printf '%s\\n'"
+                            + " 'add rule ip floci_imds output ip daddr 192.0.2.1 counter"
+                            + " comment \"guest-preserved\"'"
+                            + " 'add rule ip floci_imds output ip daddr 169.254.169.254"
+                            + " tcp dport 80 dnat to 169.254.169.254:42170"
+                            + " comment \"floci-imds-relay-42169\"' | nft -f -"}, 5);
+            assertEquals(0, otherRule.exitCode(), otherRule.summary());
             ContainerExec.Result repaired = ContainerExec.runMerged(docker, namespace.helperId(), start, 30);
             assertEquals(0, repaired.exitCode(), "A stale nft table was not repaired: " + repaired.summary());
             ContainerExec.Result rules = ContainerExec.runMerged(docker, namespace.helperId(),
@@ -183,6 +177,8 @@ class SecurityGroupFirewallDockerIntegrationTest {
             assertEquals(1L, rules.stdout().lines()
                     .filter(line -> line.contains("floci-imds-relay-42169")
                             && line.contains("169.254.169.254:42169")).count());
+            assertFalse(rules.stdout().contains("169.254.169.254:42170"), rules.summary());
+            assertTrue(rules.stdout().contains("guest-preserved"), rules.summary());
             assertTrue(Boolean.TRUE.equals(docker.inspectContainerCmd(worker).exec().getState().getRunning()));
         } finally {
             if (worker != null) {
@@ -196,6 +192,22 @@ class SecurityGroupFirewallDockerIntegrationTest {
                 lifecycle.removeIfExists(namespace.helperId());
             }
         }
+    }
+
+    private static ContainerExec.Result pollCurl(DockerClient docker, String helperId, String... curlArgs)
+            throws Exception {
+        String[] command = new String[curlArgs.length + 1];
+        command[0] = "curl";
+        System.arraycopy(curlArgs, 0, command, 1, curlArgs.length);
+        ContainerExec.Result result = null;
+        for (int attempt = 0; attempt < 30; attempt++) {
+            result = ContainerExec.runMerged(docker, helperId, command, 3);
+            if (result.exitCode() == 0) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+        return result;
     }
 
     @Test
