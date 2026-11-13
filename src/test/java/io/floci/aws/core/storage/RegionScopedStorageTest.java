@@ -1,16 +1,16 @@
-package io.floci.aws.services.appconfig;
+package io.floci.aws.core.storage;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.testing.StorageFactories;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -19,7 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-class AppConfigStorageTest {
+class RegionScopedStorageTest {
     @TempDir
     Path directory;
 
@@ -31,8 +31,8 @@ class AppConfigStorageTest {
             StorageBackend<String, String> legacy = factory.create(
                     "appconfig", "records.json", new TypeReference<>() {});
             legacy.put("existing", "legacy");
-            AppConfigStorage<String> east = store(factory, "us-east-1");
-            AppConfigStorage<String> west = store(factory, "us-west-2");
+            RegionScopedStorage<String> east = store(factory, "us-east-1");
+            RegionScopedStorage<String> west = store(factory, "us-west-2");
             assertEquals(Optional.of("legacy"), east.get("existing"));
             assertEquals(Optional.empty(), west.get("existing"));
             east.put("existing", "east");
@@ -61,11 +61,56 @@ class AppConfigStorageTest {
         }
     }
 
-    private static AppConfigStorage<String> store(StorageFactory factory, String region) {
+    /** A key may hold a slash, as a Glue name may; only a Region and a slash at its start are refused. */
+    @ParameterizedTest
+    @ValueSource(strings = {"memory", "persistent"})
+    void aKeyWithASlashThatIsNotARegionStaysInItsRegion(String mode) {
+        StorageFactory factory = StorageFactories.open(directory, mode, "000000000000");
+        try {
+            StorageBackend<String, String> legacy = factory.create(
+                    "appconfig", "records.json", new TypeReference<>() {});
+            legacy.put("older/record", "legacy");
+            RegionScopedStorage<String> east = store(factory, "us-east-1");
+            RegionScopedStorage<String> west = store(factory, "us-west-2");
+
+            west.put("sales/2024:orders", "west");
+
+            assertEquals(Optional.of("west"), west.get("sales/2024:orders"));
+            assertEquals(Optional.empty(), east.get("sales/2024:orders"));
+            assertEquals(Set.of("sales/2024:orders"), west.keys());
+            assertEquals(Optional.of("legacy"), east.get("older/record"));
+            assertEquals(Set.of("older/record"), east.keys());
+            assertEquals(Optional.empty(), west.get("older/record"));
+        } finally {
+            factory.shutdownAll();
+        }
+    }
+
+    /** Batch writes and atomic deletions act in the request's Region only, as single ones do. */
+    @Test
+    void batchesStayInTheirRegion() {
+        StorageFactory factory = StorageFactories.open(directory, "wal", "000000000000");
+        try {
+            RegionScopedStorage<String> east = store(factory, "us-east-1");
+            RegionScopedStorage<String> west = store(factory, "us-west-2");
+
+            east.putAllAtomically(Map.of("a", "east-a", "b", "east-b"));
+            west.putAll(Map.of("a", "west-a"));
+            west.deleteAllAtomically(Set.of("a", "b"));
+
+            assertEquals(Set.of("a", "b"), east.keys());
+            assertEquals(Optional.of("east-a"), east.get("a"));
+            assertEquals(Set.of(), west.keys());
+        } finally {
+            factory.shutdownAll();
+        }
+    }
+
+    private static RegionScopedStorage<String> store(StorageFactory factory, String region) {
         RegionResolver regions = mock(RegionResolver.class);
         when(regions.getDefaultRegion()).thenReturn("us-east-1");
         when(regions.getRegion()).thenReturn(region);
-        return new AppConfigStorage<>(factory, regions, "appconfig", "records.json", new TypeReference<>() {});
+        return new RegionScopedStorage<>(factory, regions, "appconfig", "records.json", new TypeReference<>() {});
     }
 
 }
