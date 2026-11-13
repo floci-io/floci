@@ -9,6 +9,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.parameterValue;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -115,13 +116,5 @@ class CloudFormationRoute53RecordSetRollbackIntegrationTest {
                 .header("X-Amz-Target", "AmazonSSM.PutParameter")
                 .body("{\"Name\":\"" + name + "\",\"Value\":\"foreign\",\"Type\":\"String\"}")
                 .when().post("/").then().statusCode(200);
-    }
-
-    private static String parameterValue(String name) {
-        return given().contentType("application/x-amz-json-1.1").header("Authorization", SSM_AUTH)
-                .header("X-Amz-Target", "AmazonSSM.GetParameter")
-                .body("{\"Name\":\"" + name + "\"}")
-                .when().post("/").then().statusCode(200)
-                .extract().jsonPath().getString("Parameter.Value");
     }
 }

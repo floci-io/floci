@@ -19,6 +19,7 @@ import org.mockito.Mockito;
 
 import java.time.Duration;
 
+import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.parameterValue;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,8 +41,6 @@ class CloudFormationRoute53RecordSetIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
-    private static final String SSM_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ssm/aws4_request";
     private static final String ROUTE53_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/route53/aws4_request";
     private static final Duration STACK_DELETE_TIMEOUT = Duration.ofSeconds(30);
@@ -1207,15 +1206,5 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             .formParam("Action", "DeleteStack")
             .formParam("StackName", stackName)
         .when().post("/").then().statusCode(200);
-    }
-
-    private String parameterValue(String name) {
-        return given()
-            .contentType("application/x-amz-json-1.1")
-            .header("Authorization", SSM_AUTH)
-            .header("X-Amz-Target", "AmazonSSM.GetParameter")
-            .body("{\"Name\":\"" + name + "\"}")
-        .when().post("/").then().statusCode(200)
-            .extract().jsonPath().getString("Parameter.Value");
     }
 }
