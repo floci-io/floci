@@ -35,7 +35,10 @@ import java.util.regex.Pattern;
  * another account or Region than the request's is checked as given and as each resource of that name a handler may
  * act on instead, in the ARN's account or the caller's and in the ARN's Region or the request's, and the request is
  * refused if any is denied, as handlers mix them (ECR's tag handlers keep the ARN's account in the request's
- * Region); one of a resource AWS owns, whose account is {@code aws}, is checked in that account alone.
+ * Region); one of a resource AWS owns, whose account is {@code aws}, is checked in that account alone, and so is one
+ * its service says it acts on in the account the ARN names (an OAM sink a link is made to). A request leaving out a
+ * member naming a resource its service then uses one of its own for is checked on the one the service finds
+ * (Resource Explorer's default view).
  */
 public final class RequestResources {
 
@@ -189,12 +192,17 @@ public final class RequestResources {
                     resource.types().stream().map(formats::get).filter(format -> format.pattern().matcher(named).matches())
                             .min(Comparator.comparing(format -> !format.awsOwned()))
                             .ifPresent(format -> addNamed(arns, format.checked(named), format.awsOwned(),
-                                    partition, region, accountId));
+                                    partition, region, accountId, stored));
                 }
             } else if (resource.through() != null) {
                 through(arns, resource, formats, form, body, region, stored);
             } else if (!resource.find().isEmpty()) {
                 found(arns, resource, formats, form, body, partition, region, accountId, stored);
+            } else if (resource.byDefault()) {
+                // The one its service acts on for a request naming none, as it finds it; none when it has none.
+                if (stored != null) {
+                    stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
+                }
             } else {
                 fill(arns, resource, formats, form, body, partition, region, accountId, stored);
             }
@@ -221,11 +229,30 @@ public final class RequestResources {
      */
     public static List<String> created(String operation, ContainerRequestContext ctx, String partition, String region,
                                        String accountId, Map<String, String> labels) {
+        return created(operation, null, ctx, partition, region, accountId, labels);
+    }
+
+    /**
+     * As {@link #created(String, ContainerRequestContext, String, String, String, Map)}, for a request whose tags need
+     * the {@code tagging} action: a create whose action acts on no resource type tags the resource it makes
+     * ({@code makes}) where that action acts on the resource's type, as AWS checks a tagging action on the resource
+     * being tagged, and its tags go where the operation is checked otherwise (a Cloud Map namespace, whose
+     * {@code TagResource} acts on no type, on {@code *}); a null {@code tagging}, or one the table does not hold, acts
+     * on it.
+     */
+    public static List<String> created(String operation, String tagging, ContainerRequestContext ctx, String partition,
+                                       String region, String accountId, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
         List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
                 : served(table.operations().getOrDefault(operation, List.of()), ctx).stream()
                         .filter(RequestResourceMembers.Resource::made).toList();
+        if (creates == null && made.isEmpty() && operation != null) {
+            made = table.makes().getOrDefault(operation, List.of()).stream()
+                    .filter(resource -> tagging == null || table.types().getOrDefault(tagging, resource.types())
+                            .contains(resource.types().getFirst()))
+                    .toList();
+        }
         if (creates == null && made.isEmpty()) {
             return List.of();
         }
@@ -251,7 +278,7 @@ public final class RequestResources {
                 String under = parent.resource().substring(created.parentWord().length());
                 addNamed(arns, new AwsArnUtils.Arn(parent.partition(), parent.service(), parent.region(),
                         parent.accountId(), created.childWord() + under + created.separator() + "*").toString(),
-                        false, partition, region, accountId);
+                        false, partition, region, accountId, null);
             }
         }
         return List.copyOf(arns);
@@ -493,7 +520,7 @@ public final class RequestResources {
                         .filter(value -> !isArnOf(named, value)
                                 && format.pattern().matcher(value).matches()).toList();
                 asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
-                        accountId));
+                        accountId, stored));
                 values = values.stream().filter(value -> !asArns.contains(value)).toList();
                 if (values.isEmpty()) {
                     return;
@@ -523,7 +550,7 @@ public final class RequestResources {
                         from.region().isEmpty() ? region : from.region(),
                         from.accountId().isEmpty() ? accountId : from.accountId()), format,
                         resource.types().getFirst(), filling.variables(), null, region), format.awsOwned(), partition,
-                        region, accountId);
+                        region, accountId, null);
             }
         }
     }
@@ -657,15 +684,21 @@ public final class RequestResources {
      * An ARN the request names: as given, and, when it names another partition, account or Region than the
      * request's, as each resource of that name in the request's partition, in the ARN's account or the caller's and
      * the ARN's Region or the request's, whichever its handler acts on. An ARN with no account or Region keeps none,
-     * and one of a type AWS owns ({@code awsOwned}) its account, {@code aws}, which is no caller's.
+     * and one of a type AWS owns ({@code awsOwned}) its account, {@code aws}, which is no caller's. One naming another
+     * account whose resource {@code stored} says the service acts on there (an OAM sink a link is made to, a RAM
+     * invitation sent to the caller) is that resource alone.
      */
     private static void addNamed(Set<String> arns, String arn, boolean awsOwned, String partition, String region,
-                                 String accountId) {
+                                 String accountId, StoredResourceArns stored) {
         arns.add(arn);
         if (!AwsArnUtils.isArn(arn)) {
             return;
         }
         AwsArnUtils.Arn named = AwsArnUtils.parse(arn);
+        if (!awsOwned && stored != null && !named.accountId().isEmpty() && !named.accountId().equals(accountId)
+                && stored.reachedInItsAccount(arn, accountId)) {
+            return;
+        }
         List<String> accounts = named.accountId().isEmpty() || awsOwned ? List.of(named.accountId())
                 : List.of(named.accountId(), accountId);
         List<String> regions = named.region().isEmpty() ? List.of("") : List.of(named.region(), region);
