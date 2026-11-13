@@ -3,6 +3,8 @@ package io.floci.aws.services.glue;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.Crawler;
@@ -57,9 +59,11 @@ public class GlueCrawlerRunService {
     private final Clock clock;
 
     @Inject
-    public GlueCrawlerRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config) {
-        this(storageFactory.create("glue", "crawler_runs.json", new TypeReference<>() {}),
-                storageFactory.create("glue", "workflow_run_crawls.json", new TypeReference<>() {}),
+    public GlueCrawlerRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config,
+                                 RegionResolver regionResolver) {
+        this(new RegionScopedStorage<>(storageFactory, regionResolver, "glue", "crawler_runs.json", new TypeReference<>() {}),
+                new RegionScopedStorage<>(storageFactory, regionResolver,
+                        "glue", "workflow_run_crawls.json", new TypeReference<>() {}),
                 glueService, config.services().glue().crawlerRunDurationSeconds(), Clock.systemUTC());
     }
 

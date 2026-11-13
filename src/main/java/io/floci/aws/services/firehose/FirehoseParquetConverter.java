@@ -12,6 +12,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.firehose.model.DeliveryStreamDescription;
 import io.floci.aws.services.firehose.model.DeliveryStreamDescription.DataFormatConversionConfiguration;
 import io.floci.aws.services.firehose.model.DeliveryStreamDescription.OpenXJsonSerDe;
@@ -236,12 +237,16 @@ public class FirehoseParquetConverter {
     // ── schema resolution ────────────────────────────────────────────────────
 
     /**
-     * The Glue store is not region- or catalog-partitioned, so
-     * SchemaConfiguration.Region and CatalogId only flow into the error-output
-     * metadata; VersionId is not resolved (the live table is always used).
+     * The Glue table is read in SchemaConfiguration.Region when it names one, and in the
+     * stream's own Region otherwise, as AWS reads it. The catalog is the stream account's, so
+     * CatalogId only flows into the error-output metadata; VersionId is not resolved (the live
+     * table is always used).
      */
     private List<SchemaColumn> resolveSchema(SchemaConfiguration schemaConfig, SerDeRules rules) {
-        Table table = glueService.getTable(schemaConfig.getDatabaseName(), schemaConfig.getTableName());
+        Table table = schemaConfig.getRegion() == null || schemaConfig.getRegion().isBlank()
+                ? glueService.getTable(schemaConfig.getDatabaseName(), schemaConfig.getTableName())
+                : RequestScopes.callAs(regionResolver.getAccountId(), schemaConfig.getRegion(),
+                        () -> glueService.getTable(schemaConfig.getDatabaseName(), schemaConfig.getTableName()));
         List<Column> columns = table.getStorageDescriptor() == null
                 ? null : table.getStorageDescriptor().getColumns();
         if (columns == null || columns.isEmpty()) {

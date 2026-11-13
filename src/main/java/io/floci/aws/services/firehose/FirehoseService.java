@@ -1144,12 +1144,13 @@ public class FirehoseService implements ResourceProvider {
                 return;
             }
 
-            // Every store this delivery touches, Glue and S3 included, reads the account
-            // from the request context, and a scheduled flush has none. Without this the
-            // work would run as the default account rather than the stream's owner: the
+            // Every store this delivery touches, Glue and S3 included, reads the account and
+            // the Region from the request context, and a scheduled flush has none. Without this
+            // the work would run as the default account and Region rather than the stream's: the
             // stream's Glue table would be missed and its objects would land in the wrong
             // partition. The sidecar follows the same context, so both sides stay together.
             RequestScopes.runAs(stream.getAccountId(),
+                    AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(), regionResolver.getDefaultRegion()),
                     () -> deliverBuffer(streamName, stream, toFlush, since, checkpoint));
         }
     }
