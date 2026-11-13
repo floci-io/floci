@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cognito.CognitoService;
-import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.verifiedpermissions.model.EntityIdentifier;
 import io.floci.aws.services.verifiedpermissions.model.IdentitySource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,10 +13,6 @@ import jakarta.inject.Inject;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
-import java.security.PublicKey;
-import java.security.Signature;
-import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -94,7 +89,10 @@ public class VerifiedPermissionsTokenService {
                 .filter(candidate -> issuer.equals(VerifiedPermissionsService.identityIssuer(candidate.configuration())))
                 .findFirst().orElseThrow(() -> VerifiedPermissionsService.validation("No identity source matches the token issuer."));
         if (local != null) {
-            verifyEmulatedCognitoSignature(token, cognitoPoolId(local.configuration()));
+            String poolId = cognitoPoolId(local.configuration());
+            if (!cognitoService.verifiedIssuingPoolId(token).map(poolId::equals).orElse(false)) {
+                throw VerifiedPermissionsService.validation("Token signature validation failed.");
+            }
         } else {
             try {
                 signatureVerifier.verify(token, issuer);
@@ -250,46 +248,24 @@ public class VerifiedPermissionsTokenService {
         return slash < 0 ? null : arn.substring(slash + "userpool/".length());
     }
 
-    /** The issuer Floci's Cognito signs with for this source's pool, or null when the pool is not Floci's. */
+    /**
+     * The issuer Floci's Cognito signs with for this source's pool, or null when the source does
+     * not name one of Floci's pools: the full ARN must match, not only the pool id.
+     */
     private String emulatedCognitoIssuer(JsonNode configuration) {
         String poolId = cognitoPoolId(configuration);
         if (poolId == null) {
             return null;
         }
+        String configuredArn = configuration.path("cognitoUserPoolConfiguration").path("userPoolArn").asText();
         try {
-            cognitoService.describeUserPool(poolId);
+            if (!configuredArn.equals(cognitoService.describeUserPool(poolId).getArn())) {
+                return null;
+            }
         } catch (AwsException e) {
             return null;
         }
         return cognitoService.getIssuer(poolId);
-    }
-
-    /** Fails closed: an unknown alg, a kid that is not the pool's signing key, or a bad signature. */
-    private void verifyEmulatedCognitoSignature(String token, String poolId) {
-        UserPool pool = cognitoService.describeUserPool(poolId);
-        String[] parts = token.split("\\.", -1);
-        JsonNode header;
-        try {
-            header = objectMapper.readTree(new String(Base64.getUrlDecoder().decode(pad(parts[0])), StandardCharsets.UTF_8));
-        } catch (IllegalArgumentException | IOException e) {
-            throw VerifiedPermissionsService.validation("Token signature validation failed: malformed header.");
-        }
-        if (!"RS256".equals(header.path("alg").asText()) || !header.path("kid").asText("").equals(pool.getSigningKeyId())) {
-            throw VerifiedPermissionsService.validation("Token signature validation failed: unknown signing key.");
-        }
-        try {
-            PublicKey key = KeyFactory.getInstance("RSA")
-                    .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(pool.getSigningPublicKey())));
-            Signature verifier = Signature.getInstance("SHA256withRSA");
-            verifier.initVerify(key);
-            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
-            if (verifier.verify(Base64.getUrlDecoder().decode(pad(parts[2])))) {
-                return;
-            }
-        } catch (Exception e) {
-            // fall through: any failure to verify is a refusal
-        }
-        throw VerifiedPermissionsService.validation("Token signature validation failed: signature does not verify.");
     }
 
     private JsonNode decodeClaims(String token) {

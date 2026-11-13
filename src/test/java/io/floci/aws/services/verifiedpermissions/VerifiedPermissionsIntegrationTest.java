@@ -1,8 +1,8 @@
 package io.floci.aws.services.verifiedpermissions;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -319,6 +319,7 @@ class VerifiedPermissionsIntegrationTest {
     void isAuthorizedWithToken_acceptsAccessTokensFromFlocisOwnCognitoPool() throws Exception {
         JsonNode pool = cognito("CreateUserPool", "{\"PoolName\":\"avp-token-pool\"}");
         String poolId = pool.path("UserPool").path("Id").asText();
+        String poolArn = pool.path("UserPool").path("Arn").asText();
         String clientId = cognito("CreateUserPoolClient", objectJson(Map.of(
                 "UserPoolId", poolId, "ClientName", "app",
                 "ExplicitAuthFlows", List.of("ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"))))
@@ -336,10 +337,23 @@ class VerifiedPermissionsIntegrationTest {
         givenAws("CreateIdentitySource", objectJson(Map.of(
                         "policyStoreId", store, "principalEntityType", "User",
                         "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
-                                "userPoolArn", "arn:aws:cognito-idp:us-east-1:111122223333:userpool/" + poolId,
+                                "userPoolArn", poolArn,
                                 "clientIds", List.of(clientId))))))
                 .then().statusCode(200);
         givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of(
+                        "static", Map.of("statement", "permit(principal, action, resource);")))))
+                .then().statusCode(200);
+
+        // A source naming the same pool id in another account is not this pool: the token's
+        // issuer matches no source there.
+        String foreign = createStore("OFF", "DISABLED");
+        givenAws("CreateIdentitySource", objectJson(Map.of(
+                        "policyStoreId", foreign, "principalEntityType", "User",
+                        "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
+                                "userPoolArn", poolArn.replaceFirst(":\\d{12}:", ":999988887777:"),
+                                "clientIds", List.of(clientId))))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", foreign, "definition", Map.of(
                         "static", Map.of("statement", "permit(principal, action, resource);")))))
                 .then().statusCode(200);
 
@@ -351,6 +365,12 @@ class VerifiedPermissionsIntegrationTest {
         givenAws("IsAuthorizedWithToken", objectJson(request))
                 .then().statusCode(200).body("decision", equalTo("ALLOW"));
 
+        Map<String, Object> foreignRequest = new LinkedHashMap<>(request);
+        foreignRequest.put("policyStoreId", foreign);
+        givenAws("IsAuthorizedWithToken", objectJson(foreignRequest))
+                .then().statusCode(400).body("__type", containsString("ValidationException"))
+                .body("message", containsString("issuer"));
+
         // Same issuer, signature broken: refused, never evaluated.
         String[] parts = accessToken.split("\\.");
         String flipped = (parts[2].charAt(0) == 'A' ? "B" : "A") + parts[2].substring(1);
@@ -358,6 +378,11 @@ class VerifiedPermissionsIntegrationTest {
         givenAws("IsAuthorizedWithToken", objectJson(request))
                 .then().statusCode(400).body("__type", containsString("ValidationException"))
                 .body("message", containsString("signature"));
+
+        // Same issuer, empty header: a validation error, not a server error.
+        request.put("accessToken", "." + parts[1] + "." + parts[2]);
+        givenAws("IsAuthorizedWithToken", objectJson(request))
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
     }
 
     @Test
