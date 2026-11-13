@@ -360,6 +360,45 @@ class EcsGracefulStopConcurrencyServiceTest {
     }
 
     @Test
+    void preparationInterruptsTheScheduledPullBeforeWaitingForItsPass() throws Exception {
+        EcsService service = newService(true);
+        CountDownLatch pullEntered = new CountDownLatch(1);
+        CountDownLatch releasePull = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            pullEntered.countDown();
+            try {
+                releasePull.await();
+            } catch (InterruptedException e) {
+                interrupted.countDown();
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("image pull interrupted", e);
+            }
+            throw new IllegalStateException("test released the pull without interruption");
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        createService(service, "scheduled-pull", 1);
+        FutureTask<Void> preparation = new FutureTask<>(service::beginTeardown, null);
+        Thread thread = new Thread(preparation, "test-ecs-scheduled-pull-teardown");
+        thread.setDaemon(true);
+        try {
+            assertTrue(pullEntered.await(10, TimeUnit.SECONDS), "the real scheduler must enter its pull");
+            thread.start();
+            preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+            assertEquals(0, interrupted.getCount(), "preparation interrupts the scheduler's inline pull");
+            List<EcsTask> tasks = allTasks(service, "scheduled-pull");
+            assertEquals(1, tasks.size());
+            assertEquals("STOPPED", tasks.getFirst().getLastStatus());
+            assertEquals("TaskFailedToStart", tasks.getFirst().getStopCode());
+            verify(containerManager, never()).stopTask(any());
+        } finally {
+            releasePull.countDown();
+            if (thread.getState() != Thread.State.NEW) {
+                preparation.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    @Test
     void teardownPreparationWaitsForTaskLaunchBeforeStoppingContainers() throws Exception {
         EcsService service = newService();
         createService(service, "launching", 1);
@@ -417,12 +456,20 @@ class EcsGracefulStopConcurrencyServiceTest {
     }
 
     private EcsService newService() {
+        return newService(false);
+    }
+
+    private EcsService newService(boolean scheduleReconciliation) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
                 config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"), eventPublisher);
-        service.initializeStorage();
+        if (scheduleReconciliation) {
+            service.init();
+        } else {
+            service.initializeStorage();
+        }
         service.createCluster(CLUSTER, REGION);
         services.add(service);
         return service;

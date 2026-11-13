@@ -31,7 +31,7 @@ import java.util.Optional;
  * {@link ReposiliteSidecarClient#ensureRepository}), not to its own container.
  *
  * <p>Implements {@link ContainerTeardown} rather than observing {@code ShutdownEvent} directly:
- * {@code ContainerTeardowns.stopAll} already runs every implementation both at process shutdown
+ * {@code ContainerTeardowns} already drains every implementation both at process shutdown
  * and on {@code /state/reset}/{@code /state/nuke}, so a reset now actually stops the managed
  * container instead of leaving it running with every {@code CodeArtifactRepository} record that
  * named it gone.

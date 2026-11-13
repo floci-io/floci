@@ -197,9 +197,9 @@ class EmulatorLifecycleTest {
         emulatorLifecycle.onStop(new ShutdownEvent());
 
         InOrder order = Mockito.inOrder(first, second, storageFactory, ecsTaskRoleCredentialsServer);
+        order.verify(storageFactory).flushAll();
         order.verify(first).beginTeardown();
         order.verify(second).beginTeardown();
-        order.verify(storageFactory).flushAll();
         order.verify(ecsTaskRoleCredentialsServer).stop();
         order.verify(first).stopManagedContainers();
         order.verify(second).stopManagedContainers();

@@ -450,8 +450,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     /** Stops task producers before any owner retires shared credentials or networking. */
     @Override
     public void beginTeardown() {
+        reconciler.shutdownNow();
         synchronized (reconciliationPassLock) {
-            reconciler.shutdownNow();
+            // Wait for the interrupted pass to land its task before shared resources retire.
         }
         // An interrupted launch fails into its own catch block, which lands the task STOPPED and
         // keeps a partial launch's handle, so the sweep below claims what it started.

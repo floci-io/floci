@@ -404,7 +404,6 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
-        List<ContainerTeardown> prepared = ContainerTeardowns.prepareAll(containerTeardowns, LOG);
         // Flush persisted state to disk FIRST, before the slow proxy/container teardown below.
         // Stopping Docker sidecars (RDS/ElastiCache/etc.) can block long enough to exhaust the
         // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
@@ -415,6 +414,7 @@ public class EmulatorLifecycle {
         runCleanup("Kinesis poller", kinesisPoller::shutdown);
         runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
+        List<ContainerTeardown> prepared = ContainerTeardowns.prepareAll(containerTeardowns, LOG);
         runCleanup("EC2 metadata server", () -> {
             if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();
