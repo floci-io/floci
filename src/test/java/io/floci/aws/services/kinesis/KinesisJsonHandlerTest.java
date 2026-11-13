@@ -20,6 +20,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.time.Clock;
 import java.time.Instant;
@@ -28,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -406,7 +408,7 @@ class KinesisJsonHandlerTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"PutRecord", "PutRecords"})
-    void writesReportAnOpenDescendantAfterRepeatedSplits(String action) {
+    void writesReportTheOpenHashRangeAfterRepeatedSplits(String action) {
         createStream("test-stream");
         KinesisStream stream = service.describeStream("test-stream", REGION);
         service.splitShard("test-stream", FIRST_SHARD_ID,
@@ -422,19 +424,19 @@ class KinesisJsonHandlerTest {
         ObjectNode response = responseEntity(handler.handle(action, request, REGION));
         JsonNode result = "PutRecords".equals(action) ? response.path("Records").get(0) : response;
 
-        assertEquals(stream.getShards().get(3).getShardId(), result.path("ShardId").asText());
+        assertEquals(stream.getShards().get(5).getShardId(), result.path("ShardId").asText());
         assertFalse(result.path("SequenceNumber").asText().isEmpty());
         if ("PutRecords".equals(action)) {
             assertEquals(0, response.path("FailedRecordCount").asInt());
         }
-        assertEquals(1, stream.getShards().get(3).recordCount());
+        assertEquals(1, stream.getShards().get(5).recordCount());
         assertTrue(stream.getShards().stream().filter(KinesisShard::isClosed)
                 .allMatch(shard -> shard.recordCount() == 0));
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"PutRecord", "PutRecords"})
-    void writesFailWithoutAppendingWhenNoOpenDescendantExists(String action) {
+    void writesFailWithoutAppendingWhenNoOpenShardCoversHash(String action) {
         createStream("test-stream");
         KinesisShard shard = service.describeStream("test-stream", REGION).getShards().getFirst();
         shard.setClosed(true);
@@ -1008,6 +1010,94 @@ class KinesisJsonHandlerTest {
         req.put("ExplicitHashKey", MIN_HASH_KEY);
         ObjectNode respMin = responseEntity(handler.handle("PutRecord", req, REGION));
         assertEquals(FIRST_SHARD_ID, respMin.get("ShardId").asText());
+    }
+
+    @Test
+    void ordinaryPartitionKeysUseMd5HashRangesReportedByListShards() {
+        createStream("md5-routing", TWO_SHARDS);
+        ObjectNode list = MAPPER.createObjectNode().put("StreamName", "md5-routing");
+        ArrayNode shards = (ArrayNode) responseEntity(handler.handle("ListShards", list, REGION)).get("Shards");
+
+        ObjectNode put = MAPPER.createObjectNode()
+                .put("StreamName", "md5-routing")
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk-0");
+        String singleShard = responseEntity(handler.handle("PutRecord", put, REGION)).get("ShardId").asText();
+        assertEquals(shardForMd5Hash(shards, "EFFC8E8920E4EE5505B7F963C5D72F6D"), singleShard);
+
+        ObjectNode batch = MAPPER.createObjectNode().put("StreamName", "md5-routing");
+        ArrayNode records = batch.putArray("Records");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "a");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "b");
+        records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "é-0");
+        ArrayNode results = (ArrayNode) responseEntity(handler.handle("PutRecords", batch, REGION)).get("Records");
+        assertEquals(shardForMd5Hash(shards, "0CC175B9C0F1B6A831C399E269772661"),
+                results.get(0).get("ShardId").asText());
+        assertEquals(shardForMd5Hash(shards, "92EB5FFEE6AE2FEC3AD71C777531578F"),
+                results.get(1).get("ShardId").asText());
+        assertEquals(shardForMd5Hash(shards, "2F6923E2AAC1CFC8729E5C892BBE2244"),
+                results.get(2).get("ShardId").asText());
+    }
+
+    @Test
+    void ordinaryPartitionKeyNormalizesLegacyOverlappingShardRanges() {
+        createStream("legacy-md5-routing", TWO_SHARDS);
+        KinesisStream stream = service.describeStream("legacy-md5-routing", REGION);
+        for (KinesisShard shard : stream.getShards()) {
+            shard.setHashKeyRange(new KinesisShard.HashKeyRange(MIN_HASH_KEY, MAX_HASH_KEY));
+        }
+
+        ObjectNode put = MAPPER.createObjectNode()
+                .put("StreamName", "legacy-md5-routing")
+                .put("Data", "dGVzdA==")
+                .put("PartitionKey", "pk-0");
+        assertEquals(SECOND_SHARD_ID,
+                responseEntity(handler.handle("PutRecord", put, REGION)).get("ShardId").asText());
+        assertEquals(MIN_HASH_KEY, stream.getShards().getFirst().getHashKeyRange().startingHashKey());
+        assertEquals(MAX_HASH_KEY, stream.getShards().get(1).getHashKeyRange().endingHashKey());
+    }
+
+    @Test
+    void putRecordsDoesNotRescanEveryShardForEachEntry() {
+        KinesisStream stream = service.createStream("indexed-routing", 256, REGION);
+        AtomicInteger rangeReads = new AtomicInteger();
+        List<KinesisShard> counted = new ArrayList<>();
+        for (KinesisShard shard : stream.getShards()) {
+            counted.add(new KinesisShard(shard.getShardId(),
+                    shard.getHashKeyRange().startingHashKey(), shard.getHashKeyRange().endingHashKey(),
+                    shard.getSequenceNumberRange().startingSequenceNumber()) {
+                @Override
+                public HashKeyRange getHashKeyRange() {
+                    rangeReads.incrementAndGet();
+                    return super.getHashKeyRange();
+                }
+            });
+        }
+        stream.setShards(counted);
+
+        ObjectNode batch = MAPPER.createObjectNode().put("StreamName", "indexed-routing");
+        ArrayNode records = batch.putArray("Records");
+        for (int i = 0; i < 100; i++) {
+            records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk-" + i);
+        }
+
+        ObjectNode result = responseEntity(handler.handle("PutRecords", batch, REGION));
+
+        assertEquals(0, result.path("FailedRecordCount").asInt());
+        assertEquals(100, result.path("Records").size());
+        assertTrue(rangeReads.get() < 8_000, () -> "Shard range reads: " + rangeReads.get());
+    }
+
+    private static String shardForMd5Hash(ArrayNode shards, String md5Hex) {
+        BigInteger hash = new BigInteger(md5Hex, 16);
+        for (JsonNode shard : shards) {
+            BigInteger start = new BigInteger(shard.path("HashKeyRange").path("StartingHashKey").asText());
+            BigInteger end = new BigInteger(shard.path("HashKeyRange").path("EndingHashKey").asText());
+            if (hash.compareTo(start) >= 0 && hash.compareTo(end) <= 0) {
+                return shard.path("ShardId").asText();
+            }
+        }
+        throw new AssertionError("No shard covers MD5 hash " + md5Hex);
     }
 
     @Test

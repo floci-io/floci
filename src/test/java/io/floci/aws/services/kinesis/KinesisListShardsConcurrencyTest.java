@@ -7,6 +7,7 @@ import io.floci.aws.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -53,8 +54,12 @@ class KinesisListShardsConcurrencyTest {
         // A concurrent split closes the parent and atomically appends two children, mutating the
         // live backing list the pre-fix sub-list page still points at.
         String firstShardId = stream.getShards().getFirst().getShardId();
+        KinesisShard.HashKeyRange firstRange = stream.getShards().getFirst().getHashKeyRange();
+        String splitPoint = new BigInteger(firstRange.startingHashKey())
+                .add(new BigInteger(firstRange.endingHashKey())).add(BigInteger.ONE)
+                .divide(BigInteger.TWO).toString();
         service.splitShard("reshard-stream", firstShardId,
-                "170141183460469231731687303715884105728", REGION);
+                splitPoint, REGION);
 
         // Pre-fix: iterating/sizing the live sub-list here throws ConcurrentModificationException.
         assertDoesNotThrow(() -> {
