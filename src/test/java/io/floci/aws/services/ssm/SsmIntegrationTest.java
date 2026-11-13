@@ -1772,7 +1772,7 @@ class SsmIntegrationTest {
     }
 
     @Test
-    void taggingRefusesAResourceTypeOtherThanAParameter() {
+    void taggingRefusesAResourceTypeWhoseTagsAreNotKept() {
         String name = "tag-type-" + System.nanoTime();
         putFilterFixture(name, "String", "");
 
@@ -1780,7 +1780,7 @@ class SsmIntegrationTest {
             .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
             .contentType(SSM_CONTENT_TYPE)
             .body("""
-                { "ResourceType": "Document", "ResourceId": "%s", "Tags": [{"Key": "env", "Value": "dev"}] }
+                { "ResourceType": "MaintenanceWindow", "ResourceId": "%s", "Tags": [{"Key": "env", "Value": "dev"}] }
                 """.formatted(name))
         .when()
             .post("/")

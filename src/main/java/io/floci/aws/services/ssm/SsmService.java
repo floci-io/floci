@@ -1124,7 +1124,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
 
     /**
      * {@code AddTagsToResource} on the resource of {@code resourceType}: a document by its name, an
-     * association by its ID, and a parameter, or any type Floci does not tag yet, as before.
+     * association by its ID, and a parameter by its name or ARN.
      */
     public synchronized void addTagsToResource(String resourceType, String resourceId, Map<String, String> tags,
                                                String region) {

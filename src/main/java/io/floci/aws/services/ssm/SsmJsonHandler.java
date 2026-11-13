@@ -1205,14 +1205,14 @@ public class SsmJsonHandler {
     }
 
     private Response handleAddTagsToResource(JsonNode request, String region) {
-        requireParameterResourceType(request);
+        requireTaggedResourceType(request);
         ssmService.addTagsToResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
                 requestTags(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
-        requireParameterResourceType(request);
+        requireTaggedResourceType(request);
         Map<String, String> tags = ssmService.listTagsForResource(request.path("ResourceType").asText(),
                 request.path("ResourceId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -1221,7 +1221,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleRemoveTagsFromResource(JsonNode request, String region) {
-        requireParameterResourceType(request);
+        requireTaggedResourceType(request);
         List<String> tagKeys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> tagKeys.add(k.asText()));
         ssmService.removeTagsFromResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
@@ -1243,10 +1243,10 @@ public class SsmJsonHandler {
     }
 
     /**
-     * Refuses a tagging request whose {@code ResourceType} is missing, outside the model's enum, or a type other than
-     * {@code Parameter}, the only one whose tags this service keeps, so the request acts on the type IAM checked.
+     * Refuses a tagging request whose {@code ResourceType} is missing, outside the model's enum, or a type whose tags
+     * this service does not keep, so the request acts on the type IAM checked.
      */
-    private static void requireParameterResourceType(JsonNode request) {
+    private static void requireTaggedResourceType(JsonNode request) {
         JsonNode resourceType = request.path("ResourceType");
         if (!resourceType.isTextual()) {
             throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("resourceType"));
@@ -1255,7 +1255,7 @@ public class SsmJsonHandler {
             throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(resourceType.asText(),
                     "resourceType", RESOURCE_TYPES_FOR_TAGGING));
         }
-        if (!"Parameter".equals(resourceType.asText())) {
+        if (!TAGGED_RESOURCE_TYPES.contains(resourceType.asText())) {
             throw new AwsException("InvalidResourceType", "The resource type isn't valid.", 400);
         }
     }
@@ -1263,6 +1263,7 @@ public class SsmJsonHandler {
     private static final List<String> RESOURCE_TYPES_FOR_TAGGING = List.of("Document", "ManagedInstance",
             "MaintenanceWindow", "Parameter", "PatchBaseline", "OpsItem", "OpsMetadata", "Automation", "Association",
             "CloudConnector");
+    private static final Set<String> TAGGED_RESOURCE_TYPES = Set.of("Parameter", "Document", "Association");
 
     private static final int GET_RESOURCE_POLICIES_MAX_RESULTS = 50;
     private static final String GET_RESOURCE_POLICIES_TOKEN = "GetResourcePolicies:";
