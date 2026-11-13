@@ -23,6 +23,7 @@ import software.amazon.awssdk.services.s3.model.S3Exception;
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -61,10 +62,10 @@ class S3BucketCollisionIamEnforcementIntegrationTest {
                 assertEquals(403, assertThrows(S3Exception.class,
                         () -> caller.headBucket(request -> request.bucket(bucket))).statusCode());
             }
-            assertError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)));
-            assertError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)
+            assertAwsError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)));
+            assertAwsError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)
                     .toBuilder().objectOwnership(ObjectOwnership.OBJECT_WRITER).build()));
-            assertError("BucketAlreadyOwnedByYou", 409, () -> owner.createBucket(createRequest(bucket)));
+            assertAwsError("BucketAlreadyOwnedByYou", 409, () -> owner.createBucket(createRequest(bucket)));
             assertEquals(ObjectOwnership.BUCKET_OWNER_ENFORCED, owner.getBucketOwnershipControls(
                     request -> request.bucket(bucket)).ownershipControls().rules().getFirst().objectOwnership());
             assertTrue(caller.listBuckets().buckets().stream().noneMatch(value -> bucket.equals(value.name())));
@@ -89,7 +90,7 @@ class S3BucketCollisionIamEnforcementIntegrationTest {
             String bucket = createBucket(owner, ownerKeys);
             owner.putBucketPolicy(request -> request.bucket(bucket).policy(bucketPolicy(bucket, "Allow")));
             caller.headBucket(request -> request.bucket(bucket));
-            assertError("AccessDenied", 403, () -> caller.createBucket(createRequest(bucket)));
+            assertAwsError("AccessDenied", 403, () -> caller.createBucket(createRequest(bucket)));
             owner.headBucket(request -> request.bucket(bucket));
         }
     }
@@ -110,18 +111,18 @@ class S3BucketCollisionIamEnforcementIntegrationTest {
                         () -> owner.headBucket(request -> request.bucket(bucket))).statusCode());
                 assertEquals(403, assertThrows(S3Exception.class,
                         () -> caller.headBucket(request -> request.bucket(bucket))).statusCode());
-                assertError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)));
-                assertError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)
+                assertAwsError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)));
+                assertAwsError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)
                         .toBuilder().objectOwnership(ObjectOwnership.OBJECT_WRITER).build()));
-                assertError("AccessDenied", 403, () -> owner.createBucket(createRequest(bucket)));
-                assertError("AccessDenied", 403, () -> owner.createBucket(createRequest(bucket)
+                assertAwsError("AccessDenied", 403, () -> owner.createBucket(createRequest(bucket)));
+                assertAwsError("AccessDenied", 403, () -> owner.createBucket(createRequest(bucket)
                         .toBuilder().objectOwnership(ObjectOwnership.OBJECT_WRITER).build()));
                 assertEquals(ObjectOwnership.BUCKET_OWNER_ENFORCED, owner.getBucketOwnershipControls(
                         request -> request.bucket(bucket)).ownershipControls().rules().getFirst().objectOwnership());
             } finally {
                 owner.deleteBucketPolicy(request -> request.bucket(bucket));
             }
-            assertError("BucketAlreadyOwnedByYou", 409, () -> owner.createBucket(createRequest(bucket)));
+            assertAwsError("BucketAlreadyOwnedByYou", 409, () -> owner.createBucket(createRequest(bucket)));
         }
     }
 
@@ -135,8 +136,8 @@ class S3BucketCollisionIamEnforcementIntegrationTest {
         try (S3Client owner = client(ownerKeys); S3Client caller = client(callerKeys)) {
             String bucket = createBucket(owner, ownerKeys);
             owner.putBucketPolicy(request -> request.bucket(bucket).policy(bucketPolicy(bucket, "Allow")));
-            assertError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)));
-            assertError("AccessDenied", 403, () -> caller.createBucket(createRequest(bucket)
+            assertAwsError("BucketAlreadyExists", 409, () -> caller.createBucket(createRequest(bucket)));
+            assertAwsError("AccessDenied", 403, () -> caller.createBucket(createRequest(bucket)
                     .toBuilder().objectOwnership(ObjectOwnership.OBJECT_WRITER).build()));
             owner.headBucket(request -> request.bucket(bucket));
         }
@@ -177,11 +178,5 @@ class S3BucketCollisionIamEnforcementIntegrationTest {
                   "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"s3:*",
                   "Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"]}]}
                 """.formatted(effect, CALLER, bucket, bucket);
-    }
-
-    private static void assertError(String code, int status, Runnable request) {
-        S3Exception error = assertThrows(S3Exception.class, request::run);
-        assertEquals(code, error.awsErrorDetails().errorCode());
-        assertEquals(status, error.statusCode());
     }
 }
