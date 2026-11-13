@@ -1053,6 +1053,42 @@ def account_members(models: dict[str, dict], operation: str) -> list[str]:
 NAME_OR_ARN_RE = re.compile(r"^\(arn:[^)]*:([A-Za-z][A-Za-z0-9-]*)\\?/\)\?")
 
 
+def typed_bare_members(models: dict[str, dict], operation: str) -> dict[str, str]:
+    """The bare top-level members of the operation's request (`Name`, `Id`), each with the stem of its shape's name
+    when that says more than the member's own (`CreateAssociation`'s `Name` is a `DocumentARN`)."""
+    found: dict[str, str] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS or name.lower() not in BARE:
+                continue
+            if model["shapes"][member["shape"]].get("type") != "string" or not stem(member["shape"]):
+                continue
+            found.setdefault(name, stem(member["shape"]))
+    return found
+
+
+def with_typed_bare(resources: list[dict], types: list[str], formats: dict[str, str], typed: dict[str, str],
+                    members: dict[str, str]) -> list[dict]:
+    """The resources, with a type no resource names yet filled from a bare member whose shape is named for it, when
+    the member fills nothing else and the type's format has one variable: `CreateAssociation`'s `Name`, a
+    `DocumentARN`, names the document the association runs."""
+    named = {kind for resource in resources for kind in _kinds(resource)}
+    used = {path for resource in resources for path in resource.get("fill", {}).values()}
+    added = []
+    for kind in types:
+        if kind in named or kind not in formats:
+            continue
+        variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+        candidates = [member for member, shape in sorted(typed.items())
+                      if related(shape, stem(kind)) and member in members and members[member] not in used]
+        if len(variables) == 1 and len(candidates) == 1:
+            added.append({"type": kind, "fill": {variables[0]: members[candidates[0]]}})
+    return resources + added
+
+
 def name_or_arn_members(models: dict[str, dict], operation: str) -> dict[str, str]:
     """The top-level members of the operation's request whose shape's pattern takes an ARN before a name, by name,
     and the fields of each element of a list of structures whose shape's does, as `Name[].Field`, each with the
@@ -1472,6 +1508,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                                                                 formats, types, members),
                                                 namespace_of(operation), types, members),
                                      namespace_of(operation), types, members)
+            resources = with_typed_bare(resources, types, formats,
+                                        typed_bare_members(models, operation.split(":", 1)[1]), members)
         optional = optional_members(models, operation.split(":", 1)[1])
         resources = with_absent_arn(resources, formats, optional)
         resources = with_absent_account(resources, formats, account_members(models, operation.split(":", 1)[1]),
