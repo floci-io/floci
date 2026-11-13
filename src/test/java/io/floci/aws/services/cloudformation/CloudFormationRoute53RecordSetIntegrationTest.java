@@ -1,8 +1,10 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
 import io.floci.aws.services.route53.Route53HostedZoneTestSupport;
 import io.floci.aws.services.route53.Route53Service;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -10,16 +12,23 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.route53.Route53Client;
+import software.amazon.awssdk.services.route53.model.RRType;
 
 import java.time.Duration;
+import java.util.List;
 
 import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.parameterValue;
+import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.putParameter;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,6 +66,9 @@ class CloudFormationRoute53RecordSetIntegrationTest {
 
     @InjectSpy
     Route53Service route53Service;
+
+    @Inject
+    CloudFormationService cloudFormationService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -1206,5 +1218,153 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             .formParam("Action", "DeleteStack")
             .formParam("StackName", stackName)
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aTtlChangeIsPutBackWhenALaterResourceFails() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-record-rb-" + suffix;
+        String foreign = "/r53-record-rb/" + suffix + "/foreign";
+        putParameter(foreign);
+
+        createStack(stackName, recordRollbackTemplate(suffix, "300", null));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+        try {
+            String zone = parameterValue("/r53-record-rb/" + suffix + "/zone");
+
+            updateStack(stackName, recordRollbackTemplate(suffix, "60", foreign));
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE", CFN_AUTH);
+
+            String records = given().header("Authorization", ROUTE53_AUTH)
+                    .when().get("/2013-04-01/hostedzone/" + zone + "/rrset")
+                    .then().statusCode(200).extract().asString();
+            assertTrue(records.contains("<TTL>300</TTL>") && !records.contains("<TTL>60</TTL>"),
+                    "the record has the TTL it had before the update: " + records);
+            assertEquals(zone, parameterValue("/r53-record-rb/" + suffix + "/zone"));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void aCommittedUpdateLeavesNoRollbackSnapshotOnTheRecordSet() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-record-commit-" + suffix;
+
+        createStack(stackName, recordRollbackTemplate(suffix, "300", null));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+        try {
+            updateStack(stackName, recordRollbackTemplate(suffix, "60", null));
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+
+            assertFalse(cloudFormationService.describeStacks(stackName, "us-east-1").get(0).getResources()
+                    .get("Www").getAttributes().containsKey(CfnRollback.ROUTE53_RECORD_UPDATE_SNAPSHOT_ATTR));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    private static String recordRollbackTemplate(String suffix, String ttl, String failingParameter) {
+        String failing = failingParameter == null ? "" : """
+                ,"Boom": {"Type": "AWS::SSM::Parameter", "DependsOn": "Www",
+                          "Properties": {"Name": "%s", "Type": "String", "Value": "x"}}""".formatted(failingParameter);
+        return """
+                {"Resources": {
+                  "Zone": {"Type": "AWS::Route53::HostedZone",
+                           "Properties": {"Name": "a.%1$s.cfn-it.example.com"}},
+                  "Www": {"Type": "AWS::Route53::RecordSet",
+                          "Properties": {"HostedZoneId": {"Ref": "Zone"}, "Name": "www.a.%1$s.cfn-it.example.com",
+                                         "Type": "A", "TTL": "%2$s", "ResourceRecords": ["10.0.0.1"]}},
+                  "ZoneParam": {"Type": "AWS::SSM::Parameter",
+                                "Properties": {"Name": "/r53-record-rb/%1$s/zone", "Type": "String",
+                                               "Value": {"Ref": "Zone"}}}
+                  %3$s
+                }}
+                """.formatted(suffix, ttl, failing);
+    }
+
+    @Test
+    void aReplacedZoneMovesItsRecordSetsAndTheOldZoneIsDeletedEmpty() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-zone-repl-" + suffix;
+        String zoneParam = "/r53-zone-repl/" + suffix + "/zone";
+
+        createStack(stackName, zoneReplacementTemplate(suffix, "a"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+        try {
+            String oldZone = parameterValue(zoneParam);
+            assertTrue(listResourceRecordSets(oldZone).contains("www.a." + suffix));
+
+            updateStack(stackName, zoneReplacementTemplate(suffix, "b"));
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+
+            String newZone = parameterValue(zoneParam);
+            assertNotEquals(oldZone, newZone, "a Name change replaces the zone");
+            String moved = listResourceRecordSets(newZone);
+            assertTrue(moved.contains("www.b." + suffix), "the record set is in the new zone: " + moved);
+            assertEquals(404, given().header("Authorization", ROUTE53_AUTH)
+                    .when().get("/2013-04-01/hostedzone/" + oldZone).statusCode(),
+                    "the old zone was empty and is deleted");
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
+    void aRenamedZoneThatRollsBackLeavesTheOldZoneWithItsRecordAndTheNewZoneGone() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "repl-zone-rollback-" + suffix;
+        String before = "repl-rb-a-" + suffix + ".example.test";
+        String after = "repl-rb-b-" + suffix + ".example.test";
+        try (CloudFormationClient cfn = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
+                Route53Client route53 = AwsTestClients.create(Route53Client.builder(), "test", Region.US_EAST_1)) {
+            CfnStackWaits.createStack(cfn, stack, zoneRollbackTemplate(before, ""), "CREATE_COMPLETE");
+            String oldZone = cfn.describeStackResource(request -> request.stackName(stack)
+                    .logicalResourceId("Zone")).stackResourceDetail().physicalResourceId();
+
+            CfnStackWaits.updateStack(cfn, stack, zoneRollbackTemplate(after, CfnStackWaits.failingResourceAfter("Record")),
+                    "UPDATE_ROLLBACK_COMPLETE");
+
+            String zoneNow = cfn.describeStackResource(request -> request.stackName(stack)
+                    .logicalResourceId("Zone")).stackResourceDetail().physicalResourceId();
+            assertEquals(oldZone, zoneNow, "the stack points at the old zone again");
+            List<String> records = route53.listResourceRecordSets(request -> request.hostedZoneId(oldZone))
+                    .resourceRecordSets().stream()
+                    .filter(set -> set.type() == RRType.A).map(set -> set.name()).toList();
+            assertEquals(List.of("www." + before + "."), records, "the old zone holds the old record");
+            List<String> zones = route53.listHostedZones().hostedZones().stream().map(zone -> zone.name()).toList();
+            assertTrue(zones.contains(before + "."));
+            assertFalse(zones.contains(after + "."), "the zone the update made is deleted");
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    private static String zoneReplacementTemplate(String suffix, String label) {
+        return """
+                {"Resources": {
+                  "Zone": {"Type": "AWS::Route53::HostedZone",
+                           "Properties": {"Name": "%2$s.%1$s.cfn-it.example.com"}},
+                  "Www": {"Type": "AWS::Route53::RecordSet",
+                          "Properties": {"HostedZoneId": {"Ref": "Zone"}, "Name": "www.%2$s.%1$s.cfn-it.example.com",
+                                         "Type": "A", "TTL": "300", "ResourceRecords": ["10.0.0.1"]}},
+                  "ZoneParam": {"Type": "AWS::SSM::Parameter",
+                                "Properties": {"Name": "/r53-zone-repl/%1$s/zone", "Type": "String",
+                                               "Value": {"Ref": "Zone"}}}
+                }}
+                """.formatted(suffix, label);
+    }
+
+    private static String zoneRollbackTemplate(String zoneName, String later) {
+        return """
+                {"Resources": {
+                  "Zone": {"Type": "AWS::Route53::HostedZone", "Properties": {"Name": "%1$s"}},
+                  "Record": {"Type": "AWS::Route53::RecordSet", "Properties": {"HostedZoneId": {"Ref": "Zone"},
+                    "Name": "www.%1$s", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.1"]}}%2$s
+                }}
+                """.formatted(zoneName, later);
     }
 }

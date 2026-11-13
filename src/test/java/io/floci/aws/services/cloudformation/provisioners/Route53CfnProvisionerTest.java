@@ -16,6 +16,7 @@ import io.floci.aws.services.route53.model.ResourceRecordSet;
 import io.floci.aws.services.route53.model.VpcAssociation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -1710,5 +1711,195 @@ class Route53CfnProvisionerTest {
         new Route53CfnProvisioner(service).delete("AWS::Route53::HostedZone", "Z123456789", "us-east-1");
 
         verify(service).deleteHostedZone("Z123456789");
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static StackResource trackedZone() {
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Zone");
+        resource.setResourceType(ZONE);
+        resource.setPhysicalId("ZOLD");
+        resource.getAttributes().put("Id", "ZOLD");
+        resource.getAttributes().put("NameServers", "ns-old");
+        return resource;
+    }
+
+    private static ProvisionContext zoneUpdateContext(String oldProps) throws Exception {
+        return new ProvisionContext(zoneEngine(), "us-east-1", "000000000000", "dns-stack", "ZOLD", event -> { },
+                MAPPER.readTree(oldProps));
+    }
+
+    private static Route53Service serviceWithOldZone() {
+        Route53Service service = mock(Route53Service.class);
+        when(service.getHostedZone("ZOLD")).thenReturn(
+                new HostedZone("ZOLD", "old.example.test.", "dns-stack/Zone", null, (VpcAssociation) null));
+        return service;
+    }
+
+    @Test
+    void aReplacementWhoseCreateFailsStillPointsAtThePriorZone() throws Exception {
+        Route53Service service = serviceWithOldZone();
+        doThrow(new AwsException("InvalidDomainName", "bad", 400)).when(service)
+                .createHostedZone(any(), any(), any(), any());
+        StackResource resource = trackedZone();
+
+        assertThrows(AwsException.class, () -> new Route53CfnProvisioner(service).provision(resource,
+                MAPPER.readTree("{\"Name\":\"new.example.test\"}"),
+                zoneUpdateContext("{\"Name\":\"old.example.test\"}")));
+
+        assertEquals("ZOLD", resource.getPhysicalId());
+    }
+
+    @Test
+    void aReplacementWhoseTagWriteFailsPutsBackThePriorZoneAndItsAttributes() throws Exception {
+        Route53Service service = serviceWithOldZone();
+        HostedZone created = new HostedZone("ZNEW", "new.example.test.", "caller", null, (VpcAssociation) null);
+        when(service.createHostedZone(any(), any(), any(), any()))
+                .thenReturn(new Route53Service.CreateZoneResult(created, null));
+        when(service.getAssignedNameServers("ZNEW")).thenReturn(List.of("ns-new"));
+        doThrow(new AwsException("Throttling", "slow", 400)).when(service)
+                .changeTagsForResource(eq("hostedzone"), eq("ZNEW"), any(), any());
+        StackResource resource = trackedZone();
+
+        assertThrows(AwsException.class, () -> new Route53CfnProvisioner(service).provision(resource,
+                MAPPER.readTree("{\"Name\":\"new.example.test\",\"HostedZoneTags\":[{\"Key\":\"k\",\"Value\":\"v\"}]}"),
+                zoneUpdateContext("{\"Name\":\"old.example.test\"}")));
+
+        verify(service).deleteHostedZone("ZNEW");
+        assertEquals("ZOLD", resource.getPhysicalId());
+        assertEquals("ZOLD", resource.getAttributes().get("Id"));
+        assertEquals("ns-old", resource.getAttributes().get("NameServers"));
+    }
+
+    @Test
+    void aBlankDelegationSetIdIsNoDelegationSet() throws Exception {
+        Route53Service service = serviceWithOldZone();
+        HostedZone created = new HostedZone("ZNEW", "new.example.test.", "caller", null, (VpcAssociation) null);
+        when(service.createHostedZone(any(), any(), any(), any()))
+                .thenReturn(new Route53Service.CreateZoneResult(created, null));
+        when(service.getAssignedNameServers(any())).thenReturn(List.of("ns"));
+
+        new Route53CfnProvisioner(service).provision(trackedZone(),
+                MAPPER.readTree("{\"Name\":\"new.example.test\",\"DelegationSetId\":\"\"}"),
+                zoneUpdateContext("{\"Name\":\"old.example.test\"}"));
+
+        verify(service).createHostedZone(eq("new.example.test"), any(), any(), any());
+        verify(service, never()).createHostedZone(any(), any(), any(), any(), any());
+    }
+
+    private static StackResource trackedRecord(String name, String zoneId) {
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Www");
+        resource.setResourceType("AWS::Route53::RecordSet");
+        resource.setPhysicalId(name);
+        resource.getAttributes().put("__FlociRoute53RecordZoneId", zoneId);
+        resource.getAttributes().put("__FlociRoute53RecordType", "A");
+        return resource;
+    }
+
+    private static ResourceRecordSet listedRecord(String name) {
+        ResourceRecordSet record = new ResourceRecordSet();
+        record.setName(name);
+        record.setType("A");
+        record.setTtl(300L);
+        return record;
+    }
+
+    private static ProvisionContext recordUpdateContext(String priorName) {
+        return new ProvisionContext(zoneEngine(), "us-east-1", "000000000000", "dns-stack", priorName);
+    }
+
+    private static JsonNode recordProps(String zoneId, String name) {
+        return MAPPER.createObjectNode().put("HostedZoneId", zoneId).put("Name", name).put("Type", "A");
+    }
+
+    private static Route53Service serviceWithAuthAndLoginRecords() {
+        Route53Service service = mock(Route53Service.class);
+        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(
+                List.of(listedRecord("auth.example.com."), listedRecord("login.example.com.")));
+        when(service.listResourceRecordSets("Z2", null, null, 0)).thenReturn(
+                List.of(listedRecord("login.example.com.")));
+        return service;
+    }
+
+    @Test
+    void aFailedSupersedeRemovesTheRecordTheAttemptWrote() {
+        Route53Service service = serviceWithAuthAndLoginRecords();
+        doThrow(new AwsException("Throttling", "slow", 400)).when(service).changeResourceRecordSets(eq("Z1"),
+                argThat(changes -> changes != null && "DELETE".equals(changes.get(0).get("action"))
+                        && ((ResourceRecordSet) changes.get(0).get("rrs")).getName().startsWith("auth")), any());
+
+        assertThrows(AwsException.class, () -> new Route53CfnProvisioner(service).provision(
+                trackedRecord("auth.example.com", "Z1"), recordProps("Z1", "login.example.com"),
+                recordUpdateContext("auth.example.com")));
+
+        verify(service).changeResourceRecordSets(eq("Z1"), argThat(changes -> changes != null
+                && "DELETE".equals(changes.get(0).get("action"))
+                && ((ResourceRecordSet) changes.get(0).get("rrs")).getName().startsWith("login")), any());
+    }
+
+    /**
+     * The update wrote {@code writtenName} in {@code writtenZone}, displacing {@code auth.example.com} in Z1.
+     * The rollback restores the displaced record in the calls the rule names: one UPSERT when both share an
+     * identity, one batch of DELETE then UPSERT in the same zone otherwise, and across zones the UPSERT in
+     * the displaced record's zone before the DELETE in the written one.
+     */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "Z1|auth.example.com|Z1 UPSERT auth.example.com.",
+            "Z1|login.example.com|Z1 DELETE login.example.com.,UPSERT auth.example.com.",
+            "Z2|login.example.com|Z1 UPSERT auth.example.com.;Z2 DELETE login.example.com."})
+    void aRollbackRestoresTheDisplacedRecordInTheCallsTheRuleNames(String writtenZone, String writtenName,
+                                                                    String expectedCalls) {
+        Route53Service service = serviceWithAuthAndLoginRecords();
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = trackedRecord("auth.example.com", "Z1");
+        owner.provision(resource, recordProps(writtenZone, writtenName), recordUpdateContext("auth.example.com"));
+        Mockito.clearInvocations(service);
+
+        assertTrue(owner.rollbackUpdate(resource));
+
+        assertEquals("auth.example.com", resource.getPhysicalId());
+        assertEquals("Z1", resource.getAttributes().get("__FlociRoute53RecordZoneId"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> changes = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<String> zones = ArgumentCaptor.forClass(String.class);
+        verify(service, times(expectedCalls.split(";").length))
+                .changeResourceRecordSets(zones.capture(), changes.capture(), any());
+        List<String> calls = new ArrayList<>();
+        for (int i = 0; i < zones.getAllValues().size(); i++) {
+            calls.add(zones.getAllValues().get(i) + " " + String.join(",", describe(changes.getAllValues().get(i))));
+        }
+        assertEquals(expectedCalls, String.join(";", calls));
+    }
+
+    @Test
+    void aRefusedDeleteFailsTheRollbackInsteadOfPassing() {
+        Route53Service service = serviceWithAuthAndLoginRecords();
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = trackedRecord("auth.example.com", "Z1");
+        owner.provision(resource, recordProps("Z1", "login.example.com"), recordUpdateContext("auth.example.com"));
+        doThrow(new AwsException("InvalidChangeBatch", "changed outside", 400)).when(service)
+                .changeResourceRecordSets(eq("Z1"), argThat(changes -> changes != null
+                        && "DELETE".equals(changes.get(0).get("action"))), any());
+
+        assertThrows(AwsException.class, () -> owner.rollbackUpdate(resource));
+    }
+
+    @Test
+    void aRollbackThatCannotRestoreTheDisplacedRecordIsNotReportedAsDone() {
+        Route53Service service = mock(Route53Service.class);
+        // The prior record is not in its zone when the update starts: nothing to restore.
+        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(listedRecord("login.example.com.")));
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = trackedRecord("auth.example.com", "Z1");
+        owner.provision(resource, recordProps("Z1", "login.example.com"), recordUpdateContext("auth.example.com"));
+
+        assertFalse(owner.rollbackUpdate(resource));
+
+        verify(service, never()).changeResourceRecordSets(eq("Z1"), argThat(changes -> changes != null
+                && "DELETE".equals(changes.get(0).get("action"))
+                && ((ResourceRecordSet) changes.get(0).get("rrs")).getName().startsWith("login")), any());
     }
 }
