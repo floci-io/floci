@@ -117,13 +117,17 @@
   that names its own signing key is refused. The signing key is an RSA one, because the
   block's signature is an RSA signature, so `GetParametersForExport` takes `RSA_2048` and
   refuses the other algorithms.
+- **The token of a TR-34 block:** the import has to name the import token the import
+  parameters issued, and a request that names none, or that names a wrapping key instead,
+  is refused with the reason rather than with a key that is not found.
 - **The headers a TR-34 export names:** a request may narrow the modes of use and the
   exportability of the key, and the header the block carries says so, the same as it does
   for a TR-31 block. A TR-34 block's header names the key and carries nothing else, so a
   request that names optional blocks is refused.
 - **The nonce of a TR-34 block:** the nonce binds the block to the exchange, and it is
   optional in the model, so a block made without one is read without the freshness it
-  carries.
+  carries. A request that names no nonce expects a block that carries none, so a block that
+  carries one may not come in under a request that names none.
 - **The AS2805 form is not made.** A request that asks for it is refused with the error that
   says so, rather than answered with something of another kind, and the refusal names the
   forms the service serves.
