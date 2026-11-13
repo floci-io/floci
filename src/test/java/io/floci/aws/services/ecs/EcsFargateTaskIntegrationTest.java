@@ -31,7 +31,7 @@ class EcsFargateTaskIntegrationTest {
     private static final String TARGET = "AmazonEC2ContainerServiceV20141113.";
     private static final String CT = "application/x-amz-json-1.1";
     private static final String CLUSTER = "fargate-task-cluster";
-    private static final String SUBNET = "subnet-default-us-east-1-a";
+    private static final String SUBNET = "subnet-013f16799e920587a";
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":[\"" + SUBNET + "\"]}}";
 

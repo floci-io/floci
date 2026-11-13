@@ -40,7 +40,7 @@ class EcsExecuteCommandIntegrationTest {
     private static final String CLUSTER = "exec-cluster";
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                    + "[\"subnet-default-us-east-1-a\"]}}";
+                    + "[\"subnet-013f16799e920587a\"]}}";
 
     @BeforeAll
     static void configure() {

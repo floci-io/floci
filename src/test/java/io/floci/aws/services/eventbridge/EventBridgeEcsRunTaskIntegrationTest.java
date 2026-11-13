@@ -69,8 +69,8 @@ class EventBridgeEcsRunTaskIntegrationTest {
                           "Group": "eb-ecs-group-%s",
                           "NetworkConfiguration": {
                             "awsvpcConfiguration": {
-                              "Subnets": ["subnet-default-us-east-1-a", "subnet-default-us-east-1-b"],
-                              "SecurityGroups": ["sg-default-us-east-1"],
+                              "Subnets": ["subnet-013f16799e920587a", "subnet-00af8362367af5f99"],
+                              "SecurityGroups": ["sg-010f8cfacc2b77b90"],
                               "AssignPublicIp": "ENABLED"
                             }
                           }
@@ -100,9 +100,9 @@ class EventBridgeEcsRunTaskIntegrationTest {
             .body("Targets[0].EcsParameters.LaunchType", equalTo("FARGATE"))
             .body("Targets[0].EcsParameters.Group", equalTo("eb-ecs-group-" + suffix))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.Subnets",
-                    hasItem("subnet-default-us-east-1-a"))
+                    hasItem("subnet-013f16799e920587a"))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.SecurityGroups",
-                    hasItem("sg-default-us-east-1"))
+                    hasItem("sg-010f8cfacc2b77b90"))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.AssignPublicIp",
                     equalTo("ENABLED"));
 

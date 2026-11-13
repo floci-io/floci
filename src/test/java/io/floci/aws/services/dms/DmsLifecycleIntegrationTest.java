@@ -31,8 +31,8 @@ class DmsLifecycleIntegrationTest {
     private static final String ACCOUNT_ID = "723679240095";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/dms/aws4_request";
-    private static final String SUBNET_A = "subnet-default-us-east-1-a";
-    private static final String SUBNET_B = "subnet-default-us-east-1-b";
+    private static final String SUBNET_A = "subnet-013f16799e920587a";
+    private static final String SUBNET_B = "subnet-00af8362367af5f99";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -180,7 +180,7 @@ class DmsLifecycleIntegrationTest {
                 .body("ReplicationInstances[0].VpcSecurityGroups[0].VpcSecurityGroupId", equalTo("sg-1"))
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.ReplicationSubnetGroupIdentifier",
                         equalTo("lc-rep-subnets"))
-                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-default-us-east-1"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-002565fab14571abd"))
                 .body("ReplicationInstances[0].EngineVersion", notNullValue());
 
         dms("DeleteReplicationSubnetGroup")
@@ -231,7 +231,7 @@ class DmsLifecycleIntegrationTest {
         describeInstance("lc-rep-default")
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.ReplicationSubnetGroupIdentifier",
                         equalTo("default"))
-                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-default-us-east-1"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-002565fab14571abd"))
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.SubnetGroupStatus", equalTo("Complete"))
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.Subnets.SubnetIdentifier",
                         hasItems(SUBNET_A, SUBNET_B));
