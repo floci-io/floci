@@ -232,7 +232,8 @@ class SsmParameterReadIamEnforcementIntegrationTest {
                 try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
                         Region.US_EAST_1)) {
                     assertEquals("v1", user.getParameter(r -> r.name(name + ":1")).parameter().value());
-                    assertEquals("v1", user.getParameter(r -> r.name("/" + name)).parameter().value());
+                    assertEquals("v1", user.getParameter(
+                            r -> r.name("arn:aws:ssm:us-east-1:000000000000:parameter/" + name)).parameter().value());
                 }
             } finally {
                 root.deleteParameter(r -> r.name(name));
