@@ -51,7 +51,10 @@ class CodeBuildRoleCredentialsTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new RegionResolver("us-east-1", ACCOUNT), false, clock);
-        roleArn = iamService.createRole("build-role", "/service-role/", "{}", null, 3600, null).getArn();
+        roleArn = iamService.createRole("build-role", "/service-role/", """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"Service":"codebuild.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                """, null, 3600, null).getArn();
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
         sessions = new EcsTaskRoleCredentials(iamService, config);
