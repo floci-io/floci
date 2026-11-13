@@ -199,7 +199,7 @@ public class RedshiftServerlessRuntime {
     public TempCredential issueCredential(String accountId, String region, String workgroupName,
                                           String dbUser, int durationSeconds) {
         return credentialBroker.issue(accountId, backendId(region, workgroupName), dbUser, List.of(),
-                durationSeconds);
+                durationSeconds, dbUser, true);
     }
 
     public String generatePassword() {

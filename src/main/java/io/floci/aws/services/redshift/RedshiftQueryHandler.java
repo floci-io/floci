@@ -1067,7 +1067,8 @@ public class RedshiftQueryHandler {
             int duration = resolveDurationSeconds(params);
 
             TempCredential credential = credentialBroker.issue(
-                    regionResolver.getAccountId(), clusterId, effectiveDbUser, dbGroups, duration);
+                    regionResolver.getAccountId(), clusterId, effectiveDbUser, dbGroups, duration,
+                    dbUser, autoCreate);
             return Response.ok(getClusterCredentialsXml("GetClusterCredentials", credential))
                     .type(MediaType.APPLICATION_XML).build();
         }
@@ -1079,7 +1080,8 @@ public class RedshiftQueryHandler {
             List<String> dbGroups = memberList(params, "DbGroups");
 
             TempCredential credential = credentialBroker.issue(
-                    regionResolver.getAccountId(), clusterId, dbUser, dbGroups, duration);
+                    regionResolver.getAccountId(), clusterId, dbUser, dbGroups, duration,
+                    dbUser, true);
             return Response.ok(getClusterCredentialsXml("GetClusterCredentialsWithIAM", credential))
                     .type(MediaType.APPLICATION_XML).build();
         }

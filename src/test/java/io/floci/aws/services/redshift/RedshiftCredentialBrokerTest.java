@@ -121,4 +121,30 @@ class RedshiftCredentialBrokerTest {
         broker.clear();
         assertTrue(broker.resolve("acc", "clus", "analyst").isEmpty());
     }
+
+    @Test
+    void issueStoresDatabaseRoleAndAutoCreateFlag() {
+        TempCredential cred = broker.issue("acc", "clus", "IAM:analyst", List.of("g1"), 900, "analyst", false);
+
+        assertEquals("IAM:analyst", cred.dbUser());
+        assertEquals("analyst", cred.databaseRole());
+        assertFalse(cred.autoCreate());
+        assertEquals(List.of("g1"), cred.dbGroups());
+    }
+
+    @Test
+    void authenticateReturnsExactMatchingCredentialForPassword() {
+        TempCredential first = broker.issue("acc", "clus", "IAM:analyst", List.of("g1"), 900, "analyst", false);
+        TempCredential second = broker.issue("acc", "clus", "IAM:analyst", List.of("g2"), 900, "analyst", false);
+
+        Optional<TempCredential> matchedFirst = broker.authenticate("acc", "clus", "IAM:analyst", first.password());
+        Optional<TempCredential> matchedSecond = broker.authenticate("acc", "clus", "IAM:analyst", second.password());
+
+        assertTrue(matchedFirst.isPresent());
+        assertEquals(List.of("g1"), matchedFirst.get().dbGroups());
+        assertTrue(matchedSecond.isPresent());
+        assertEquals(List.of("g2"), matchedSecond.get().dbGroups());
+        assertTrue(broker.authenticate("acc", "clus", "IAM:analyst", "wrong").isEmpty());
+        assertTrue(broker.authenticate("acc", "clus", "unknown", "whatever").isEmpty());
+    }
 }

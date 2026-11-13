@@ -17,6 +17,7 @@ import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.RedshiftAuditSql;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChange;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChanges;
+import io.floci.aws.services.redshift.RedshiftDbIdentityProvisioner;
 import io.floci.aws.services.redshift.proxy.CopyJobSql;
 import io.floci.aws.services.redshift.proxy.RedshiftSqlInterceptor;
 import io.floci.aws.services.redshift.spectrum.BackendSql;
@@ -408,6 +409,12 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         if (stored.withEvent && requestContext != null && requestContext.getAccessKeyId() != null) {
             stored.principal = iamService.resolveCallerArn(requestContext.getAccessKeyId()).orElse(null);
         }
+        if (target.dbIdentity() != null) {
+            stored.dbGroups = target.dbIdentity().dbGroups();
+            if (stored.dbUser == null && target.workgroupName() != null) {
+                stored.dbUser = target.dbIdentity().role();
+            }
+        }
     }
 
     private PendingStatement prepareStatement(JsonNode request, String region, RedshiftDataSessions.Scope owner) {
@@ -417,13 +424,16 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
         RedshiftDataResourceResolver.DatabaseTarget target = resolved.target();
+        if (target.dbIdentity() != null && RedshiftDbIdentityProvisioner.isRestrictedSessionCommand(sql)) {
+            throw new AwsException("ValidationException", "permission denied to set session authorization", 400);
+        }
 
         RedshiftDataStatementStore.StoredStatement stored = newStatement(request);
         stored.sql = sql;
         stored.sqls = List.of(sql);
         stored.clusterIdentifier = clusterIdentifierOrNull(resolved.parameters());
         stored.workgroupName = workgroupNameOrNull(resolved.parameters());
-        stored.dbUser = target.user();
+        stored.dbUser = target.auditUser() != null ? target.auditUser() : target.user();
         stored.database = target.database();
         stored.resultFormat = request.path("ResultFormat").asText("JSON");
         stored.queryParameters = storedParameters(parameters);
@@ -731,7 +741,12 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         if (stored.dbUser != null) {
             response.put("DbUser", stored.dbUser);
         }
-        response.putArray("DbGroups");
+        ArrayNode dbGroups = response.putArray("DbGroups");
+        if (stored.dbGroups != null) {
+            for (String group : stored.dbGroups) {
+                dbGroups.add(group);
+            }
+        }
         putWorkgroupName(response, stored);
         response.put("HasResultSet", stored.hasResultSet);
         if (stored.sessionId == null) {
@@ -902,6 +917,13 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
         RedshiftDataResourceResolver.DatabaseTarget target = resolved.target();
+        if (target.dbIdentity() != null) {
+            for (String item : sqls) {
+                if (RedshiftDbIdentityProvisioner.isRestrictedSessionCommand(item)) {
+                    throw new AwsException("ValidationException", "permission denied to set session authorization", 400);
+                }
+            }
+        }
 
         RedshiftDataStatementStore.StoredStatement parent = newStatement(request);
         parent.batch = true;
@@ -909,7 +931,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         parent.sqls = sqls;
         parent.clusterIdentifier = clusterIdentifierOrNull(resolved.parameters());
         parent.workgroupName = workgroupNameOrNull(resolved.parameters());
-        parent.dbUser = target.user();
+        parent.dbUser = target.auditUser() != null ? target.auditUser() : target.user();
         parent.database = target.database();
         parent.resultFormat = request.path("ResultFormat").asText("JSON");
         parent.subStatements = new ArrayList<>();

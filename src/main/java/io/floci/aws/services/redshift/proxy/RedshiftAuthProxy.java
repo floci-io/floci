@@ -7,6 +7,9 @@ import io.floci.aws.services.rds.proxy.PostgresProtocolHandler;
 import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftCredentialBroker;
+import io.floci.aws.services.redshift.RedshiftDbIdentityProvisioner;
+import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
 import io.floci.aws.services.s3.S3Service;
 import org.jboss.logging.Logger;
@@ -17,8 +20,12 @@ import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * TCP auth proxy for a single Redshift cluster's backing PostgreSQL container.
@@ -45,6 +52,8 @@ public class RedshiftAuthProxy {
     private final IamService iamService;
     private final SpectrumInterceptor spectrumInterceptor;
     private final RedshiftAuditLogPublisher auditLogPublisher;
+    private final RedshiftCredentialBroker credentialBroker;
+    private final RedshiftDbIdentityProvisioner identityProvisioner;
     private final String clusterAccountId;
     private volatile RoleConfiguration roleConfiguration;
 
@@ -112,6 +121,24 @@ public class RedshiftAuthProxy {
                              int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                              int maxConnections, SpectrumInterceptor spectrumInterceptor,
                              RedshiftAuditLogPublisher auditLogPublisher, RedshiftParquetWriter parquetWriter) {
+        this(clusterKey, backendHost, backendPort, masterUsername, masterPassword, dbName, sigV4,
+                tlsCertificates, passwordValidator, s3Service, iamService, clusterAccountId, iamRoleArns,
+                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections, spectrumInterceptor,
+                auditLogPublisher, parquetWriter, null, null);
+    }
+
+    public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
+                             String masterUsername, String masterPassword, String dbName,
+                             RdsSigV4Validator sigV4, RdsProxyTlsCertificates tlsCertificates,
+                             PasswordValidator passwordValidator,
+                             S3Service s3Service, IamService iamService,
+                             String clusterAccountId,
+                             List<String> iamRoleArns,
+                             int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                             int maxConnections, SpectrumInterceptor spectrumInterceptor,
+                             RedshiftAuditLogPublisher auditLogPublisher, RedshiftParquetWriter parquetWriter,
+                             RedshiftCredentialBroker credentialBroker,
+                             RedshiftDbIdentityProvisioner identityProvisioner) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -126,6 +153,8 @@ public class RedshiftAuthProxy {
         this.iamService = iamService;
         this.spectrumInterceptor = spectrumInterceptor;
         this.auditLogPublisher = auditLogPublisher;
+        this.credentialBroker = credentialBroker;
+        this.identityProvisioner = identityProvisioner;
         this.clusterAccountId = clusterAccountId;
         this.roleConfiguration = new RoleConfiguration(iamRoleArns, null);
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
@@ -248,6 +277,7 @@ public class RedshiftAuthProxy {
     private void handleConnection(Socket client) {
         PostgresProtocolHandler.AuthenticatedSession session = null;
         LoginAttempt login = new LoginAttempt();
+        AtomicReference<Runnable> leaseCloser = new AtomicReference<>();
         try {
             client.setTcpNoDelay(true);
             PostgresProtocolHandler.BackendConnector connector = () -> {
@@ -263,6 +293,7 @@ public class RedshiftAuthProxy {
                 backendSocket.setTcpNoDelay(true);
                 return backendSocket;
             };
+            PostgresProtocolHandler.SessionRoleHandover roleHandover = buildRoleHandover(leaseCloser);
             // iamEnabled = false: the SigV4 branch inside authenticate is never taken, so no
             // token binding is needed.
             session = PostgresProtocolHandler.authenticate(
@@ -272,7 +303,7 @@ public class RedshiftAuthProxy {
                                 login.username = user;
                                 login.database = database;
                                 login.dataApi = RedshiftInternalAuth.consumeDataApiToken(params.get("application_name"));
-                            });
+                            }, roleHandover);
             if (session != null) {
                 publishConnection(client, login, "authenticated");
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
@@ -283,18 +314,10 @@ public class RedshiftAuthProxy {
                 RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
                         clusterAccountId, roles.iamRoleArns(), bridgeSpectrum, clusterKey, login.database,
                         roles.defaultIamRoleArn(), bridgeAudit, login.username, parquetWriter);
-                try (CopyLoadErrorLog loadErrors = new CopyLoadErrorLog(() -> {
-                    PGSimpleDataSource source = new PGSimpleDataSource();
-                    source.setServerNames(new String[]{backendHost});
-                    source.setPortNumbers(new int[]{backendPort});
-                    source.setDatabaseName(login.database);
-                    source.setUser(masterUsername);
-                    source.setPassword(masterPassword);
-                    source.setConnectTimeout(Math.max(1, backendConnectTimeoutMillis / 1000));
-                    source.setSocketTimeout(10);
-                    source.setSslMode("disable");
-                    return source.getConnection();
-                })) {
+                if (session.iamRole() != null) {
+                    bridge.restrictSessionAuthorization(true);
+                }
+                try (CopyLoadErrorLog loadErrors = new CopyLoadErrorLog(() -> openAdminConnection(login.database))) {
                     bridge.loadErrorSink(loadErrors);
                     bridge.run();
                 }
@@ -306,6 +329,10 @@ public class RedshiftAuthProxy {
             LOG.debugv("Redshift connection error for cluster {0}: {1}", clusterKey, e.getMessage());
             publishConnection(client, login, "connection_error");
         } finally {
+            Runnable release = leaseCloser.getAndSet(null);
+            if (release != null) {
+                release.run();
+            }
             // authenticate's success path hands both sockets to the bridge, which closes both
             // itself; every other path (early return on a bare probe, auth failure, thrown
             // IOException) never had a backend connection to begin with. Closing here is
@@ -317,6 +344,45 @@ public class RedshiftAuthProxy {
                 closeQuietly(session.backend());
             }
         }
+    }
+
+    private PostgresProtocolHandler.SessionRoleHandover buildRoleHandover(AtomicReference<Runnable> leaseCloser) {
+        if (credentialBroker == null || identityProvisioner == null) {
+            return null;
+        }
+        int colon = clusterKey.indexOf(':');
+        if (colon <= 0 || colon >= clusterKey.length() - 1) {
+            return null;
+        }
+        String accountId = clusterKey.substring(0, colon);
+        String clusterId = clusterKey.substring(colon + 1);
+        return (user, password, database) -> {
+            Optional<TempCredential> credential = credentialBroker.authenticate(accountId, clusterId, user, password);
+            if (credential.isEmpty()) {
+                return null;
+            }
+            TempCredential cred = credential.get();
+            try (Connection admin = openAdminConnection(database)) {
+                RedshiftDbIdentityProvisioner.PreparedIdentity prepared = identityProvisioner.prepare(
+                        admin, clusterKey, cred.databaseRole(), cred.autoCreate(), cred.dbGroups(),
+                        () -> openAdminConnection(database));
+                leaseCloser.set(prepared.releaseLease());
+                return new PostgresProtocolHandler.HandoverOutcome(prepared.databaseRole(), prepared.releaseLease());
+            }
+        };
+    }
+
+    private Connection openAdminConnection(String database) throws SQLException {
+        PGSimpleDataSource source = new PGSimpleDataSource();
+        source.setServerNames(new String[]{backendHost});
+        source.setPortNumbers(new int[]{backendPort});
+        source.setDatabaseName(database);
+        source.setUser(masterUsername);
+        source.setPassword(masterPassword);
+        source.setConnectTimeout(Math.max(1, backendConnectTimeoutMillis / 1000));
+        source.setSocketTimeout(10);
+        source.setSslMode("disable");
+        return source.getConnection();
     }
 
     private static final class LoginAttempt {

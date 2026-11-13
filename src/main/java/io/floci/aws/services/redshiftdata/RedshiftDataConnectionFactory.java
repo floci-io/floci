@@ -1,9 +1,13 @@
 package io.floci.aws.services.redshiftdata;
 
+import io.floci.aws.services.redshift.RedshiftDbIdentityProvisioner;
 import io.floci.aws.services.redshift.proxy.RedshiftInternalAuth;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.postgresql.Driver;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Properties;
@@ -12,8 +16,40 @@ import java.util.Properties;
 class RedshiftDataConnectionFactory {
 
     private final Driver driver = new Driver();
+    private final RedshiftDbIdentityProvisioner identityProvisioner;
+
+    RedshiftDataConnectionFactory() {
+        this(null);
+    }
+
+    @Inject
+    RedshiftDataConnectionFactory(RedshiftDbIdentityProvisioner identityProvisioner) {
+        this.identityProvisioner = identityProvisioner;
+    }
 
     Connection open(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
+        Connection connection = openRaw(target);
+        RedshiftDataResourceResolver.DbIdentity dbIdentity = target.dbIdentity();
+        if (identityProvisioner == null || dbIdentity == null) {
+            return connection;
+        }
+        try {
+            String backendKey = target.backendKey() != null ? target.backendKey() : target.arn();
+            Runnable releaseLease = identityProvisioner.applyToJdbc(
+                    connection, backendKey, dbIdentity.role(), dbIdentity.autoCreate(),
+                    dbIdentity.dbGroups(), () -> openRaw(target));
+            return wrapWithRelease(connection, releaseLease);
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                connection.close();
+            } catch (SQLException suppressed) {
+                failure.addSuppressed(suppressed);
+            }
+            throw failure;
+        }
+    }
+
+    private Connection openRaw(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
         // stringtype=unspecified: Redshift Data API parameter values are always strings on the
         // wire, so every bind goes through PreparedStatement.setString. With the default
         // (varchar) the driver stamps an explicit type OID and the server refuses
@@ -28,5 +64,27 @@ class RedshiftDataConnectionFactory {
         props.setProperty("ApplicationName", applicationName);
         props.setProperty("connectTimeout", "5");
         return driver.connect(url, props);
+    }
+
+    private static Connection wrapWithRelease(Connection delegate, Runnable releaseLease) {
+        return (Connection) Proxy.newProxyInstance(
+                Connection.class.getClassLoader(),
+                new Class<?>[]{Connection.class},
+                (proxy, method, args) -> {
+                    if ("close".equals(method.getName()) && method.getParameterCount() == 0) {
+                        try {
+                            return method.invoke(delegate, args);
+                        } catch (InvocationTargetException e) {
+                            throw e.getTargetException();
+                        } finally {
+                            releaseLease.run();
+                        }
+                    }
+                    try {
+                        return method.invoke(delegate, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getTargetException();
+                    }
+                });
     }
 }
