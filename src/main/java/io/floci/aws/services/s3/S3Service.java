@@ -6870,7 +6870,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         "The specified bucket does not exist.", 404));
         synchronized (ownedBucket.value()) {
             S3Object object = copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
-            int days = restoreDays(restoreXml);
+            int days = restoreDays(restoreXml, object.getStorageClass());
             if (!"GLACIER".equals(object.getStorageClass()) && !"DEEP_ARCHIVE".equals(object.getStorageClass())) {
                 throw new AwsException("ObjectAlreadyInActiveTierError",
                         "This operation is not valid for objects in the active storage tier.", 403);
@@ -6898,9 +6898,10 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private static int restoreDays(String restoreXml) {
+    private static int restoreDays(String restoreXml, String storageClass) {
         XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(restoreXml);
-        if (root == null || !"RestoreRequest".equals(root.name()) || root.count("Days") != 1
+        if (root == null || !"RestoreRequest".equals(root.name()) || !root.text().isEmpty()
+                || root.count("Days") != 1
                 || root.count("Type") != 0 || root.count("SelectParameters") != 0
                 || root.count("OutputLocation") != 0 || root.count("Tier") > 1
                 || root.count("GlacierJobParameters") > 1 || root.count("Description") > 1
@@ -6912,6 +6913,29 @@ public class S3Service implements Resettable, ResourceProvider {
         if (!daysElement.children().isEmpty()) {
             throw malformedRestoreRequest();
         }
+        XmlParser.XmlElement tier = root.child("Tier");
+        boolean expedited = tier != null && "Expedited".equals(tier.text());
+        if (tier != null) {
+            validateRestoreTier(tier);
+        }
+        XmlParser.XmlElement glacierJobParameters = root.child("GlacierJobParameters");
+        if (glacierJobParameters != null) {
+            if (!glacierJobParameters.text().isEmpty() || glacierJobParameters.children().size() != 1
+                    || glacierJobParameters.count("Tier") != 1) {
+                throw malformedRestoreRequest();
+            }
+            XmlParser.XmlElement glacierTier = glacierJobParameters.child("Tier");
+            validateRestoreTier(glacierTier);
+            expedited |= "Expedited".equals(glacierTier.text());
+        }
+        XmlParser.XmlElement description = root.child("Description");
+        if (description != null && !description.children().isEmpty()) {
+            throw malformedRestoreRequest();
+        }
+        if ("DEEP_ARCHIVE".equals(storageClass) && expedited) {
+            throw new AwsException("InvalidArgument",
+                    "Expedited retrievals are not supported for S3 Glacier Deep Archive.", 400);
+        }
         try {
             int days = Integer.parseInt(daysElement.text());
             if (days > 0) {
@@ -6921,6 +6945,12 @@ public class S3Service implements Resettable, ResourceProvider {
             // Fall through to the same protocol error as non-positive Days.
         }
         throw malformedRestoreRequest();
+    }
+
+    private static void validateRestoreTier(XmlParser.XmlElement tier) {
+        if (!tier.children().isEmpty() || !Set.of("Standard", "Bulk", "Expedited").contains(tier.text())) {
+            throw malformedRestoreRequest();
+        }
     }
 
     private static AwsException malformedRestoreRequest() {

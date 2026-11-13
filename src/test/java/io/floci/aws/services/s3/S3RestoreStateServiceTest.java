@@ -77,6 +77,21 @@ class S3RestoreStateServiceTest {
     }
 
     @Test
+    void delayCrossingMidnightStartsExpiryPeriodAtCompletion() {
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<>();
+        InMemoryStorage<String, S3Object> objects = new InMemoryStorage<>();
+        Instant request = Instant.parse("2026-11-12T23:59:30Z");
+        S3Service start = service(buckets, objects, request, 60);
+        start.createBucket("archive", "us-east-1");
+        putArchived(start, "key");
+
+        assertTrue(start.restoreObject("archive", "key", null, ONE_DAY));
+        S3Service completed = service(buckets, objects, request.plusSeconds(60), 60);
+        assertEquals(new S3Service.RestoreStatus(false, Instant.parse("2026-11-15T00:00:00Z")),
+                completed.restoreStatus(completed.headObject("archive", "key")));
+    }
+
+    @Test
     void completedRequestExtendsOnlyTheSelectedVersion() {
         InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<>();
         InMemoryStorage<String, S3Object> objects = new InMemoryStorage<>();

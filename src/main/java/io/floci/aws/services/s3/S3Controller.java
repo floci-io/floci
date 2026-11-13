@@ -60,6 +60,7 @@ import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -632,7 +633,7 @@ public class S3Controller {
             if (params.has("versions")) {
                 s3Service.authorizeBucketRead(bucket, "s3:ListBucketVersions", authorization);
                 return handleListObjectVersions(bucket, prefix, delimiter, maxKeys, keyMarker, versionIdMarker,
-                        encodingType);
+                        encodingType, httpHeaders);
             }
             if (params.has("location")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketLocation", authorization);
@@ -775,10 +776,7 @@ public class S3Controller {
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
-            String optionalAttributes = httpHeaders.getHeaderString("x-amz-optional-object-attributes");
-            boolean includeRestoreStatus = v2 && optionalAttributes != null
-                    && Arrays.stream(optionalAttributes.split(","))
-                            .map(String::trim).anyMatch("RestoreStatus"::equals);
+            boolean includeRestoreStatus = includesRestoreStatus(httpHeaders);
             String bucketOwnerAccount = (v1 || Boolean.parseBoolean(params.first("fetch-owner")))
                     ? s3Service.getBucketOwnerAccountId(bucket) : null;
             boolean ownershipEnforced = bucketOwnerAccount != null && s3Service.bucketOwnershipIsEnforced(bucket);
@@ -809,15 +807,7 @@ public class S3Controller {
                    .elem("Size", obj.getSize())
                    .elem("StorageClass", obj.getStorageClass());
                 if (includeRestoreStatus) {
-                    S3Service.RestoreStatus restore = s3Service.restoreStatus(obj);
-                    if (restore != null) {
-                        xml.start("RestoreStatus")
-                           .elem("IsRestoreInProgress", restore.inProgress());
-                        if (restore.expiryDate() != null) {
-                            xml.elem("RestoreExpiryDate", DateTimeFormatter.ISO_INSTANT.format(restore.expiryDate()));
-                        }
-                        xml.end("RestoreStatus");
-                    }
+                    appendRestoreStatus(xml, obj);
                 }
                 if (bucketOwnerAccount != null) {
                     xml.start("Owner")
@@ -2214,7 +2204,8 @@ public class S3Controller {
     }
 
     private Response handleListObjectVersions(String bucket, String prefix, String delimiter, String maxKeys,
-                                              String keyMarker, String versionIdMarker, String encodingType) {
+                                              String keyMarker, String versionIdMarker, String encodingType,
+                                              HttpHeaders httpHeaders) {
         if (hasText(versionIdMarker) && !hasText(keyMarker)) {
             throw new AwsException("InvalidArgument",
                     "A version-id marker cannot be specified without a key marker.", 400);
@@ -2222,6 +2213,7 @@ public class S3Controller {
         int max = resolveMaxKeys(maxKeys);
         S3Service.ListVersionsResult result =
                 s3Service.listObjectVersions(bucket, prefix, delimiter, max, keyMarker, versionIdMarker);
+        boolean includeRestoreStatus = includesRestoreStatus(httpHeaders);
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ListVersionsResult", AwsNamespaces.S3)
@@ -2255,8 +2247,11 @@ public class S3Controller {
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .elem("ETag", obj.getETag())
                    .elem("Size", obj.getSize())
-                   .elem("StorageClass", obj.getStorageClass())
-                   .end("Version");
+                   .elem("StorageClass", obj.getStorageClass());
+                if (includeRestoreStatus) {
+                    appendRestoreStatus(xml, obj);
+                }
+                xml.end("Version");
             }
         }
         for (String cp : result.commonPrefixes()) {
@@ -2269,6 +2264,24 @@ public class S3Controller {
         }
         xml.end("ListVersionsResult");
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private static boolean includesRestoreStatus(HttpHeaders httpHeaders) {
+        String optionalAttributes = httpHeaders.getHeaderString("x-amz-optional-object-attributes");
+        return optionalAttributes != null && Arrays.stream(optionalAttributes.split(","))
+                .map(String::trim).anyMatch("RestoreStatus"::equals);
+    }
+
+    private void appendRestoreStatus(XmlBuilder xml, S3Object obj) {
+        S3Service.RestoreStatus restore = s3Service.restoreStatus(obj);
+        if (restore != null) {
+            xml.start("RestoreStatus")
+               .elem("IsRestoreInProgress", restore.inProgress());
+            if (restore.expiryDate() != null) {
+                xml.elem("RestoreExpiryDate", DateTimeFormatter.ISO_INSTANT.format(restore.expiryDate()));
+            }
+            xml.end("RestoreStatus");
+        }
     }
 
     // --- Notification Configuration ---
@@ -3213,8 +3226,7 @@ public class S3Controller {
         if (restore != null) {
             String header = "ongoing-request=\"" + restore.inProgress() + "\"";
             if (restore.expiryDate() != null) {
-                header += ", expiry-date=\"" + DateTimeFormatter.RFC_1123_DATE_TIME
-                        .withZone(ZoneOffset.UTC).format(restore.expiryDate()) + "\"";
+                header += ", expiry-date=\"" + rfc822(restore.expiryDate()) + "\"";
             }
             resp.header("x-amz-restore", header);
         }
