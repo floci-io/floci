@@ -81,6 +81,8 @@ public class SsmService implements ResourceProvider {
     private static final String PARAMETER_NAME_FORMAT_RULE = "If formed as a path, it can consist of sub-paths "
             + "divided by slash symbol; each sub-path can be formed as a mix of letters, numbers and the following "
             + "3 symbols .-_";
+    /** The characters a parameter name may hold: letters, numbers, {@code .-_} and the {@code /} separator. */
+    private static final Pattern PARAMETER_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_./-]+");
     /** A bare name, or a path of non-empty segments; AWS also lets a colon through here. */
     private static final Pattern UNLABEL_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.:-]+|(/[A-Za-z0-9_.:-]+)+");
 
@@ -252,6 +254,10 @@ public class SsmService implements ResourceProvider {
         return putParameter(name, value, type, description, overwrite, tags, null, null, null, null, region);
     }
 
+    /**
+     * Create or update a parameter, returning its version. As AWS does, surrounding spaces are removed from the
+     * name before it is validated and stored.
+     */
     public long putParameter(String name, String value, String type, String description,
                              boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
                              String tier, List<JsonNode> policies, String region) {
@@ -263,8 +269,26 @@ public class SsmService implements ResourceProvider {
                             + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]");
         }
         validateTagKeys(tags);
-        rejectReservedName(name);
+        name = withoutSurroundingSpaces(name);
+        rejectInvalidName(name);
+        return writeParameter(name, value, type, description, overwrite, tags, keyId, allowedPattern, tier, policies,
+                region);
+    }
 
+    /**
+     * Overwrites a parameter under the name it is stored with, without the name trimming and validation
+     * {@code PutParameter} applies, so a CloudFormation rollback can restore a parameter stored before those checks.
+     * Returns the new version.
+     */
+    public long restoreParameter(String name, String value, String type, String description, String keyId,
+                                 String allowedPattern, String tier, List<JsonNode> policies, String region) {
+        return writeParameter(name, value, type, description, true, null, keyId, allowedPattern, tier, policies,
+                region);
+    }
+
+    private long writeParameter(String name, String value, String type, String description,
+                                boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
+                                String tier, List<JsonNode> policies, String region) {
         if (overwrite && tags != null && !tags.isEmpty()) {
             throw new AwsException("ValidationException",
                     "Invalid request: tags and overwrite can't be used together. To create a "
@@ -536,13 +560,16 @@ public class SsmService implements ResourceProvider {
      * and regardless of case, so an account can never write over a public parameter. The rule
      * keys on the first path segment rather than a bare prefix, so a name such as
      * {@code ssm-auto-stack-Param-ABC}, which CloudFormation generates for a stack whose name
-     * starts with ssm, is still accepted.
+     * starts with ssm, is still accepted. A name holding anything but letters, numbers, {@code .-_} and the
+     * {@code /} separator, such as an interior space or the colon that starts a read's version or label selector,
+     * is rejected with the same message.
      */
-    private static void rejectReservedName(String name) {
+    private static void rejectInvalidName(String name) {
         String bare = name == null ? "" : name.startsWith("/") ? name.substring(1) : name;
         String lower = bare.toLowerCase(Locale.ROOT);
         if (lower.equals("aws") || lower.equals("ssm") // partition-literal: reserved name prefix
-                || lower.startsWith("aws/") || lower.startsWith("ssm/")) {
+                || lower.startsWith("aws/") || lower.startsWith("ssm/")
+                || name == null || !PARAMETER_NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "Parameter name: can't be prefixed with \"aws\" or \"ssm\" (case-insensitive). "
                             + PARAMETER_NAME_FORMAT_RULE, 400);
@@ -1095,7 +1122,7 @@ public class SsmService implements ResourceProvider {
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
-        String storageKey = regionKey(region, parameterName(resourceId, region));
+        String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -1106,6 +1133,25 @@ public class SsmService implements ResourceProvider {
         param.getTags().putAll(tags);
         parameterStore.put(storageKey, param);
         LOG.debugv("Added tags to parameter: {0}", resourceId);
+    }
+
+    /**
+     * The name without its leading and trailing spaces, as {@code PutParameter} stores it. Only the space character
+     * is removed; a tab, newline or other whitespace stays and fails name validation.
+     */
+    public static String withoutSurroundingSpaces(String name) {
+        if (name == null) {
+            return null;
+        }
+        int start = 0;
+        int end = name.length();
+        while (start < end && name.charAt(start) == ' ') {
+            start++;
+        }
+        while (end > start && name.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return name.substring(start, end);
     }
 
     /**
@@ -1135,7 +1181,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public Map<String, String> listTagsForResource(String resourceId, String region) {
-        String storageKey = regionKey(region, parameterName(resourceId, region));
+        String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -1143,7 +1189,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
-        String storageKey = regionKey(region, parameterName(resourceId, region));
+        String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -1282,8 +1328,9 @@ public class SsmService implements ResourceProvider {
 
     /**
      * The stored name a parameter name or ARN addresses. The ARN carries a leading slash the stored name may
-     * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored. A version or
-     * label selector after the last colon is kept, but the fallback checks the name without it.
+     * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored, but
+     * {@code parameter//foo} names {@code //foo} and never falls back to {@code /foo}. A version or label selector
+     * after the last colon is kept, but the fallback checks the name without it.
      */
     private String parameterName(String nameOrArn, String region) {
         return parameterName(nameOrArn, region, false);
@@ -1291,6 +1338,43 @@ public class SsmService implements ResourceProvider {
 
     String parameterReadName(String nameOrArn, String region) {
         return parameterName(nameOrArn, region, true);
+    }
+
+    /**
+     * The stored name a tagging {@code ResourceId} addresses. A legacy {@code parameter<name>} ARN of the request's
+     * partition, region and account is read as {@code parameter/<name>}; see {@link #withLegacyParameterSlash}.
+     */
+    private String parameterTagName(String resourceId, String region) {
+        return parameterReadName(withLegacyParameterSlash(resourceId,
+                regionResolver.partitionForRegion(region), region, regionResolver.getAccountId()), region);
+    }
+
+    /**
+     * The {@code parameter/<name>} ARN for a legacy {@code parameter<name>} ARN of the given partition, region and
+     * account. Floci gave a top-level parameter that form before its ARNs matched AWS, and tagging still resolves
+     * it. Any other value, including a legacy ARN of another partition, region or account, is returned as is.
+     */
+    private static String withLegacyParameterSlash(String resourceId, String partition, String region,
+                                                   String accountId) {
+        if (resourceId == null || !AwsArnUtils.looksLikeArn(resourceId)) {
+            return resourceId;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceId);
+        } catch (IllegalArgumentException e) {
+            return resourceId;
+        }
+        if (!"ssm".equals(arn.service()) || !arn.resource().startsWith("parameter")) {
+            return resourceId;
+        }
+        String name = arn.resource().substring("parameter".length());
+        if (name.isEmpty() || name.startsWith("/") || !arn.partition().equals(partition)
+                || !arn.region().equals(region) || !arn.accountId().equals(accountId)) {
+            return resourceId;
+        }
+        return new AwsArnUtils.Arn(arn.partition(), arn.service(), arn.region(), arn.accountId(),
+                "parameter/" + name).toString();
     }
 
     private String parameterName(String nameOrArn, String region, boolean parameterRead) {
@@ -1308,7 +1392,8 @@ public class SsmService implements ResourceProvider {
                     String name = arn.resource().substring("parameter".length());
                     int separator = name.lastIndexOf(':');
                     String baseName = separator > 0 ? name.substring(0, separator) : name;
-                    if (baseName.startsWith("/") && parameterStore.get(regionKey(region, baseName)).isEmpty()
+                    if (baseName.startsWith("/") && !baseName.startsWith("//")
+                            && parameterStore.get(regionKey(region, baseName)).isEmpty()
                             && parameterStore.get(regionKey(region, baseName.substring(1))).isPresent()) {
                         return name.substring(1);
                     }

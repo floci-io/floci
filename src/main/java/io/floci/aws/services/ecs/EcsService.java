@@ -3205,20 +3205,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     svc.setServiceConnectConfiguration(serviceConnectConfiguration);
                 }
                 boolean taskDefChanged = false;
-                String platformVersionBefore = svc.getPlatformVersion();
+                String platformVersionBefore = resolvePlatformVersion(svc.getPlatformVersion());
                 if (resolved != null) {
                     taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
                     svc.setTaskDefinition(resolved.getTaskDefinitionArn());
                     applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
                             ? request.getPlatformVersion() : svc.getPlatformVersion());
                 } else if (request.getPlatformVersion() != null) {
-                    svc.setPlatformVersion(PLATFORM_VERSION_LATEST.equals(request.getPlatformVersion())
-                            ? DEFAULT_PLATFORM_VERSION : request.getPlatformVersion());
+                    svc.setPlatformVersion(request.getPlatformVersion());
                 }
                 // UpdateServiceRequest.platformVersion is documented as "This parameter triggers a new
                 // service deployment". Compared after resolution, so a request that asks for LATEST on a
                 // service already running the version LATEST resolves to is not a change.
-                rollingChange |= !Objects.equals(platformVersionBefore, svc.getPlatformVersion());
+                rollingChange |= !Objects.equals(platformVersionBefore,
+                        resolvePlatformVersion(svc.getPlatformVersion()));
                 if (taskDefChanged || forceNewDeployment || serviceConnectChanged || rollingChange) {
                     svc.setDeploymentId(newDeploymentId());
                     svc.setLastDeploymentAt(Instant.now());
@@ -3337,7 +3337,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return placementFor(strategy.getFirst().capacityProvider()).launchType();
     }
 
-    /** A Fargate service reports the platform its tasks run on; an EC2 service reports neither. */
+    /** A Fargate service retains its requested platform version; an EC2 service reports neither member. */
     private static void applyServicePlatform(EcsServiceModel svc, TaskDefinition taskDef, String platformVersion) {
         if (svc.getLaunchType() != LaunchType.FARGATE) {
             svc.setPlatformVersion(null);
@@ -3345,9 +3345,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             return;
         }
         svc.setPlatformVersion(platformVersion == null || platformVersion.isBlank()
-                || PLATFORM_VERSION_LATEST.equals(platformVersion)
-                ? DEFAULT_PLATFORM_VERSION : platformVersion);
+                ? PLATFORM_VERSION_LATEST : platformVersion);
         svc.setPlatformFamily(platformFamilyOf(taskDef));
+    }
+
+    private static String resolvePlatformVersion(String platformVersion) {
+        return PLATFORM_VERSION_LATEST.equals(platformVersion) ? DEFAULT_PLATFORM_VERSION : platformVersion;
     }
 
     /**
@@ -4644,7 +4647,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } else {
             d.setLaunchType(svc.getLaunchType());
         }
-        d.setPlatformVersion(svc.getPlatformVersion());
+        d.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
         d.setPlatformFamily(svc.getPlatformFamily());
         d.setNetworkConfiguration(svc.getNetworkConfiguration());
         d.setServiceConnectConfiguration(svc.getServiceConnectConfiguration());
@@ -4819,7 +4822,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         revision.setTaskDefinition(taskDefinition);
         revision.setLaunchType(svc.getLaunchType());
         revision.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
-        revision.setPlatformVersion(svc.getPlatformVersion());
+        revision.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
+        revision.setRequestedPlatformVersion(svc.getPlatformVersion());
         revision.setPlatformFamily(svc.getPlatformFamily());
         revision.setLoadBalancers(svc.getLoadBalancers());
         revision.setServiceRegistries(svc.getServiceRegistries());
@@ -5041,7 +5045,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setTaskDefinition(revision.getTaskDefinition());
         svc.setLaunchType(revision.getLaunchType());
         svc.setCapacityProviderStrategy(revision.getCapacityProviderStrategy());
-        svc.setPlatformVersion(revision.getPlatformVersion());
+        svc.setPlatformVersion(revision.getRequestedPlatformVersion() != null
+                ? revision.getRequestedPlatformVersion() : revision.getPlatformVersion());
         svc.setPlatformFamily(revision.getPlatformFamily());
         svc.setLoadBalancers(revision.getLoadBalancers());
         svc.setServiceRegistries(revision.getServiceRegistries());

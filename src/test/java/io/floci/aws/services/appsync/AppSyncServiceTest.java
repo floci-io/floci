@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -24,14 +25,9 @@ import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -562,43 +558,6 @@ class AppSyncServiceTest {
         assertThrows(AwsException.class, () -> service.tagResource(null, Map.of()));
     }
 
-    /**
-     * Parks {@code first} in its next write to {@code store}, starts {@code second} on another
-     * thread, waits until it is blocked behind the first or done, then lets the first go and waits
-     * for both. The second can only be blocked if a lock covers the first's read, change and write;
-     * the callers assert the final state.
-     */
-    private static void secondWriterRunsAroundTheFirst(ParkingStore<?> store, Runnable first, Runnable second)
-            throws Exception {
-        secondCallRunsAroundTheFirst(store, store::parkNextWrite, first, second);
-    }
-
-    /** As above, with the caller choosing which store call of the first one is parked. */
-    private static void secondCallRunsAroundTheFirst(ParkingStore<?> store, Runnable arm, Runnable first,
-            Runnable second) throws Exception {
-        arm.run();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> firstWrite = pool.submit(first);
-            assertTrue(store.awaitParked(), "the first write must reach the store");
-            AtomicReference<Thread> secondThread = new AtomicReference<>();
-            Future<?> secondWrite = pool.submit(() -> {
-                secondThread.set(Thread.currentThread());
-                second.run();
-            });
-            awaitBlockedOrDone(secondThread, secondWrite);
-
-            store.release();
-            firstWrite.get(2, TimeUnit.SECONDS);
-            secondWrite.get(2, TimeUnit.SECONDS);
-        } catch (ExecutionException e) {
-            throw new AssertionError(e.getCause());
-        } finally {
-            store.release();
-            pool.shutdownNow();
-        }
-    }
-
     private AppSyncService serviceWithApiStore(ParkingStore<GraphqlApi> apiStore) {
         return newService(Clock.fixed(NOW, ZoneOffset.UTC), "http://localhost:4566",
                 new AccountAwareStorageBackend<>(apiStore, null, "000000000000"));
@@ -618,7 +577,8 @@ class AppSyncServiceTest {
         AppSyncService svc = serviceWithApiStore(store);
         GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
 
-        secondWriterRunsAroundTheFirst(store,
+        store.parkNextWrite();
+        assertOperationWaitsForParkedStore(store,
                 () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
                 () -> svc.tagResource(arnOf(api), Map.of("env", "test")));
 
@@ -633,7 +593,8 @@ class AppSyncServiceTest {
         GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
         svc.tagResource(arnOf(api), Map.of("drop", "1", "keep", "2"));
 
-        secondWriterRunsAroundTheFirst(store,
+        store.parkNextWrite();
+        assertOperationWaitsForParkedStore(store,
                 () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
                 () -> svc.untagResource(arnOf(api), List.of("drop")));
 
@@ -648,7 +609,8 @@ class AppSyncServiceTest {
         AppSyncService svc = serviceWithApiStore(store);
         GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
 
-        secondWriterRunsAroundTheFirst(store,
+        store.parkNextWrite();
+        assertOperationWaitsForParkedStore(store,
                 () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
                 () -> svc.putEnvironmentVariables(api.getApiId(), Map.of("TABLE_NAME", "my-table")));
 
@@ -665,7 +627,8 @@ class AppSyncServiceTest {
         ApiKey created = svc.createApiKey(api.getApiId(), Map.of());
         long expires = NOW.plus(Duration.ofDays(30)).getEpochSecond();
 
-        secondWriterRunsAroundTheFirst(keyStore,
+        keyStore.parkNextWrite();
+        assertOperationWaitsForParkedStore(keyStore,
                 () -> svc.updateApiKey(api.getApiId(), created.getId(), Map.of("description", "renewed")),
                 () -> svc.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", expires)));
 
@@ -689,7 +652,8 @@ class AppSyncServiceTest {
         GraphqlApi api = svc.createGraphqlApi(apiRequest("kept"), "us-east-1");
         AtomicReference<Throwable> deleteFailure = new AtomicReference<>();
 
-        secondCallRunsAroundTheFirst(store, store::parkNextRead,
+        store.parkNextRead();
+        assertOperationWaitsForParkedStore(store,
                 () -> svc.startSchemaCreation(api.getApiId(), "type Query { a: String }"),
                 () -> {
                     try {
@@ -704,5 +668,43 @@ class AppSyncServiceTest {
         assertEquals("kept", svc.getGraphqlApi(api.getApiId()).getName());
         assertEquals(SchemaCreationStatusType.PROCESSING,
                 svc.getSchemaCreationStatus(api.getApiId()).getStatus());
+    }
+
+    @Test
+    void invalidTypeFormatLeavesTheStoredDefinitionUnchanged() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        service.createType(api.getApiId(), Map.of("name", "Item", "definition", "type Item { id: ID }", "format", "SDL"));
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateType(api.getApiId(), "Item",
+                Map.of("definition", "type Item { changed: ID }", "format", "BOGUS")));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+        assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void missingTypeFormatLeavesTheStoredTypeUnchanged(boolean explicitNull) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        service.createType(api.getApiId(), Map.of("name", "Item", "definition", "type Item { id: ID }",
+                "description", "original", "format", "SDL"));
+        Map<String, Object> request = new HashMap<>();
+        request.put("definition", "type Item { changed: ID }");
+        request.put("description", "replacement");
+        if (explicitNull) {
+            request.put("format", null);
+        }
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.updateType(api.getApiId(), "Item", request));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("format"));
+        assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+        assertEquals("original", service.getType(api.getApiId(), "Item").getDescription());
+        assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
     }
 }

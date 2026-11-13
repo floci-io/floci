@@ -310,9 +310,18 @@ class ServiceSpecificCredentialIntegrationTest {
                 .body(not(containsString("NotSupportedService")));
         }
 
-        // An absent or blank name never reaches that check: it fails the required-parameter one.
+        // A blank name is a value the request carried, and `serviceName` declares no length,
+        // pattern or value set for anything ahead of the operation to hold it to, so it reaches
+        // the same check with nothing standing where the name goes. Only an absent one fails the
+        // required-parameter check.
         iam("CreateServiceSpecificCredential")
             .formParam("UserName", userName).formParam("ServiceName", "")
+        .when().post("/").then().statusCode(404)
+            .body(containsString("NoSuchEntity"))
+            .body(containsString("No such service  is supported for Service Specific Credentials"));
+
+        iam("CreateServiceSpecificCredential")
+            .formParam("UserName", userName)
         .when().post("/").then().statusCode(400).body(containsString("ValidationError"));
     }
 

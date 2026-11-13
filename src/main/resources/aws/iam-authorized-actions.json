@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-11",
+    "retrieved": "2026-11-12",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -223,7 +223,9 @@
       "BatchCreateVehicle": "iotfleetwise:CreateVehicle"
     },
     "lakeformation": {
-      "GetTemporaryDataLocationCredentials": "lakeformation:GetDataAccess"
+      "GetGlueFunctionSessionContext": "lakeformation:GetDataAccess",
+      "GetTemporaryDataLocationCredentials": "lakeformation:GetDataAccess",
+      "GetTemporaryGlueFunctionCredentials": "lakeformation:GetDataAccess"
     },
     "lambda": {
       "GetLayerVersionByArn": "lambda:GetLayerVersion",
@@ -352,6 +354,8 @@
       "StartPolicyGeneration",
       "ValidatePolicy"
     ],
+    "account": [],
+    "apigateway": [],
     "cloudfront": [
       "CreateAnycastIpList",
       "CreateCachePolicy",
@@ -426,6 +430,13 @@
       "UpdatePublicKey",
       "UpdateSavingsPlan"
     ],
+    "cloudfront-keyvaluestore": [],
+    "controlcatalog": [
+      "ListCommonControls",
+      "ListControlMappings",
+      "ListDomains",
+      "ListObjectives"
+    ],
     "controltower": [
       "CreateLandingZone",
       "CreateManagedAccount",
@@ -491,6 +502,10 @@
       "ListEksAnywhereSubscriptions",
       "RegisterCluster"
     ],
+    "emr-serverless": [
+      "CreateApplication",
+      "ListApplications"
+    ],
     "es": [
       "AcceptInboundConnection",
       "AcceptInboundCrossClusterSearchConnection",
@@ -538,6 +553,13 @@
       "UpdatePackage",
       "UpdatePackageScope",
       "UpdateVpcEndpoint"
+    ],
+    "fis": [
+      "GetTargetResourceType",
+      "ListActions",
+      "ListExperimentTemplates",
+      "ListExperiments",
+      "ListTargetResourceTypes"
     ],
     "guardduty": [
       "AcceptAdministratorInvitation",
@@ -833,6 +855,11 @@
       "UpdateRevealConfiguration",
       "UpdateSensitivityInspectionTemplate"
     ],
+    "oam": [
+      "CreateSink",
+      "ListLinks",
+      "ListSinks"
+    ],
     "payment-cryptography": [
       "CreateKey",
       "DisableDefaultKeyReplicationRegions",
@@ -944,6 +971,69 @@
       "UpdateSPICECapacityConfiguration",
       "UpdateSelfUpgradeConfiguration"
     ],
+    "ram": [
+      "EnableSharingWithAwsOrganization",
+      "GetResourcePolicies",
+      "GetResourceShareAssociations",
+      "GetResourceShareInvitations",
+      "GetResourceShares",
+      "ListPermissionAssociations",
+      "ListPermissions",
+      "ListPrincipals",
+      "ListReplacePermissionAssociationsWork",
+      "ListResourceTypes",
+      "ListResources",
+      "ListSourceAssociations"
+    ],
+    "resource-explorer-2": [
+      "AssociateDefaultView",
+      "BatchGetView",
+      "CreateIndex",
+      "CreateManagedView",
+      "CreateResourceExplorerSetup",
+      "CreateStreamingAccessForService",
+      "CreateView",
+      "DeleteResourceExplorerSetup",
+      "DeleteStreamingAccessForService",
+      "DisassociateDefaultView",
+      "GetAccountLevelServiceConfiguration",
+      "GetDefaultView",
+      "GetIndex",
+      "GetResourceExplorerSetup",
+      "GetServiceIndex",
+      "GetServiceView",
+      "ListIndexes",
+      "ListIndexesForMembers",
+      "ListManagedViews",
+      "ListServiceIndexes",
+      "ListServiceViews",
+      "ListStreamingAccessForServices",
+      "ListSupportedResourceTypes",
+      "ListViews"
+    ],
+    "route53": [
+      "CreateCidrCollection",
+      "CreateHealthCheck",
+      "CreateHostedZone",
+      "CreateReusableDelegationSet",
+      "CreateTrafficPolicy",
+      "GetAccountLimit",
+      "GetCheckerIpRanges",
+      "GetGeoLocation",
+      "GetHealthCheckCount",
+      "GetHostedZoneCount",
+      "GetTrafficPolicyInstanceCount",
+      "ListCidrCollections",
+      "ListGeoLocations",
+      "ListHealthChecks",
+      "ListHostedZones",
+      "ListHostedZonesByName",
+      "ListHostedZonesByVPC",
+      "ListReusableDelegationSets",
+      "ListTrafficPolicies",
+      "ListTrafficPolicyInstances",
+      "TestDNSAnswer"
+    ],
     "scheduler": [
       "ListScheduleGroups",
       "ListSchedules",
@@ -1024,6 +1114,65 @@
       "StartTraceRetrieval",
       "UpdateIndexingRule",
       "UpdateTraceSegmentDestination"
+    ]
+  },
+  "authorizedByMethod": {
+    "apigateway": [
+      "CreateApi",
+      "CreateApiKey",
+      "CreateAuthorizer",
+      "CreateDeployment",
+      "CreateDomainName",
+      "CreateDomainNameAccessAssociation",
+      "CreateIntegration",
+      "CreateModel",
+      "CreateRestApi",
+      "CreateStage",
+      "CreateUsagePlan",
+      "CreateVpcLink",
+      "DeleteAuthorizer",
+      "DeleteDeployment",
+      "DeleteDomainName",
+      "DeleteIntegration",
+      "DeleteIntegrationResponse",
+      "DeleteModel",
+      "DeleteStage",
+      "DeleteVpcLink",
+      "GenerateClientCertificate",
+      "GetAuthorizer",
+      "GetAuthorizers",
+      "GetDeployment",
+      "GetDeployments",
+      "GetDomainName",
+      "GetDomainNames",
+      "GetIntegration",
+      "GetIntegrationResponse",
+      "GetModel",
+      "GetModelTemplate",
+      "GetModels",
+      "GetStage",
+      "GetStages",
+      "GetTags",
+      "GetVpcLink",
+      "GetVpcLinks",
+      "ImportApi",
+      "ImportRestApi",
+      "PutIntegration",
+      "PutRestApi",
+      "ReimportApi",
+      "TagResource",
+      "UntagResource",
+      "UpdateAccount",
+      "UpdateApi",
+      "UpdateAuthorizer",
+      "UpdateDeployment",
+      "UpdateDomainName",
+      "UpdateIntegration",
+      "UpdateIntegrationResponse",
+      "UpdateModel",
+      "UpdateRestApi",
+      "UpdateStage",
+      "UpdateVpcLink"
     ]
   }
 }

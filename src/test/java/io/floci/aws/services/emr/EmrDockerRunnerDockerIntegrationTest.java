@@ -57,7 +57,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * EMR steps and EMR Serverless job runs through Floci's Docker runner for real: a cluster in the {@code docker}
  * runner mode runs each step, and an application each job run, in a container of the release's EMR Serverless image,
- * which reaches Floci's S3 and Glue from there. The cached {@code emr-7.5.0} image keeps a local run from pulling;
+ * which reaches Floci's S3 and Glue from there, a job run's executors each in a container of their own, as the profile sets. The cached {@code emr-7.5.0} image keeps a local run from pulling;
  * CI pulls it (3.5 GB) the first time.
  */
 @QuarkusTest
@@ -126,6 +126,39 @@ class EmrDockerRunnerDockerIntegrationTest {
                 "-files", side("mapper.py", "reducer.py"), "-mapper", "python3 mapper.py",
                 "-reducer", "python3 reducer.py", "-input", s3Uri("in/"), "-output", s3Uri("out/")));
         assertEquals(WORD_COUNTS, counts("out/"));
+    }
+
+    @Test
+    void aStreamingJobsMapperAndReducerRunInYarnContainersOnItsClustersCoreAndTaskNodes() {
+        // Each says the host it ran on, after the words it counted.
+        String where = """
+                import socket
+                print(sys.argv[1] + " " + socket.gethostname() + "\\t1")
+                """;
+        put("side/where-mapper.py", MAPPER + where);
+        put("side/where-reducer.py", REDUCER + where);
+        startCluster("[]", null, ",{\"Name\":\"core\",\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1},{\"Name\":\"task\",\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1}");
+        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getList("Instances.PrivateDnsName");
+        List<String> nodes = instances.subList(1, instances.size());
+
+        // The mapper and the reducer, from the files -files sends, with a shuffle between them, run on the core and
+        // task nodes, not in the step's container.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop-streaming",
+                "-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1",
+                "-files", side("where-mapper.py", "where-reducer.py"), "-mapper", "python3 where-mapper.py mapper",
+                "-reducer", "python3 where-reducer.py reducer", "-input", s3Uri("in/"), "-output", s3Uri("where/")));
+        Map<String, Integer> counts = counts("where/");
+        assertEquals(WORD_COUNTS, counts.entrySet().stream().filter(entry -> !entry.getKey().contains(" "))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)), counts::toString);
+        List<String> ranOn = counts.keySet().stream().filter(key -> key.contains(" ")).toList();
+        assertEquals(List.of("mapper", "reducer"), ranOn.stream().map(task -> task.split(" ")[0]).distinct().toList(),
+                ranOn::toString);
+        for (String task : ranOn) {
+            assertTrue(nodes.contains(task.split(" ")[1]), task + " among " + nodes);
+        }
     }
 
     @Test
@@ -357,6 +390,38 @@ class EmrDockerRunnerDockerIntegrationTest {
 
         assertEquals("SUCCESS", ended.jsonPath().getString("jobRun.state"));
         assertEquals("from the archive environment\n", partFiles("venv-out/"));
+    }
+
+    @Test
+    void anEmrServerlessRunsExecutorsRunInContainersOfTheirOwnThatGoWithIt() {
+        put("side/hosts.py", """
+                import socket, sys, time
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                hosts = spark.sparkContext.parallelize(range(24), 24) \\
+                    .map(lambda i: (time.sleep(0.5), socket.gethostname())[1]).distinct().collect()
+                where = "with the driver" if socket.gethostname() in hosts else "apart from the driver"
+                spark.createDataFrame([("%d executors, %s" % (len(hosts), where),)], ["value"]) \\
+                    .coalesce(1).write.text(sys.argv[1])
+                """);
+        String applicationId = createSparkApplication(REGION, "emr-7.5.0");
+        cleanup.register(() -> deleteApplication(REGION, applicationId));
+        ObjectNode run = JSON.createObjectNode().put("clientToken", UUID.randomUUID().toString())
+                .put("executionRoleArn", "arn:aws:iam::000000000000:role/emr-serverless-job");
+        ObjectNode sparkSubmit = run.putObject("jobDriver").putObject("sparkSubmit")
+                .put("entryPoint", s3Uri("side/hosts.py"))
+                .put("sparkSubmitParameters", "--conf spark.executor.cores=2 --conf spark.executor.memory=1g");
+        sparkSubmit.putArray("entryPointArguments").add(s3Uri("hosts-out/"));
+        String jobRunId = startJobRun(REGION, applicationId, run.toString());
+
+        Response ended = awaitJobRun(REGION, applicationId, jobRunId);
+
+        assertEquals("SUCCESS", ended.jsonPath().getString("jobRun.state"));
+        // Each executor has a worker of its own, as on EMR Serverless, up to the profile's two.
+        assertEquals("2 executors, apart from the driver\n", partFiles("hosts-out/"));
+        await().atMost(Duration.ofSeconds(30)).until(() -> lifecycle.getDockerClient().listContainersCmd()
+                .withShowAll(true).withLabelFilter(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, jobRunId))
+                .exec().isEmpty());
     }
 
     /**

@@ -74,10 +74,9 @@ class ResourceArnBuilderTest {
         for (String id : List.of("N1", "%2Fdelegationset%2FN1")) {
             when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/2013-04-01/delegationset/" + id));
             when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost/"));
-            MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
-            parameters.putSingle("Id", id.equals("N1") ? "N1" : "/delegationset/N1");
-            when(uriInfo.getPathParameters()).thenReturn(parameters);
             for (String operation : List.of("GetReusableDelegationSet", "DeleteReusableDelegationSet")) {
+                // The id is read from the route the request matched, the type's path Route 53 returns it under dropped.
+                when(ctx.getMethod()).thenReturn(operation.startsWith("Get") ? "GET" : "DELETE");
                 assertEquals(List.of("arn:" + partition + ":route53:::delegationset/N1"),
                         builder.buildResources("route53", "route53:" + operation, ctx, region, ACCOUNT, partition));
             }

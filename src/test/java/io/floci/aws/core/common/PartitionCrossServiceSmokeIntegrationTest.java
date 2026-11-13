@@ -856,6 +856,27 @@ class PartitionCrossServiceSmokeIntegrationTest {
 
     @ParameterizedTest
     @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void cloudFrontKeyValueStoreArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "cloudfront");
+        String name = unique("smoke-kvs", partitionCase);
+        String body = """
+                <CreateKeyValueStoreRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                </CreateKeyValueStoreRequest>
+                """.formatted(name);
+        Response created = signed(region, "cloudfront")
+            .contentType("application/xml")
+            .body(body)
+        .when().post("/2020-05-31/key-value-store").then().statusCode(201).extract().response();
+        String etag = created.header("ETag");
+        cleanup.register(() -> signed(region, "cloudfront")
+            .header("If-Match", etag)
+        .when().delete("/2020-05-31/key-value-store/" + name));
+        PartitionMatrix.assertGlobalArnIn(partitionCase, created.xmlPath().getString("KeyValueStore.ARN"));
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void ramResourceShareArn(PartitionCase partitionCase) {
         String region = offered(partitionCase, "ram");
         String arn = signed(region, "ram")

@@ -99,7 +99,11 @@ REQUIRED_BY_HAND = (
 # `InvalidInput` too when the list arrives empty, and `Encoding` on `GetSSHPublicKey` is answered
 # with the modelled `UnrecognizedPublicKeyEncoding` rather than as a constraint at all. The
 # simulators answer an empty `ActionNames`, `PolicyInputList` or `PolicySourceArn` with a sentence
-# of their own, "At least one ActionNames member is required.", which no capture here moves. And
+# of their own, "At least one ActionNames member is required.", which no capture here moves.
+# `PolicyInputList` keeps that only where the operation requires it, which is `SimulateCustomPolicy`:
+# on `SimulatePrincipalPolicy` the member is optional, so there is no sentence in front of the walk
+# to protect and the member is read here, a document held to the 131072 characters and the printable
+# set `policyDocumentType` declares. And
 # `TagKeys` on the untag operations is answered against the list as a whole, "Value at 'tagKeys'
 # failed to satisfy constraint: Member must satisfy constraint: [...]", where the walk names the
 # member that broke it under its own index: both forms are readings, and this is the one those
@@ -117,7 +121,7 @@ MEMBERS_BY_HAND = {
     "ListPoliciesGrantingServiceAccess": ("ServiceNamespaces",),
     "GetSSHPublicKey": ("Encoding",),
     "SimulateCustomPolicy": ("ActionNames", "PolicyInputList"),
-    "SimulatePrincipalPolicy": ("ActionNames", "PolicyInputList", "PolicySourceArn"),
+    "SimulatePrincipalPolicy": ("ActionNames", "PolicySourceArn"),
     "UntagInstanceProfile": ("TagKeys",),
     "UntagMFADevice": ("TagKeys",),
     "UntagOpenIDConnectProvider": ("TagKeys",),

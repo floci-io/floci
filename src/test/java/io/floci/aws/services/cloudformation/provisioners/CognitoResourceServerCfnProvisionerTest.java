@@ -21,6 +21,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -581,6 +582,19 @@ class CognitoResourceServerCfnProvisionerTest {
         assertTrue(provisioner.completeUpdate(resource).complete());
         verify(cognito).deleteResourceServer(POOL, IDENTIFIER);
         verify(cognito, never()).deleteResourceServer(NEW_POOL, IDENTIFIER);
+    }
+
+    @Test
+    void aReplacementKeepsTheEnginesChangesOnTheCleanupContext() {
+        when(cognito.describeResourceServer(POOL, IDENTIFIER)).thenReturn(server(POOL, IDENTIFIER, "Old API"));
+        StackResource resource = resource(IDENTIFIER, POOL);
+        ProvisionContext engineContext = CarriedChanges.withEngineStatement(ctx(IDENTIFIER));
+        ObjectNode desired = properties(NEW_POOL, IDENTIFIER, "New API");
+
+        ProvisionContext recorded = CarriedChanges.contextRecorded(
+                () -> provisioner.provision(resource, desired, engineContext));
+
+        assertSame(CarriedChanges.ENGINE_STATEMENT, recorded.changes("AWS::Cognito::UserPoolResourceServer", null));
     }
 
     @Test

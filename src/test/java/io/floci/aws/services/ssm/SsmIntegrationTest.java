@@ -1903,6 +1903,95 @@ class SsmIntegrationTest {
             .body("Parameters", hasSize(0));
     }
 
+    @Test
+    void putParameterRejectsANameOutsideTheParameterNameSyntaxAndStoresNothing() {
+        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db secret", "/name-syntax/db\\t",
+                "\\u00a0/name-syntax/db")) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.PutParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"String\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Parameter name: can't be prefixed with \"aws\" or \"ssm\" "
+                        + "(case-insensitive). If formed as a path, it can consist of sub-paths divided by slash "
+                        + "symbol; each sub-path can be formed as a mix of letters, numbers and the following 3 "
+                        + "symbols .-_"));
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ParameterNotFound"));
+        }
+    }
+
+    @Test
+    void putParameterStoresANameWithoutItsSurroundingSpaces() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \" /name-spaces/db \", \"Value\": \"v\", \"Type\": \"String\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"/name-spaces/db\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo("/name-spaces/db"))
+            .body("Parameter.Value", equalTo("v"));
+    }
+
+    @Test
+    void aDoubleSlashArnDoesNotReadTheParameterUnderOneSlash() {
+        String name = "/double-slash-" + UUID.randomUUID();
+        String doubleSlashArn = "arn:aws:ssm:us-east-1:000000000000:parameter/" + name;
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"String\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        for (String selected : List.of(doubleSlashArn, doubleSlashArn + ":1")) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + selected + "\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ParameterNotFound"));
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameters")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Names\": [\"" + selected + "\"] }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Parameters", hasSize(0))
+                .body("InvalidParameters", contains(selected));
+        }
+    }
+
     private void putIntelligentTiering(String name, String jsonEscapedValue) {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")

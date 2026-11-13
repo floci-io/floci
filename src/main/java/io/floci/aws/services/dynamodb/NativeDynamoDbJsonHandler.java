@@ -172,17 +172,14 @@ public class NativeDynamoDbJsonHandler {
         };
     }
 
-    // The default account quotas, the same in every Region measured.
-    private static final long ACCOUNT_MAX_CAPACITY_UNITS = 80_000;
-    private static final long TABLE_MAX_CAPACITY_UNITS = 40_000;
     private static final int ENDPOINT_CACHE_PERIOD_IN_MINUTES = 1440;
 
     private Response handleDescribeLimits() {
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("AccountMaxReadCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
-        response.put("AccountMaxWriteCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
-        response.put("TableMaxReadCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
-        response.put("TableMaxWriteCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxReadCapacityUnits", DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxWriteCapacityUnits", DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("TableMaxReadCapacityUnits", DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS);
+        response.put("TableMaxWriteCapacityUnits", DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS);
         return Response.ok(response).build();
     }
 
@@ -200,8 +197,10 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(createTableViolations(request));
         TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
+        ObjectNode tableNode = tableToNode(table);
+        tableNode.remove("WarmThroughput");
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("TableDescription", tableToNode(table));
+        response.set("TableDescription", tableNode);
         return Response.ok(response).build();
     }
 
@@ -1062,17 +1061,23 @@ public class NativeDynamoDbJsonHandler {
                 ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
                 requireNonEmptyExpression(updateExpression, "UpdateExpression");
                 DynamoDbReservedWords.check(ue, "UpdateExpression");
+                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
+                DynamoDbService.requireSectionsUsedOnce(updateExpression);
                 Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
                 checkUnusedEan(exprAttrNames, hashTokens);
                 Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
                 checkUnusedEav(exprAttrValues, colonTokensAll);
-                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
             } else {
                 ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
             }
         } catch (AwsException e) {
             throw inValidationEnvelope(e);
         }
+
+        if (exprAttrValues != null) {
+            exprAttrValues.forEach(DynamoDbAttributeValueValidator::validate);
+        }
+        attributeUpdateValues.forEach(DynamoDbAttributeValueValidator::validate);
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
                 conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
@@ -2048,6 +2053,17 @@ public class NativeDynamoDbJsonHandler {
 
         if (!gsiThroughputUpdates.isEmpty()) {
             TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
+            if (throughput != null) {
+                DynamoDbCapacityQuotas.requireWithinTableQuota(
+                        throughput.readCapacityUnits(), throughput.writeCapacityUnits(), region);
+            }
+            for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
+                Throughput gsiThroughput = gsiUpdate.provisionedThroughput();
+                if (gsiThroughput != null) {
+                    DynamoDbCapacityQuotas.requireWithinIndexQuota(gsiUpdate.indexName(),
+                            gsiThroughput.readCapacityUnits(), gsiThroughput.writeCapacityUnits(), region);
+                }
+            }
             for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
                 String indexName = gsiUpdate.indexName();
                 if (gsiDeletes.contains(indexName)) {
@@ -3082,15 +3098,21 @@ public class NativeDynamoDbJsonHandler {
         if (older) {
             requireValidTransactExpressions(op, true);
             requireTransactItemOrKey(action);
-            return;
+        } else {
+            requireTransactItemOrKey(action);
+            List<String> onFailureErrors = new ArrayList<>();
+            addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
+            throwValidationErrors(onFailureErrors);
+            // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
+            DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+            requireValidTransactExpressions(op, false);
         }
-        requireTransactItemOrKey(action);
-        List<String> onFailureErrors = new ArrayList<>();
-        addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
-        throwValidationErrors(onFailureErrors);
-        // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
-        requireValidTransactExpressions(op, false);
+        if ("Update".equals(action.type()) && op.has("UpdateExpression")) {
+            JsonNode values = op.get("ExpressionAttributeValues");
+            if (values != null) {
+                values.forEach(DynamoDbAttributeValueValidator::validate);
+            }
+        }
     }
 
     private static void requireTransactItemOrKey(TransactAction action) {
@@ -3141,6 +3163,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
         requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
         dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+        if (updateExpression != null) {
+            DynamoDbService.requireSectionsUsedOnce(updateExpression);
+        }
 
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
@@ -3905,8 +3930,8 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode warmThroughput = objectMapper.createObjectNode();
         warmThroughput.put("Status", "ACTIVE");
-        warmThroughput.put("ReadUnitsPerSecond", 0);
-        warmThroughput.put("WriteUnitsPerSecond", 0);
+        warmThroughput.put("ReadUnitsPerSecond", table.getWarmReadUnitsPerSecond());
+        warmThroughput.put("WriteUnitsPerSecond", table.getWarmWriteUnitsPerSecond());
         node.set("WarmThroughput", warmThroughput);
 
         // Global-table replicas. In a single-process emulator every region is served by this same

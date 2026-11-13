@@ -57,7 +57,7 @@ class EksWorkerAuthentication {
                 || !region.equals(token.region()) || identity.roleArn() == null || identity.roleId() == null) {
             return Optional.empty();
         }
-        Optional<Cluster> cluster = eks.findAuthenticationCluster(account, name)
+        Optional<Cluster> cluster = eks.findAuthenticationCluster(account, region, name)
                 .filter(value -> value.getArn() != null && value.getArn().equals(
                         AwsArnUtils.Arn.of("eks", region, account, "cluster/" + name).toString()))
                 .filter(value -> createdAt.equals(String.valueOf(value.getCreatedAt())));
