@@ -1711,34 +1711,23 @@ class ResourceArnBuilderTest {
     // ── SSM ──────────────────────────────────────────────────────────────────────
 
     @Test
-    void ssmBuildsArnFromNameWithLeadingSlash() {
-        setJsonBody("{\"Name\":\"/config/env\"}");
-        String arn = builder.build("ssm", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/config/env", arn);
-    }
-
-    @Test
-    void ssmBuildsArnFromNameWithoutLeadingSlash() {
-        setJsonBody("{\"Name\":\"config-key\"}");
-        String arn = builder.build("ssm", ctx, "us-east-1", "000000000000");
-        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/config-key", arn);
+    void ssmNamesTheParameterItsNameNamesWithOrWithoutALeadingSlash() {
+        for (String name : List.of("/config/env", "config/env")) {
+            setJsonBody("{\"Name\":\"" + name + "\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/config/env"),
+                    builder.buildResources("ssm", "ssm:GetParameter", ctx, "us-east-1", ACCOUNT, "aws"), name);
+        }
     }
 
     @Test
     void ssmResourcePolicyActionsActOnTheParameterTheirResourceArnNames() {
-        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.PutResourcePolicy");
         setJsonBody("{\"ResourceArn\":\"arn:aws:ssm:us-east-1:000000000000:parameter/prod/db\",\"Policy\":\"{}\"}");
-        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db",
-                builder.build("ssm", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db"),
+                builder.buildResources("ssm", "ssm:PutResourcePolicy", ctx, "us-east-1", ACCOUNT, "aws"));
 
-        // Any other action acts on the parameter its handler reads, its Name, whatever else the body carries.
-        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
         setJsonBody("{\"Name\":\"/prod/db\",\"ResourceArn\":\"arn:aws:ssm:us-east-1:000000000000:parameter/dev/db\"}");
-        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db",
-                builder.build("ssm", ctx, "us-east-1", "000000000000"));
-        when(ctx.getHeaderString("X-Amz-Target")).thenReturn(null);
-        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db",
-                builder.build("ssm", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db"),
+                builder.buildResources("ssm", "ssm:GetParameter", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────

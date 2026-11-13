@@ -1771,6 +1771,73 @@ class SsmIntegrationTest {
             .body("DeletedParameters", hasSize(2));
     }
 
+    @Test
+    void taggingRefusesAResourceTypeWhoseTagsAreNotKept() {
+        String name = "tag-type-" + System.nanoTime();
+        putFilterFixture(name, "String", "");
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceType": "MaintenanceWindow", "ResourceId": "%s", "Tags": [{"Key": "env", "Value": "dev"}] }
+                """.formatted(name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidResourceType"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.ListTagsForResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceType": "Bucket", "ResourceId": "%s" }
+                """.formatted(name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("'resourceType'"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.RemoveTagsFromResource")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("""
+                { "ResourceId": "%s", "TagKeys": ["env"] }
+                """.formatted(name))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("'resourceType'"));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.DeleteParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void getParametersByPathRefusesARequestWithoutAPath() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Recursive\": true }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", containsString("'path'"));
+    }
+
     private String parameterArn(String name, String expectedArnSuffix) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.GetParameter")

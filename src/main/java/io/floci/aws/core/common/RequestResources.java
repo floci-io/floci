@@ -44,6 +44,7 @@ public final class RequestResources {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{(\\w+)}");
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
+    private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
     private record Filling(Map<String, String> variables, AwsArnUtils.Arn from) {
@@ -490,7 +491,9 @@ public final class RequestResources {
      * structure gives, the request's for a name (a {@code PutEvents} entry, on the bus it names). Each value is read
      * up to the resource's {@code before} character, when it has one (a CodeBuild build id's project), and without the
      * type's own path when it begins with one, as Route 53 returns its ids ({@code /hostedzone/Z1} names hosted zone
-     * {@code Z1}). A type
+     * {@code Z1}). A value filling a {@code ...WithoutLeadingSlash} variable is a Parameter Store name instead, read
+     * as {@link #asVariable} reads it. A value rendered past a type's format, when its service checks the
+     * type without a qualifier, is cut where the format ends, as an ARN given is. A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
      * else has that id open.
      */
@@ -508,8 +511,10 @@ public final class RequestResources {
         boolean given = false;
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
             List<String> values = read(resource, form, body, variable.getValue()).stream()
-                    .map(value -> withoutTypePath(before(value, resource.before()), resource.types().getFirst()))
-                    .map(value -> asVariable(variable.getKey(), value))
+                    .map(value -> before(value, resource.before()))
+                    .map(value -> variable.getKey().endsWith(WITHOUT_LEADING_SLASH)
+                            ? asVariable(variable.getKey(), value)
+                            : withoutTypePath(value, resource.types().getFirst()))
                     .toList();
             if (values.isEmpty()) {
                 continue;
@@ -543,13 +548,14 @@ public final class RequestResources {
         for (Filling filling : fillings) {
             AwsArnUtils.Arn from = filling.from();
             if (from == null) {
-                arns.add(withId(render(format.format(), filling.variables(), partition, region, account), format,
+                arns.add(withId(format.checked(render(format.format(), filling.variables(), partition, region,
+                        account)), format,
                         resource.types().getFirst(), filling.variables(), account.equals(accountId) ? stored : null,
                         region));
             } else {
-                addNamed(arns, withId(render(format.format(), filling.variables(), from.partition(),
+                addNamed(arns, withId(format.checked(render(format.format(), filling.variables(), from.partition(),
                         from.region().isEmpty() ? region : from.region(),
-                        from.accountId().isEmpty() ? accountId : from.accountId()), format,
+                        from.accountId().isEmpty() ? accountId : from.accountId())), format,
                         resource.types().getFirst(), filling.variables(), null, region), format.awsOwned(), partition,
                         region, accountId, null);
             }
@@ -557,11 +563,17 @@ public final class RequestResources {
     }
 
     /**
-     * The value as the variable takes it: without the leading {@code /} a variable named for leaving it out drops,
-     * as an SSM parameter's ARN names {@code /team/x} as {@code parameter/team/x}.
+     * The value as the variable takes it: a variable named for leaving out the leading {@code /} takes a Parameter
+     * Store name without the whitespace around it, which a put drops, and without one leading {@code /}, as an SSM
+     * parameter's ARN names {@code /team/x} as {@code parameter/team/x}. A name of two leading slashes keeps the
+     * second, and a name beginning {@code /parameter/} keeps that, being no type path.
      */
     static String asVariable(String variable, String value) {
-        return variable.endsWith("WithoutLeadingSlash") && value.startsWith("/") ? value.substring(1) : value;
+        if (!variable.endsWith(WITHOUT_LEADING_SLASH)) {
+            return value;
+        }
+        String name = value.strip();
+        return name.startsWith("/") ? name.substring(1) : name;
     }
 
     /** The value without a leading {@code /<type>/}, the path a service may return an id of that type under. */

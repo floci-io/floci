@@ -33,7 +33,10 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
   `${SecurityGroupId}`), and it is a name for a name and an id for an id (an `Identifier` either),
   or the member is a bare `Name`, `Id` or `Identifier`, the variable is named after the type and the
   operation is about the type, its name past the verb the type's (`DescribeTargetGroups`, but not
-  `StartExecution` for a state machine, whose `name` is the execution's), and no member holds its ARN.
+  `StartExecution` for a state machine, whose `name` is the execution's), and no member holds its ARN,
+  or, when no member does either, a string member whose botocore shape is named after the type (Parameter Store's
+  `GetParametersByPath` names a hierarchy by a `Path` holding a `PSParameterName`, as `GetParameterHistory` names a
+  parameter by its `Name`).
   Of several members that could fill a variable, one naming the type before the variable wins over a
   bare one: the snapshot `RestoreFromClusterSnapshot` restores has the cluster its
   `SnapshotClusterIdentifier` names, not the `ClusterIdentifier` of the cluster it creates, and the
@@ -119,9 +122,11 @@ request, never from a member a caller could add. `CLIENTS_NOT_READ` are SDK clie
 namespace's operations whose requests Floci does not serve, each with its reason.
 `UNQUALIFIED` are the resource types whose ARN a request may give with a qualifier, one more `:<name>`
 past its format, and whose service checks it without one: Step Functions checks a version or an alias
-on its state machine's ARN. `MINTED_IDS` are the resource types whose service follows the name their
-format ends in with an id it mints, `/<id>`, which the format leaves out and a request naming one by
-its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
+on its state machine's ARN, and Parameter Store a version or a label on its parameter's. A value filling a variable
+named `...WithoutLeadingSlash` is read as a Parameter Store name, without the whitespace around it and one leading
+`/`: a parameter's ARN is `parameter/<name>`, whether or not its name starts with a slash. `MINTED_IDS` are the
+resource types whose service follows the name their format ends in with an id it mints, `/<id>`, which the
+format leaves out and a request naming one by its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
 asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
 all an id their service mints, which a request names by members the ARN does not hold, with those
 members: each operation whose request has them all names the type by them (`find`), and the reader
@@ -185,8 +190,8 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
-              "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "sso", "states", "textract",
-              "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
+              "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
+              "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -205,7 +210,7 @@ QUALIFIED_MEMBERS = ("payment-cryptography",)
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
-              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
+              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
@@ -220,12 +225,6 @@ READ_IN_HAND_BUILT: dict[str, str] = {
 READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
-
-_SSM_TAGS = ("SSM tagging: a request names its resource by ResourceType and ResourceId, or tags the document or "
-             "association it creates, which the rule reads, while ResourceArnBuilder keeps building the parameter ARNs")
-READ_IN_HAND_BUILT.update({f"ssm:{operation}": _SSM_TAGS
-                           for operation in ("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
-                                             "CreateDocument", "CreateAssociation")})
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
@@ -594,6 +593,10 @@ UNQUALIFIED: dict[str, str] = {
     "states:statemachine": "Step Functions authorizes a version or an alias on its state machine's ARN, not on the "
                            "version's or the alias's ('To authorize a version or an alias to invoke an API action, "
                            "Step Functions uses the state machine's ARN instead of using the version ARN or alias ARN')",
+    "ssm:parameter": "Parameter Store reads a version or a label after a parameter's name ('To query by parameter "
+                     "label, use \"Name\": \"name:label\". To query by parameter version, use \"Name\": "
+                     "\"name:version\"', GetParameter's Name) and checks the read on the parameter, whose name "
+                     "holds no colon",
 }
 
 # Resource types whose service follows the one variable their format ends in with an id it mints, `/<id>`,
@@ -893,6 +896,19 @@ def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
                 found.setdefault(name, name + _strings(model, shape))
             for path in _nested_arns(model, name, shape):
                 found.setdefault(path.removesuffix("[]"), path)
+    return found
+
+
+def member_shapes(models: dict[str, dict], operation: str) -> dict[str, str]:
+    """The botocore shape each top-level member of the operation's request holds, by member name, across the request's
+    clients."""
+    found: dict[str, str] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec:
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            found.setdefault(name, member["shape"])
     return found
 
 
@@ -1212,9 +1228,11 @@ def compatible(member: str, variable: str) -> bool:
 
 
 def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
-                  arn_members: set[str] | None = None, labels: dict[str, str] | None = None) -> list[dict]:
+                  arn_members: set[str] | None = None, labels: dict[str, str] | None = None,
+                  shapes: dict[str, str] | None = None) -> list[dict]:
     """The resources the rule finds the operation's request naming, as vendored entries. `labels` gives the path
-    segment before each bare member a REST request carries as a path label, stemmed (`path_labels`)."""
+    segment before each bare member a REST request carries as a path label, stemmed (`path_labels`), and `shapes` the
+    botocore shape each member holds (`member_shapes`)."""
     name = operation.split(":", 1)[1]
     created = stem(CREATING_RE.sub("", name)) if CREATING_RE.match(name) else None
     subject = stem(SUBJECT_RE.sub("", name))
@@ -1249,7 +1267,8 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (v == in_slot, kind_of(v) == "", v)):
             choice = _filling(variable, kind_stem, len(variables), {m: p for m, p in names.items() if m not in fill.values()},
-                              bare=bare, qualified=namespace_of(operation) in QUALIFIED_MEMBERS)
+                              bare=bare, qualified=namespace_of(operation) in QUALIFIED_MEMBERS,
+                              shapes=shapes if not held else None)
             if choice is not None:
                 fill[variable] = choice
                 used[kind] = choice
@@ -1367,11 +1386,12 @@ def by_members_key_is_empty(kinds: list[str], filled: dict[str, dict[str, str]])
 
 
 def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str], bare: set[str],
-             qualified: bool = False) -> str | None:
+             qualified: bool = False, shapes: dict[str, str] | None = None) -> str | None:
     """The member that fills the variable: one of a compatible kind whose stem relates to the variable's,
     or, for the variable named after the type or a type's only one, a member named after the type, or a
-    bare `Name` or `Id` among those `bare` gives, of a compatible kind; the closest of them, and a string
-    before a list."""
+    bare `Name` or `Id` among those `bare` gives, of a compatible kind, or else a string member whose botocore
+    shape is named after the type, of a compatible kind (Parameter Store's `Path` and `GetParameterHistory`'s
+    `Name` hold a `PSParameterName`); the closest of them, and a string before a list."""
     variable_stem = stem(variable)
     candidates = [member for member in names
                   if stem(member) and related(stem(member), variable_stem) and compatible(member, variable)]
@@ -1380,6 +1400,10 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
                       and ((member in bare and member.lower() in BARE)
                            or (stem(member) and (related(stem(member), kind_stem)
                                                  or (qualified and names_type(member, kind_stem)))))]
+    if not candidates and (related(variable_stem, kind_stem) or variables == 1):
+        candidates = [member for member in names if member in (shapes or {}) and not names[member].endswith("[]")
+                      and "." not in member and stem(shapes[member]) and related(stem(shapes[member]), kind_stem)
+                      and compatible(shapes[member], variable) and compatible(member, variable)]
     if not candidates:
         return None
     # A member naming the type before the variable (`SnapshotClusterIdentifier` for the snapshot's `ClusterName`,
@@ -1492,7 +1516,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
         resources = picked_by_enum(types, formats, members, enum_members(models, operation.split(":", 1)[1]))
         if resources is None:
             resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members,
-                                                                              arn_members, labels),
+                                                                              arn_members, labels,
+                                                                              member_shapes(models, operation.split(":", 1)[1])),
                                                                 formats, types, members),
                                                 namespace_of(operation), types, members),
                                      namespace_of(operation), types, members)

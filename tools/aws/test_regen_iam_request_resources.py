@@ -919,7 +919,7 @@ def test_the_vendored_file_is_well_formed():
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
     # A state machine's version or alias is checked on the state machine.
-    assert document["unqualified"] == {"states": ["statemachine"]}
+    assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}
@@ -1317,3 +1317,14 @@ def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_i
          "when": {"ResourceType": ["ManagedInstance"]}},
         {"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"},
          "when": {"ResourceType": ["Parameter"]}}]
+
+
+def test_a_member_whose_shape_is_named_after_the_type_names_it():
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Path"),
+                           shapes={"Path": "ThingName"}) == [{"type": "thing", "fill": {"ThingName": "Path"}}]
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Path")) == []
+    # A shape named for something else, a shape of another kind, or a list names nothing.
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Path"), shapes={"Path": "PathString"}) == []
+    assert r.resources_for("svc:GetPoolsByPath", ["pool"], FORMATS, members("Path"), shapes={"Path": "PoolName"}) == []
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Paths[]"),
+                           shapes={"Paths": "ThingName"}) == []
