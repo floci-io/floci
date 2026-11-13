@@ -3049,8 +3049,10 @@ public class CloudFormationService implements ResourceProvider {
                     stack.setStackPolicyBody(stackPolicy);
                 }
                 stack.replaceTags(operationTags);
-                stack.getResources().values().forEach(resource -> resource.getAttributes()
-                        .remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR));
+                stack.getResources().values().forEach(resource -> {
+                    resource.getAttributes().remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR);
+                    resource.getAttributes().remove(CfnRollback.ROUTE53_RECORD_UPDATE_SNAPSHOT_ATTR);
+                });
                 refreshTemplateUses(stack, resources, conditions, physicalIds);
                 if (hasReplacementUpdates(stack) || hasRemovedOrConditionFalseResources(stack, resources, conditions)) {
                     stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
