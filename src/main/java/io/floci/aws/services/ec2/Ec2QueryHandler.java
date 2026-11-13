@@ -947,7 +947,7 @@ public class Ec2QueryHandler {
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
-                creditSpecificationCpuCredits, userDataEncoded, Boolean.parseBoolean(p.getFirst("DryRun")),
+                creditSpecificationCpuCredits, userDataEncoded, dryRun(p),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
                 "spot".equals(marketType), privateIpAddress, capacitySpecification);
 
@@ -2361,9 +2361,18 @@ public class Ec2QueryHandler {
     }
 
     private void checkDryRun(MultivaluedMap<String, String> params) {
-        if (Boolean.parseBoolean(params.getFirst("DryRun"))) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+        if (dryRun(params)) {
+            throw Ec2Service.dryRunOperation();
         }
+    }
+
+    /** The request's DryRun flag. A blank or non-boolean value is refused rather than read as false. */
+    private boolean dryRun(MultivaluedMap<String, String> params) {
+        String value = params.getFirst("DryRun");
+        if (value != null && value.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
+        }
+        return Boolean.TRUE.equals(parseOptionalBoolean(value, "DryRun"));
     }
 
     private Response handleModifyIpam(MultivaluedMap<String, String> p, String region) {
@@ -3649,12 +3658,8 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteSecurityGroup(MultivaluedMap<String, String> p, String region) {
-        String dryRun = p.getFirst("DryRun");
-        if (dryRun != null && dryRun.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
-        }
         String groupId = service.deleteSecurityGroup(region, p.getFirst("GroupId"), p.getFirst("GroupName"),
-                Boolean.TRUE.equals(parseOptionalBoolean(dryRun, "DryRun")));
+                dryRun(p));
         return xmlResponse(new XmlBuilder().start("DeleteSecurityGroupResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString()).elem("return", "true")
                 .elem("groupId", groupId).end("DeleteSecurityGroupResponse").build());
@@ -4206,7 +4211,7 @@ public class Ec2QueryHandler {
             String v = p.getFirst("Tag." + i + ".Value");
             tagList.add(creationTag(k, v));
         }
-        service.createTags(region, resourceIds, tagList, Boolean.parseBoolean(p.getFirst("DryRun")));
+        service.createTags(region, resourceIds, tagList, dryRun(p));
         return booleanResponse("CreateTags");
     }
 
@@ -4219,7 +4224,7 @@ public class Ec2QueryHandler {
             String v = p.getFirst("Tag." + i + ".Value");
             tagList.add(new Tag(k, v));
         }
-        service.deleteTags(region, resourceIds, tagList, Boolean.parseBoolean(p.getFirst("DryRun")));
+        service.deleteTags(region, resourceIds, tagList, dryRun(p));
         return booleanResponse("DeleteTags");
     }
 
@@ -4403,7 +4408,7 @@ public class Ec2QueryHandler {
         }
         service.replaceRoute(region, rtId, dest, destIpv6, destPrefixList, gwId, natGwId, pcxId,
                 instanceId, networkInterfaceId,
-                Boolean.parseBoolean(p.getFirst("DryRun")));
+                dryRun(p));
         return booleanResponse("ReplaceRoute");
     }
 
@@ -4652,7 +4657,7 @@ public class Ec2QueryHandler {
         InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(region, p.getFirst("SubnetId"),
                 getList(p, "SecurityGroupId"), preserve == null ? null : Boolean.parseBoolean(preserve),
                 p.getFirst("IpAddressType"), parseTagsForResource(p, "instance-connect-endpoint"),
-                p.getFirst("ClientToken"), Boolean.parseBoolean(p.getFirst("DryRun")));
+                p.getFirst("ClientToken"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateInstanceConnectEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5271,7 +5276,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
                 firstPresent(p, "SetDefaultVersion", "DefaultVersion"),
-                Boolean.parseBoolean(p.getFirst("DryRun")));
+                dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5292,13 +5297,9 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
-        String dryRun = p.getFirst("DryRun");
-        if (dryRun != null && dryRun.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
-        }
         List<Ec2Service.LaunchTemplateVersionDeletion> results = service.deleteLaunchTemplateVersions(
                 region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"),
-                getList(p, "LaunchTemplateVersion"), Boolean.TRUE.equals(parseOptionalBoolean(dryRun, "DryRun")));
+                getList(p, "LaunchTemplateVersion"), dryRun(p));
         XmlBuilder xml = new XmlBuilder().start("DeleteLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
         for (boolean success : List.of(true, false)) {
@@ -6801,7 +6802,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteVolume(MultivaluedMap<String, String> p, String region) {
-        service.deleteVolume(region, p.getFirst("VolumeId"), Boolean.parseBoolean(p.getFirst("DryRun")));
+        service.deleteVolume(region, p.getFirst("VolumeId"), dryRun(p));
         return booleanResponse("DeleteVolume");
     }
 
@@ -6817,7 +6818,7 @@ public class Ec2QueryHandler {
         Boolean multiAttachEnabled = p.getFirst("MultiAttachEnabled") != null
                 ? Boolean.parseBoolean(p.getFirst("MultiAttachEnabled"))
                 : null;
-        boolean dryRun = Boolean.parseBoolean(p.getFirst("DryRun"));
+        boolean dryRun = dryRun(p);
         VolumeModification mod = service.modifyVolume(region, volumeId, size, volumeType,
                 iops, throughput, multiAttachEnabled, dryRun);
         XmlBuilder xml = new XmlBuilder()
@@ -6899,7 +6900,7 @@ public class Ec2QueryHandler {
         String instanceId = p.getFirst("InstanceId");
         String device = p.getFirst("Device");
         VolumeAttachment attachment = service.attachVolume(region, volumeId, instanceId, device,
-                Boolean.parseBoolean(p.getFirst("DryRun")));
+                dryRun(p));
         return volumeAttachmentResponse("AttachVolume", attachment, "attaching");
     }
 
@@ -6909,7 +6910,7 @@ public class Ec2QueryHandler {
         String device = p.getFirst("Device");
         boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
         VolumeAttachment attachment = service.detachVolume(region, volumeId, instanceId, device, force,
-                Boolean.parseBoolean(p.getFirst("DryRun")));
+                dryRun(p));
         return volumeAttachmentResponse("DetachVolume", attachment, "detaching");
     }
 

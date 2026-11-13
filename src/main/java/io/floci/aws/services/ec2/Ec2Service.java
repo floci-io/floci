@@ -4157,7 +4157,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
             synchronized (attachmentTopologyLock(region)) {
                 if (finalSubnetId != null) {
@@ -7988,8 +7988,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             "The security group '" + selectedId + "' has a dependent object", 400);
                 }
                 if (dryRun) {
-                    throw new AwsException("DryRunOperation",
-                            "Request would have succeeded, but DryRun flag is set.", 412);
+                    throw dryRunOperation();
                 }
                 securityGroups.delete(key(region, selectedId));
                 removeTags(region, selectedId);
@@ -9910,7 +9909,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 nextDefault = String.valueOf(requested);
             }
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
             launchTemplate.setDefaultVersionNumber(nextDefault);
             launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
@@ -10076,8 +10075,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (template) {
                 ensureLaunchTemplatePresent(region, template, id);
                 if (dryRun) {
-                    throw new AwsException("DryRunOperation",
-                            "Request would have succeeded, but DryRun flag is set.", 412);
+                    throw dryRunOperation();
                 }
                 ensureLaunchTemplateVersions(template);
                 int lastIssued = lastIssuedLaunchTemplateVersion(template);
@@ -10468,6 +10466,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
+    /**
+     * What EC2 answers a dry run with once the request has passed every check the real call makes:
+     * DryRunOperation, HTTP 412, nothing changed.
+     */
+    static AwsException dryRunOperation() {
+        return new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+    }
+
     // ─── Tags ──────────────────────────────────────────────────────────────────
 
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
@@ -10493,7 +10499,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 requireWithinTagLimit(region, resourceId, tagList);
             }
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
             createSystemTags(region, resourceIds, tagList);
         });
@@ -10731,7 +10737,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
         if (dryRun) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            throw dryRunOperation();
         }
         deleteResourceTags(region, resourceIds, tagList);
     }
@@ -12270,8 +12276,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     : null;
 
             if (dryRun) {
-                throw new AwsException("DryRunOperation",
-                        "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
 
             // The target the request does not name is cleared rather than carried over from the
@@ -13138,7 +13143,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         if (dryRun) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            throw dryRunOperation();
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         if (token != null) {
@@ -14890,7 +14895,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "Volume " + volumeId + " is currently attached to an instance", 400);
             }
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
             if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
                 if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
@@ -15038,7 +15043,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
 
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
 
             Integer originalSize = volume.getSize();
@@ -15256,7 +15261,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         if (dryRun) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            throw dryRunOperation();
         }
 
         if (volumeBlockDeviceManager != null) {
@@ -15318,7 +15323,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             "filesystem/partition tables. To force detachment, use the force parameter", 400);
         }
         if (dryRun) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            throw dryRunOperation();
         }
         target.setState("detached");
         volume.getAttachments().clear();

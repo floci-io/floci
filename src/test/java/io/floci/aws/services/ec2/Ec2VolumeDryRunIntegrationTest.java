@@ -117,6 +117,27 @@ class Ec2VolumeDryRunIntegrationTest {
         assertEquals(before, volumes());
     }
 
+    /** A DryRun value that is not a boolean is refused as one, and the request changes nothing. */
+    @ParameterizedTest
+    @CsvSource({
+            "CreateVolume, maybe", "CreateVolume, ''",
+            "DeleteVolume, maybe", "DeleteVolume, ''",
+            "AttachVolume, maybe", "AttachVolume, ''",
+            "DetachVolume, maybe", "DetachVolume, ''",
+            "CreateTags, maybe", "CreateTags, ''",
+            "DeleteTags, maybe", "DeleteTags, ''"
+    })
+    void aDryRunValueThatIsNotABooleanIsRefused(String action, String value) {
+        List<String> before = volumes();
+
+        dryRunnable(action).formParam("DryRun", value).post("/").then()
+                .statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"))
+                .body("Response.Errors.Error.Message", equalTo("DryRun is not a valid boolean."));
+
+        assertEquals(before, volumes());
+    }
+
     /** A request for {@code action} that would succeed against the fixture. */
     private RequestSpecification dryRunnable(String action) {
         return switch (action) {
