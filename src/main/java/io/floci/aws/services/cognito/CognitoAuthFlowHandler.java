@@ -541,7 +541,7 @@ final class CognitoAuthFlowHandler {
                     consumeCustomSession(session, state);
                     state.history.get(state.history.size() - 1).put("challengeResult", true);
                 }
-                CognitoUser user = applyNewPasswordAttributes(pool, responses);
+                CognitoUser user = applyNewPasswordAttributes(pool, state.username, responses);
                 return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
             }
             String username = responses.get("USERNAME");
@@ -559,7 +559,7 @@ final class CognitoAuthFlowHandler {
                 changePassword(pool, responses);
                 passwordChangeSessions.remove(session, pending);
             }
-            CognitoUser user = applyNewPasswordAttributes(pool, responses);
+            CognitoUser user = applyNewPasswordAttributes(pool, pending.username(), responses);
             return completePrimaryAuth(pool, client, user, "TokenGeneration_NewPasswordChallenge", clientMetadata,
                     pending.authEventId());
         }
@@ -576,8 +576,12 @@ final class CognitoAuthFlowHandler {
         service.adminSetUserPassword(pool.getId(), username, newPassword, true);
     }
 
-    private CognitoUser applyNewPasswordAttributes(UserPool pool, Map<String, String> responses) {
-        String username = responses.get("USERNAME");
+    /**
+     * Applies the attributes of the response, then reads the user back. {@code username} is the user's own username
+     * from the session: the USERNAME of the response may be an alias such as the email, which stops naming the
+     * user once the response changes it.
+     */
+    private CognitoUser applyNewPasswordAttributes(UserPool pool, String username, Map<String, String> responses) {
         Map<String, String> attrUpdates = newPasswordAttributes(responses);
         if (!attrUpdates.isEmpty()) {
             service.adminUpdateUserAttributes(pool.getId(), username, attrUpdates);
@@ -897,7 +901,8 @@ final class CognitoAuthFlowHandler {
      * challenges here already resolve the alias to the session's user, so the NEW_PASSWORD_REQUIRED and MFA
      * challenges of the other flows do as well. A direct match of the sign-in keys counts, so a pool
      * without aliases and its case sensitivity behave as before; only otherwise is the supplied value
-     * resolved to its user.
+     * resolved to its user, with a single lookup, because every session holds the username of its user
+     * already.
      */
     private boolean isSessionUser(UserPool pool, String supplied, String sessionUsername) {
         if (supplied == null) {
@@ -907,7 +912,7 @@ final class CognitoAuthFlowHandler {
             return true;
         }
         String canonical = resolveToCanonicalUsername(pool, supplied);
-        return canonical != null && canonical.equals(resolveToCanonicalUsername(pool, sessionUsername));
+        return canonical != null && service.signInKey(pool, canonical).equals(service.signInKey(pool, sessionUsername));
     }
 
     // ──────────────────────────── SRP ────────────────────────────

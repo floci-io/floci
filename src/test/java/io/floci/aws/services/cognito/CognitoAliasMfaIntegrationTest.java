@@ -132,6 +132,26 @@ class CognitoAliasMfaIntegrationTest {
         assertFalse(result.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
     }
 
+    @Test
+    void newPasswordChallengeCompletesWhenTheResponseChangesTheEmail() throws Exception {
+        String poolId = createAliasPool("""
+                {"MfaConfiguration":"OFF"}""");
+        String clientId = createClient(poolId);
+        String email = createUserWithTemporaryPassword(poolId);
+        String newEmail = "alias-mfa-new-" + UUID.randomUUID() + "@example.com";
+
+        JsonNode challenge = cognitoJson("InitiateAuth", login(clientId, email, TEMPORARY_PASSWORD));
+        assertEquals("NEW_PASSWORD_REQUIRED", challenge.path("ChallengeName").asText());
+        String responses = ",\"NEW_PASSWORD\":\"" + PASSWORD + "\",\"userAttributes.email\":\"" + newEmail + "\"";
+
+        JsonNode result = cognitoJson("RespondToAuthChallenge", respond(clientId, "NEW_PASSWORD_REQUIRED",
+                challenge.path("Session").asText(), email, responses));
+        assertFalse(result.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+
+        JsonNode signedIn = cognitoJson("InitiateAuth", login(clientId, newEmail));
+        assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+    }
+
     private static String createAliasPool(String mfaConfiguration) throws Exception {
         String poolId = cognitoJson("CreateUserPool", """
                 {"PoolName":"AliasMfaPool","UsernameAttributes":["email"]}
