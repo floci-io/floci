@@ -790,7 +790,7 @@ public class GlueService {
         }
     }
 
-    public void deleteTable(String databaseName, String tableName) {
+    public synchronized void deleteTable(String databaseName, String tableName) {
         getTable(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
@@ -812,7 +812,7 @@ public class GlueService {
         LOG.infov("Deleted Glue Table: {0}.{1}", databaseName, tableName);
     }
 
-    public List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
+    public synchronized List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
         getDatabase(databaseName);
         List<BatchDeleteTableError> errors = new ArrayList<>();
         for (String tableName : tableNames) {
