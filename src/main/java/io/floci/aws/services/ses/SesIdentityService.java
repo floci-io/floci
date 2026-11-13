@@ -423,8 +423,8 @@ public class SesIdentityService implements SesTaggable {
         if (notificationType == null) {
             violations.add(SmithyValidationErrors.notNullWithoutValue("notificationType"));
         } else if (!NOTIFICATION_TYPES.contains(notificationType)) {
-            violations.add("Value at 'notificationType' failed to satisfy "
-                    + "constraint: Member must satisfy enum value set: " + NOTIFICATION_TYPES);
+            violations.add(SmithyValidationErrors.Violations.WITHOUT_VALUES.notInEnum(
+                    notificationType, "notificationType", NOTIFICATION_TYPES));
         }
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationError(violations);
@@ -511,9 +511,8 @@ public class SesIdentityService implements SesTaggable {
         }
         if (!NOTIFICATION_TYPES.contains(notificationType)) {
             throw SmithyValidationErrors.validationError(
-                    "Value at 'notificationType' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set: "
-                            + NOTIFICATION_TYPES);
+                    SmithyValidationErrors.Violations.WITHOUT_VALUES.notInEnum(
+                            notificationType, "notificationType", NOTIFICATION_TYPES));
         }
         synchronized (identityCreationLock) {
             Identity identity = identityStore.get(identityKey(region, identityValue))
