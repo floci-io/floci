@@ -126,19 +126,21 @@ public final class Ec2MetadataProxy {
                 + endpoint + "/latest/meta-data/instance-id >/dev/null && exit 0";
     }
 
-    public static String[] podIdentityStartCommand(String flociHost, int flociPort) {
-        return startCommand("pod-identity", "169.254.170.23", 80, flociHost, flociPort,
-                podIdentityProbeCommand("http://169.254.170.23"));
-    }
-
     /**
-     * Ready once the relay answers at all: without a pod's token Floci answers 400, which still
-     * proves socat relays. Any HTTP proxy the image configures is bypassed, since a proxy's own
-     * answer would pass the same check.
+     * Ready once the pod identity endpoint answers at all: without a pod's token Floci answers 400,
+     * which still proves the path reaches it. Any HTTP proxy the image configures is bypassed, since
+     * a proxy's own answer would pass the same check. Uses {@code curl} where there is one, else
+     * {@code wget}, as in a stock {@code rancher/k3s} node, which has BusyBox's and no {@code curl}:
+     * both print the status of an error answer, which is what is looked for.
      */
-    static String podIdentityProbeCommand(String endpoint) {
-        return "[ \"$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 1 " + endpoint
-                + "/v1/credentials)\" != \"000\" ] && exit 0";
+    public static String podIdentityProbeCommand(String endpoint) {
+        String url = endpoint + "/v1/credentials";
+        return "if command -v curl >/dev/null 2>&1; then"
+                + " [ \"$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' --max-time 1 " + url + ")\" != \"000\" ]"
+                + " && exit 0;"
+                + " else env -u http_proxy -u HTTP_PROXY wget -T 1 -O /dev/null " + url + " 2>&1"
+                + " | grep -qE 'HTTP/1[.][01] [0-9]{3}|ERROR [0-9]{3}' && exit 0;"
+                + " fi";
     }
 
     public static String[] startCommand(String name, String bindIp, int bindPort,

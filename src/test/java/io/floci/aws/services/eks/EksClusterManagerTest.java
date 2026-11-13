@@ -101,6 +101,7 @@ import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -2552,21 +2553,31 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void configuresRelayWhenPodIdentityEnabled() {
+        void forwardsThePodIdentityAddressToFlociWithoutARelayProcess() {
             Cluster cluster = new Cluster();
             cluster.setName("test-cluster");
 
             manager.configurePodIdentityRelay(cluster, "cid-1");
 
-            assertEquals(3, capturedCmds.size());
-            assertTrue(capturedCmds.get(0)[2].contains("command -v socat"));
-            assertTrue(capturedCmds.get(1)[2].contains("169.254.170.23"));
-            assertTrue(capturedCmds.get(1)[2].contains("TCP:floci-host:4566"));
-            assertTrue(capturedCmds.get(1)[2].contains("floci-pod-identity-proxy.pid"));
-            assertTrue(capturedCmds.get(2)[2].contains("FLOCI-LINK-LOCAL"));
-            assertTrue(capturedCmds.get(2)[2].contains("169.254.170.23"));
-            assertFalse(capturedCmds.get(2)[2].contains("169.254.169.254"),
-                    "Pod identity relay must not route IMDS traffic");
+            assertEquals(1, capturedCmds.size());
+            assertArrayEquals(EksPodNetworkRouting.buildPodIdentityForwardCommand(
+                    EksClusterManager.DEFAULT_POD_CIDR, "floci-host", 4566), capturedCmds.get(0));
+            String script = capturedCmds.get(0)[2];
+            assertFalse(script.contains("socat"), "nothing is installed or started in the node");
+            assertFalse(script.contains("169.254.169.254"), "pod identity forwarding must not route IMDS traffic");
+        }
+
+        @Test
+        void forwardsTheClustersOwnPodNetwork() {
+            Cluster cluster = new Cluster();
+            cluster.setName("test-cluster");
+            cluster.setPodCidr("10.244.0.0/16");
+
+            manager.configurePodIdentityRelay(cluster, "cid-1");
+
+            assertEquals(1, capturedCmds.size());
+            assertTrue(capturedCmds.get(0)[2].contains("-I PREROUTING 1 -s 10.244.0.0/16 -d 169.254.170.23/32"),
+                    capturedCmds.get(0)[2]);
         }
 
         @Test

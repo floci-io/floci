@@ -2778,35 +2778,33 @@ public class EksClusterManager
         }
     }
 
+    /**
+     * Makes the EKS Pod Identity address, {@code 169.254.170.23:80}, answer in the node: NAT rules
+     * send pod and node requests for it straight to Floci's credentials endpoint (see
+     * {@link EksPodNetworkRouting#buildPodIdentityForwardCommand}). No relay process runs in the node,
+     * so nothing has to be installed there, which a stock {@code rancher/k3s} image could not do.
+     */
     void configurePodIdentityRelay(Cluster cluster, String containerId) {
         if (!config.services().eks().podIdentityWebhook() || !config.tls().enabled()) {
             return;
         }
         try {
-            ContainerExec.Result install = execInContainerForResult(containerId,
-                    Ec2MetadataProxy.installCommand(), 180);
-            if (install.exitCode() != 0) {
-                LOG.warnv("Could not install Pod Identity relay dependencies for EKS cluster {0}: {1}",
-                        cluster.getName(), install.summary());
+            String podCidr = cluster.getPodCidr() != null && !cluster.getPodCidr().isBlank()
+                    ? cluster.getPodCidr()
+                    : DEFAULT_POD_CIDR;
+            ContainerExec.Result forward = execInContainerForResult(containerId,
+                    EksPodNetworkRouting.buildPodIdentityForwardCommand(podCidr, dockerHostResolver.resolve(),
+                            config.port()), 30);
+            if (forward.exitCode() != 0) {
+                LOG.warnv("Could not forward the Pod Identity address for EKS cluster {0} to Floci: {1}",
+                        cluster.getName(), forward.summary());
                 return;
             }
-
-            String flociHost = dockerHostResolver.resolve();
-            int flociPort = config.port();
-
-            ContainerExec.Result start = execInContainerForResult(containerId,
-                    Ec2MetadataProxy.podIdentityStartCommand(flociHost, flociPort), 30);
-            if (start.exitCode() != 0) {
-                LOG.warnv("Could not start link-local Pod Identity relay for EKS cluster {0}: {1}",
-                        cluster.getName(), start.summary());
-                return;
-            }
-
-            configurePodNetworkRouting(cluster, containerId, List.of(EksPodNetworkRouting.POD_IDENTITY_ENDPOINT));
-
-            LOG.infov("Configured link-local Pod Identity relay for EKS cluster {0}", cluster.getName());
+            LOG.infov("Forwarding the Pod Identity address {0}:{1,number,#} to Floci for EKS cluster {2}",
+                    EksPodNetworkRouting.POD_IDENTITY_ENDPOINT.ip(), EksPodNetworkRouting.POD_IDENTITY_ENDPOINT.port(),
+                    cluster.getName());
         } catch (Exception e) {
-            LOG.warnv("Could not configure link-local Pod Identity relay for EKS cluster {0}: {1}",
+            LOG.warnv("Could not forward the Pod Identity address for EKS cluster {0} to Floci: {1}",
                     cluster.getName(), e.getMessage());
         }
     }
