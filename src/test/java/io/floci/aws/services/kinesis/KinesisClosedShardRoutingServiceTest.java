@@ -33,7 +33,7 @@ class KinesisClosedShardRoutingServiceTest {
     }
 
     @Test
-    void putRecordFollowsAnOpenSplitChild() {
+    void putRecordSelectsAnOpenSplitChildByHash() {
         KinesisStream stream = service.createStream(STREAM, 1, REGION);
         service.putRecord(STREAM, DATA, "c", REGION);
         split(stream.getShards().getFirst());
@@ -42,55 +42,53 @@ class KinesisClosedShardRoutingServiceTest {
     }
 
     @Test
-    void putRecordTraversesClosedSplitChildren() {
+    void putRecordRoutesToOpenRangeAfterRepeatedSplits() {
         KinesisStream stream = splitTwoGenerations();
 
-        // "b" hashes to 98, selecting the original parent at index zero modulo seven.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "b", stream.getShards().get(3));
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "b", stream.getShards().get(5));
     }
 
     @ParameterizedTest
     @ValueSource(ints = {1, 2})
-    void putRecordPrefersAnOpenDirectChildOverADeeperDescendant(int closedChildIndex) {
+    void putRecordFindsHashRangeAcrossUnevenSplitDepth(int closedChildIndex) {
         KinesisStream stream = service.createStream(STREAM, 1, REGION);
         split(stream.getShards().getFirst());
         split(stream.getShards().get(closedChildIndex));
 
-        // "d" selects the root modulo five, with one direct child still open.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "d", stream.getShards().get(3 - closedChildIndex));
+        KinesisShard expected = stream.getShards().get(closedChildIndex == 1 ? 2 : 3);
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "d", expected);
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"d", "e"})
-    void putRecordTraversesEitherMergeParentThenAClosedChild(String partitionKey) {
+    @ValueSource(strings = {"a", "b"})
+    void putRecordRoutesAcrossMergedThenSplitRange(String partitionKey) {
         KinesisStream stream = service.createStream(STREAM, 2, REGION);
         service.mergeShards(STREAM, stream.getShards().get(0).getShardId(),
                 stream.getShards().get(1).getShardId(), REGION);
         split(stream.getShards().get(2));
 
-        // With five stored shards, these keys select each original merge parent.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, partitionKey, stream.getShards().get(3));
+        KinesisShard expected = stream.getShards().get("a".equals(partitionKey) ? 3 : 4);
+        assertOpenDestinationAndUnchangedClosedRecords(stream, partitionKey, expected);
     }
 
     @Test
-    void putRecordTraversesSplitThenMergeThenSplit() {
+    void putRecordRoutesAcrossSplitThenMergeThenSplit() {
         KinesisStream stream = service.createStream(STREAM, 1, REGION);
         split(stream.getShards().getFirst());
         service.mergeShards(STREAM, stream.getShards().get(1).getShardId(),
                 stream.getShards().get(2).getShardId(), REGION);
         split(stream.getShards().get(3));
 
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "f", stream.getShards().get(4));
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "f", stream.getShards().get(5));
     }
 
     @Test
-    void putRecordUsesAReachableChildInsteadOfAnEarlierUnrelatedOpenShard() {
+    void putRecordSelectsSplitChildInsteadOfUnrelatedOpenShard() {
         KinesisStream stream = service.createStream(STREAM, 2, REGION);
         service.putRecordWithShardId(STREAM, DATA, "d", "0", REGION);
         split(stream.getShards().getFirst());
 
-        // "d" selects the closed parent modulo four; shard one is unrelated and open.
-        assertOpenDestinationAndUnchangedClosedRecords(stream, "d", stream.getShards().get(2));
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "a", stream.getShards().get(2));
 
         assertEquals(1, stream.getShards().get(0).recordCount());
         assertEquals(0, stream.getShards().get(1).recordCount());
@@ -98,11 +96,11 @@ class KinesisClosedShardRoutingServiceTest {
     }
 
     @Test
-    void putRecordRejectsAClosedShardWithoutDescendants() {
+    void putRecordRejectsWhenNoOpenShardCoversHash() {
         KinesisStream stream = service.createStream(STREAM, 1, REGION);
         stream.getShards().getFirst().setClosed(true);
 
-        assertNoDestination(stream, "b");
+        assertNoDestination(stream, "a");
     }
 
     @Test
@@ -110,11 +108,11 @@ class KinesisClosedShardRoutingServiceTest {
         KinesisStream stream = service.createStream(STREAM, 2, REGION);
         stream.getShards().getFirst().setClosed(true);
 
-        assertNoDestination(stream, "b");
+        assertNoDestination(stream, "a");
     }
 
     @Test
-    void putRecordRejectsACycleWithoutHangingOrAppending() {
+    void putRecordRejectsNoOpenShardDespiteLineageCycle() {
         KinesisStream stream = service.createStream(STREAM, 2, REGION);
         KinesisShard first = stream.getShards().get(0);
         KinesisShard second = stream.getShards().get(1);
@@ -143,7 +141,7 @@ class KinesisClosedShardRoutingServiceTest {
     }
 
     @Test
-    void explicitAccountProducerAlsoTraversesClosedDescendants() {
+    void explicitAccountProducerAlsoRoutesToAnOpenHashRange() {
         KinesisStream stream = splitTwoGenerations();
 
         String sequence = service.putRecordForAccount("000000000000", STREAM, DATA, "b", REGION);

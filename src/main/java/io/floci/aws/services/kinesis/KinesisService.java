@@ -3,6 +3,7 @@ package io.floci.aws.services.kinesis;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -23,11 +24,9 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -1340,47 +1339,10 @@ public class KinesisService implements ResourceProvider {
     }
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {
-        if (explicitHashKey != null) {
-            normalizeOpenShardRanges(stream);
-            return selectShardByExplicitHashKey(stream, explicitHashKey);
-        }
-
-        // Preserve ordinary-key placement, then resolve historical parents to an open descendant.
-        // The producer holds the stream lock, shared with splitShard and mergeShards.
-        List<KinesisShard> shards = stream.getShards();
-        int index = (int) (Math.abs((long) partitionKey.hashCode()) % shards.size());
-        KinesisShard selected = shards.get(index);
-        if (!selected.isClosed()) {
-            return selected;
-        }
-
-        List<KinesisShard> snapshot = List.copyOf(shards);
-        Map<String, List<KinesisShard>> children = new HashMap<>();
-        for (KinesisShard shard : snapshot) {
-            if (shard.getParentShardId() != null) {
-                children.computeIfAbsent(shard.getParentShardId(), ignored -> new ArrayList<>()).add(shard);
-            }
-            if (shard.getAdjacentParentShardId() != null) {
-                children.computeIfAbsent(shard.getAdjacentParentShardId(), ignored -> new ArrayList<>()).add(shard);
-            }
-        }
-        Deque<KinesisShard> pending = new ArrayDeque<>();
-        Set<String> visited = new HashSet<>();
-        pending.add(selected);
-        visited.add(selected.getShardId());
-        while (!pending.isEmpty()) {
-            KinesisShard shard = pending.removeFirst();
-            if (!shard.isClosed()) {
-                return shard;
-            }
-            for (KinesisShard child : children.getOrDefault(shard.getShardId(), List.of())) {
-                if (visited.add(child.getShardId())) {
-                    pending.addLast(child);
-                }
-            }
-        }
-        throw new AwsException("InvalidArgumentException",
-                "Selected shard " + selected.getShardId() + " has no open descendant.", 400);
+        normalizeOpenShardRanges(stream);
+        String hashKey = explicitHashKey != null ? explicitHashKey
+                : new BigInteger(1, Digests.md5(partitionKey.getBytes(StandardCharsets.UTF_8))).toString();
+        return selectShardByExplicitHashKey(stream, hashKey);
     }
 
     private KinesisShard selectShardByExplicitHashKey(KinesisStream stream, String explicitHashKey) {

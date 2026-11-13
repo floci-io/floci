@@ -671,7 +671,7 @@ class KinesisIntegrationTest {
         .when().post("/").then().statusCode(200);
 
         Set<String> reported = new HashSet<>();
-        // Probe enough partition keys that hash(pk) % 2 hits both shards. With 50 keys the
+        // Probe enough partition-key MD5 values to cover both shard ranges. With 50 keys the
         // odds of single-shard routing are ~1 in 2^49, so this is effectively deterministic.
         for (int i = 0; i < 50 && reported.size() < 2; i++) {
             String pk = "pk-" + i;
@@ -863,7 +863,7 @@ class KinesisIntegrationTest {
 
     @Test
     @Order(46)
-    void putRecordPreservesShardForNegativeHashCode() {
+    void putRecordUsesMd5RangeForPreviouslyNegativeJavaHashCode() {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -882,7 +882,7 @@ class KinesisIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ShardId", equalTo("shardId-000000000002"));
+            .body("ShardId", equalTo("shardId-000000000001"));
     }
 
     // --- AT_TIMESTAMP iterator coverage ---
