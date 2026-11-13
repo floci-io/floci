@@ -173,15 +173,14 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         String description = optionalText(PROFILE, props, "Description", DESCRIPTION_MAX_LENGTH, ctx);
         allowed(PROFILE, "DeletionProtectionCheck", text(props, "DeletionProtectionCheck", ctx),
                 DELETION_PROTECTION_CHECKS);
-        // The engine's change decides: ApplicationId and LocationUri are create-only in the registry,
-        // Type updates without interruption.
+        // The engine's change decides: ApplicationId and LocationUri are create-only in the registry.
+        // A Type change is accepted and not applied: UpdateConfigurationProfile has no Type member.
         if (updating && !ctx.changes(PROFILE, props).requiresReplacement()) {
             ConfigurationProfile current = service.findConfigurationProfile(ctx.priorPhysicalId())
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "Configuration profile not found", 404));
             snapshotBeforeUpdate(r, current);
-            service.updateConfigurationProfile(current.getApplicationId(), current.getId(), name, description,
-                    type);
+            service.updateConfigurationProfile(current.getApplicationId(), current.getId(), name, description);
             return;
         }
         Map<String, Object> request = new HashMap<>();
@@ -476,7 +475,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
             case PROFILE -> {
                 ConfigurationProfile prior = MAPPER.treeToValue(snapshot, ConfigurationProfile.class);
                 service.updateConfigurationProfile(prior.getApplicationId(), prior.getId(), prior.getName(),
-                        prior.getDescription(), prior.getType());
+                        prior.getDescription());
             }
             case STRATEGY -> {
                 DeploymentStrategy prior = MAPPER.treeToValue(snapshot, DeploymentStrategy.class);

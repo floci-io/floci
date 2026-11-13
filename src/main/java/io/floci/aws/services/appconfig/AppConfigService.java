@@ -300,14 +300,10 @@ public class AppConfigService {
         profile.setName((String) request.get("Name"));
         profile.setDescription((String) request.get("Description"));
         profile.setLocationUri((String) request.get("LocationUri"));
-        profile.setType(profileType(profile.getLocationUri(), (String) request.get("Type")));
+        String type = (String) request.get("Type");
+        profile.setType(type == null && "hosted".equals(profile.getLocationUri()) ? "AWS.Freeform" : type);
         profileStore.put(profile.getId(), profile);
         return profile;
-    }
-
-    /** The type a profile holds: a hosted profile without one is {@code AWS.Freeform}. */
-    private static String profileType(String locationUri, String type) {
-        return type == null && "hosted".equals(locationUri) ? "AWS.Freeform" : type;
     }
 
     public ConfigurationProfile getConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
@@ -360,20 +356,11 @@ public class AppConfigService {
      */
     public synchronized ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId,
                                                                         String name, String description) {
-        return updateConfigurationProfile(applicationId, profileId, name, description,
-                profileStore.get(profileId).map(ConfigurationProfile::getType).orElse(null));
-    }
-
-    /** The same, also setting the profile's type, which AWS updates without interruption. */
-    public synchronized ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId,
-                                                                        String name, String description,
-                                                                        String type) {
         ConfigurationProfile profile = copy(profileStore.get(profileId)
                 .filter(p -> applicationId.equals(p.getApplicationId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404)));
         profile.setName(name);
         profile.setDescription(description);
-        profile.setType(profileType(profile.getLocationUri(), type));
         profileStore.put(profile.getId(), profile);
         return profile;
     }

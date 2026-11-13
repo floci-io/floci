@@ -2352,9 +2352,11 @@ public class CloudFormationService implements ResourceProvider {
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
             Map<String, JsonNode[]> comparedProperties = new HashMap<>();
+            Set<String> replacedResourceIds = new HashSet<>();
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
-                    : changedResourceIds(stack, templateBody, params, region, comparedProperties);
+                    : changedResourceIds(stack, templateBody, params, region, comparedProperties,
+                            replacedResourceIds);
             JsonNode previousResources = isCreate
                     ? objectMapper.missingNode()
                     : previousResources(stack, previousState, region, accountId);
@@ -2511,7 +2513,9 @@ public class CloudFormationService implements ResourceProvider {
                                 ProvisionContext.isUpdate(resource.getPhysicalId()), priorProps,
                                 provisionProps,
                                 comparedForms != null ? comparedForms[0] : null,
-                                comparedForms != null ? comparedForms[1] : null);
+                                comparedForms != null ? comparedForms[1] : null,
+                                changedResourceIds.contains(logicalId)
+                                        ? replacedResourceIds.contains(logicalId) : null);
                         resource = dispatcher.provision(logicalId, type, provisionProps,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
@@ -2784,10 +2788,13 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * The ids of the resources an update adds or modifies. {@code comparedProperties} receives, for
      * the modified ones the diff compared, the {@code Properties} of the compared forms, previous
-     * then current; see the change-set diff it comes from.
+     * then current; see the change-set diff it comes from. {@code replacedIds} receives the modified
+     * ones whose change says {@code Replacement: True}, so an update replaces exactly what the
+     * preview said it would.
      */
     private Set<String> changedResourceIds(Stack stack, String templateBody, Map<String, String> params,
-                                           String region, Map<String, JsonNode[]> comparedProperties) {
+                                           String region, Map<String, JsonNode[]> comparedProperties,
+                                           Set<String> replacedIds) {
         ChangeSet changeSet = new ChangeSet();
         changeSet.setStackName(stack.getStackName());
         changeSet.setStackId(stack.getStackId());
@@ -2799,6 +2806,9 @@ public class CloudFormationService implements ResourceProvider {
         for (ResourceChange change : computeChangeSetChanges(changeSet, region, comparedProperties)) {
             if ("Add".equals(change.action()) || "Modify".equals(change.action())) {
                 changedResourceIds.add(change.logicalResourceId());
+                if ("True".equals(change.replacement())) {
+                    replacedIds.add(change.logicalResourceId());
+                }
             }
         }
         return changedResourceIds;
