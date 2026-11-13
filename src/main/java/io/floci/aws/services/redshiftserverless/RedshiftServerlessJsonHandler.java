@@ -48,6 +48,7 @@ public class RedshiftServerlessJsonHandler {
     private final RedshiftServerlessAdminJsonHandler admin;
     private final RedshiftServerlessCustomDomainService customDomains;
     private final RedshiftServerlessSharedSnapshots sharedSnapshots;
+    private final RedshiftServerlessSnapshotKeyAccess snapshotKeys;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
@@ -55,7 +56,8 @@ public class RedshiftServerlessJsonHandler {
                                          RedshiftServerlessUsageLimitService usageLimits,
                                          RedshiftServerlessAdminJsonHandler admin,
                                          RedshiftServerlessCustomDomainService customDomains,
-                                         RedshiftServerlessSharedSnapshots sharedSnapshots) {
+                                         RedshiftServerlessSharedSnapshots sharedSnapshots,
+                                         RedshiftServerlessSnapshotKeyAccess snapshotKeys) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
@@ -63,6 +65,7 @@ public class RedshiftServerlessJsonHandler {
         this.admin = admin;
         this.customDomains = customDomains;
         this.sharedSnapshots = sharedSnapshots;
+        this.snapshotKeys = snapshotKeys;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -306,6 +309,11 @@ public class RedshiftServerlessJsonHandler {
         String workgroupName = ServerlessSupport.text(request, "workgroupName");
         Boolean manageAdminPassword = ServerlessSupport.bool(request, "manageAdminPassword");
         String kmsKeyId = ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId");
+        if (shared) {
+            // A snapshot that is not there is answered as not found by the restore itself.
+            service.findSnapshotOfAccount(ownerAccount, snapshotName, region)
+                    .ifPresent(found -> snapshotKeys.requireRestoreAccess(found, ownerAccount, region));
+        }
         RedshiftServerlessService.RestoreResult result = shared
                 ? service.restoreFromSharedSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
                         manageAdminPassword, kmsKeyId, region)

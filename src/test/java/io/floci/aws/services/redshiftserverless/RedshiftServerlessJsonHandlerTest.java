@@ -134,7 +134,8 @@ class RedshiftServerlessJsonHandlerTest {
                         new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
                         new RedshiftServerlessScheduledActionService(storageFactory, service,
                                 mock(RedshiftServerlessScheduledActionAuthorizer.class), regionResolver)),
-                customDomains, mock(RedshiftServerlessSharedSnapshots.class));
+                customDomains, mock(RedshiftServerlessSharedSnapshots.class),
+                mock(RedshiftServerlessSnapshotKeyAccess.class));
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

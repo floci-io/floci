@@ -13,6 +13,7 @@ import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.kms.keytype.KmsKeyType;
@@ -2340,6 +2341,35 @@ public class KmsService implements ResourceProvider {
         } catch (AwsException e) {
             return Optional.empty();
         }
+    }
+
+    /**
+     * The key policy of the key {@code keyArn} names, read from the account the ARN names rather than
+     * the caller's, so a service can judge another account's key for a caller. An alias ARN is
+     * followed to its key. Empty when that account holds no such key, or the key has no policy.
+     */
+    public Optional<String> findKeyPolicyOfAccount(String keyArn) {
+        if (!AwsArnUtils.isArnFor(keyArn, "kms") || !(keyStore instanceof AccountAwareStorageBackend<KmsKey> keys)
+                || !(aliasStore instanceof AccountAwareStorageBackend<KmsAlias> aliases)) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(keyArn);
+        String resource = arn.resource();
+        String keyId;
+        if (resource.startsWith("alias/")) {
+            keyId = aliases.getForAccount(arn.accountId(), arn.region() + "::" + resource)
+                    .map(KmsAlias::getTargetKeyId).orElse(null);
+        } else if (resource.startsWith("key/")) {
+            keyId = resource.substring("key/".length());
+        } else {
+            keyId = null;
+        }
+        if (keyId == null) {
+            return Optional.empty();
+        }
+        return keys.getForAccount(arn.accountId(), arn.region() + "::" + keyId)
+                .map(KmsKey::getPolicy)
+                .filter(policy -> policy != null && !policy.isBlank());
     }
 
     /**

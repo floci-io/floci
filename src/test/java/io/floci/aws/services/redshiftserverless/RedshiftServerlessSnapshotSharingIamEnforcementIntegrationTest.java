@@ -188,6 +188,73 @@ class RedshiftServerlessSnapshotSharingIamEnforcementIntegrationTest {
         denied(call(callerKey, "RestoreFromSnapshot", byName));
     }
 
+    @Test
+    void aSnapshotUnderACustomerManagedKeyIsRestorableOnlyWhenTheKeyPolicyAllowsTheCaller() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String sourceNamespace = "kms-src-" + suffix;
+        String snapshot = "kms-snap-" + suffix;
+        String namespace = "kms-dst-" + suffix;
+        String workgroup = "kms-wg-" + suffix;
+        String callerKey = user(CALLER, ALLOW_RESTORE);
+        String keyArn = kms(OWNER, "CreateKey", Map.of("Description", "snapshot key"))
+                .statusCode(200).extract().path("KeyMetadata.Arn");
+        String keyId = keyArn.substring(keyArn.lastIndexOf('/') + 1);
+
+        call(OWNER, "CreateNamespace", Map.of("namespaceName", sourceNamespace, "adminUsername", "admin",
+                "kmsKeyId", keyArn)).statusCode(200);
+        String snapshotArn = call(OWNER, "CreateSnapshot",
+                Map.of("snapshotName", snapshot, "namespaceName", sourceNamespace))
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+        call(CALLER, "CreateNamespace", Map.of("namespaceName", namespace, "adminUsername", "admin"))
+                .statusCode(200);
+        call(CALLER, "CreateWorkgroup", Map.of("workgroupName", workgroup, "namespaceName", namespace))
+                .statusCode(200);
+        call(OWNER, "PutResourcePolicy", Map.of("resourceArn", snapshotArn, "policy",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::"
+                        + CALLER + ":root\"},\"Action\":\"redshift-serverless:RestoreFromSnapshot\"}]}"))
+                .statusCode(200);
+        Map<String, String> restore = Map.of("namespaceName", namespace, "workgroupName", workgroup,
+                "snapshotName", snapshot, "ownerAccount", OWNER);
+
+        // The snapshot is shared, but its key is the owner's alone.
+        keyDenied(call(callerKey, "RestoreFromSnapshot", restore), keyArn);
+
+        putKeyPolicy(keyId, keyStatement("Allow", CALLER));
+        call(callerKey, "RestoreFromSnapshot", restore).statusCode(200).body("snapshotName", equalTo(snapshot));
+
+        putKeyPolicy(keyId, keyStatement("Allow", CALLER) + "," + keyStatement("Deny", CALLER));
+        keyDenied(call(callerKey, "RestoreFromSnapshot", restore), keyArn);
+
+        // Withdrawing the grant takes the access away at the next restore.
+        putKeyPolicy(keyId, keyStatement("Allow", OWNER));
+        keyDenied(call(callerKey, "RestoreFromSnapshot", restore), keyArn);
+    }
+
+    private static String keyStatement(String effect, String account) {
+        return "{\"Effect\":\"" + effect + "\",\"Principal\":{\"AWS\":\"arn:aws:iam::" + account
+                + ":root\"},\"Action\":\"kms:*\",\"Resource\":\"*\"}";
+    }
+
+    private void putKeyPolicy(String keyId, String statements) {
+        kms(OWNER, "PutKeyPolicy", Map.of("KeyId", keyId, "PolicyName", "default",
+                "Policy", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}")).statusCode(200);
+    }
+
+    private static void keyDenied(ValidatableResponse response, String keyArn) {
+        response.statusCode(400).body("__type", equalTo("AccessDeniedException"))
+                .body("message", containsString("kms:Decrypt")).body("message", containsString(keyArn));
+    }
+
+    private ValidatableResponse kms(String accessKeyId, String action, Map<String, String> body) {
+        return given().port(endpoint.getPort())
+                .header("X-Amz-Target", "TrentService." + action)
+                .header("Authorization", auth(accessKeyId, "kms"))
+                .contentType(CONTENT_TYPE)
+                .body(body)
+                .when().post("/")
+                .then();
+    }
+
     private static void denied(ValidatableResponse response) {
         response.statusCode(400).body("__type", equalTo("AccessDeniedException"))
                 .body("message", containsString("redshift-serverless:RestoreFromSnapshot"));
