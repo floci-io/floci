@@ -416,17 +416,20 @@ class PaymentCryptographyKeyExchangeTest {
                 () -> service.exportKey("us-east-1", key.getKeyId(), "Nonsense", Map.of(), "", ""));
         assertEquals("ValidationException", refused.getErrorCode());
     }
-    @Test
-    void aKeyThatLeavesUnderACertificateComesBack() {
-        // The service that exports mints the parameters; the service that imports holds the
-        // token that names the key the block is wrapped under.
+    /**
+     * The exchange a TR-34 block goes through.
+     *
+     * <p>The parameters, the two authorities and the material of the export and of the
+     * import are built here, so that a change to the TR-34 request is made in one place
+     * and not in every test that makes a block.
+     *
+     * @param wrappingAlgorithm the algorithm of the receiver's key
+     */
+    private Tr34Exchange tr34Exchange(String wrappingAlgorithm) {
         Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
                 "RSA_2048", false);
         Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-
-        PaymentCryptographyKey key = createKey("TDES_2KEY",
-                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+                wrappingAlgorithm, false);
         // The receiver's authority vouches for the certificate the key is wrapped under; the
         // sender's authority vouches for the certificate the block was signed with.
         PaymentCryptographyKey receiver = createAuthority(
@@ -434,28 +437,56 @@ class PaymentCryptographyKeyExchangeTest {
         PaymentCryptographyKey sender = createAuthority(
                 (String) exportParameters.get("SigningKeyCertificate"));
 
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
+        Map<String, Object> exportMaterial = new LinkedHashMap<>();
+        exportMaterial.put("ExportToken", exportParameters.get("ExportToken"));
+        exportMaterial.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
+        exportMaterial.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
+        exportMaterial.put("KeyBlockFormat", "X9_TR34_2012");
+        exportMaterial.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        return new Tr34Exchange(exportParameters, importParameters, exportMaterial, receiver, sender);
+    }
+
+    /** The exchange a TR-34 block goes through, under the receiver's RSA-2048 key. */
+    private Tr34Exchange tr34Exchange() {
+        return tr34Exchange("RSA_2048");
+    }
+
+    /** The parameters, the authorities and the material of a TR-34 exchange. */
+    private record Tr34Exchange(Map<String, Object> exportParameters,
+                        Map<String, Object> importParameters,
+                        Map<String, Object> exportMaterial,
+                        PaymentCryptographyKey receiver,
+                        PaymentCryptographyKey sender) {
+
+        /** The material of a TR-34 import, for the block an export made. */
+        Map<String, Object> importMaterial(String block) {
+            Map<String, Object> incoming = new LinkedHashMap<>();
+            incoming.put("ImportToken", importParameters.get("ImportToken"));
+            incoming.put("SigningKeyCertificate", exportParameters.get("SigningKeyCertificate"));
+            incoming.put("WrappedKeyBlock", block);
+            incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
+            incoming.put("KeyBlockFormat", "X9_TR34_2012");
+            incoming.put("RandomNonce", "A1B2C3D4E5F60718");
+            return incoming;
+        }
+    }
+
+    @Test
+    void aKeyThatLeavesUnderACertificateComesBack() {
+        // The service that exports mints the parameters; the service that imports holds the
+        // token that names the key the block is wrapped under.
+        Tr34Exchange exchange = tr34Exchange();
+        PaymentCryptographyKey key = createKey("TDES_2KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material, "", "");
+                exchange.exportMaterial(), "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         assertEquals("TR34_KEY_BLOCK", wrapped.get("WrappedKeyMaterialFormat"));
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
-        incoming.put("SigningKeyCertificate", exportParameters.get("SigningKeyCertificate"));
-        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
-        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
-
-        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock", incoming,
-                "", true, Map.of());
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock",
+                exchange.importMaterial((String) wrapped.get("KeyMaterial")), "", true, Map.of());
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals(key.getKeyUsage(), imported.getKeyUsage());
@@ -465,40 +496,17 @@ class PaymentCryptographyKeyExchangeTest {
     void theTr34HeaderCarriesTheExportabilityTheRequestNames() throws Exception {
         // The request may narrow the exportability of the key, and the block carries the
         // narrowed one, so the key that comes back is one that may not leave again.
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-
+        Tr34Exchange exchange = tr34Exchange();
         PaymentCryptographyKey key = createKey("TDES_2KEY",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-        PaymentCryptographyKey sender = createAuthority(
-                (String) exportParameters.get("SigningKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
-        material.put("KeyBlockHeaders", Map.of("KeyExportability", "NON_EXPORTABLE"));
+        exchange.exportMaterial().put("KeyBlockHeaders", Map.of("KeyExportability", "NON_EXPORTABLE"));
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material, "", "");
+                exchange.exportMaterial(), "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
-        incoming.put("SigningKeyCertificate", exportParameters.get("SigningKeyCertificate"));
-        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
-        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
-
-        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock", incoming,
-                "", true, Map.of());
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock",
+                exchange.importMaterial((String) wrapped.get("KeyMaterial")), "", true, Map.of());
 
         assertFalse(imported.isExportable(),
                 "the key came back exportable although the request narrowed it");
@@ -508,25 +516,14 @@ class PaymentCryptographyKeyExchangeTest {
     void aTr34ExportWithOptionalBlocksIsRefused() {
         // The TR-34 block's header names the key and carries nothing else, so a request
         // that names optional blocks is refused rather than answered without them.
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
+        Tr34Exchange exchange = tr34Exchange();
         PaymentCryptographyKey key = createKey("TDES_2KEY",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
-        material.put("KeyBlockHeaders", Map.of("OptionalBlocks", Map.of("AB", "0011")));
+        exchange.exportMaterial().put("KeyBlockHeaders", Map.of("OptionalBlocks", Map.of("AB", "0011")));
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock", material, "", ""));
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                        exchange.exportMaterial(), "", ""));
 
         assertEquals("ValidationException", refused.getErrorCode());
     }
@@ -535,33 +532,17 @@ class PaymentCryptographyKeyExchangeTest {
     void aTr34BlockWithoutANonceComesBack() {
         // The nonce is optional in the model, so a block the service made without one
         // comes back without one.
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
+        Tr34Exchange exchange = tr34Exchange();
         PaymentCryptographyKey key = createKey("TDES_2KEY",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-        PaymentCryptographyKey sender = createAuthority(
-                (String) exportParameters.get("SigningKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
+        exchange.exportMaterial().remove("RandomNonce");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material, "", "");
+                exchange.exportMaterial(), "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
-        incoming.put("SigningKeyCertificate", exportParameters.get("SigningKeyCertificate"));
-        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
-        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
+        Map<String, Object> incoming = exchange.importMaterial((String) wrapped.get("KeyMaterial"));
+        incoming.remove("RandomNonce");
 
         PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock", incoming,
                 "", true, Map.of());
@@ -574,23 +555,14 @@ class PaymentCryptographyKeyExchangeTest {
         // The service signs the block with the key the export parameters issued, so a
         // request that names no token is refused with the reason, not with a key that is
         // not found.
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
+        Tr34Exchange exchange = tr34Exchange();
         PaymentCryptographyKey key = createKey("TDES_2KEY",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
+        exchange.exportMaterial().remove("ExportToken");
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock", material, "", ""));
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                        exchange.exportMaterial(), "", ""));
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("export token"), refused.getMessage());
@@ -611,18 +583,13 @@ class PaymentCryptographyKeyExchangeTest {
         // A caller that signs its own block can put an exportability the service does not
         // read into the header, and the service refuses it rather than taking it for an
         // exportable one.
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Crafted crafted = craftedBlock(importParameters, "B9999D0ATB00X0000",
+        Tr34Exchange exchange = tr34Exchange();
+        Crafted crafted = craftedBlock(exchange, "B9999D0ATB00X0000",
                 HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F"), false);
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        Map<String, Object> incoming = exchange.importMaterial(crafted.block());
         incoming.put("SigningKeyCertificate", crafted.signingCertificate());
-        incoming.put("WrappedKeyBlock", crafted.block());
         incoming.put("CertificateAuthorityPublicKeyIdentifier", crafted.authority().getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
@@ -635,19 +602,14 @@ class PaymentCryptographyKeyExchangeTest {
     void aTr34BlockUnderATooWeakTokenIsRefused() throws Exception {
         // The import token's own key protects the key that comes in, so a key stronger
         // than the token may not come in under it.
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Crafted crafted = craftedBlock(importParameters, "D9999D0AB00E0000",
+        Tr34Exchange exchange = tr34Exchange();
+        Crafted crafted = craftedBlock(exchange, "D9999D0AB00E0000",
                 HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F"
                         + "101112131415161718191A1B1C1D1E1F"), true);
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        Map<String, Object> incoming = exchange.importMaterial(crafted.block());
         incoming.put("SigningKeyCertificate", crafted.signingCertificate());
-        incoming.put("WrappedKeyBlock", crafted.block());
         incoming.put("CertificateAuthorityPublicKeyIdentifier", crafted.authority().getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
@@ -658,42 +620,21 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void anAesKeyLeavesUnderATr34BlockUnderItsOwnCipher() {
         // The key block is enciphered with the cipher the key needs, so an AES key is not
-        // protected by something weaker than itself.
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_3072", false);
+        // protected by something weaker than itself. An AES-128 key needs a receiver whose
+        // certificate is RSA-3072 or RSA-4096.
+        Tr34Exchange exchange = tr34Exchange("RSA_3072");
         PaymentCryptographyKey key = createKey("AES_128",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-        PaymentCryptographyKey sender = createAuthority(
-                (String) exportParameters.get("SigningKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material, "", "");
+                exchange.exportMaterial(), "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         // The content encryption is the AES one, and not the Triple DES one.
         assertTrue(((String) wrapped.get("KeyMaterial")).contains("608648016503040102"),
                 "the block does not name the AES content encryption");
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
-        incoming.put("SigningKeyCertificate", exportParameters.get("SigningKeyCertificate"));
-        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
-        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
-
-        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock", incoming,
-                "", true, Map.of());
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock",
+                exchange.importMaterial((String) wrapped.get("KeyMaterial")), "", true, Map.of());
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
     }
@@ -715,15 +656,27 @@ class PaymentCryptographyKeyExchangeTest {
      * @param aes whether the key is an AES one
      * @return the block, the authority that vouches for its signature and the certificate
      */
-    private Crafted craftedBlock(Map<String, Object> importParameters, String header,
-                                 byte[] clearKey, boolean aes) throws Exception {
+    /**
+     * A TR-34 block the test builds and signs itself.
+     *
+     * <p>The service signs the blocks it makes, so a block that carries something the
+     * service would never write is put to it by a caller that signs its own.
+     *
+     * @param exchange the exchange the block travels through
+     * @param header the TR-31 header the block carries
+     * @param clearKey the key the block carries
+     * @param aes whether the key is an AES one
+     * @return the block, the authority that vouches for its signature and the certificate
+     */
+    private Crafted craftedBlock(Tr34Exchange exchange, String header, byte[] clearKey,
+                                 boolean aes) throws Exception {
         SecureRandom random = new SecureRandom();
         KeyPair signer = PaymentCryptographyKeyPairs.rsa(2048, random);
         Certificates.Minted certificate = CertificatesTest.mint(signer.getPublic(), "floci sender",
                 signer.getPrivate(), "floci sender");
         PaymentCryptographyKey authority = createAuthority(certificate.pem());
         X509Certificate wrapping = Certificates.parseCertificate(
-                (String) importParameters.get("WrappingKeyCertificate"));
+                (String) exchange.importParameters().get("WrappingKeyCertificate"));
         byte[] block = Tr34.build(clearKey, header,
                 HexFormat.of().parseHex("A1B2C3D4E5F60718"), signer.getPrivate(),
                 wrapping.getPublicKey(), null, certificate.der(), aes);
@@ -733,27 +686,12 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void aBlockThatWasSignedByAnotherAuthorityDoesNotOpen() {
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-
+        Tr34Exchange exchange = tr34Exchange();
         PaymentCryptographyKey key = createKey("TDES_2KEY",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-        PaymentCryptographyKey sender = createAuthority(
-                (String) exportParameters.get("SigningKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material, "", "");
+                exchange.exportMaterial(), "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
         // Another authority signs it, so the signature does not verify against this one.
@@ -762,13 +700,8 @@ class PaymentCryptographyKeyExchangeTest {
         Certificates.Minted otherCertificate = CertificatesTest.mint(other.getPublic(),
                 "floci other", other.getPrivate(), "floci other");
 
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        Map<String, Object> incoming = exchange.importMaterial((String) wrapped.get("KeyMaterial"));
         incoming.put("SigningKeyCertificate", otherCertificate.pem());
-        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
-        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
@@ -787,32 +720,16 @@ class PaymentCryptographyKeyExchangeTest {
         assertTrue(refused.getMessage().contains("signed with RSA_2048"), refused.getMessage());
     }
     @Test
-    void aTr34BlockThatCarriesNoHeaderIsRefused() {
+    void aTr34BlockThatCarriesNoHeaderIsRefused() throws Exception {
         // A block that is signed correctly but whose key block names no key says nothing
         // about what it carries, so it is refused rather than read.
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        X509Certificate wrapping = Certificates.parseCertificate(
-                (String) importParameters.get("WrappingKeyCertificate"));
+        Tr34Exchange exchange = tr34Exchange();
+        Crafted crafted = craftedBlock(exchange, "",
+                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F"), false);
 
-        SecureRandom random = new SecureRandom();
-        KeyPair signing = PaymentCryptographyKeyPairs.rsa(2048, random);
-        Certificates.Minted certificate = CertificatesTest.mint(signing.getPublic(),
-                "floci sender", signing.getPrivate(), "floci sender");
-        PaymentCryptographyKey sender = createAuthority(certificate.pem());
-
-        byte[] block = Tr34.build(
-                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F"),
-                "", HexFormat.of().parseHex("A1B2C3D4E5F60718"), signing.getPrivate(),
-                wrapping.getPublicKey());
-
-        Map<String, Object> incoming = new LinkedHashMap<>();
-        incoming.put("ImportToken", importParameters.get("ImportToken"));
-        incoming.put("SigningKeyCertificate", certificate.pem());
-        incoming.put("WrappedKeyBlock", HexFormat.of().withUpperCase().formatHex(block));
-        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
-        incoming.put("KeyBlockFormat", "X9_TR34_2012");
-        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
+        Map<String, Object> incoming = exchange.importMaterial(crafted.block());
+        incoming.put("SigningKeyCertificate", crafted.signingCertificate());
+        incoming.put("CertificateAuthorityPublicKeyIdentifier", crafted.authority().getKeyId());
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
@@ -831,24 +748,10 @@ class PaymentCryptographyKeyExchangeTest {
         PaymentCryptographyKey base = service.createKey("us-east-1", attributes,
                 Map.of("DeriveKey", Boolean.TRUE), false, true, Map.of());
 
-        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
-                "RSA_2048", false);
-        PaymentCryptographyKey receiver = createAuthority(
-                (String) importParameters.get("WrappingKeyCertificate"));
-        PaymentCryptographyKey sender = createAuthority(
-                (String) exportParameters.get("SigningKeyCertificate"));
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("ExportToken", exportParameters.get("ExportToken"));
-        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
-        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
-        material.put("KeyBlockFormat", "X9_TR34_2012");
-        material.put("RandomNonce", "A1B2C3D4E5F60718");
+        Tr34Exchange exchange = tr34Exchange();
 
         Map<String, Object> answer = service.exportKey("us-east-1", base.getKeyId(), "Tr34KeyBlock",
-                material, "12345678900000000001", "");
+                exchange.exportMaterial(), "12345678900000000001", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
         // The header travels in the clear, so it can be read without opening the block.
