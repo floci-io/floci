@@ -286,6 +286,7 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
+            validateTagCapacity(stream.getTags(), tags);
             stream.getTags().putAll(tags);
             store.put(key, stream);
         }
@@ -386,6 +387,10 @@ public class KinesisService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException", "Invalid tag key or value", 400);
             }
         }
+        validateTagCapacity(current, added);
+    }
+
+    private static void validateTagCapacity(Map<String, String> current, Map<String, String> added) {
         Set<String> keys = new HashSet<>(current.keySet());
         keys.addAll(added.keySet());
         if (keys.size() > 50 && added.keySet().stream().anyMatch(key -> !current.containsKey(key))) {
