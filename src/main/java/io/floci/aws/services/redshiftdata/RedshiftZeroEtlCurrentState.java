@@ -121,23 +121,17 @@ public final class RedshiftZeroEtlCurrentState {
     }
 
     /**
-     * The change an AWS stream record makes to the current state: a {@code REMOVE} deletes its keys, and any other
-     * event upserts its {@code NewImage}. A record of a stream that carries no new image (a {@code KEYS_ONLY} or
-     * {@code OLD_IMAGE} view) is projected from the item as it is now, read through {@code lookup}, and a key that
-     * no longer has one is deleted. A record without keys projects nothing.
+     * The change a stream record makes to the current state: the record names a key, and the key is projected as
+     * the source holds it now, read through {@code lookup}. The item is upserted, or deleted when the source no
+     * longer has it. The record's own images are not used: a record replayed after the backfill scan read a newer
+     * version of its item, or after the item changed again, would otherwise put its older image over the newer one
+     * until the later record was replayed. Read as it is now, every record of a key projects the same state, so
+     * replay order cannot regress a row. A record without keys projects nothing.
      */
     public static Change changeOf(JsonNode record, Function<JsonNode, JsonNode> lookup) {
-        JsonNode dynamodb = record.path("dynamodb");
-        JsonNode keys = dynamodb.get("Keys");
+        JsonNode keys = record.path("dynamodb").get("Keys");
         if (keys == null || !keys.isObject() || keys.isEmpty()) {
             return null;
-        }
-        if ("REMOVE".equals(record.path("eventName").asText())) {
-            return new Change(keys, null);
-        }
-        JsonNode newImage = dynamodb.get("NewImage");
-        if (newImage != null && newImage.isObject()) {
-            return new Change(keys, newImage);
         }
         JsonNode current = lookup.apply(keys);
         return new Change(keys, current != null && current.isObject() ? current : null);

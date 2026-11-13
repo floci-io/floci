@@ -836,8 +836,12 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         TableDefinition table = createTableAs("111111111111", tableName, true);
         Integration integration = tableSourceIntegration(table);
         integration.setBackfillCompleted(true);
+        // Key 1 is in the source and key 2 was deleted from it; each is named by an insert and a remove.
+        ObjectNode held = itemWithId("1");
+        held.putObject("note").put("S", "held");
+        RequestScopes.runAs("111111111111", () -> dynamoDbService.putItem(tableName, held, "us-east-1"));
         DynamoDbStreamReader.Record inserted = imageRecord("s1", "INSERT", "1", "first");
-        DynamoDbStreamReader.Record removed = keysOnlyRecord("s2", "REMOVE", "1");
+        DynamoDbStreamReader.Record removed = keysOnlyRecord("s2", "REMOVE", "2");
         streams.shard(table.getStreamArn(), SHARD_ID, null).addAll(List.of(inserted, removed));
 
         new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer).pollOnce(integration);
@@ -853,10 +857,66 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         inOrder.verify(writer).applyChanges(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), eq(state.getValue()),
                 changes.capture());
         assertEquals(tableName, state.getValue().tableName());
-        assertEquals(List.of(new Change(inserted.awsRecord().path("dynamodb").path("Keys"),
-                        inserted.awsRecord().path("dynamodb").path("NewImage")),
+        assertEquals(List.of(new Change(inserted.awsRecord().path("dynamodb").path("Keys"), held),
                 new Change(removed.awsRecord().path("dynamodb").path("Keys"), null)), changes.getValue());
         assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+    }
+
+    /**
+     * The scan read version three of an item while the stream still holds the MODIFY records that led to it. They
+     * are replayed after the scan, carrying older images, and must not put those over the newer row.
+     */
+    @Test
+    void replayedRecordsOfAnItemTheScanReadNewerNeverRegressItsRow() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-replayed-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        ObjectNode versionThree = itemWithId("1");
+        versionThree.putObject("note").put("S", "version three");
+        RequestScopes.runAs("111111111111", () -> dynamoDbService.putItem(tableName, versionThree, "us-east-1"));
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        DynamoDbStreamReader.Record versionTwo = imageRecord("s1", "MODIFY", "1", "version two");
+        DynamoDbStreamReader.Record versionThreeRecord = imageRecord("s2", "MODIFY", "1", "version three");
+        streams.shard(table.getStreamArn(), SHARD_ID, null).addAll(List.of(versionTwo));
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb,
+                mock(RedshiftService.class), writer);
+
+        consumer.pollOnce(integration);
+        streams.shard(table.getStreamArn(), SHARD_ID, null).add(versionThreeRecord);
+        consumer.pollOnce(integration);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Change>> changes = ArgumentCaptor.forClass(List.class);
+        verify(writer, times(2)).applyChanges(any(), any(), any(), changes.capture());
+        // Across polls, the older record's poll and the newer one's both leave version three in the row.
+        for (List<Change> applied : changes.getAllValues()) {
+            assertEquals(1, applied.size());
+            assertEquals(versionThree, applied.get(0).item());
+        }
+    }
+
+    @Test
+    void manyRecordsOfOneKeyProjectItOnce() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-chatty-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        streams.shard(table.getStreamArn(), SHARD_ID, null).addAll(List.of(
+                imageRecord("s1", "INSERT", "1", "a"), imageRecord("s2", "MODIFY", "1", "b"),
+                keysOnlyRecord("s3", "REMOVE", "1")));
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, mock(RedshiftService.class), writer)
+                .pollOnce(integration);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Change>> changes = ArgumentCaptor.forClass(List.class);
+        verify(writer).applyChanges(any(), any(), any(), changes.capture());
+        assertEquals(1, changes.getValue().size());
+        assertTrue(changes.getValue().get(0).isDelete());
     }
 
     @Test

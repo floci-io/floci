@@ -27,6 +27,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,6 +36,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
@@ -287,7 +289,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         List<JsonNode> awsRecords = records.stream().map(DynamoDbStreamReader.Record::awsRecord).toList();
         writer.writeBatch(integration.getAccountId(), integration.getTargetArn(),
                 integration.getLandingTableName(), awsRecords);
-        projectSafely(integration, null, awsRecords);
+        projectSafely(integration, null, () -> readThrough(integration, awsRecords));
         committed.put(shardId, records.get(records.size() - 1).sequenceNumber());
         redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
                 committed, true, null);
@@ -330,7 +332,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
                 writer.writeBatch(integration.getAccountId(), integration.getTargetArn(),
                         integration.getLandingTableName(), records);
                 if (currentState != null) {
-                    projectSafely(integration, currentState, records);
+                    projectSafely(integration, currentState, () -> scannedItems(records));
                 }
             }
 
@@ -354,12 +356,12 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
      * {@link #restoreProjection} rebuilds the table from a scan once it can be written again.
      */
     private void projectSafely(Integration integration, RedshiftZeroEtlCurrentState currentState,
-                               List<JsonNode> records) {
+                               Supplier<List<Change>> changes) {
         if (stalledProjections.contains(integration.getIntegrationArn())) {
             return;
         }
         try {
-            project(integration, currentState, records);
+            project(integration, currentState, changes.get());
         } catch (RuntimeException e) {
             stallProjection(integration, e);
         }
@@ -420,28 +422,51 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
     }
 
     /**
-     * Applies the records to the current-state table, after they landed: each {@code INSERT} or {@code MODIFY}
-     * replaces the item under its keys and each {@code REMOVE} deletes it, in stream order, so the table holds
-     * what the source holds once every record has landed. The projection is idempotent, so a record landed twice,
-     * once by the backfill scan and once from the stream, or written again after a failed poll, leaves the same
-     * state. A record whose stream carries no new image is projected from the item as the source has it now.
-     *
-     * @param currentState the table resolved by the caller, or null to resolve it from the source table
+     * The changes the stream records make: each key a record names, projected as the source holds it now, once
+     * however many records name it. A record's own image is not used, so replaying a record after the backfill
+     * scan read a newer version of its item, or after the item changed again, cannot put the older image over the
+     * newer one: every record of a key projects the same state, and the table follows the source as the stream
+     * drains. The scan reads each item it projects itself, so only the stream pays this lookup.
      */
-    private void project(Integration integration, RedshiftZeroEtlCurrentState currentState, List<JsonNode> records) {
+    private List<Change> readThrough(Integration integration, List<JsonNode> records) {
         String sourceArn = integration.getSourceArn() != null
                 ? integration.getSourceArn() : integration.getSourceStreamArn();
         String tableName = RedshiftZeroEtlEndpoints.tableName(sourceArn);
         String region = AwsArnUtils.parse(sourceArn).region();
         Scope scope = new Scope(integration.getAccountId(), region);
-        List<Change> changes = new ArrayList<>();
+        Map<String, Change> changes = new LinkedHashMap<>();
         for (JsonNode record : records) {
-            Change change = RedshiftZeroEtlCurrentState.changeOf(record, keys -> RequestScopes.callAs(
-                    integration.getAccountId(), region, () -> dynamoDb.items().getItem(scope, tableName, keys)));
+            JsonNode keys = record.path("dynamodb").path("Keys");
+            if (!keys.isObject() || changes.containsKey(keys.toString())) {
+                continue;
+            }
+            Change change = RedshiftZeroEtlCurrentState.changeOf(record, lookedUp -> RequestScopes.callAs(
+                    integration.getAccountId(), region, () -> dynamoDb.items().getItem(scope, tableName, lookedUp)));
             if (change != null) {
-                changes.add(change);
+                changes.put(keys.toString(), change);
             }
         }
+        return new ArrayList<>(changes.values());
+    }
+
+    /** The changes a backfill page makes: each item the scan read, upserted under its keys. */
+    private static List<Change> scannedItems(List<JsonNode> backfillRecords) {
+        List<Change> changes = new ArrayList<>();
+        for (JsonNode record : backfillRecords) {
+            JsonNode dynamodb = record.path("dynamodb");
+            changes.add(new Change(dynamodb.get("Keys"), dynamodb.get("NewImage")));
+        }
+        return changes;
+    }
+
+    /**
+     * Applies the changes to the current-state table, after the records they come from have landed. The projection
+     * is idempotent, so an item projected twice, once by the backfill scan and once from the stream, or a batch
+     * applied again after a stalled poll, leaves the same state.
+     *
+     * @param currentState the table resolved by the caller, or null to resolve it from the source table
+     */
+    private void project(Integration integration, RedshiftZeroEtlCurrentState currentState, List<Change> changes) {
         if (changes.isEmpty()) {
             return;
         }

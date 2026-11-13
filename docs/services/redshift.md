@@ -492,14 +492,15 @@ SELECT id, value->'note'->>'S' AS note FROM public."orders";
   every DynamoDB number exactly where AWS's `NUMERIC(38,18)` would round or overflow, `B` is `BYTEA`. The
   partition key comes first, then the sort key, and together they are the primary key. Every other
   attribute lives only in `value`, so items of differing shape need no schema change.
-- Each `INSERT` and `MODIFY` replaces the item under its keys with the record's new image, each `REMOVE`
-  deletes it, and the backfill scan upserts each item it reads. A record of a stream with no new image
-  (a `KEYS_ONLY` or `OLD_IMAGE` view) is projected from the item as the source holds it at that moment.
-- Changes are applied in shard order after the batch has landed. The projection is idempotent, so an
-  item that lands twice, once from the scan and once from the stream, leaves the same state. While the
-  stream catches up after the backfill, a replayed older image can briefly replace a newer one the scan
-  read; the table holds the source's state once the stream is drained, as AWS's full export followed by
-  incremental exports does. AWS refreshes every 15 to 30 minutes; Floci applies each poll.
+- The backfill scan upserts each item it reads. A stream record names a key, and the key is projected as
+  the source holds it at that moment: the item is upserted, or deleted when the source no longer has it.
+  The record's own images, and its event type, are not used, so a record replayed after the scan read a
+  newer version of its item, or after the item changed again, cannot put an older image over the newer
+  row: every record of a key projects the same state, and a batch projects each key once. The cost is one
+  `GetItem` per key per batch, and the table shows each key's latest state, not every intermediate one,
+  as AWS's incremental exports do. AWS refreshes every 15 to 30 minutes; Floci applies each poll.
+- Changes are applied after the batch has landed, in one transaction. The projection is idempotent, so an
+  item projected twice, once from the scan and once from the stream, leaves the same state.
 - The integration marks its table as its own, with a comment naming the integration
   (`floci-zetl-integration:<integration-id>`, see `obj_description`). A table that an earlier integration
   of the source marked is dropped and made afresh by the next one, so an item deleted from the source in

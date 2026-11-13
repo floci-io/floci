@@ -137,31 +137,37 @@ class RedshiftZeroEtlCurrentStateTest {
     }
 
     @Test
-    void insertsAndModifiesUpsertTheNewImageAndRemovesDelete() {
-        ObjectNode insert = record("INSERT", true);
-        ObjectNode remove = record("REMOVE", false);
+    void aRecordIsProjectedFromTheItemAsTheSourceHoldsItNowNotFromItsOwnImage() {
+        // A replayed MODIFY carries version two, but the source holds version three: the newer one is projected.
+        ObjectNode replayed = record("MODIFY", true);
+        ObjectNode current = MAPPER.createObjectNode();
+        current.putObject("id").put("S", "1");
+        current.putObject("note").put("S", "version three");
 
-        Change upsert = RedshiftZeroEtlCurrentState.changeOf(insert, keys -> null);
-        Change delete = RedshiftZeroEtlCurrentState.changeOf(remove, keys -> null);
+        Change change = RedshiftZeroEtlCurrentState.changeOf(replayed, keys -> current);
 
-        assertEquals(insert.path("dynamodb").path("Keys"), upsert.keys());
-        assertEquals(insert.path("dynamodb").path("NewImage"), upsert.item());
-        assertTrue(delete.isDelete());
-        assertEquals(remove.path("dynamodb").path("Keys"), delete.keys());
+        assertEquals(replayed.path("dynamodb").path("Keys"), change.keys());
+        assertEquals(current, change.item());
     }
 
     @Test
-    void aRecordWithoutANewImageIsProjectedFromTheItemAsItIsNow() {
-        ObjectNode modify = record("MODIFY", false);
+    void everyKindOfRecordProjectsTheSameStateOfItsKey() {
         ObjectNode current = MAPPER.createObjectNode();
         current.putObject("id").put("S", "1");
-        current.putObject("note").put("S", "read back");
 
-        Change fromLookup = RedshiftZeroEtlCurrentState.changeOf(modify, keys -> current);
-        Change gone = RedshiftZeroEtlCurrentState.changeOf(modify, keys -> null);
+        for (String eventName : List.of("INSERT", "MODIFY", "REMOVE")) {
+            assertEquals(current, RedshiftZeroEtlCurrentState.changeOf(record(eventName, true), keys -> current).item(),
+                    eventName);
+        }
+    }
 
-        assertEquals(current, fromLookup.item());
-        assertTrue(gone.isDelete());
+    @Test
+    void aKeyTheSourceNoLongerHoldsIsDeleted() {
+        // Even an INSERT record, replayed after its item was deleted, deletes: the source is the truth.
+        Change delete = RedshiftZeroEtlCurrentState.changeOf(record("INSERT", true), keys -> null);
+
+        assertTrue(delete.isDelete());
+        assertEquals(record("INSERT", true).path("dynamodb").path("Keys"), delete.keys());
     }
 
     @Test
