@@ -22,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -40,7 +41,9 @@ class Ec2MetadataProxyTest {
         assertTrue(prelude.contains("2>/dev/null || true;"));
         for (String[] command : new String[][]{
                 Ec2MetadataProxy.installCommand(),
+                Ec2MetadataProxy.installEc2Command(),
                 Ec2MetadataProxy.startCommand("10.0.0.1", 9169),
+                Ec2MetadataProxy.startEc2Command("10.0.0.1", 9169),
                 Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566)}) {
             assertTrue(command[2].startsWith("set -eu\n" + prelude + "\n"), command[2]);
         }
@@ -91,11 +94,13 @@ class Ec2MetadataProxyTest {
         assertEquals("-c", command[1]);
 
         String script = command[2];
-        assertTrue(script.contains("command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then exit 0; fi"));
+        assertTrue(script.contains("command -v curl >/dev/null 2>&1; then exit 0; fi"));
+        assertFalse(script.contains("command -v iptables"));
         assertTrue(script.contains("apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates"));
         assertTrue(script.contains("dnf install -y --allowerasing iproute socat curl ca-certificates"));
         assertTrue(script.contains("yum install -y iproute socat curl ca-certificates"));
         assertTrue(script.contains("apk add --no-cache iproute2 socat curl ca-certificates"));
+        assertFalse(script.contains("iptables-nft"));
     }
 
     @Test
@@ -117,6 +122,21 @@ class Ec2MetadataProxyTest {
         assertTrue(script.contains("-X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60'"));
         assertTrue(script.contains("http://169.254.169.254/latest/api/token"));
         assertTrue(script.contains("-H \"X-aws-ec2-metadata-token: $token\" http://169.254.169.254/latest/meta-data/instance-id"));
+    }
+
+    @Test
+    void imdsStartDoesNotReserveGuestPort80() {
+        String script = Ec2ContainerManager.metadataProxyStartCommand("10.0.0.1", 9169)[2];
+
+        assertFalse(script.contains("nohup socat TCP-LISTEN:80,"), script);
+        assertTrue(script.contains("nohup socat TCP-LISTEN:42169,bind=169.254.169.254,fork,reuseaddr"
+                + " TCP:10.0.0.1:9169"), script);
+        assertTrue(script.contains("iptables -t nat -C OUTPUT -d 169.254.169.254/32 -p tcp --dport 80"
+                + " -j DNAT --to-destination 169.254.169.254:42169"), script);
+        assertTrue(script.contains("iptables -t nat -I OUTPUT 1 -d 169.254.169.254/32 -p tcp --dport 80"
+                + " -j DNAT --to-destination 169.254.169.254:42169"), script);
+        assertTrue(script.contains("/tmp/floci-imds-proxy-42169.pid"), script);
+        assertTrue(script.contains("cleanup_new_proxy"), script);
     }
 
     @Test
@@ -179,6 +199,17 @@ class Ec2MetadataProxyTest {
         assertEquals("dnf\n", Files.readString(record));
         assertEquals("install -y --allowerasing iproute socat curl ca-certificates\n",
                 Files.readString(arguments));
+    }
+
+    @Test
+    void ec2InstallUsesExistingNftWithoutNetworkOrPackageManager(@TempDir Path directory) throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        for (String tool : List.of("ip", "socat", "curl", "nft")) {
+            HelperShellFixture.writeTool(bin, tool, "exit 0\n");
+        }
+
+        assertEquals(0, HelperShellFixture.run(Ec2MetadataProxy.installEc2Command(), directory,
+                Map.of("PATH", bin.toString())), HelperShellFixture.output(directory));
     }
 
     @Test

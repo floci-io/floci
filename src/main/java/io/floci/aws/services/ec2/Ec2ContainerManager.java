@@ -1090,6 +1090,15 @@ public class Ec2ContainerManager {
         submitLifecycleOperation(containerId, () -> RequestScopes.runAs(accountId, instance.getRegion(), () -> {
             boolean setUpMetadataEndpoint = false;
             try {
+                String instanceId = instance.getInstanceId();
+                ProtectedNamespace namespace = protectedNamespace(instance);
+                if (namespace != null) {
+                    // The helper survives a workload stop. Migrate its old TCP/80 listener before
+                    // a restarted guest can bind a wildcard HTTP server during boot.
+                    metadataServer.registerContainer(namespace.transportAddress(), instanceId, instance);
+                    configureLinkLocalMetadataEndpoint(namespace.helperId(), instanceId,
+                            dockerHostResolver.resolve(), config.services().ec2().imdsPort());
+                }
                 dockerClient.startContainerCmd(containerId).exec();
                 boolean running = false;
                 for (int i = 0; i < 20 && !running; i++) {
@@ -1098,11 +1107,9 @@ public class Ec2ContainerManager {
                         Thread.sleep(500);
                     }
                 }
-                String instanceId = instance.getInstanceId();
                 // A protected workload shares the helper's namespace, so it has no Docker network
                 // attachment of its own to rediscover: the helper keeps the transport address
                 // across the workload's stop/start, exactly as launch used it.
-                ProtectedNamespace namespace = protectedNamespace(instance);
                 String containerIp = namespace == null
                         ? waitForContainerBridgeIp(containerId, instanceId)
                         : namespace.transportAddress();
@@ -1120,13 +1127,13 @@ public class Ec2ContainerManager {
                     if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, true)) {
                         exposeReachablePublicAddress(instance);
                     }
-                    metadataServer.registerContainer(containerIp, instanceId, instance);
+                    if (namespace == null) {
+                        metadataServer.registerContainer(containerIp, instanceId, instance);
+                    }
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
                     refreshMetadataAddresses(instance, containerId);
-                    // A restarted container has a new network namespace: the link-local IMDS
-                    // address launch configured is gone, and without it the guest cannot reach
-                    // 169.254.169.254 (instance credentials, user data, EC2 Instance Connect keys).
-                    // A protected instance's helper kept its namespace, and the address with it.
+                    // A plain restart loses its link-local address; a protected helper was
+                    // prepared before starting the workload.
                     setUpMetadataEndpoint = namespace == null;
                 }
             } catch (InterruptedException e) {
@@ -1946,11 +1953,11 @@ public class Ec2ContainerManager {
     }
 
     static String[] metadataProxyInstallCommand() {
-        return Ec2MetadataProxy.installCommand();
+        return Ec2MetadataProxy.installEc2Command();
     }
 
     static String[] metadataProxyStartCommand(String flociHost, int imdsPort) {
-        return Ec2MetadataProxy.startCommand(flociHost, imdsPort);
+        return Ec2MetadataProxy.startEc2Command(flociHost, imdsPort);
     }
 
 

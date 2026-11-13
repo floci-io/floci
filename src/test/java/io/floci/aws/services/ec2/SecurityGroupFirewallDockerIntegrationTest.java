@@ -4,10 +4,12 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.ec2.model.IpPermission;
 import io.floci.aws.services.ec2.model.IpRange;
 import io.floci.aws.services.ec2.model.SecurityGroup;
+import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
@@ -24,9 +26,58 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class SecurityGroupFirewallDockerIntegrationTest {
+
+    private static final String METADATA_AND_WEB_SERVERS = """
+            from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+            from sys import argv
+
+            class Handler(BaseHTTPRequestHandler):
+                def respond(self, body):
+                    payload = body.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+
+                def do_PUT(self):
+                    if self.path == "/latest/api/token" and self.headers.get(
+                            "X-aws-ec2-metadata-token-ttl-seconds"):
+                        self.respond("fixture-token")
+                    else:
+                        self.send_error(400)
+
+                def do_GET(self):
+                    if self.server.server_port == 80:
+                        self.respond("web-ok")
+                    elif self.path == "/latest/meta-data/instance-id" and self.headers.get(
+                            "X-aws-ec2-metadata-token") == "fixture-token":
+                        self.respond("i-fixture")
+                    else:
+                        self.send_error(401)
+
+                def log_message(self, format, *args):
+                    pass
+
+            if argv[1] == "metadata":
+                ThreadingHTTPServer(("127.0.0.1", 9169), Handler).serve_forever()
+            else:
+                ThreadingHTTPServer(("0.0.0.0", 80), Handler).serve_forever()
+            """;
+    private static final String IMDS_CLIENT = """
+            from urllib.request import ProxyHandler, Request, build_opener
+            opener = build_opener(ProxyHandler({}))
+            endpoint = "http://169.254.169.254"
+            token = opener.open(Request(endpoint + "/latest/api/token", method="PUT",
+                headers={"X-aws-ec2-metadata-token-ttl-seconds": "60"}), timeout=2).read().decode()
+            instance = opener.open(Request(endpoint + "/latest/meta-data/instance-id",
+                headers={"X-aws-ec2-metadata-token": token}), timeout=2).read().decode()
+            print(token)
+            print(instance)
+            """;
 
     // A denied connection is dropped without a reply, so it only ends when nc's timeout expires;
     // a permitted one connects in tens of milliseconds, so one second is ample to call it denied.
@@ -37,6 +88,115 @@ class SecurityGroupFirewallDockerIntegrationTest {
     @Inject ContainerLifecycleManager lifecycle;
     @Inject ContainerBuilder builder;
     @Inject DockerClient docker;
+
+    @Test
+    void legacyImdsRelayMigratesOfflineAndLeavesWildcardHttpPortAvailable() throws Exception {
+        Assumptions.assumeTrue(firewall.enabled());
+        try {
+            Assumptions.assumeTrue("linux".equalsIgnoreCase(docker.infoCmd().exec().getOsType()));
+        } catch (Exception e) {
+            Assumptions.abort("Docker daemon is unavailable");
+        }
+
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String eniId = "eni-imds-" + suffix;
+        SecurityGroupFirewallManager.Namespace namespace = null;
+        String fixtureContainer = null;
+        String worker = null;
+        try {
+            namespace = firewall.createNamespace("ec2", "imds-" + suffix, "000000000000",
+                    "us-east-1", Optional.empty(), Map.of());
+            SecurityGroup group = group("sg-imds-" + suffix, false, "0.0.0.0/0");
+            firewall.register(endpoint(eniId, "10.0.0.2", namespace, group), namespace.helperId(), Map.of());
+            fixtureContainer = lifecycle.createAndStart(builder.newContainer(TestImages.PYTHON_ALPINE)
+                    .withName("floci-imds-fixture-" + suffix)
+                    .withNetworkMode("container:" + namespace.helperId())
+                    .withEntrypoint(List.of("python", "-c"))
+                    .withCmd(List.of(METADATA_AND_WEB_SERVERS, "metadata"))
+                    .build()).containerId();
+
+            ContainerExec.Result fixture = null;
+            for (int attempt = 0; attempt < 30; attempt++) {
+                fixture = ContainerExec.runMerged(docker, namespace.helperId(), new String[]{"curl", "--noproxy", "*",
+                        "-fsS", "--max-time", "1", "-X", "PUT", "-H",
+                        "X-aws-ec2-metadata-token-ttl-seconds: 60",
+                        "http://127.0.0.1:9169/latest/api/token"}, 3);
+                if (fixture.exitCode() == 0) {
+                    break;
+                }
+                Thread.sleep(100);
+            }
+            assertEquals(0, fixture.exitCode(), "IMDS fixture did not start: " + fixture.summary());
+            assertEquals("fixture-token", fixture.stdout().trim());
+
+            ContainerExec.Result legacy = ContainerExec.runMerged(docker, namespace.helperId(),
+                    Ec2MetadataProxy.startCommand("127.0.0.1", 9169), 30);
+            assertEquals(0, legacy.exitCode(), "Old IMDS proxy did not start: " + legacy.summary());
+
+            ContainerExec.Result removed = ContainerExec.runMerged(docker, namespace.helperId(),
+                    new String[]{"apk", "del", "iptables"}, 10);
+            assertEquals(0, removed.exitCode(), "Could not simulate the old helper image: " + removed.summary());
+            ContainerExec.Result missing = ContainerExec.runMerged(docker, namespace.helperId(),
+                    new String[]{"sh", "-c", "! command -v iptables && command -v nft"}, 5);
+            assertEquals(0, missing.exitCode(), "Old helper tool state is wrong: " + missing.summary());
+
+            ContainerExec.Result install = ContainerExec.runMerged(docker, namespace.helperId(),
+                    Ec2ContainerManager.metadataProxyInstallCommand(), 20);
+            assertEquals(0, install.exitCode(), "Offline IMDS dependencies are unavailable: " + install.summary());
+            String[] start = Ec2ContainerManager.metadataProxyStartCommand("127.0.0.1", 9169);
+            ContainerExec.Result proxy = ContainerExec.runMerged(docker, namespace.helperId(), start, 30);
+            assertEquals(0, proxy.exitCode(), "IMDS proxy did not start: " + proxy.summary());
+
+            worker = lifecycle.createAndStart(builder.newContainer(TestImages.PYTHON_ALPINE)
+                    .withName("floci-imds-web-test-" + suffix)
+                    .withNetworkMode("container:" + namespace.helperId())
+                    .withEntrypoint(List.of("python", "-c"))
+                    .withCmd(List.of(METADATA_AND_WEB_SERVERS, "web"))
+                    .build()).containerId();
+            ContainerExec.Result web = null;
+            for (int attempt = 0; attempt < 30; attempt++) {
+                web = ContainerExec.runMerged(docker, namespace.helperId(), new String[]{"curl", "--noproxy", "*",
+                        "-fsS", "--max-time", "1", "http://127.0.0.1:80/"}, 3);
+                if (web.exitCode() == 0) {
+                    break;
+                }
+                Thread.sleep(100);
+            }
+            assertEquals(0, web.exitCode(), "Wildcard port 80 did not serve HTTP: " + web.summary());
+            assertEquals("web-ok", web.stdout().trim());
+
+            ContainerExec.Result imds = ContainerExec.runMerged(docker, worker,
+                    new String[]{"python", "-c", IMDS_CLIENT}, 10);
+            assertEquals(0, imds.exitCode(), "Workload could not reach IMDSv2: " + imds.summary());
+            assertEquals("fixture-token\ni-fixture", imds.stdout().trim().replace("\r", ""));
+
+            ContainerExec.Result reapplied = ContainerExec.runMerged(docker, namespace.helperId(), start, 30);
+            assertEquals(0, reapplied.exitCode(), reapplied.summary());
+            ContainerExec.Result stale = ContainerExec.runMerged(docker, namespace.helperId(),
+                    new String[]{"nft", "flush", "chain", "ip", "floci_imds", "output"}, 5);
+            assertEquals(0, stale.exitCode(), stale.summary());
+            ContainerExec.Result repaired = ContainerExec.runMerged(docker, namespace.helperId(), start, 30);
+            assertEquals(0, repaired.exitCode(), "A stale nft table was not repaired: " + repaired.summary());
+            ContainerExec.Result rules = ContainerExec.runMerged(docker, namespace.helperId(),
+                    new String[]{"nft", "list", "chain", "ip", "floci_imds", "output"}, 5);
+            assertEquals(0, rules.exitCode(), rules.summary());
+            assertEquals(1L, rules.stdout().lines()
+                    .filter(line -> line.contains("floci-imds-relay-42169")
+                            && line.contains("169.254.169.254:42169")).count());
+            assertTrue(Boolean.TRUE.equals(docker.inspectContainerCmd(worker).exec().getState().getRunning()));
+        } finally {
+            if (worker != null) {
+                lifecycle.removeIfExists(worker);
+            }
+            if (fixtureContainer != null) {
+                lifecycle.removeIfExists(fixtureContainer);
+            }
+            firewall.unregister(eniId);
+            if (namespace != null) {
+                lifecycle.removeIfExists(namespace.helperId());
+            }
+        }
+    }
 
     @Test
     void deniedLogicalCidrBlocksManagedPeerThenRuleUpdatePermitsIt() throws Exception {
