@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.services.cloudformation.model.Stack;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.DockerAvailability;
@@ -13,8 +14,10 @@ import software.amazon.awssdk.services.cloudformation.model.ChangeSetType;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.ParameterType;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.function.Consumer;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.physicalId;
@@ -89,6 +92,15 @@ class CfnReplacementPreviewAndActionIntegrationTest {
                 + " {'Fn::GetAtt': ['Template', 'LatestVersionNumber']}]]}, " + tags(tag) + "}}}}");
     }
 
+    /** A cluster whose engine is {@code engine} (template text) and whose subnet group is the literal {@code group}. */
+    private static String clusterInGroup(String engine, String group, String prefix) {
+        return json("{'Resources': {" + vpcAndSubnet("10.83") + subnetGroup("Group1", prefix + "-1")
+                + subnetGroup("Group2", prefix + "-2")
+                + "'Cluster': {'Type': 'AWS::ElastiCache::CacheCluster', 'DependsOn': ['Group1', 'Group2'],"
+                + " 'Properties': {'Engine': " + engine + ", 'CacheNodeType': 'cache.t3.micro', 'NumCacheNodes': 1,"
+                + " 'CacheSubnetGroupName': '" + group + "'}}}}");
+    }
+
     private static String clusterReadingGroup(String groupName, String tag) {
         return json("{'Resources': {" + vpcAndSubnet("10.82") + subnetGroup("R0", groupName)
                 + "'R1': {'Type': 'AWS::ElastiCache::CacheCluster', 'Properties': {'Engine': 'redis',"
@@ -119,6 +131,8 @@ class CfnReplacementPreviewAndActionIntegrationTest {
         String prefix = "lt" + suffix;
         String parameter = "/preview/" + suffix + "/unrecorded";
         String reference = "'{{resolve:ssm:" + parameter + "}}'";
+        String engineParameter = "/preview/" + suffix + "/engine";
+        String engineReference = "'{{resolve:ssm:" + engineParameter + "}}'";
         List<Row> rows = List.of(
                 new Row("launch template changed in place", versionedCluster(prefix, "t3.micro", "1"),
                         versionedCluster(prefix, "t3.small", "1"), "Cluster", "Conditional", true, null),
@@ -128,9 +142,20 @@ class CfnReplacementPreviewAndActionIntegrationTest {
                         clusterReadingGroup("sb-" + suffix, "2"), "R1", "True", true, null),
                 new Row("no recorded digests, only a description changes",
                         profileWithDescription(json(reference), "d"), profileWithDescription(json(reference), "e"),
-                        "Subject", "False", false, this::forgetDigests));
+                        "Subject", "False", false, this::forgetDigests),
+                new Row("no record for one create-only property does not hide another one that changed",
+                        clusterInGroup(json(engineReference), "e" + suffix + "-1", "e" + suffix),
+                        clusterInGroup(json(engineReference), "e" + suffix + "-2", "e" + suffix),
+                        "Cluster", "True", true, this::forgetDigests),
+                new Row("a digest of an unresolvable reference, only a description changes",
+                        profileWithDescription(json(reference), "d"), profileWithDescription(json(reference), "e"),
+                        "Subject", "False", false, this::storeUnresolvableDigests),
+                new Row("a literal that starts with the unrecorded marker changes to another literal",
+                        profile("'unrecorded one'"), profile("'unrecorded two'"), "Subject", "True", true, null));
         try (SsmClient ssm = AwsTestClients.create(SsmClient.builder(), "test", Region.US_EAST_1)) {
             ssm.putParameter(request -> request.name(parameter).value("hosted")
+                    .type(ParameterType.STRING).overwrite(true));
+            ssm.putParameter(request -> request.name(engineParameter).value("redis")
                     .type(ParameterType.STRING).overwrite(true));
             Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the cache data plane");
             assertAll(rows.stream().map(row -> () -> update(row, "b-" + rows.indexOf(row) + "-" + suffix)));
@@ -164,6 +189,15 @@ class CfnReplacementPreviewAndActionIntegrationTest {
 
     private void forgetDigests(String stack) {
         cloudFormationService.describeStacks(stack, REGION).getFirst().replaceDynamicReferenceDigests(Map.of());
+    }
+
+    /** What an older stack may hold: a digest that stands for a reference that did not resolve. */
+    private void storeUnresolvableDigests(String stack) {
+        Stack current = cloudFormationService.describeStacks(stack, REGION).getFirst();
+        Map<String, String> unresolvable = new LinkedHashMap<>();
+        current.dynamicReferenceDigestsSnapshot().keySet()
+                .forEach(key -> unresolvable.put(key, "unresolvable " + UUID.randomUUID()));
+        current.replaceDynamicReferenceDigests(unresolvable);
     }
 
     private static void update(Row row, String stack) throws Exception {
