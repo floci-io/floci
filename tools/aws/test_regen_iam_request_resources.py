@@ -705,8 +705,6 @@ def test_a_well_formed_document_validates():
     document["operations"]["svc:A"]["resources"][0]["before"] = "#"
     # A member filling a variable read up to a character, as a CodeBuild build id names its project before ':'.
     document["operations"]["svc:B"]["resources"][0]["before"] = ":"
-    document["operations"]["svc:B"]["resources"][0]["stripped"] = True
-    document["operations"]["svc:B"]["resources"][0]["trailing"] = "/"
     assert r.validate(document) == []
     assert r.validate(with_a_create()) == []
     # A field of each of a list's structures fills a variable, read as given when absent, or as an ARN.
@@ -785,11 +783,6 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(before="##"), "no one character"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(before=":", fill={"GroupName": "Names[]"}) or
      d["operations"]["svc:B"]["resources"][0].update(before=1), "no one character"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(trailing="//"), "no one character"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(trailing=1), "no one character"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(stripped=False), "not true"),
-    (lambda d: d["operations"]["svc:A"]["resources"][0].update(trailing="/"), "neither an ARN member"),
-    (lambda d: d["operations"]["svc:A"]["resources"][0].update(stripped=True), "neither an ARN member"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="Ids[]"), "no account of its ARN"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="a.b"), "no account of its ARN"),
     (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:::group/${GroupName}")
@@ -1324,3 +1317,14 @@ def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_i
          "when": {"ResourceType": ["ManagedInstance"]}},
         {"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"},
          "when": {"ResourceType": ["Parameter"]}}]
+
+
+def test_a_member_whose_shape_is_named_after_the_type_names_it():
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Path"),
+                           shapes={"Path": "ThingName"}) == [{"type": "thing", "fill": {"ThingName": "Path"}}]
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Path")) == []
+    # A shape named for something else, a shape of another kind, or a list names nothing.
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Path"), shapes={"Path": "PathString"}) == []
+    assert r.resources_for("svc:GetPoolsByPath", ["pool"], FORMATS, members("Path"), shapes={"Path": "PoolName"}) == []
+    assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Paths[]"),
+                           shapes={"Paths": "ThingName"}) == []

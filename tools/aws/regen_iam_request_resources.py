@@ -33,7 +33,10 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
   `${SecurityGroupId}`), and it is a name for a name and an id for an id (an `Identifier` either),
   or the member is a bare `Name`, `Id` or `Identifier`, the variable is named after the type and the
   operation is about the type, its name past the verb the type's (`DescribeTargetGroups`, but not
-  `StartExecution` for a state machine, whose `name` is the execution's), and no member holds its ARN.
+  `StartExecution` for a state machine, whose `name` is the execution's), and no member holds its ARN,
+  or, when no member does either, a string member whose botocore shape is named after the type (Parameter Store's
+  `GetParametersByPath` names a hierarchy by a `Path` holding a `PSParameterName`, as `GetParameterHistory` names a
+  parameter by its `Name`).
   Of several members that could fill a variable, one naming the type before the variable wins over a
   bare one: the snapshot `RestoreFromClusterSnapshot` restores has the cluster its
   `SnapshotClusterIdentifier` names, not the `ClusterIdentifier` of the cluster it creates, and the
@@ -103,9 +106,7 @@ resource there may apply only `when` a member has one of some values (`Type` pic
 v2 `CreateLoadBalancer` creates), or `unless` it has, a member given a JSON null counting as absent
 (Cloud Map's handler then reads `DnsConfig.NamespaceId`), and a member read as a value when it is
 `absent` (an EventBridge request naming no event bus names the default one), a member filling a variable may be
-read up to a character `before` (a CodeBuild build id, `<project>:<id>`, names its project), `stripped` of the
-whitespace around it its handler drops (Parameter Store's `PutParameter` name), or without one `trailing` character
-its handler adds when it is missing (a Parameter Store path, `/a/` and `/a` both naming `/a/`), a variable may be
+read up to a character `before` (a CodeBuild build id, `<project>:<id>`, names its project), a variable may be
 filled from a field of each element of a list of structures, one resource for each element and the `absent` value
 for an
 element lacking it (`PutEvents` publishes each entry to its bus), or from a structure's field (`pipeline.name`),
@@ -590,25 +591,6 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
     "macie2:CreateMember": ([{"type": "Member", "fill": {"ResourceId": "account.accountId"}}],
                             "the member ARN ends in the account the request associates, which it names as "
                             "account.accountId, nested where the rule does not look for the member's id"),
-    **{f"ssm:{operation}": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "Name"}}],
-                            f"{operation} names its parameter by Name, a bare name the rule reads only for an "
-                            "operation named after the type past its verb, which this one's is not")
-       for operation in ("GetParameterHistory", "LabelParameterVersion")},
-    **{f"ssm:{operation}": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "Name"},
-                              "stripped": True}],
-                            f"Floci's {operation} handler drops the spaces around the Name it acts on, so the "
-                            "parameter checked is the one named without them")
-       for operation in ("PutParameter", "UnlabelParameterVersion")},
-    "ssm:GetParametersByPath": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "Path"},
-                                  "absent": {"Path": "/"}, "trailing": "/"}],
-                                "the request names the hierarchy it reads by Path, which the rule does not relate "
-                                "to a parameter; the handler reads /a and /a/ alike and an empty Path as the root, "
-                                "so a path is checked without the slash it may end in, as parameter/a"),
-    **{f"ssm:{operation}": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"}}],
-                            "Floci's tagging handlers act on the parameter the ResourceId names, its name or its "
-                            "ARN, whatever ResourceType the request gives, so it is that parameter checked; the "
-                            "rule reads no ResourceId")
-       for operation in ("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource")},
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
@@ -920,6 +902,19 @@ def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
                 found.setdefault(name, name + _strings(model, shape))
             for path in _nested_arns(model, name, shape):
                 found.setdefault(path.removesuffix("[]"), path)
+    return found
+
+
+def member_shapes(models: dict[str, dict], operation: str) -> dict[str, str]:
+    """The botocore shape each top-level member of the operation's request holds, by member name, across the request's
+    clients."""
+    found: dict[str, str] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec:
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            found.setdefault(name, member["shape"])
     return found
 
 
@@ -1239,9 +1234,11 @@ def compatible(member: str, variable: str) -> bool:
 
 
 def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
-                  arn_members: set[str] | None = None, labels: dict[str, str] | None = None) -> list[dict]:
+                  arn_members: set[str] | None = None, labels: dict[str, str] | None = None,
+                  shapes: dict[str, str] | None = None) -> list[dict]:
     """The resources the rule finds the operation's request naming, as vendored entries. `labels` gives the path
-    segment before each bare member a REST request carries as a path label, stemmed (`path_labels`)."""
+    segment before each bare member a REST request carries as a path label, stemmed (`path_labels`), and `shapes` the
+    botocore shape each member holds (`member_shapes`)."""
     name = operation.split(":", 1)[1]
     created = stem(CREATING_RE.sub("", name)) if CREATING_RE.match(name) else None
     subject = stem(SUBJECT_RE.sub("", name))
@@ -1276,7 +1273,8 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (v == in_slot, kind_of(v) == "", v)):
             choice = _filling(variable, kind_stem, len(variables), {m: p for m, p in names.items() if m not in fill.values()},
-                              bare=bare, qualified=namespace_of(operation) in QUALIFIED_MEMBERS)
+                              bare=bare, qualified=namespace_of(operation) in QUALIFIED_MEMBERS,
+                              shapes=shapes if not held else None)
             if choice is not None:
                 fill[variable] = choice
                 used[kind] = choice
@@ -1394,11 +1392,12 @@ def by_members_key_is_empty(kinds: list[str], filled: dict[str, dict[str, str]])
 
 
 def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str], bare: set[str],
-             qualified: bool = False) -> str | None:
+             qualified: bool = False, shapes: dict[str, str] | None = None) -> str | None:
     """The member that fills the variable: one of a compatible kind whose stem relates to the variable's,
     or, for the variable named after the type or a type's only one, a member named after the type, or a
-    bare `Name` or `Id` among those `bare` gives, of a compatible kind; the closest of them, and a string
-    before a list."""
+    bare `Name` or `Id` among those `bare` gives, of a compatible kind, or else a string member whose botocore
+    shape is named after the type, of a compatible kind (Parameter Store's `Path` and `GetParameterHistory`'s
+    `Name` hold a `PSParameterName`); the closest of them, and a string before a list."""
     variable_stem = stem(variable)
     candidates = [member for member in names
                   if stem(member) and related(stem(member), variable_stem) and compatible(member, variable)]
@@ -1407,6 +1406,10 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
                       and ((member in bare and member.lower() in BARE)
                            or (stem(member) and (related(stem(member), kind_stem)
                                                  or (qualified and names_type(member, kind_stem)))))]
+    if not candidates and (related(variable_stem, kind_stem) or variables == 1):
+        candidates = [member for member in names if member in (shapes or {}) and not names[member].endswith("[]")
+                      and "." not in member and stem(shapes[member]) and related(stem(shapes[member]), kind_stem)
+                      and compatible(shapes[member], variable) and compatible(member, variable)]
     if not candidates:
         return None
     # A member naming the type before the variable (`SnapshotClusterIdentifier` for the snapshot's `ClusterName`,
@@ -1519,7 +1522,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
         resources = picked_by_enum(types, formats, members, enum_members(models, operation.split(":", 1)[1]))
         if resources is None:
             resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members,
-                                                                              arn_members, labels),
+                                                                              arn_members, labels,
+                                                                              member_shapes(models, operation.split(":", 1)[1])),
                                                                 formats, types, members),
                                                 namespace_of(operation), types, members),
                                      namespace_of(operation), types, members)
@@ -1757,7 +1761,7 @@ ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
 # The keys a resource found by members does not take: it is read no other way.
-FOUND_ONLY = {"absent", "arnOf", "fixed", "before", "stripped", "trailing"}
+FOUND_ONLY = {"absent", "arnOf", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:
@@ -1862,7 +1866,7 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                                                                             "endpoint"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
                                                                                        "fixed", "made", "before", "find", "endpoint",
-                                                                                       "default", "stripped", "trailing"}):
+                                                                                       "default"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if "default" in resource and (resource["default"] is not True or resource["fill"] or not resource.get("when")
                                   or set(resource) - {"type", "fill", "when", "default", "endpoint"}):
@@ -1874,11 +1878,6 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     before = resource.get("before", "#")
     if not isinstance(before, str) or len(before) != 1:
         return [f"{operation} reads its members before {before!r}, which is no one character"]
-    trailing = resource.get("trailing", "/")
-    if not isinstance(trailing, str) or len(trailing) != 1:
-        return [f"{operation} reads its members without a trailing {trailing!r}, which is no one character"]
-    if resource.get("stripped", True) is not True:
-        return [f"{operation} reads its members stripped by {resource['stripped']!r}, which is not true"]
     named = resource.get("types") or [resource.get("type")]
     kinds = _kinds(resource)
     corrected = resource in CORRECTIONS.get(operation, ([], ""))[0]
