@@ -1061,11 +1061,12 @@ public class NativeDynamoDbJsonHandler {
                 ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
                 requireNonEmptyExpression(updateExpression, "UpdateExpression");
                 DynamoDbReservedWords.check(ue, "UpdateExpression");
+                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
+                DynamoDbService.requireSectionsUsedOnce(updateExpression);
                 Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
                 checkUnusedEan(exprAttrNames, hashTokens);
                 Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
                 checkUnusedEav(exprAttrValues, colonTokensAll);
-                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
             } else {
                 ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
             }
@@ -3162,6 +3163,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
         requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
         dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+        if (updateExpression != null) {
+            DynamoDbService.requireSectionsUsedOnce(updateExpression);
+        }
 
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
