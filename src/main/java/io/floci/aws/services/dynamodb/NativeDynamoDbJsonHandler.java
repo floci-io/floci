@@ -1041,15 +1041,9 @@ public class NativeDynamoDbJsonHandler {
             // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
             if (updateExpression != null) {
                 if (!updateExpression.isEmpty()) {
-                    DynamoDbUpdateExpressionSyntax.check(updateExpression);
+                    DynamoDbUpdateExpressionSyntax.check(updateExpression, exprAttrNames, exprAttrValues);
                 }
-                // Undefined tokens must be caught before the unused-EAN/EAV checks below.
-                requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
                 requireNonEmptyExpression(updateExpression, "UpdateExpression");
-                // The reserved word check looks past single spaces only.
-                String ue = updateExpression.trim().replaceAll("\\s+", " ");
-                DynamoDbReservedWords.check(ue, "UpdateExpression");
-                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
                 DynamoDbService.requireSectionsUsedOnce(updateExpression);
                 Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
                 checkUnusedEan(exprAttrNames, hashTokens);
@@ -3148,11 +3142,7 @@ public class NativeDynamoDbJsonHandler {
         requireNonEmptyExpression(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
         if (updateExpression != null) {
-            DynamoDbUpdateExpressionSyntax.check(updateExpression);
-        }
-        requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
-        dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
-        if (updateExpression != null) {
+            DynamoDbUpdateExpressionSyntax.check(updateExpression, exprAttrNames, exprAttrValues);
             DynamoDbService.requireSectionsUsedOnce(updateExpression);
         }
 
@@ -3593,8 +3583,7 @@ public class NativeDynamoDbJsonHandler {
     private record ExprToken(char prefix, String text) {}
 
     // Scans an expression once, left to right, for #name and :value placeholders, in the order
-    // they occur in the text. Both extractHashTokens/extractColonTokens (membership checks) and
-    // requireDefinedTokens (first-undefined-token-wins) build on this single scan.
+    // they occur in the text.
     private static List<ExprToken> scanExprTokens(String expr) {
         List<ExprToken> tokens = new ArrayList<>();
         if (expr == null) {
@@ -3640,25 +3629,6 @@ public class NativeDynamoDbJsonHandler {
             }
         }
         return tokens;
-    }
-
-    /**
-     * Rejects the first #name or :value token, in textual order, that neither
-     * ExpressionAttributeNames nor ExpressionAttributeValues defines. This matches DynamoDB for a
-     * single-action update expression; with several undefined tokens spread across an UpdateExpression's actions/clauses, DynamoDB
-     * may name a different one, though always with this same error type and message form.
-     */
-    private static void requireDefinedTokens(String expression, String exprType,
-            JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        for (ExprToken token : scanExprTokens(expression)) {
-            if (token.prefix() == '#') {
-                if (exprAttrNames == null || !exprAttrNames.has(token.text())) {
-                    throw ExpressionEvaluator.undefinedName(exprType, token.text());
-                }
-            } else if (exprAttrValues == null || !exprAttrValues.has(token.text())) {
-                throw ExpressionEvaluator.undefinedValue(exprType, token.text());
-            }
-        }
     }
 
     /**

@@ -3996,44 +3996,6 @@ public class DynamoDbService {
         return clause;
     }
 
-    private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
-            "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
-
-    void requireAddOrDeleteOperandTypes(String updateExpression, JsonNode exprAttrValues, boolean inValidationEnvelope) {
-        if (updateExpression == null || exprAttrValues == null) {
-            return;
-        }
-        String remaining = updateExpression.trim().replaceAll("\\s+", " ");
-        while (!remaining.isEmpty()) {
-            String keyword = remaining.substring(0, Math.max(remaining.indexOf(' '), 0)).toUpperCase();
-            String body = remaining.substring(keyword.length()).trim();
-            int nextClause = findNextClauseKeyword(body);
-            String actions = nextClause < 0 ? body : body.substring(0, nextClause);
-            remaining = nextClause < 0 ? "" : body.substring(nextClause);
-            Set<String> allowed = switch (keyword) {
-                case "ADD" -> Set.of("N", "SS", "NS", "BS");
-                case "DELETE" -> Set.of("SS", "NS", "BS");
-                default -> null;
-            };
-            while (allowed != null && !actions.isBlank()) {
-                int comma = findNextComma(actions);
-                String[] words = (comma < 0 ? actions : actions.substring(0, comma)).trim().split(" ");
-                actions = comma < 0 ? "" : actions.substring(comma + 1);
-                JsonNode operand = exprAttrValues.get(words[words.length - 1]);
-                if (operand == null) {
-                    continue;
-                }
-                String type = DynamoDbAttributeValueValidator.typeOf(operand);
-                if (!allowed.contains(type)) {
-                    throw new AwsException("ValidationException", (inValidationEnvelope ? "1 validation error detected: " : "")
-                            + "Invalid UpdateExpression: Incorrect operand type for operator or function;"
-                            + " operator: " + keyword + ", operand type: " + OPERAND_TYPE_NAMES.get(type)
-                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND", 400);
-                }
-            }
-        }
-    }
-
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
         for (String type : types) {
             if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
