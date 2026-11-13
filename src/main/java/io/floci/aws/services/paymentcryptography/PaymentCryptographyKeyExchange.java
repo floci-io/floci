@@ -757,10 +757,10 @@ final class PaymentCryptographyKeyExchange {
      * The TR-31 header a key leaves the service in, in the clear.
      *
      * <p>A TR-34 block carries the header in the clear beside the encrypted key block, so the
-     * receiver knows what the key is before it opens the block. The header is written the
-     * way a TR-31 block's is: the type names the cipher that protects the block, which in a
-     * TR-34 block is the ephemeral Triple DES key, and the rest names the key the block
-     * carries.
+     * receiver knows what the key is before it opens the block. The header uses the layout
+     * the TR-31 standard fixes: the type is always {@code D} (the reference does not use
+     * the type to name the cipher in a TR-34 block), the length is the placeholder the
+     * reference writes, and the rest names the key the block carries.
      *
      * <p>The length field is the placeholder the reference writes, because the field is
      * ignored in a TR-34 block: what the block carries is the key, not a block of a length
@@ -782,9 +782,6 @@ final class PaymentCryptographyKeyExchange {
         String exportability = exportabilityCode(key, headers);
         String version = versionCode(headers);
         List<String[]> blocks = optionalBlocks(headers);
-        // The type names the cipher that protects the key, and the cipher is the one the
-        // key needs, so a Triple DES key is protected with Triple DES and an AES key with
-        // AES.
         // The version and the length are the placeholders the reference writes, because
         // neither has a meaning in a TR-34 block: what the block carries is the key, not a
         // block of a length the receiver would have to compute. The optional blocks follow
@@ -793,8 +790,8 @@ final class PaymentCryptographyKeyExchange {
         // the header a whole number of cipher blocks is the last of them.
         List<String[]> padded = PaymentCryptographyTr31.withPadding(blocks,
                 "A".equals(algorithm) ? 16 : 8);
-        String header = "D9999" + usage + algorithm + mode + version + exportability
-                + PaymentCryptographyTr31.two(padded.size(), 10) + "00";
+        String header = PaymentCryptographyTr31.header16("D", usage, mode, exportability,
+                9999, algorithm, version, padded.size());
         return header + PaymentCryptographyTr31.optionalBlocks(padded);
     }
 

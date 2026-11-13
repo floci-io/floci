@@ -301,9 +301,9 @@ final class PaymentCryptographyTr31 {
      *
      * @param blockLength the length of the whole block, in characters
      */
-    private static String header16(String type, String usage, String mode, String exportability,
-                                  int blockLength, String algorithm, String version,
-                                  int optionalBlocks) {
+    static String header16(String type, String usage, String mode, String exportability,
+                           int blockLength, String algorithm, String version,
+                           int optionalBlocks) {
         String header = type
                 + pad4(blockLength)
                 + usage

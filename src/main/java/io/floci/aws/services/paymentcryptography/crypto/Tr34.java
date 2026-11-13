@@ -689,7 +689,6 @@ public final class Tr34 {
         return out;
     }
 
-    /** Strip PKCS#7 padding, rejecting malformed padding rather than truncating. */
     /** The SHA-256 digest of the given bytes. */
     private static byte[] digest(byte[] data) {
         try {
