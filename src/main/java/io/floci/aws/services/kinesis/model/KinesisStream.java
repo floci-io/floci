@@ -22,7 +22,7 @@ public class KinesisStream {
     private String streamStatus;
     private Instant statusTransitionDeadline;
     @JsonIgnore
-    private transient boolean statusUpdateInProgress;
+    private transient boolean statusWindowInProgress;
     private volatile List<KinesisShard> shards = new CopyOnWriteArrayList<>();
     private int retentionPeriodHours = 24;
     private Instant streamCreationTimestamp;
@@ -59,8 +59,8 @@ public class KinesisStream {
 
     public String getStreamStatus() { return getStreamStatus(Instant.now()); }
     public synchronized String getStreamStatus(Instant now) {
-        if (statusUpdateInProgress) {
-            return "UPDATING";
+        if (statusWindowInProgress) {
+            return streamStatus;
         }
         return statusTransitionDeadline != null && !now.isBefore(statusTransitionDeadline)
                 ? "ACTIVE" : streamStatus;
@@ -75,14 +75,14 @@ public class KinesisStream {
     public synchronized void setStatusWindow(String status, Instant deadline) {
         this.streamStatus = status;
         this.statusTransitionDeadline = deadline;
-        this.statusUpdateInProgress = false;
+        this.statusWindowInProgress = false;
     }
 
-    public synchronized void beginStatusUpdate(Instant fallbackDeadline) {
-        // Persistent snapshots taken mid-reshard still have a bounded recovery deadline.
-        this.streamStatus = "UPDATING";
+    public synchronized void beginStatusWindow(String status, Instant fallbackDeadline) {
+        // Persistent snapshots taken during a change still have a bounded recovery deadline.
+        this.streamStatus = status;
         this.statusTransitionDeadline = fallbackDeadline;
-        this.statusUpdateInProgress = true;
+        this.statusWindowInProgress = true;
     }
 
     public List<KinesisShard> getShards() { return shards; }

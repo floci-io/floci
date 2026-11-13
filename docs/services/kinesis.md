@@ -123,8 +123,10 @@ Stream creation and control-plane updates normally report `ACTIVE` immediately. 
 to become active or retry a conflicting update. During an `UPDATING` window, reads
 and record writes remain available, but another split, merge, scaling, mode, size,
 or encryption change returns `ResourceInUseException`. The window is evaluated on
-read from a stored deadline after the synchronous change. Resharding also reports
-`UPDATING` while the change is in progress; the setting does not defer the shard change.
+read from a stored deadline set after the changed state is first persisted. A slow
+final synchronous write can shorten a very small window before the call returns.
+With a nonzero updating delay, resharding also reports `UPDATING` while the change is
+in progress; the setting does not defer the shard change.
 
 `UpdateShardCount` enforces the documented default limits: at most double the current
 open shard count per call, at most ten calls per rolling 24-hour period per stream, a
