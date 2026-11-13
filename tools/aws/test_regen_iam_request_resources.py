@@ -1276,3 +1276,22 @@ def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_i
          "when": {"ResourceType": ["ManagedInstance"]}},
         {"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"},
          "when": {"ResourceType": ["Parameter"]}}]
+
+
+def test_a_bare_member_names_the_type_its_shape_is_named_for():
+    formats = {"association": "arn:${Partition}:ssm:${Region}:${Account}:association/${AssociationId}",
+               "document": "arn:${Partition}:ssm:${Region}:${Account}:document/${DocumentName}"}
+    resources = [{"type": "association", "fill": {}}]
+    # `CreateAssociation`'s `Name` is a `DocumentARN`: it names the document the association runs.
+    assert r.with_typed_bare(resources, ["association", "document"], formats, {"Name": "document"},
+                             {"Name": "Name"}) == [
+        {"type": "association", "fill": {}},
+        {"type": "document", "fill": {"DocumentName": "Name"}}]
+    # A type the request already names, or a shape named for no type of the action, adds nothing.
+    assert r.with_typed_bare(resources, ["association"], formats, {"Name": "document"}, {"Name": "Name"}) == resources
+    assert r.with_typed_bare(resources, ["association", "document"], formats, {"Name": "calendar"},
+                             {"Name": "Name"}) == resources
+    # A member that already fills a resource names that one.
+    named = [{"type": "association", "fill": {"AssociationId": "Name"}}]
+    assert r.with_typed_bare(named, ["association", "document"], formats, {"Name": "document"},
+                             {"Name": "Name"}) == named
