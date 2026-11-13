@@ -28,6 +28,8 @@ public class TableDefinition {
     private long itemCount;
     private long tableSizeBytes;
     private ProvisionedThroughput provisionedThroughput;
+    private long warmReadUnitsPerSecond;
+    private long warmWriteUnitsPerSecond;
     private String tableArn;
     private Map<String, String> tags;
     private List<GlobalSecondaryIndex> globalSecondaryIndexes;
@@ -95,6 +97,8 @@ public class TableDefinition {
         this.tableArn = AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
         this.tableId = UUID.randomUUID().toString();
         this.provisionedThroughput = new ProvisionedThroughput(5, 5);
+        this.warmReadUnitsPerSecond = 5;
+        this.warmWriteUnitsPerSecond = 5;
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
         this.localSecondaryIndexes = new ArrayList<>();
@@ -102,6 +106,24 @@ public class TableDefinition {
         this.pointInTimeRecoveryRecoveryPeriodInDays = 35;
         this.kinesisStreamingDestinations = new ArrayList<>();
         this.replicaRegions = new ArrayList<>();
+    }
+
+    /** Baseline warm read units for a table given its billing mode and provisioned capacity. */
+    public static long defaultWarmReadUnits(String billingMode, ProvisionedThroughput pt) {
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            return 12000;
+        }
+        long rcu = pt != null ? pt.getReadCapacityUnits() : 0;
+        return rcu > 0 ? rcu : 5;
+    }
+
+    /** Baseline warm write units for a table given its billing mode and provisioned capacity. */
+    public static long defaultWarmWriteUnits(String billingMode, ProvisionedThroughput pt) {
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            return 4000;
+        }
+        long wcu = pt != null ? pt.getWriteCapacityUnits() : 0;
+        return wcu > 0 ? wcu : 5;
     }
 
     public String getTableName() { return tableName; }
@@ -127,6 +149,22 @@ public class TableDefinition {
 
     public ProvisionedThroughput getProvisionedThroughput() { return provisionedThroughput; }
     public void setProvisionedThroughput(ProvisionedThroughput provisionedThroughput) { this.provisionedThroughput = provisionedThroughput; }
+
+    public long getWarmReadUnitsPerSecond() {
+        if (warmReadUnitsPerSecond <= 0) {
+            return defaultWarmReadUnits(billingMode, provisionedThroughput);
+        }
+        return warmReadUnitsPerSecond;
+    }
+    public void setWarmReadUnitsPerSecond(long v) { this.warmReadUnitsPerSecond = v; }
+
+    public long getWarmWriteUnitsPerSecond() {
+        if (warmWriteUnitsPerSecond <= 0) {
+            return defaultWarmWriteUnits(billingMode, provisionedThroughput);
+        }
+        return warmWriteUnitsPerSecond;
+    }
+    public void setWarmWriteUnitsPerSecond(long v) { this.warmWriteUnitsPerSecond = v; }
 
     public String getTableArn() { return tableArn; }
     public void setTableArn(String tableArn) { this.tableArn = tableArn; }

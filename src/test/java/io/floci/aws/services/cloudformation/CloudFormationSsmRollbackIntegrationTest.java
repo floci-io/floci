@@ -480,8 +480,7 @@ class CloudFormationSsmRollbackIntegrationTest {
         Mockito.doThrow(new AwsException("InternalServerError", "simulated restore failure", 500))
                 .doCallRealMethod()
                 .when(ssmService)
-                .putParameter(eq(name), eq(priorValue), any(), any(), eq(true), any(), any(), any(), any(), any(),
-                        anyString());
+                .restoreParameter(eq(name), eq(priorValue), any(), any(), any(), any(), any(), any(), anyString());
     }
 
     private void failDeleting(String name) {

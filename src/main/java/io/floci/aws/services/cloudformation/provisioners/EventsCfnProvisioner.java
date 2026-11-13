@@ -60,7 +60,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
     private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
     private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
-            Set.of("Name", "Description", "Tags", "Policy");
+            Set.of("Name", "EventSourceName", "Description", "Tags", "Policy");
     private static final Pattern EVENT_BUS_TAG_PATTERN =
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
@@ -406,7 +406,14 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         validateEventBusProperties(props);
         String existingBusName = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         String busName = ctx.resolveOptional(props, "Name");
-        validateEventBusName(busName);
+        String eventSourceName = ctx.resolveOptional(props, "EventSourceName");
+        boolean sameBus = existingBusName != null && existingBusName.equals(busName);
+        if (eventSourceName != null || !sameBus) {
+            validateEventBusName(busName, eventSourceName);
+        }
+        if (sameBus) {
+            eventSourceName = busName.indexOf('/') >= 0 ? busName : null;
+        }
         if (existingBusName != null && !existingBusName.equals(busName)) {
             throw new AwsException("ValidationError",
                     "Updating EventBus Name requires resource replacement, which is not supported.", 400);
@@ -418,11 +425,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> tags = parseEventBusTags(props != null ? props.get("Tags") : null, ctx);
         JsonNode policy = resolveEventBusPolicy(props, ctx);
+        if (eventSourceName != null && !policy.isNull()) {
+            throw new AwsException("ValidationError",
+                    "AWS::Events::EventBus Policy is not supported on a partner event bus.", 400);
+        }
 
         EventBus bus;
         boolean createdBus = false;
         try {
-            bus = eventBridgeService.createEventBus(busName, description, tags, ctx.region());
+            bus = eventBridgeService.createEventBus(busName, eventSourceName, description, tags, ctx.region());
             createdBus = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
         } catch (AwsException e) {
@@ -485,10 +496,22 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private void validateEventBusName(String busName) {
+    private void validateEventBusName(String busName, String eventSourceName) {
         if (busName == null || busName.isBlank()) {
             throw new AwsException("ValidationError",
                     "Name is required for AWS::Events::EventBus.", 400);
+        }
+        if (eventSourceName != null) {
+            if (eventSourceName.length() > 256
+                    || !EventBridgeService.PARTNER_EVENT_SOURCE_NAME.matcher(eventSourceName).matches()) {
+                throw new AwsException("ValidationError",
+                        "Invalid AWS::Events::EventBus EventSourceName: " + eventSourceName, 400);
+            }
+            if (!eventSourceName.equals(busName)) {
+                throw new AwsException("ValidationError",
+                        "AWS::Events::EventBus Name must match EventSourceName: " + eventSourceName, 400);
+            }
+            return;
         }
         if (busName.length() > 256
                 || !busName.matches("[.\\-_A-Za-z0-9]+")
@@ -694,6 +717,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
+            if (!eventBridgeService.ruleExists(ruleName, busName, region)) {
+                LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
+                return;
+            }
             // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
             List<Target> targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {

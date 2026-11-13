@@ -1,6 +1,6 @@
 """Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes, regen_apigateway_shapes,
-regen_ecs_shapes and regen_emr_serverless_shapes, and of the constraints regen_resource_groups_shapes,
-regen_ecr_shapes, regen_iam_shapes and regen_sts_shapes vendor.
+regen_ecs_shapes, regen_organizations_shapes and regen_emr_serverless_shapes, and of the constraints
+regen_resource_groups_shapes, regen_ecr_shapes, regen_iam_shapes and regen_sts_shapes vendor.
 
 Each generator names a model, an output and, for the constraints flavour, its operations, and hands
 the rest here, so what any one of them does differently is a constant and what they all do is
@@ -30,6 +30,7 @@ import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
 import regen_kinesis_shapes
 import regen_lambda_microvm_shapes
+import regen_organizations_shapes
 import regen_payment_cryptography_data_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
@@ -198,6 +199,7 @@ def test_generator_name_is_the_scripts_path_from_the_repository_root():
     assert r.generator_name(regen_sesv2_shapes.__file__) == "tools/aws/regen_sesv2_shapes.py"
     assert r.generator_name(regen_apigateway_shapes.__file__) == "tools/aws/regen_apigateway_shapes.py"
     assert r.generator_name(regen_ecs_shapes.__file__) == "tools/aws/regen_ecs_shapes.py"
+    assert r.generator_name(regen_organizations_shapes.__file__) == "tools/aws/regen_organizations_shapes.py"
 
 
 def test_generator_name_outside_the_repository_is_the_file_name(tmp_path):
@@ -223,6 +225,7 @@ def test_load_model_without_a_service_model_exits(tmp_path):
     (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json", {}),
     (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json", {}),
     (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json", {}),
+    (regen_organizations_shapes, "organizations/2016-11-28", "organizations-request-shapes.json", {}),
 ])
 def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, options, monkeypatch):
     calls = []

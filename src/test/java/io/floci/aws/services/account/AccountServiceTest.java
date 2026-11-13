@@ -8,10 +8,13 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.account.model.AlternateContact;
 import io.floci.aws.services.organizations.OrganizationsService;
+import io.floci.aws.services.organizations.model.Organization;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -25,6 +28,7 @@ class AccountServiceTest {
     private static final String ACCOUNT_ID = "123456789012";
     private final ObjectMapper mapper = new ObjectMapper();
     private AccountService service;
+    private OrganizationsService organizations;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
@@ -33,7 +37,8 @@ class AccountServiceTest {
         AccountAwareStorageBackend<AlternateContact> store = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         when(storageFactory.create(eq("account"), eq("account-alternate-contacts.json"), any(TypeReference.class)))
                 .thenReturn((AccountAwareStorageBackend) store);
-        service = new AccountService(storageFactory, mock(OrganizationsService.class));
+        organizations = mock(OrganizationsService.class);
+        service = new AccountService(storageFactory, organizations);
     }
 
     @Test
@@ -75,6 +80,30 @@ class AccountServiceTest {
         AwsException deleteError = assertThrows(AwsException.class,
                 () -> service.deleteAlternateContact(ACCOUNT_ID, request));
         assertEquals("ResourceNotFoundException", deleteError.getErrorCode());
+    }
+
+    @Test
+    void findsTheMemberAccountOfTheCallersOrganizationARequestNames() {
+        Organization organization = new Organization();
+        organization.setId("o-abcdefghij");
+        organization.setArn("arn:aws:organizations::" + ACCOUNT_ID + ":organization/o-abcdefghij");
+        organization.setMasterAccountId(ACCOUNT_ID);
+        when(organizations.describeOrganization(ACCOUNT_ID)).thenReturn(organization);
+        when(organizations.describeAccount(ACCOUNT_ID, "999988887777"))
+                .thenThrow(new AwsException("AccountNotFoundException", "not a member", 400));
+
+        assertEquals(Optional.of("arn:aws:account::" + ACCOUNT_ID + ":account/o-abcdefghij/111122223333"),
+                service.find("accountInOrganization", List.of("111122223333"), "us-east-1"));
+        // An account the organization does not hold, and another type, find nothing.
+        assertEquals(Optional.empty(), service.find("accountInOrganization", List.of("999988887777"), "us-east-1"));
+        assertEquals(Optional.empty(), service.find("account", List.of("111122223333"), "us-east-1"));
+    }
+
+    @Test
+    void findsNoMemberAccountForACallerInNoOrganization() {
+        when(organizations.describeOrganization(ACCOUNT_ID))
+                .thenThrow(new AwsException("AWSOrganizationsNotInUseException", "no organization", 400));
+        assertEquals(Optional.empty(), service.find("accountInOrganization", List.of("111122223333"), "us-east-1"));
     }
 
     private ObjectNode contactRequest() {

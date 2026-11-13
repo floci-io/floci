@@ -422,3 +422,119 @@ def test_the_round_trip_lists_the_routed_scopes_actions(tmp_path):
     given = saved_sources(tmp_path / "later", ANCHOR_SERVICES + [typed("svc", {"ListThings": ["thing"]}),
                                                                  typed("other", {})])
     assert r.main(["--verify", "--source-dir", str(given), "--output", str(output)]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# authorizedByMethod: the operations checked as the action their route's method names
+# --------------------------------------------------------------------------- #
+def by_method_service(operations: dict[str, list[str]], sdks: dict[str, list[str]] | None = None) -> dict:
+    """An API Gateway-like reference document: its methods are actions, beside actions of their own names."""
+    document = service("api", operations, ["GET", "POST", "PUT", "PATCH", "DELETE", "UpdatePolicy", "CreatePortal"])
+    for operation in document["Operations"]:
+        operation["SDK"] = [{"Name": name} for name in (sdks or {}).get(operation["Name"], ["api"])]
+    return document
+
+
+METHOD_ROUTES = {"handRouted": {"hand": "the rules route it alone"}, "models": {
+    "api": {"credentialScope": "api", "operations": {
+        "TagResource": {"method": "PUT", "requestUri": "/tags/{arn+}",
+                        "alternatives": [{"method": "POST", "requestUri": "/tags", "located": {"arn": "body"}}]},
+        "GetStage": {"method": "GET", "requestUri": "/apis/{id}/stages/{name}"},
+        "CreateApi": {"method": "POST", "requestUri": "/apis"},
+        "CreatePortal": {"method": "POST", "requestUri": "/portals"}}},
+    "api-v2": {"credentialScope": "api", "operations": {
+        "TagResource": {"method": "POST", "requestUri": "/v2/tags/{arn+}"},
+        "GetStage": {"method": "GET", "requestUri": "/v2/apis/{id}/stages/{name}"}}},
+    "hand": {"credentialScope": "hand", "operations": {"GetThing": {"method": "GET", "requestUri": "/things"}}}}}
+
+
+def test_the_route_methods_are_each_routed_operations_alternatives_included():
+    assert r.route_methods(METHOD_ROUTES) == {"api": {
+        "CreateApi": ["POST"], "CreatePortal": ["POST"], "GetStage": ["GET"], "TagResource": ["POST", "PUT"]}}
+
+
+def test_an_operation_listing_the_action_of_each_of_its_routes_methods_is_authorized_by_method():
+    # TagResource is a PUT in one model and a POST in the other, and lists both beside the resource's PATCH;
+    # GetStage, listed for two SDK clients, is no single action, but each client's route is a GET.
+    documents = [by_method_service({"TagResource": ["api:PATCH", "api:POST", "api:PUT"],
+                                    "GetStage": ["api:GET"],
+                                    "CreateApi": ["api:POST", "api:UpdatePolicy", "iam:PassRole"]},
+                                   {"GetStage": ["api", "apiv2"]})]
+    methods = r.route_methods(METHOD_ROUTES)
+    assert r.authorized_by_method(documents, methods, r.authorized_actions_from(documents)) == {
+        "api": ["CreateApi", "GetStage", "TagResource"]}
+
+
+def test_an_operation_missing_the_action_of_one_of_its_routes_methods_keeps_its_own_name():
+    documents = [by_method_service({"TagResource": ["api:PATCH", "api:PUT"], "GetStage": ["api:GET"]},
+                                   {"GetStage": ["api", "apiv2"]})]
+    assert r.authorized_by_method(documents, r.route_methods(METHOD_ROUTES), {}) == {"api": ["GetStage"]}
+
+
+def test_an_operation_with_an_action_of_its_own_name_keeps_it():
+    documents = [by_method_service({"CreatePortal": ["api:CreatePortal", "api:POST"]})]
+    assert r.authorized_by_method(documents, r.route_methods(METHOD_ROUTES), {}) == {}
+
+
+def test_an_operation_the_one_action_shape_names_is_not_also_authorized_by_method():
+    documents = [by_method_service({"CreateApi": ["api:POST"]})]
+    renamed = r.authorized_actions_from(documents)
+    assert renamed == {"api": {"CreateApi": "api:POST"}}
+    assert r.authorized_by_method(documents, r.route_methods(METHOD_ROUTES), renamed) == {}
+
+
+def test_an_operation_listed_twice_must_list_its_methods_both_times():
+    documents = [by_method_service({"CreateApi": ["api:POST", "iam:PassRole"]})]
+    documents[0]["Operations"].append({"Name": "CreateApi", "AuthorizedActions": [{"Service": "api", "Name": "PUT"}]})
+    assert r.authorized_by_method(documents, r.route_methods(METHOD_ROUTES), {}) == {}
+
+
+def test_a_scope_authorized_by_method_the_reference_does_not_have_is_an_error():
+    with pytest.raises(ValueError, match="no namespace api"):
+        r.authorized_by_method([typed("other", {})], r.route_methods(METHOD_ROUTES), {})
+
+
+def test_the_operations_authorized_by_method_must_be_routed_sorted_and_named_once():
+    documents = ANCHOR_SERVICES + [by_method_service({"TagResource": ["api:POST", "api:PUT"]}), typed("other", {})]
+    methods = r.route_methods(METHOD_ROUTES)
+    document = r.build(documents, "a test", ["api"], methods)
+    assert document["authorizedByMethod"] == {"api": ["TagResource"]}
+    assert r.validate(document, ["api"], methods) == []
+    assert "authorizedByMethod lists api, a scope rest-routes.json reads no routes for" in r.validate(document, [])
+    document["authorizedByMethod"]["api"] = ["TagResource", "Missing"]
+    problems = r.validate(document, ["api"], methods)
+    assert "authorizedByMethod.api is not sorted, or repeats an operation" in problems
+    assert "authorizedByMethod lists api:Missing, which no route of api serves" in problems
+    document["authorizedByMethod"]["api"] = ["TagResource"]
+    document["authorizedActions"]["api"] = {"TagResource": "api:PUT"}
+    document["authorizedActions"] = dict(sorted(document["authorizedActions"].items()))
+    assert "api:TagResource is authorized by method and as api:PUT" in r.validate(document, ["api"], methods)
+    document["authorizedByMethod"] = {"api": []}
+    assert "authorizedByMethod.api is not a list of operation names" in r.validate(document, ["api"], methods)
+    del document["authorizedByMethod"]
+    assert "authorizedByMethod is missing" in r.validate(document, ["api"], methods)
+
+
+def test_verify_fails_on_an_operation_aws_no_longer_authorizes_by_method_and_reports_one_it_added():
+    untrue, added = r.verify_by_method_against({"api": ["CreateApi", "TagResource"]}, {"api": ["GetStage", "TagResource"]})
+    assert untrue == ["AWS no longer authorizes api:CreateApi by the methods of its routes"]
+    assert added == ["api:GetStage by method"]
+    assert r.verify_by_method_against({"api": ["TagResource"]}, {"api": ["TagResource"]}) == ([], [])
+
+
+def test_the_round_trip_lists_the_operations_authorized_by_method(tmp_path):
+    reference = by_method_service({"TagResource": ["api:PATCH", "api:POST", "api:PUT"], "GetStage": ["api:GET"]},
+                                  {"GetStage": ["api", "apiv2"]})
+    sources = saved_sources(tmp_path, ANCHOR_SERVICES + [reference])
+    routes = tmp_path / "rest-routes.json"
+    routes.write_text(json.dumps(METHOD_ROUTES), encoding="utf-8")
+    output = tmp_path / "iam-authorized-actions.json"
+    assert r.main(["--source-dir", str(sources), "--output", str(output), "--routes", str(routes)]) == 0
+    assert json.loads(output.read_text())["authorizedByMethod"] == {"api": ["GetStage", "TagResource"]}
+    assert r.main(["--check", "--output", str(output), "--routes", str(routes)]) == 0
+    assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output), "--routes", str(routes)]) == 0
+    (tmp_path / "later").mkdir()
+    later = by_method_service({"TagResource": ["api:PATCH", "api:PUT"], "GetStage": ["api:GET"]},
+                              {"GetStage": ["api", "apiv2"]})
+    given = saved_sources(tmp_path / "later", ANCHOR_SERVICES + [later])
+    assert r.main(["--verify", "--source-dir", str(given), "--output", str(output), "--routes", str(routes)]) == 1

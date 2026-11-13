@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
@@ -29,6 +30,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -82,7 +88,7 @@ class NativeDynamoDbJsonHandlerTest {
         return node;
     }
 
-    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression, 
+    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression,
     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValues){
         ObjectNode node = mapper.createObjectNode();
         node.put("TableName", tableName);
@@ -110,12 +116,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "UPDATED_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -137,7 +143,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
         createUsersTable("us-east-1");
@@ -187,12 +193,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "UPDATED_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -214,7 +220,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesAllOld()  throws Exception {
         createUsersTable("us-east-1");
@@ -227,12 +233,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "ALL_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -256,7 +262,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesAllNew()  throws Exception {
         createUsersTable("us-east-1");
@@ -269,12 +275,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "ALL_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -298,7 +304,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesNone()  throws Exception {
         createUsersTable("us-east-1");
@@ -311,12 +317,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "NONE");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -606,6 +612,121 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void describeTableReportsProvisionedTableCapacityAsWarmThroughput() throws Exception {
+        service.createTable("table-warm-provisioned",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-provisioned"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsOnDemandTableWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-on-demand",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-on-demand"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void updateTableWalksWarmThroughputThroughCutRaiseAndOnDemandSwitch() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 10, "WriteCapacityUnits": 20}
+                }
+                """), "eu-west-1");
+
+        // cut: warm stays at the previous peak (10/20)
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 8}
+                }
+                """), "eu-west-1");
+        JsonNode warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(10, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(20, warm.get("WriteUnitsPerSecond").asLong());
+
+        // raise: warm follows the new capacity
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 15, "WriteCapacityUnits": 25}
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(15, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25, warm.get("WriteUnitsPerSecond").asLong());
+
+        // on-demand switch: warm only rises to the baseline, never drops the peak
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(12000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warm.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void describeTableFallsBackForLegacyZeroWarmThroughput() throws Exception {
+        service.createTable("table-warm-legacy",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        // Simulate a persisted table from before warm throughput was tracked.
+        TableDefinition table = service.describeTable("table-warm-legacy", "eu-west-1");
+        table.setWarmReadUnitsPerSecond(0);
+        table.setWarmWriteUnitsPerSecond(0);
+        service.persistTable("table-warm-legacy", table, "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-legacy"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void createTableOmitsTableWarmThroughput() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-create",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 4}
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("TableDescription").has("WarmThroughput"),
+                "CreateTable must omit table-level WarmThroughput");
+    }
+
+    @Test
     void describeTableReportsOnDemandGsiWarmThroughput() throws Exception {
         handler.handle("CreateTable", json("""
                 {
@@ -668,6 +789,14 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
     }
 
+    private JsonNode describedTable(String tableName) throws Exception {
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        return body.get("Table");
+    }
+
     private JsonNode describedGsi(String tableName, String indexName) throws Exception {
         Response response = handler.handle("DescribeTable",
                 mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
@@ -713,6 +842,203 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> assertTrue(error instanceof AwsException awsError
                         && "ValidationException".equals(awsError.getErrorCode())),
                 () -> assertEquals(1, describedIndexes.size()));
+    }
+
+    private static final String SEE_GUIDE =
+            " Refer to the Amazon DynamoDB Developer Guide for current limits and how to request higher limits.";
+
+    private JsonNode quotaTableRequest(String tableName, long read, long write, long gsiRead, long gsiWrite) {
+        return json("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d},
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}
+                    }]
+                }
+                """.formatted(tableName, read, write, gsiRead, gsiWrite));
+    }
+
+    private JsonNode throughputUpdate(String tableName, long read, long write) {
+        return json("""
+                {"TableName": "%s", "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}}
+                """.formatted(tableName, read, write));
+    }
+
+    private AwsException expectLimitExceeded(String action, JsonNode request) {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(action, request, "eu-west-2"));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+        return ex;
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            40001 | 1     | 1     | 1     | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 40001 | 1     | 1     | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 1     | 40001 | 1     | The requested ReadCapacityUnits for index gsi1, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 1     | 1     | 40001 | The requested WriteCapacityUnits for index gsi1, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 40001 | 40001 | 1     | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            79984 | 1     | 1     | 1     | The requested ReadCapacityUnits, 79984, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            79985 | 1     | 1     | 1     | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 79986.
+            1     | 1     | 79985 | 1     | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 79986.
+            40001 | 80001 | 1     | 1     | This request would have caused the WriteCapacityUnits limit to be exceeded for the account in eu-west-2. Current WriteCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 80002.
+            """)
+    void createTableRefusesCapacityAboveTheQuotas(long read, long write, long gsiRead, long gsiWrite, String message) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("elsewhere", 30000, 30000, 30000, 30000), "us-east-1");
+
+        AwsException ex = expectLimitExceeded("CreateTable", quotaTableRequest("quota", read, write, gsiRead, gsiWrite));
+
+        assertEquals(message + SEE_GUIDE, ex.getMessage());
+        assertEquals(List.of("held"), service.listTables("eu-west-2"));
+    }
+
+    @Test
+    void createTableChecksTheQuotasAfterTheOtherErrors() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        ObjectNode unusedAttribute = (ObjectNode) quotaTableRequest("quota", 40001, 1, 1, 1);
+        ((ArrayNode) unusedAttribute.get("AttributeDefinitions")).addObject()
+                .put("AttributeName", "unused").put("AttributeType", "S");
+
+        AwsException taken = assertThrows(AwsException.class, () -> handler.handle("CreateTable",
+                quotaTableRequest("held", 40001, 1, 1, 1), "eu-west-2"));
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> handler.handle("CreateTable", unusedAttribute, "eu-west-2"));
+
+        assertEquals("ResourceInUseException", taken.getErrorCode());
+        assertEquals("ValidationException", invalid.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":10}} | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":10,"WriteCapacityUnits":40001}} | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":5}}}],"ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":10}} | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":6,"WriteCapacityUnits":5}}},{"Update":{"IndexName":"nope","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":40001}}}]} | The requested WriteCapacityUnits for index nope, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":1}}}]} | The requested ReadCapacityUnits for index gsi2, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":79971,"WriteCapacityUnits":1}}}]} | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 30. Limit: 80000. Current ReadCapacityUnits provisioned for the table and indexes: 15. Requested: 79986.
+            """)
+    void updateTableRefusesCapacityAboveTheQuotas(String request, String message) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+
+        AwsException ex = expectLimitExceeded("UpdateTable", json(request));
+
+        assertEquals(message + SEE_GUIDE, ex.getMessage());
+        TableDefinition table = service.describeTable("quota", "eu-west-2");
+        assertEquals(10, table.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(1, table.getGlobalSecondaryIndexes().size());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":39996,"WriteCapacityUnits":10}} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":10,"WriteCapacityUnits":39996}} | WriteCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":39991,"WriteCapacityUnits":5}}}]} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":39986,"WriteCapacityUnits":1}}}]} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"onDemand","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":39986,"WriteCapacityUnits":1}} | ReadCapacityUnits | 40015 | 0 | 39986
+            """)
+    void updateTableRefusesATotalAboveTheAccountQuota(String request, String unit, long reserved, long current,
+                                                      long requested) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 39990, 39990, 10, 10), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "onDemand",
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}]
+                }
+                """), "eu-west-2");
+
+        AwsException ex = expectLimitExceeded("UpdateTable", json(request));
+
+        assertEquals("This request would have caused the " + unit + " limit to be exceeded for the account in "
+                + "eu-west-2. Current " + unit + " reserved by the account: " + reserved + ". Limit: 80000. Current "
+                + unit + " provisioned for the table and indexes: " + current + ". Requested: " + requested + "."
+                + SEE_GUIDE, ex.getMessage());
+    }
+
+    @Test
+    void updateTableAcceptsATotalAtTheAccountQuotaAndAnyDecrease() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 39990, 39990, 10, 10), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+
+        handler.handle("UpdateTable", throughputUpdate("quota", 39995, 10), "eu-west-2");
+        handler.handle("UpdateTable", throughputUpdate("quota", 39994, 9), "eu-west-2");
+
+        assertEquals(39994, service.describeTable("quota", "eu-west-2").getProvisionedThroughput().getReadCapacityUnits());
+    }
+
+    @Test
+    void updateTableChecksTheQuotasAfterTheLookups() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+        JsonNode existingIndexCreate = json("""
+                {
+                    "TableName": "quota",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": 80001, "WriteCapacityUnits": 1}
+                    }}]
+                }
+                """);
+
+        AwsException missingTable = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateTable", throughputUpdate("missing", 40001, 10), "eu-west-2"));
+        AwsException existingIndex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateTable", existingIndexCreate, "eu-west-2"));
+
+        assertEquals("ResourceNotFoundException", missingTable.getErrorCode());
+        assertEquals("ValidationException", existingIndex.getErrorCode());
+    }
+
+    @Test
+    void concurrentRequestsCannotPassTheAccountQuotaTogether() throws Exception {
+        try (ExecutorService pool = Executors.newFixedThreadPool(16)) {
+            for (String region : AwsRegions.advertised(AwsRegions.DEFAULT_PARTITION)) {
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Response>> results = new ArrayList<>();
+                for (int i = 0; i < 8; i++) {
+                    handler.handle("CreateTable", quotaTableRequest("old" + i, 1, 1, 1, 1), region);
+                    JsonNode create = quotaTableRequest("new" + i, 10000, 1, 1, 1);
+                    JsonNode update = throughputUpdate("old" + i, 10000, 1);
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return handler.handle("CreateTable", create, region);
+                    }));
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return handler.handle("UpdateTable", update, region);
+                    }));
+                }
+                start.countDown();
+                for (Future<Response> result : results) {
+                    try {
+                        result.get();
+                    } catch (ExecutionException e) {
+                        AwsException refused = assertInstanceOf(AwsException.class, e.getCause());
+                        assertEquals("LimitExceededException", refused.getErrorCode());
+                    }
+                }
+
+                long reserved = 0;
+                for (String name : service.listTables(region)) {
+                    reserved += DynamoDbCapacityQuotas.Capacity.of(service.describeTable(name, region)).read();
+                }
+                assertTrue(reserved <= DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS, region + " " + reserved);
+            }
+        }
     }
 
     // Request validation for AWS parity: real DynamoDB rejects each of these with a
@@ -1828,6 +2154,64 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = :v SET b = :v                                   | SET
+            REMOVE a REMOVE b                                       | REMOVE
+            ADD a :s ADD b :s                                       | ADD
+            DELETE a :s DELETE b :s                                 | DELETE
+            add a :s\tADD b :s                                      | ADD
+            REMOVE a REMOVE b REMOVE c                              | REMOVE
+            ADD a :s REMOVE b REMOVE c ADD d :s                     | REMOVE
+            SET a = :v DELETE b :s ADD c :s DELETE d :s SET e = :v  | DELETE
+            """)
+    void updateItemRejectsARepeatedSectionBeforeTheTableLookup(String expression, String section) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: The \"" + section
+                + "\" section can only be used once in an update expression;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            ADD a :v ADD b :v     | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            ADD a :s ADD b :w     | An expression attribute value used in expression is not defined; attribute value: :w
+            """)
+    void updateItemChecksARepeatedSectionAfterTheOtherUpdateExpressionErrors(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRefusesARepeatedSectionForACallerThatSkipsTheHandler() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = item("userId", "u1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
+                "ADD a :s ADD b :s", null, valueAndSet(), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"ADD\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", key, "eu-west-1"));
+    }
+
+    private ObjectNode valueAndSet() {
+        ObjectNode values = singleValue(":v");
+        values.putObject(":s").putArray("SS").add("x");
+        return values;
+    }
+
     @Test
     void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
         createUsersTable("eu-west-1");
@@ -2072,6 +2456,36 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSection() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSectionBeforeUnusedValuesAndTheTableLookup() {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+        update.put("ConditionExpression", "attribute_exists(c)");
+        update.set("ExpressionAttributeValues", singleValue(":u"));
+        update.putObject("ExpressionAttributeNames").put("#u", "u");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
     }
 
     @Test

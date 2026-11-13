@@ -139,7 +139,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   Management Guide writes Spark steps, runs the arguments after it, with its `--master` and `--deploy-mode` as
   given where the cluster runs YARN (see **YARN**) and without them where it does not. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
   `spark-submit`, with the JAR and the step's `Args`; a MapReduce job it starts, such as the Management
-  Guide's `wordcount` of Hadoop's examples JAR, runs in local mode (see **Hadoop streaming and MapReduce**).
+  Guide's `wordcount` of Hadoop's examples JAR, runs on the cluster's YARN, or in local mode where it runs none (see
+  **Hadoop streaming and MapReduce**).
   A `Jar` of `/usr/lib/hadoop-mapreduce/hadoop-streaming.jar`, where EMR has it, runs the image's
   `/usr/lib/hadoop/hadoop-streaming.jar`. Any other `command-runner.jar` step runs its
   command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
@@ -207,8 +208,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   folder a `spark-env` export of `HADOOP_CONF_DIR` names, with the cluster's `core-site` after it, which wins; the
   image's `hdfs` command cannot run, so `hdfs dfs` runs as `hadoop fs`, and its other commands fail. A structured
   streaming query keeps its checkpoints through Spark's file system checkpoint manager, as its default one refuses
-  an `hdfs://` path without a host. In a command's Hadoop configuration, which a custom JAR's MapReduce in the
-  driver reads too, the `hdfs` scheme is a view of that HDFS in which one folder, `/tmp/hadoop/mapred/staging`, is
+  an `hdfs://` path without a host. Where the cluster runs no YARN, in a command's Hadoop configuration, which a custom
+  JAR's MapReduce in the driver reads too, the `hdfs` scheme is a view of that HDFS in which one folder, `/tmp/hadoop/mapred/staging`, is
   the container's own, for MapReduce in local mode (see **Hadoop streaming and MapReduce**); Spark and Hive keep
   HDFS's own client, so a Spark step can write a Hive table there. The HDFS container, its network and the volumes
   go once the cluster has ended and its last step is done ("HDFS is ephemeral storage that is reclaimed when you terminate a
@@ -218,7 +219,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
 * **YARN**: on a Docker network of the cluster's own, the default, "the primary node runs the YARN ResourceManager
   service", as the Management Guide puts it, in the primary node's container, with a NodeManager beside it on a cluster
   created with no core node, which keeps it, and its DataNode, as core nodes are added, the blocks it holds staying in
-  reach, and the cluster's Spark runs on them. A
+  reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
+  run on them. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
@@ -258,8 +260,13 @@ holding the driver and its executors, or a command or a script. The cluster itse
   again. A core node a resize brings back under its name in that minute takes no new blocks until it is over. A core
   node that stops before HDFS has moved its blocks starts again on its data, and one a shutdown of Floci cut off while
   it was being decommissioned starts again on its data with the cluster's next step, to be decommissioned then.
-* **Hadoop streaming and MapReduce**: a step's `hadoop` command runs MapReduce in local mode, in its own JVM, on the
-  YARN clusters too (see **Known limitations**): the image has MapReduce only in Spark's shaded Hadoop client, which
+* **Hadoop streaming and MapReduce**: on a cluster that runs YARN (see **YARN**), a step's MapReduce runs there, its
+  application master and tasks in YARN's containers on the cluster's nodes. A step's `hadoop` command, and so
+  `hadoop-streaming`, a `hadoop jar` and `hdfs dfs`, run from the nodes' Hadoop (`/usr/lib`, or the one an `emr-spark-*`
+  release keeps in `/opt`), with a `mapred-site.xml` that names YARN, the nodes' folders and the step's AWS environment,
+  and an application master of 1 GB and tasks of 768 MB, which the cluster's `mapred-site` replaces. A custom JAR step's
+  MapReduce gets the same. Where the cluster runs no YARN, a step's `hadoop` command runs MapReduce in local mode, in
+  its own JVM: the image has MapReduce only in Spark's shaded Hadoop client, which
   Floci makes the
   command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
   command's class path whatever `HADOOP_CLASSPATH` a command sets, and a copy of its `mapred-site.xml` sets
@@ -310,12 +317,14 @@ holding the driver and its executors, or a command or a script. The cluster itse
   on its class path, while the cluster's other steps keep the release image's. Then a `command-runner.jar` step
   running `hive-script`, as the AWS CLI writes a `Type=Hive` step (`hive-script --run-hive-script --args` and the
   step's `Args`), or `hive` itself, runs Hive: `hive-script` runs `hive` with the arguments after `--args`, as the
-  image's `hadoop` user in `/home/hadoop`, with Tez in local mode in its JVM, as an [EMR Serverless Hive job
-  run](emr-serverless.md#running-hive-job-runs)'s does, on the cluster's storage. It gets the cluster's `core-site`,
+  image's `hadoop` user in `/home/hadoop`, on the cluster's storage, its Tez on the cluster's YARN, or, where it runs
+  none, in local mode in its JVM, as an [EMR Serverless Hive job run](emr-serverless.md#running-hive-job-runs)'s does.
+  The images hold EMR Serverless's build of Tez, whose `tez-site.xml` names its own plugins, so on YARN Hive runs the
+  stock classes from the same jars, with an application master of 1 GB and tasks of 768 MB and one virtual core. It gets the cluster's `core-site`,
   `tez-site` and `hive-site` properties, each a `--hiveconf`, then the step's own arguments, so a `--hiveconf` of
   the step's wins over a classification's, as it does over `hive-site.xml`; the cluster's `hive-env` exports are its
   environment. Floci's settings come before them all, and any of them replaces one: S3A on Floci's S3 for `s3://`,
-  Tez in local mode, the cluster's HDFS, and its metastore. "By default, Hive records metastore information in a
+  where Tez runs, the cluster's HDFS, and its metastore. "By default, Hive records metastore information in a
   MySQL database on the primary node's file system", which Floci keeps in a Derby database of the metastore service
   its primary node runs (see **Storage**), so a table one Hive step makes is there for the next, until the cluster
   ends, and any number of Hive steps use it at once. The `hive-site` setting of
@@ -493,8 +502,10 @@ holding the driver and its executors, or a command or a script. The cluster itse
 - **No YARN in a network namespace the steps share, or with no network.** With `docker-network` set to `host` or
   `container:<id>`, YARN's daemons would listen on every interface of the namespace, and with `none` the steps could not
   reach them, so the cluster's Spark runs in local mode.
-- **MapReduce and Tez in local mode.** On a cluster that runs YARN too, `hadoop-streaming`, a custom JAR's MapReduce and
-  Hive's Tez run in the step's container.
+- **MapReduce and Tez in local mode where there is no YARN.** Only a cluster that runs YARN (see **YARN**) runs them on
+  it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's Tez run in the step's container.
+- **Tez's intermediate data is not compressed on YARN.** The images name the LZO codec for it, whose native library they
+  lack, so Floci turns that compression off, which a `tez-site` classification can turn back on with a codec they have.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
   `container:<id>`, the primary node runs HDFS but not Hive's metastore service: Hive 3's has no setting for the
   address it listens on, so it would serve its tables, and the files under them, on every interface of the

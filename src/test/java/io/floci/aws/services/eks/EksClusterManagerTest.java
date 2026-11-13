@@ -1275,6 +1275,44 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void regionQualifiedClustersLeadWithTheirRegion() {
+            // Cluster names are unique only per Region (#7966): two Regions' same-named clusters
+            // must not share a container and data volume.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+
+            Cluster defaultAccount = cluster();
+            defaultAccount.setAccountId("000000000000");
+            defaultAccount.setDockerNameRegion("eu-west-1");
+            Cluster otherAccount = cluster();
+            otherAccount.setAccountId("999999999999");
+            otherAccount.setDockerNameRegion("eu-west-1");
+
+            assertEquals("floci-aws-eks-eu-west-1.demo", manager.clusterResourceName(defaultAccount));
+            assertEquals("floci-aws-eks-eu-west-1.999999999999.demo", manager.clusterResourceName(otherAccount));
+        }
+
+        @Test
+        void aRegionQualifiedClusterNeverClaimsTheUnqualifiedContainer() {
+            // The unqualified container may belong to the same-named cluster in another Region,
+            // created before Region qualification.
+            when(config.defaultAccountId()).thenReturn("000000000000");
+            when(lifecycleManager.findByName("floci-aws-eks-eu-west-1.demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-eu")));
+            when(lifecycleManager.adopt("cid-eu", List.of(6443), Optional.empty()))
+                    .thenReturn(new ContainerInfo("cid-eu", Map.of(), Map.of(6443, 6521)));
+
+            Cluster cluster = cluster();
+            cluster.setAccountId("000000000000");
+            cluster.setDockerNameRegion("eu-west-1");
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-eu", cluster.getContainerId());
+            assertEquals("floci-aws-eks-eu-west-1.demo", cluster.getDockerName());
+            verify(lifecycleManager, never()).findByName("floci-aws-eks-demo");
+            verify(lifecycleManager, never()).findByName("floci-eks-demo");
+        }
+
+        @Test
         void legacyNamedContainerIsKeptWhenItsAccountLabelMatchesTheOwner() {
             // A non-default-account cluster created before account-qualified naming left its
             // container (and mounted data volume) under floci-eks-<name>. Restoration must keep
@@ -1436,7 +1474,7 @@ class EksClusterManagerTest {
                     clusterWithArn("arn:aws:eks:us-east-1:000000000000:cluster/demo"));
 
             assertEquals(EksClusterManager.buildRegistriesYaml("000000000000", AwsRegions.advertised("aws"),
-                    4566, "http://floci:4566"), Files.readString(tempDir.resolve("registries/demo/registries.yaml")));
+                    4566, "http://floci:4566"), Files.readString(tempDir.resolve("registries/000000000000/us-east-1/demo/registries.yaml")));
         }
 
         @Test
@@ -1444,7 +1482,7 @@ class EksClusterManagerTest {
             manager.injectEcrRegistryMirror("container-1",
                     clusterWithArn("arn:aws-cn:eks:cn-north-1:000000000000:cluster/demo"));
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(tempDir.resolve("registries/000000000000/cn-north-1/demo/registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-north-1.localhost:4566\":"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-northwest-1.localhost:4566\":"));
             assertFalse(yaml.contains(".us-east-1."), "a China cluster pulls from China regions only");
@@ -1457,7 +1495,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", cluster);
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(tempDir.resolve("registries/111122223333/eu-west-1/demo/registries.yaml"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-west-1.localhost:4566\":"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.eu-west-1.localhost:4566\":"));
         }
@@ -1470,7 +1508,7 @@ class EksClusterManagerTest {
             verify(copyCmd).withRemotePath("/etc");
             verify(copyCmd).exec();
             verify(config, never()).tls();
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
         }
 
@@ -1482,7 +1520,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", demoCluster());
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:54321\":"));
             assertTrue(yaml.contains("\"localhost:54321\":"));
             assertFalse(yaml.contains("localhost:4566\":"));
@@ -1499,7 +1537,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", demoCluster());
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566\":"));
             assertTrue(yaml.contains("\"localhost.floci.io:4566\":"));
             assertTrue(yaml.contains("- \"http://floci:4566\""));
@@ -1515,7 +1553,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", demoCluster());
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
             assertTrue(yaml.contains("\"localhost:4566\":"));
             verify(copyCmd).exec();
@@ -2415,6 +2453,10 @@ class EksClusterManagerTest {
             Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
             Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
             assertEquals(tempDir.resolve("keys").resolve("000000000000").resolve("us-east-1").resolve("my-cluster"), keysDir);
+            // The key k3s signs with is the one EksService creates and JWKS publishes, under the
+            // cluster's Regional key, not a second key minted under the bare name (#7966).
+            verify(oidcService).ensureKeyForAccount("000000000000", "us-east-1::my-cluster", issuer);
+            verify(oidcService, never()).ensureKeyForAccount(anyString(), eq("my-cluster"), anyString());
             assertTrue(Files.exists(privFile));
             assertTrue(Files.exists(pubFile));
 
@@ -2807,7 +2849,7 @@ class EksClusterManagerTest {
             nodegroup.setCapacityType("ON_DEMAND");
             nodegroup.setInstanceTypes(List.of("t3.medium"));
             nodegroup.setLabels(Map.of("environment", "production", "team", "platform"));
-            nodeGroupStorage.put("prod-cluster/worker-group-1", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/worker-group-1", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -2846,7 +2888,7 @@ class EksClusterManagerTest {
                     Map.of("key", "evict", "value", "true", "effect", "NO_EXECUTE"),
                     Map.of("key", "spot", "value", "preemptible", "effect", "PREFER_NO_SCHEDULE")
             ));
-            nodeGroupStorage.put("prod-cluster/gpu-group", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/gpu-group", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -2869,7 +2911,7 @@ class EksClusterManagerTest {
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("spot-group");
             nodegroup.setCapacityType("SPOT");
-            nodeGroupStorage.put("prod-cluster/spot-group", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/spot-group", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -2897,7 +2939,7 @@ class EksClusterManagerTest {
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("block-group");
             nodegroup.setCapacityType("CAPACITY_BLOCK");
-            nodeGroupStorage.put("prod-cluster/block-group", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/block-group", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -2956,8 +2998,8 @@ class EksClusterManagerTest {
             second.setLabels(Map.of("role", "backend", "secondary", "true"));
             second.setTaints(List.of(Map.of("key", "tier", "value", "backend", "effect", "NO_SCHEDULE")));
 
-            nodeGroupStorage.put("prod-cluster/second-ng", second);
-            nodeGroupStorage.put("prod-cluster/first-ng", first);
+            nodeGroupStorage.put("us-west-2::prod-cluster/second-ng", second);
+            nodeGroupStorage.put("us-west-2::prod-cluster/first-ng", first);
 
             manager.startCluster(cluster);
 
@@ -2993,7 +3035,7 @@ class EksClusterManagerTest {
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("app-workers");
             nodegroup.setLabels(Map.of("app", "test"));
-            nodeGroupStorage.put("prod-cluster/app-workers", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/app-workers", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -3034,7 +3076,7 @@ class EksClusterManagerTest {
                     "node.kubernetes.io/instance-type", "fake-type",
                     "custom-label", "valid-value"
             ));
-            nodeGroupStorage.put("prod-cluster/worker-group", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/worker-group", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -3068,7 +3110,7 @@ class EksClusterManagerTest {
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("custom-group");
             nodegroup.setInstanceTypes(List.of("nonexistent.nano"));
-            nodeGroupStorage.put("prod-cluster/custom-group", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/custom-group", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -3095,7 +3137,7 @@ class EksClusterManagerTest {
             Nodegroup nodegroup = new Nodegroup();
             nodegroup.setNodegroupName("versioned-group");
             nodegroup.setReleaseVersion("1.30.2-20240703");
-            nodeGroupStorage.put("prod-cluster/versioned-group", nodegroup);
+            nodeGroupStorage.put("us-west-2::prod-cluster/versioned-group", nodegroup);
 
             manager.startCluster(cluster);
 
@@ -3641,10 +3683,25 @@ class EksClusterManagerTest {
 
             verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
             verify(copyCmd).exec();
-            String written = Files.readString(tempDir.resolve("webhook").resolve("demo")
+            String written = Files.readString(tempDir.resolve("webhook/000000000000/us-east-1/demo")
                     .resolve("floci-eks-pod-identity.yaml"));
             assertTrue(written.contains("https://host.docker.internal:4566"
-                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000"));
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1"));
+        }
+
+        @Test
+        void sameNamedClustersInTwoRegionsKeepTheirLocalFilesApart() {
+            // Cluster names are unique only within a Region (#7966); a shared path would let one
+            // cluster's token-webhook kubeconfig be copied into the other's container.
+            Cluster west = cluster();
+            west.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/demo");
+            Cluster central = cluster();
+            central.setArn("arn:aws:eks:eu-central-1:000000000000:cluster/demo");
+
+            assertEquals(tempDir.resolve("webhook/000000000000/eu-west-1/demo/token-webhook.yaml"),
+                    manager.localClusterFile(west, "webhook", "token-webhook.yaml"));
+            assertNotEquals(manager.localClusterFile(west, "webhook", "token-webhook.yaml"),
+                    manager.localClusterFile(central, "webhook", "token-webhook.yaml"));
         }
 
         @Test

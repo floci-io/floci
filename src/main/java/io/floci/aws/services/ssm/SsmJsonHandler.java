@@ -1602,7 +1602,7 @@ public class SsmJsonHandler {
         documentNode.put("Content", effectiveContent);
         documentNode.put("Status", document.getStatus());
         if (document.getCreatedDate() != null) {
-            documentNode.put("CreatedDate", document.getCreatedDate().toString());
+            documentNode.put("CreatedDate", EpochSeconds.fromInstant(document.getCreatedDate()));
         }
         response.set("Document", documentNode);
         return Response.ok(response).build();

@@ -115,7 +115,8 @@ public class DurableExecutionService implements Resettable {
     }
 
     public record StartRequest(String accountId, String region, String functionName, String qualifier,
-                               String executionName, String inputPayload, boolean synchronous) {
+                               String executionName, String inputPayload, boolean synchronous,
+                               String traceHeader) {
     }
 
     public record ListRequest(String accountId, String region, String functionName, String version,
@@ -548,6 +549,7 @@ public class DurableExecutionService implements Resettable {
     private void runInvocation(String accountId, String key, String invocationId, long launchGeneration) {
         ResolvedDurableTarget target;
         byte[] payload;
+        String traceId = null;
         long startedAt;
         synchronized (lockFor(accountId, key)) {
             DurableExecution execution = store.getForAccount(accountId, key).orElse(null);
@@ -563,6 +565,7 @@ public class DurableExecutionService implements Resettable {
             try {
                 target = invoker.resolve(accountId, execution.getRegion(), execution.getFunctionName(),
                         execution.getVersion());
+                traceId = DurableTraceHeader.forInvocation(execution.getTraceHeader(), target.activeTracing());
                 payload = objectMapper.writeValueAsBytes(
                         DurableWire.invocationEvent(execution, token, updatedOperationIds));
             } catch (AwsException | IOException e) {
@@ -578,7 +581,7 @@ public class DurableExecutionService implements Resettable {
             result = new DurableInvocationResult(null, null, "ResourceNotFoundException");
         } else {
             try {
-                result = invoker.invoke(target, payload, invocationId);
+                result = invoker.invoke(target, payload, invocationId, traceId);
             } catch (AwsException e) {
                 result = new DurableInvocationResult(null, DurableWire.functionErrorPayload(
                         DurableErrorObject.of(e.getMessage(), e.getErrorCode())),
@@ -703,6 +706,8 @@ public class DurableExecutionService implements Resettable {
         execution.setVersion(target.version());
         execution.setExecutionArn(target.functionArn() + "/durable-execution/" + name + "/" + executionId);
         execution.setStartTimestamp(now);
+        execution.setTraceHeader(DurableTraceHeader.forExecution(request.traceHeader(), target.activeTracing(),
+                now / 1000));
         execution.setInputPayload(request.inputPayload());
         execution.setExecutionTimeoutSeconds(target.executionTimeoutSeconds());
         execution.setRetentionPeriodInDays(target.retentionPeriodInDays());
@@ -850,7 +855,7 @@ public class DurableExecutionService implements Resettable {
                                                ResolvedDurableTarget target, String name, String executionId, long now,
                                                List<Runnable> effects) {
         StartRequest request = new StartRequest(target.accountId(), target.region(), target.functionName(),
-                target.version(), name, operation.getInputPayload(), false);
+                target.version(), name, operation.getInputPayload(), false, null);
         DurableExecution child = newExecution(request, target, name, executionId, now);
         child.setParentExecutionArn(parent.getExecutionArn());
         child.setParentOperationId(operation.getId());
@@ -878,7 +883,7 @@ public class DurableExecutionService implements Resettable {
     private ChainedOutcome invokePlainFunction(ResolvedDurableTarget target, byte[] payload) {
         DurableInvocationResult result;
         try {
-            result = invoker.invoke(target, payload, UUID.randomUUID().toString());
+            result = invoker.invoke(target, payload, UUID.randomUUID().toString(), null);
         } catch (AwsException e) {
             return ChainedOutcome.failed(e);
         } catch (RuntimeException e) {

@@ -2,7 +2,9 @@ package io.floci.aws.services.appsync;
 
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
 import software.amazon.awssdk.services.appsync.model.AuthenticationType;
@@ -18,8 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @QuarkusTest
 class AppSyncUpdateTypeIntegrationTest {
 
-    @Test
-    void rejectedFormatPreservesTheTypeAndValidUpdateStillSucceeds() {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"BOGUS", ""})
+    void rejectedFormatPreservesTheTypeAndValidUpdateStillSucceeds(String format) {
         try (AppSyncClient client = AwsTestClients.create(
                 AppSyncClient.builder(), "741648700015", Region.US_EAST_1)) {
             String apiId = client.createGraphqlApi(request -> request.name("type-update-" + UUID.randomUUID())
@@ -33,7 +37,7 @@ class AppSyncUpdateTypeIntegrationTest {
 
                 BadRequestException refused = assertThrows(BadRequestException.class,
                         () -> client.updateType(request -> request.apiId(apiId).typeName("Item")
-                                .definition(replacement).format("BOGUS")));
+                                .definition(replacement).format(format)));
 
                 assertEquals(400, refused.statusCode());
                 assertEquals(stored, client.getType(request -> request.apiId(apiId).typeName("Item")

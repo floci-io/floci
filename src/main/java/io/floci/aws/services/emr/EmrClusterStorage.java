@@ -118,12 +118,6 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // The ResourceManager's cluster metrics on its web port, which say when the NodeManager has registered.
     private static final String RESOURCE_MANAGER_METRICS = "http://127.0.0.1:8088/ws/v1/cluster/metrics";
     private static final String RESOURCE_MANAGER_NODES = "http://127.0.0.1:8088/ws/v1/cluster/nodes?states=";
-    // The java.base packages Hadoop 3.4's YARN daemons reach into, which Java 17 opens only when told, through
-    // JDK_JAVA_OPTIONS, which Java 9 on reads and Java 8, on which a release may run and which refuses the options
-    // themselves, ignores.
-    private static final List<String> YARN_OPENED_PACKAGES = List.of("java.lang", "java.lang.reflect",
-            "java.lang.invoke", "java.util", "java.util.concurrent", "java.util.regex", "java.net", "java.io",
-            "java.nio", "sun.nio.ch", "sun.nio.cs", "sun.security.action", "sun.util.calendar");
     // Where a NodeManager keeps its containers' logs, on the node's volume, as <application>/<container>/<file>.
     private static final String YARN_LOGS = "/mnt/yarn/logs";
     private static final int LOG_LISTING_SECONDS = 30;
@@ -1045,10 +1039,9 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return properties.toString();
     }
 
-    // The JVM options that open YARN_OPENED_PACKAGES to Hadoop's classes.
+    // The JVM options that open to Hadoop's classes the packages its daemons reach into.
     private static String yarnOpens() {
-        return YARN_OPENED_PACKAGES.stream().map(name -> "--add-opens=java.base/" + name + "=ALL-UNNAMED")
-                .collect(Collectors.joining(" "));
+        return EmrServerlessSparkRunner.yarnJavaOptions();
     }
 
     // A cluster's HDFS container, started anew on the HDFS data its volume holds, which goes with the cluster's other

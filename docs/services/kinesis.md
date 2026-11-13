@@ -21,6 +21,9 @@
 | `AddTagsToStream` | Tag a stream |
 | `RemoveTagsFromStream` | Remove tags |
 | `ListTagsForStream` | List tags |
+| `TagResource` | Add or update tags on a stream or consumer |
+| `UntagResource` | Remove tags from a stream or consumer |
+| `ListTagsForResource` | List tags on a stream or consumer |
 | `StartStreamEncryption` | Enable KMS encryption |
 | `StopStreamEncryption` | Disable encryption |
 | `SplitShard` | Split a shard into two |

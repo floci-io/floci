@@ -1,5 +1,6 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ExtractableResponse;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -17,6 +19,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +27,7 @@ import java.util.UUID;
 import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
@@ -48,6 +52,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class Ec2IntegrationTest {
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
@@ -2936,7 +2943,10 @@ class Ec2IntegrationTest {
         given().header("Authorization", AUTH_HEADER.replace("/ec2/", "/iam/"))
                 .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", "sample-profile-v2")
                 .post("/").then().statusCode(200);
-        String launchedInstanceId = given()
+        cleanup.register(() -> given().header("Authorization", AUTH_HEADER.replace("/ec2/", "/iam/"))
+                .formParam("Action", "DeleteInstanceProfile").formParam("InstanceProfileName", "sample-profile-v2")
+                .post("/").then().statusCode(200));
+        ExtractableResponse<Response> launched = given()
             .formParam("Action", "RunInstances")
             .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)
             .formParam("LaunchTemplate.Version", "$Default")
@@ -2954,6 +2964,26 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
+            .extract();
+        String launchedInstanceId = launched.path("RunInstancesResponse.instancesSet.item.instanceId");
+        cleanup.register(() -> {
+            given()
+                .formParam("Action", "TerminateInstances")
+                .formParam("InstanceId.1", launchedInstanceId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> given()
+                    .formParam("Action", "DescribeInstances")
+                    .formParam("InstanceId.1", launchedInstanceId)
+                    .header("Authorization", AUTH_HEADER)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
+                            equalTo("terminated")));
+        });
+        launched.response().then()
             .body("RunInstancesResponse.instancesSet.item.imageId", equalTo("ami-sample-override"))
             .body("RunInstancesResponse.instancesSet.item.instanceType", equalTo("c7g.large"))
             .body("RunInstancesResponse.instancesSet.item.keyName", equalTo("test-key"))
@@ -2965,8 +2995,7 @@ class Ec2IntegrationTest {
             .body("RunInstancesResponse.instancesSet.item.tagSet.item.findAll { it.key == 'example:NodeType' }.size()",
                     equalTo(1))
             .body("RunInstancesResponse.instancesSet.item.tagSet.item.find { it.key == 'sample-name' }.value",
-                    equalTo("sample-local"))
-            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+                    equalTo("sample-local"));
 
         given()
             .formParam("Action", "DescribeInstances")

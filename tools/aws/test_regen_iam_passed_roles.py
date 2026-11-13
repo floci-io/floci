@@ -217,6 +217,16 @@ def test_an_operation_naming_no_role_must_say_why(corrections):
         r.entry_for("svc:CreateThing", ["svc"], empty)
 
 
+def test_an_operation_botocore_does_not_have_yet_is_not_read_until_a_bump_brings_it(corrections):
+    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": r.NOT_IN_BOTOCORE})
+    before = {"svc": model({"CreateOther": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", ["svc"], before) == {"passedTo": ["svc"],
+                                                               "notRead": r.NOT_IN_BOTOCORE}
+    bumped = {"svc": model({"CreateThing": "In"}, {"In": structure(RoleArn="String")})}
+    with pytest.raises(ValueError, match="take it out of NOT_READ"):
+        r.entry_for("svc:CreateThing", ["svc"], bumped)
+
+
 # --------------------------------------------------------------------------- #
 # The whole document
 # --------------------------------------------------------------------------- #

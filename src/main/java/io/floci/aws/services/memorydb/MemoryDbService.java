@@ -869,13 +869,11 @@ public class MemoryDbService {
         if (resourceArn == null) {
             throw new AwsException("InvalidParameterValueException", "ResourceArn is required.", 400);
         }
-        try {
-            AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
-            if (!"memorydb".equals(arn.service()) || !currentRegion().equals(arn.region())
-                    || !regionResolver.getAccountId().equals(arn.accountId())) {
-                throw new IllegalArgumentException("ARN owner mismatch");
-            }
-        } catch (IllegalArgumentException e) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "memorydb")) {
+            throw new AwsException("InvalidARNFault", "The specified ARN is not valid.", 400);
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        if (!currentRegion().equals(arn.region()) || !regionResolver.getAccountId().equals(arn.accountId())) {
             throw new AwsException("ClusterNotFoundFault", "Cluster not found.", 400);
         }
         migrateLegacyClusters(currentRegion());

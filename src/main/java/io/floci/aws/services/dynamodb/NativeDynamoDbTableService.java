@@ -404,6 +404,12 @@ public class NativeDynamoDbTableService {
      * stay with the caller, which runs them while it parses so their error precedence holds.
      */
     TableDefinition updateTable(UpdateTableRequest request, String region) {
+        synchronized (dynamoDbService.capacityLock()) {
+            return applyUpdate(request, region);
+        }
+    }
+
+    private TableDefinition applyUpdate(UpdateTableRequest request, String region) {
         String tableName = request.tableName();
         TableSettings settings = request.settings();
         List<String> addRegions = request.replicaAdds();
@@ -430,7 +436,7 @@ public class NativeDynamoDbTableService {
         TableDefinition table = dynamoDbService.updateTable(tableName,
                 throughput != null ? throughput.readCapacityUnits() : null,
                 throughput != null ? throughput.writeCapacityUnits() : null,
-                request.gsiCreates(), request.gsiDeletes(), request.attributeDefinitions(),
+                request.gsiCreates(), request.gsiDeletes(), request.gsiUpdates(), request.attributeDefinitions(),
                 request.vectorCreates(), request.vectorDeletes(),
                 settings.billingMode(), region);
 
@@ -460,14 +466,6 @@ public class NativeDynamoDbTableService {
             table.setDeletionProtectionEnabled(settings.deletionProtectionEnabled());
         }
 
-        String billingMode = settings.billingMode();
-        if (billingMode != null) {
-            table.setBillingMode(billingMode);
-            if ("PAY_PER_REQUEST".equals(billingMode)) {
-                table.getProvisionedThroughput().setReadCapacityUnits(0L);
-                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
-            }
-        }
 
         if (settings.tableClass() != null) {
             table.setTableClass(settings.tableClass());

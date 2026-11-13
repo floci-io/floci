@@ -288,11 +288,15 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
-        Ec2Service service = mockModeService();
+    void defaultSecurityGroupOfIsEmptyWhenTheStoredDefaultGroupIsMissing() {
+        AccountAwareStorageBackend<SecurityGroup> groups = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-security-groups.json", groups)));
         String region = "us-east-1";
         String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
-        service.deleteSecurityGroup(region, service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+        // Model a missing persisted record; the public API cannot delete a default group.
+        groups.delete(region + "::" + service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
 
         assertTrue(service.defaultSecurityGroupOf(region, vpcId).isEmpty());
     }
@@ -9578,6 +9582,92 @@ class Ec2ServiceTest {
         AwsException error = assertThrows(AwsException.class, () -> service.modifyInstanceMetadataOptions(
                 "us-east-1", "i-0123456789abcdef0", new LaunchTemplateData.MetadataOptions()));
         assertEquals("InvalidInstanceID.NotFound", error.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"instance-state", "instance-groups", "interface-groups", "endpoint-groups",
+            "ingress", "egress", "group-pairs"})
+    void deleteSecurityGroupToleratesUnrelatedNullAttachmentFields(String field) {
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<NetworkInterface> interfaceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<VpcEndpoint> endpointStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of(
+                        "ec2-instances.json", instanceStore, "ec2-network-interfaces.json", interfaceStore,
+                        "ec2-vpc-endpoints.json", endpointStore)));
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup selected = service.createSecurityGroup(region, "selected", "selected", vpc);
+        SecurityGroup unrelated = service.createSecurityGroup(region, "unrelated", "unrelated", vpc);
+        Instance instance = new Instance();
+        instance.setInstanceId("i-null-fields");
+        instance.setRegion(region);
+        instance.setState("instance-state".equals(field) ? null : InstanceState.running());
+        instance.setSecurityGroups("instance-groups".equals(field) ? null : List.of());
+        instanceStore.put(region + "::i-null-fields", instance);
+        NetworkInterface networkInterface = new NetworkInterface();
+        networkInterface.setNetworkInterfaceId("eni-null-fields");
+        networkInterface.setGroups("interface-groups".equals(field) ? null : List.of());
+        interfaceStore.put(region + "::eni-null-fields", networkInterface);
+        VpcEndpoint endpoint = new VpcEndpoint();
+        endpoint.setVpcEndpointId("vpce-null-fields");
+        endpoint.setSecurityGroupIds("endpoint-groups".equals(field) ? null : List.of());
+        endpointStore.put(region + "::vpce-null-fields", endpoint);
+        if ("ingress".equals(field)) {
+            unrelated.setIpPermissions(null);
+        }
+        if ("egress".equals(field)) {
+            unrelated.setIpPermissionsEgress(null);
+        }
+        if ("group-pairs".equals(field)) {
+            IpPermission permission = new IpPermission();
+            permission.setUserIdGroupPairs(null);
+            unrelated.setIpPermissions(List.of(permission));
+        }
+
+        service.deleteSecurityGroup(region, selected.getGroupId());
+
+        assertTrue(service.describeSecurityGroups(region, List.of(selected.getGroupId()), List.of(), Map.of()).isEmpty());
+        assertEquals(unrelated.getGroupId(), service.describeSecurityGroups(
+                region, List.of(unrelated.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+    }
+
+    @Test
+    void deleteSecurityGroupRetainsAttachmentWithUnknownInstanceState() {
+        AccountAwareStorageBackend<Instance> instances = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-instances.json", instances)));
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup selected = service.createSecurityGroup(region, "selected", "selected", vpc);
+        Instance instance = new Instance();
+        instance.setState(null);
+        instance.setSecurityGroups(List.of(new GroupIdentifier(selected.getGroupId(), selected.getGroupName())));
+        instances.put(region + "::i-unknown-state", instance);
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, selected.getGroupId())).getErrorCode());
+        assertEquals(selected.getGroupId(), service.describeSecurityGroups(
+                region, List.of(selected.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " "})
+    void deleteSecurityGroupRequiresAnIdentifierWithoutMutation(String blank) {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup selected = service.createSecurityGroup(region, "selected", "selected", vpc);
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, null, blank, false)).getErrorCode());
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, blank, null, false)).getErrorCode());
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, null, null, false)).getErrorCode());
+        assertEquals(selected.getGroupId(), service.describeSecurityGroups(
+                region, List.of(selected.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
     }
 
     private static Ec2Service mockModeService() {

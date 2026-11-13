@@ -616,16 +616,18 @@ public class AppSyncService {
     public synchronized AppSyncType updateType(String apiId, String typeName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         AppSyncType existing = getType(apiId, typeName);
-        TypeFormat format = request.containsKey("format") ? parseEnum(TypeFormat.class, request.get("format")) : null;
+        Object formatValue = request.get("format");
+        if (formatValue == null) {
+            throw new AwsException("BadRequestException", "A type format is required", 400);
+        }
+        TypeFormat format = parseEnum(TypeFormat.class, formatValue);
         if (request.containsKey("definition")) {
             existing.setDefinition((String) request.get("definition"));
         }
         if (request.containsKey("description")) {
             existing.setDescription((String) request.get("description"));
         }
-        if (request.containsKey("format")) {
-            existing.setFormat(format);
-        }
+        existing.setFormat(format);
         typeStore.put(apiKey(apiId, typeName), existing);
         return existing;
     }

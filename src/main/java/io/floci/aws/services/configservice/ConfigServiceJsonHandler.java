@@ -202,7 +202,8 @@ public class ConfigServiceJsonHandler {
 
     private Response describeConfigurationRecorders(JsonNode req, String region) {
         List<String> names = extractStringList(req, "ConfigurationRecorderNames");
-        List<ConfigurationRecorder> recorders = service.describeConfigurationRecorders(region, names);
+        String arn = req.path("Arn").asText(null);
+        List<ConfigurationRecorder> recorders = service.describeConfigurationRecorders(region, names, arn);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("ConfigurationRecorders", mapper.valueToTree(recorders));
         return Response.ok(resp).build();
@@ -227,7 +228,8 @@ public class ConfigServiceJsonHandler {
 
     private Response describeConfigurationRecorderStatus(JsonNode req, String region) {
         List<String> names = extractStringList(req, "ConfigurationRecorderNames");
-        List<ConfigurationRecorderStatus> statuses = service.describeConfigurationRecorderStatus(region, names);
+        String arn = req.path("Arn").asText(null);
+        List<ConfigurationRecorderStatus> statuses = service.describeConfigurationRecorderStatus(region, names, arn);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("ConfigurationRecordersStatus", mapper.valueToTree(statuses));
         return Response.ok(resp).build();

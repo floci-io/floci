@@ -52,8 +52,7 @@ public class SesCfnProvisioner implements CfnResourceProvisioner {
             // it before either an in-place update or replacement can overwrite its snapshot.
             rollbackUpdate(resource);
             recoveredSnapshot = true;
-            ctx = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(), ctx.stackName(),
-                    resource.getPhysicalId(), ctx.progress(), ctx.priorProperties());
+            ctx = ctx.withPriorPhysicalId(resource.getPhysicalId());
         }
         String identityName = desired.identity();
         boolean updating = ctx.reusesPriorEntity(identityName);
