@@ -62,6 +62,7 @@ import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -369,6 +370,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             if (cluster.getName() == null) {
                 throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("name"));
             }
+            // "The RunJobFlow request can contain InstanceFleets parameters or InstanceGroups parameters, but not
+            // both", as "instance fleets and instance groups cannot coexist in a cluster".
+            if (!cluster.getInstanceGroups().isEmpty() && !cluster.getInstanceFleets().isEmpty()) {
+                throw new AwsException("ValidationException", "The RunJobFlow request can contain InstanceFleets"
+                        + " parameters or InstanceGroups parameters, but not both.", 400);
+            }
             String id = "j-" + randomId(13);
             cluster.setId(id);
             cluster.setRegion(region);
@@ -569,6 +576,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return call(() -> {
             EmrCluster cluster = requireCluster(clusterId);
             rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
+            if (!cluster.getInstanceFleets().isEmpty()) {
+                throw new AwsException("ValidationException", fleetsAndGroupsApart(clusterId, "instance fleets"), 400);
+            }
             List<String> ids = new ArrayList<>();
             for (EmrInstanceGroup group : groups) {
                 group.setId("ig-" + randomId(13));
@@ -668,6 +678,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return call(() -> {
             EmrCluster cluster = requireCluster(clusterId);
             rejectShutDownCluster(cluster, EmrService::jobFlowShutDown);
+            if (!cluster.getInstanceGroups().isEmpty()) {
+                throw invalid(fleetsAndGroupsApart(clusterId, "instance groups"));
+            }
             fleet.setId("if-" + randomId(13));
             fleet.setProvisionedOnDemandCapacity(fleet.getTargetOnDemandCapacity());
             fleet.setProvisionedSpotCapacity(fleet.getTargetSpotCapacity());
@@ -1132,6 +1145,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     private static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
+    }
+
+    // Why a cluster gets no instance group or fleet of the other kind: "The configuration option you choose applies to
+    // all nodes, it applies for the lifetime of the cluster, and instance fleets and instance groups cannot coexist in
+    // a cluster."
+    private static String fleetsAndGroupsApart(String clusterId, String uses) {
+        return "Cluster " + clusterId + " uses " + uses + ", and instance fleets and instance groups cannot coexist"
+                + " in a cluster.";
     }
 
     /**
@@ -1746,16 +1767,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         isCore, isCore ? core : task);
             }
         }
-        EmrInstanceFleet primaryFleet = cluster.getInstanceFleets().stream()
-                .filter(fleet -> "MASTER".equals(fleet.getInstanceFleetType())).findFirst().orElse(null);
-        int number = 1;
         for (EmrInstanceFleet fleet : cluster.getInstanceFleets()) {
-            if (fleet == primaryFleet) {
-                continue;
+            int number = fleetNumber(cluster.getInstanceFleets(), fleet);
+            if (number > 0) {
+                boolean isCore = "CORE".equals(fleet.getInstanceFleetType());
+                int count = fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
+                addNodes(cluster, number, isCore ? Math.max(count, floor) : count, isCore, isCore ? core : task);
             }
-            boolean isCore = "CORE".equals(fleet.getInstanceFleetType());
-            int count = fleet.getTargetOnDemandCapacity() + fleet.getTargetSpotCapacity();
-            addNodes(cluster, number++, isCore ? Math.max(count, floor) : count, isCore, isCore ? core : task);
         }
         List<ClusterStorage.Node> nodes = new ArrayList<>(core);
         nodes.addAll(task);
@@ -1934,7 +1952,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /** The EC2 instance id ListInstances gives a cluster's instance {@code index}, counted from 1. */
-    static String ec2InstanceId(int index) {
+    static String ec2InstanceId(long index) {
         return "i-" + String.format("%017d", index);
     }
 
@@ -1942,7 +1960,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * The private IPv4 address of the instance {@code ordinal}, counted from 1, of a cluster's instance group numbered
      * {@code group}: an instance keeps it while its cluster's other groups resize, as an EC2 instance does.
      */
-    static String privateIpAddress(int group, int ordinal) {
+    static String privateIpAddress(int group, long ordinal) {
         return "10." + group + "." + (ordinal - 1) / 254 + "." + ((ordinal - 1) % 254 + 1);
     }
 
@@ -1951,23 +1969,32 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * group, and from 1 for the others in the order the cluster has them, which only adds to the end.
      */
     static int groupNumber(List<EmrInstanceGroup> groups, EmrInstanceGroup group) {
-        EmrInstanceGroup primary = groups.stream().filter(EmrService::isMasterGroup).findFirst().orElse(null);
-        if (group == primary) {
+        return numberAmong(groups, group, EmrService::isMasterGroup);
+    }
+
+    /** A cluster's instance fleet's number in its instances' addresses, as {@link #groupNumber} gives a group's. */
+    static int fleetNumber(List<EmrInstanceFleet> fleets, EmrInstanceFleet fleet) {
+        return numberAmong(fleets, fleet, EmrService::isMasterFleet);
+    }
+
+    private static <T> int numberAmong(List<T> all, T one, Predicate<T> isMaster) {
+        T primary = all.stream().filter(isMaster).findFirst().orElse(null);
+        if (one == primary) {
             return 0;
         }
         int number = 1;
-        for (EmrInstanceGroup other : groups) {
-            if (other == group) {
+        for (T other : all) {
+            if (other == one) {
                 return number;
             }
             if (other != primary) {
                 number++;
             }
         }
-        throw new IllegalArgumentException("The instance group is not one of the cluster's");
+        throw new IllegalArgumentException("The instance group or fleet is not one of the cluster's");
     }
 
-    // The primary instance's: the first of the MASTER group, which ListInstances numbers before the others.
+    // The primary instance's: the first of the MASTER group or fleet, which ListInstances numbers before the others.
     static String masterInstanceId(EmrCluster cluster) {
         return ec2InstanceId(1);
     }
@@ -1980,6 +2007,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     static boolean isMasterGroup(EmrInstanceGroup group) {
         return "MASTER".equals(group.getInstanceGroupType());
+    }
+
+    static boolean isMasterFleet(EmrInstanceFleet fleet) {
+        return "MASTER".equals(fleet.getInstanceFleetType());
     }
 
     /** What a step's thread asks the service while its driver goes: a step has no timeout to report. */
