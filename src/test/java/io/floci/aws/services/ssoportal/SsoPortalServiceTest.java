@@ -70,12 +70,15 @@ class SsoPortalServiceTest {
         PaginatedResult<PortalRoleInfo> roles = service.listAccountRoles(accessToken, accountId, null, null);
         assertEquals("PlatformAdmins", roles.items().getFirst().roleName());
 
+        when(ssoAdminService.portalSessionName(any(), eq(principalId))).thenReturn(Optional.of("alice@example.com"));
         PortalRoleCredentials credentials = service.getRoleCredentials(accessToken, accountId, "PlatformAdmins");
         assertTrue(credentials.accessKeyId().startsWith("ASIA"));
         assertTrue(credentials.expiration() > System.currentTimeMillis());
 
         ArgumentCaptor<String> roleArn = ArgumentCaptor.forClass(String.class);
-        verify(iamService).registerSessionForAccount(eq(accountId), any(), any(), any(), roleArn.capture(), any(), eq(null));
+        // The role session is named after the Identity Store user, as IAM Identity Center names it.
+        verify(iamService).registerSessionForAccount(eq(accountId), any(), any(), any(), roleArn.capture(), any(), eq(null),
+                eq("alice@example.com"));
         assertEquals("arn:aws-cn:iam::" + accountId
                 + ":role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_PlatformAdmins_floci", roleArn.getValue());
     }

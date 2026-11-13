@@ -112,8 +112,10 @@ public class SsoPortalService {
         String sessionToken = random(SECRET_CHARACTERS, 200);
         String roleArn = regionResolver.buildGlobalArn("iam", accountId,
                 "role/aws-reserved/" + ServicePrincipals.of("sso") + "/AWSReservedSSO_" + roleName + "_floci");
+        // IAM Identity Center names the role session after the user, as GetCallerIdentity and EKS then report it.
+        String sessionName = ssoAdminService.portalSessionName(assignment, session.principalId()).orElse(null);
         iamService.registerSessionForAccount(accountId, accessKeyId, secretAccessKey, sessionToken,
-                roleArn, expiration, null);
+                roleArn, expiration, null, sessionName);
         return new PortalRoleCredentials(accessKeyId, expiration.toEpochMilli(), secretAccessKey, sessionToken);
     }
 

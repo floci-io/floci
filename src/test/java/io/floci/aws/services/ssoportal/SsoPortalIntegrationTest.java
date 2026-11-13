@@ -80,7 +80,7 @@ class SsoPortalIntegrationTest {
             .then().statusCode(400)
                 .body("__type", containsString("InvalidRequestException"));
 
-        given()
+        String roleAccessKeyId = given()
                 .header("x-amz-sso_bearer_token", accessToken)
                 .queryParam("account_id", "111111111111")
                 .queryParam("role_name", "PortalDirect" + suffix)
@@ -89,7 +89,20 @@ class SsoPortalIntegrationTest {
                 .body("roleCredentials.accessKeyId", Matchers.startsWith("ASIA"))
                 .body("roleCredentials.secretAccessKey", Matchers.not(Matchers.emptyString()))
                 .body("roleCredentials.sessionToken", Matchers.not(Matchers.emptyString()))
-                .body("roleCredentials.expiration", Matchers.greaterThan(System.currentTimeMillis()));
+                .body("roleCredentials.expiration", Matchers.greaterThan(System.currentTimeMillis()))
+            .extract().path("roleCredentials.accessKeyId");
+
+        // IAM Identity Center names the role session after the user.
+        given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + roleAccessKeyId
+                        + "/20260101/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc")
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetCallerIdentity")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", Matchers.equalTo(
+                        "arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_PortalDirect" + suffix
+                                + "_floci/portal-" + suffix + "@example.com"));
 
         given()
                 .header("x-amz-sso_bearer_token", accessToken)
