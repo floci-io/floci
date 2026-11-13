@@ -3,6 +3,9 @@ package io.floci.aws.services.ec2.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class IpamPoolAllocation {
@@ -13,6 +16,7 @@ public class IpamPoolAllocation {
     private String resourceType;
     private String resourceId;
     private String resourceOwner;
+    private List<Tag> tags = new ArrayList<>();
     /** Idempotency token of the AllocateIpamPoolCidr call that created this allocation. */
     private String clientToken;
 
@@ -38,4 +42,7 @@ public class IpamPoolAllocation {
 
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }
+
+    public List<Tag> getTags() { return tags; }
+    public void setTags(List<Tag> tags) { this.tags = tags == null ? new ArrayList<>() : tags; }
 }
