@@ -2,9 +2,11 @@ package io.floci.aws.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -12,6 +14,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -115,6 +118,24 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
             return Optional.empty();
         }
         return getBytes(repositoryContainerId, "/v3/package/" + SidecarUriUtils.encodeSegment(lowerId) + "/"
+                + SidecarUriUtils.encodeSegment(normalizedVersion.get()) + "/"
+                + SidecarUriUtils.encodeSegment(expectedAssetName));
+    }
+
+    /** {@link #fetchPackageVersionAsset}'s streamed sibling; see {@link RepositorySidecarManager} for why. */
+    @Override
+    public Optional<StreamedAsset> fetchPackageVersionAssetStreamed(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String version, String assetName) {
+        String lowerId = packageName.toLowerCase(Locale.ROOT);
+        Optional<String> normalizedVersion = matchVersion(repositoryContainerId, lowerId, version);
+        if (normalizedVersion.isEmpty()) {
+            return Optional.empty();
+        }
+        String expectedAssetName = lowerId + "." + normalizedVersion.get() + ".nupkg";
+        if (!expectedAssetName.equals(assetName)) {
+            return Optional.empty();
+        }
+        return getBytesStreamed(repositoryContainerId, "/v3/package/" + SidecarUriUtils.encodeSegment(lowerId) + "/"
                 + SidecarUriUtils.encodeSegment(normalizedVersion.get()) + "/"
                 + SidecarUriUtils.encodeSegment(expectedAssetName));
     }
@@ -369,33 +390,66 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
     public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version, String assetName, byte[] content) {
         synchronized (lockFor(repositoryContainerId)) {
-            String baseUrl = ensureReady(repositoryContainerId, null);
             String boundary = "flociNuGetCopyBoundary" + System.nanoTime();
-            byte[] head = ("--" + boundary + "\r\n"
-                    + "Content-Disposition: form-data; name=\"package\"; filename=\"" + assetName + "\"\r\n"
-                    + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
-            byte[] tail = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+            byte[] head = multipartHead(boundary, assetName);
+            byte[] tail = multipartTail(boundary);
             byte[] body = new byte[head.length + content.length + tail.length];
             System.arraycopy(head, 0, body, 0, head.length);
             System.arraycopy(content, 0, body, head.length, content.length);
             System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+            sendMultipartPush(repositoryContainerId, boundary, BodyPublishers.ofByteArray(body), assetName,
+                    body.length);
+        }
+    }
 
-            HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
-                            "/api/v2/package"))
-                    .timeout(Duration.ofSeconds(30))
-                    .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                    .PUT(BodyPublishers.ofByteArray(body))
-                    .build();
-            HttpResponse<String> response;
-            try {
-                response = httpClient.send(request, BodyHandlers.ofString());
-            } catch (Exception e) {
-                throw new IllegalStateException("Could not reach the BaGetter sidecar to push " + assetName, e);
-            }
-            if (response.statusCode() != 200 && response.statusCode() != 201 && response.statusCode() != 202) {
-                throw new IllegalStateException("Could not push " + assetName + " to the BaGetter sidecar: "
-                        + "upstream returned " + response.statusCode());
-            }
+    /**
+     * {@link #storePackageVersionAsset(String, String, String, String, String, String, String,
+     * byte[])}'s own streamed sibling: the same multipart shape, but the file part streams
+     * straight from disk via {@code BodyPublishers.concat}, so the asset's own content is never
+     * copied into one combined array the way the {@code byte[]} overload above still does for
+     * content that is already resident.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength) {
+        synchronized (lockFor(repositoryContainerId)) {
+            String boundary = "flociNuGetCopyBoundary" + System.nanoTime();
+            byte[] head = multipartHead(boundary, assetName);
+            byte[] tail = multipartTail(boundary);
+            HttpRequest.BodyPublisher publisher = MultipartFilePublisher.concat(head, content, tail);
+            sendMultipartPush(repositoryContainerId, boundary, publisher, assetName, contentLength);
+        }
+    }
+
+    private static byte[] multipartHead(String boundary, String assetName) {
+        return ("--" + boundary + "\r\n"
+                + "Content-Disposition: form-data; name=\"package\"; filename=\"" + assetName + "\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] multipartTail(String boundary) {
+        return ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void sendMultipartPush(String repositoryContainerId, String boundary, HttpRequest.BodyPublisher publisher,
+            String assetName, long contentLength) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        "/api/v2/package"))
+                .timeout(SidecarUriUtils.transferTimeout(contentLength))
+                .header("Content-Type", "multipart/form-data; boundary=" + boundary)
+                .PUT(publisher)
+                .build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the BaGetter sidecar to push " + assetName, e);
+        }
+        if (response.statusCode() != 200 && response.statusCode() != 201 && response.statusCode() != 202) {
+            throw new IllegalStateException("Could not push " + assetName + " to the BaGetter sidecar: "
+                    + "upstream returned " + response.statusCode());
         }
     }
 
@@ -549,5 +603,35 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
                     + "returned " + response.statusCode());
         }
         return Optional.of(response.body());
+    }
+
+    /**
+     * {@link #getBytes}'s streamed sibling, for the one asset download that can be large: a flat
+     * 10-second timeout, fine for {@link #getBytes}'s own small-metadata callers, would cancel a
+     * legitimately large, still-in-progress download here, the same gap the write side once had
+     * on its own forwarding call. The real size isn't known until the response itself arrives, so
+     * this uses the worst-case download timeout rather than one sized off an actual byte count.
+     */
+    private Optional<StreamedAsset> getBytesStreamed(String repositoryContainerId, String encodedPath) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), encodedPath))
+                .timeout(SidecarUriUtils.maxTransferTimeout()).GET().build();
+        HttpResponse<InputStream> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the BaGetter sidecar at " + encodedPath, e);
+        }
+        if (response.statusCode() == 404) {
+            StreamingResponses.closeQuietly(response.body());
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            throw new IllegalStateException("Could not fetch " + encodedPath + " from the BaGetter sidecar: upstream "
+                    + "returned " + response.statusCode());
+        }
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        return Optional.of(new StreamedAsset(response.body(), contentLength));
     }
 }

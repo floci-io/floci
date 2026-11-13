@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -114,6 +116,35 @@ class PypiExternalConnectionClientTest {
 
         assertTrue(result.isPresent());
         assertArrayEquals(content, result.get().content());
+    }
+
+    /**
+     * {@code fetchFile(..., Path)} is the streamed sibling a large sdist/wheel import actually
+     * uses: unlike the {@code byte[]} overload above, it writes straight to a file via an {@link
+     * AssetDigestingInputStream}-wrapped copy, so this confirms that wrapping still lands the
+     * real bytes on disk and reports their real size, not just that the plain {@code byte[]}
+     * path works.
+     */
+    @Test
+    void fetchFileToAPathWritesTheRealBytesAndReportsTheirSize() throws IOException {
+        byte[] content = "sdist-content".getBytes(StandardCharsets.UTF_8);
+        server.createContext("/packages/aa/bb/widget-1.0.0.tar.gz", exchange -> {
+            exchange.sendResponseHeaders(200, content.length);
+            exchange.getResponseBody().write(content);
+            exchange.close();
+        });
+        Path destination = Files.createTempFile("pypi-external-connection-test-", ".tar.gz");
+
+        try {
+            Optional<PypiExternalConnectionClient.FetchedFile> result = client.fetchFile("fake",
+                    serverBaseUrl + "/packages/aa/bb/widget-1.0.0.tar.gz", destination);
+
+            assertTrue(result.isPresent());
+            assertEquals(content.length, result.get().size());
+            assertArrayEquals(content, Files.readAllBytes(destination));
+        } finally {
+            Files.deleteIfExists(destination);
+        }
     }
 
     @Test

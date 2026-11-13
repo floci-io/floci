@@ -8,14 +8,22 @@ import jakarta.ws.rs.NotAuthorizedException;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +48,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -68,6 +77,7 @@ class CodeArtifactPypiControllerTest {
     private PypiserverSidecarClient pypiserver;
     private CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
     private CodeArtifactPypiController controller;
+    private final AtomicReference<Path> lastStagedWholeBody = new AtomicReference<>();
 
     @BeforeEach
     void setUp() throws Exception {
@@ -92,6 +102,22 @@ class CodeArtifactPypiControllerTest {
         // method here, matching a repository with no pypi external connection configured at all;
         // individual tests below override specific calls to exercise the merge/retention paths.
         externalConnectionImporter = mock(CodeArtifactPypiExternalConnectionImporter.class);
+        // service is a mock, so its own real stageAssetBody (which the controller now calls to
+        // stage the whole raw multipart body before scanning it) never runs; stubbed here to
+        // actually stage to a real temp file, the same real behavior the controller depends on to
+        // parse/size/forward real content, rather than a null Path the controller's own file-path
+        // manipulation (MultipartFormParser.extractFilePart) would otherwise crash on.
+        when(service.stageAssetBody(any())).thenAnswer(invocation -> {
+            InputStream in = invocation.getArgument(0);
+            Path staged = Files.createTempFile("pypi-controller-test-", ".bin");
+            Files.copy(in, staged, StandardCopyOption.REPLACE_EXISTING);
+            lastStagedWholeBody.set(staged);
+            return staged;
+        });
+        doAnswer(invocation -> {
+            Files.deleteIfExists(invocation.getArgument(0));
+            return null;
+        }).when(service).deleteStagedAssetBody(any());
 
         HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
         controller = new CodeArtifactPypiController(service, pypiserver, externalConnectionImporter, httpClient);
@@ -155,8 +181,12 @@ class CodeArtifactPypiControllerTest {
 
         Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY, "my-pkg-1.0.tar.gz");
 
+        // The lease must still be held once downloadFile itself has returned: a concurrent
+        // DeleteRepository must not be able to tear down the pypiserver container before the
+        // entity stream below is actually drained.
+        verify(pypiserver, never()).endUse("pypi-repo-id");
         assertEquals(200, response.getStatus());
-        assertEquals("package bytes", new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+        assertEquals("package bytes", new String(readEntity(response), StandardCharsets.UTF_8));
         verify(pypiserver).endUse("pypi-repo-id");
     }
 
@@ -191,9 +221,14 @@ class CodeArtifactPypiControllerTest {
         Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY,
                 "ext-pkg-1.0.0.tar.gz");
 
+        // The lease must survive the first 404, the external-connection import, and the retry: it
+        // is only released once the real 200's entity stream is actually drained below, not as
+        // soon as downloadFile itself returns.
+        verify(pypiserver, never()).endUse("pypi-repo-id");
         assertEquals(200, response.getStatus());
-        assertEquals("real-upstream-bytes", new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+        assertEquals("real-upstream-bytes", new String(readEntity(response), StandardCharsets.UTF_8));
         assertEquals(2, requestCount.get());
+        verify(pypiserver).endUse("pypi-repo-id");
     }
 
     @Test
@@ -457,9 +492,30 @@ class CodeArtifactPypiControllerTest {
     @Test
     void uploadRejectsABodyWithNoDeterminableBoundary() {
         Response response = controller.upload(headers("Bearer good", "application/octet-stream"), DOMAIN, REPOSITORY,
-                "not multipart".getBytes(StandardCharsets.UTF_8));
+                new ByteArrayInputStream("not multipart".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(400, response.getStatus());
+    }
+
+    @Test
+    void uploadDeletesTheExtractedStagedAssetFileEvenWhenTheFilePartIsTruncatedBeforeItsClosingBoundary() throws Exception {
+        // No closing "--boundary123--" at all: MultipartFormParser.extractFilePart has already
+        // created the destination file and started writing into it by the time this makes
+        // copyUntilDelimiter run off the end of the staged body and throw, so this exercises the
+        // 400 response's own cleanup path, not the success path's.
+        String truncated = "--boundary123\r\n"
+                + "Content-Disposition: form-data; name=\"content\"; filename=\"my_pkg-1.0.tar.gz\"\r\n"
+                + "Content-Type: application/octet-stream\r\n\r\n"
+                + "partial, never-terminated file content";
+        byte[] body = truncated.getBytes(StandardCharsets.UTF_8);
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY,
+                new ByteArrayInputStream(body));
+
+        assertEquals(400, response.getStatus());
+        Path stagedAsset = lastStagedWholeBody.get().resolveSibling(lastStagedWholeBody.get().getFileName() + ".asset");
+        assertFalse(Files.exists(stagedAsset), "a staged asset file from a failed extraction must not leak: " + stagedAsset);
     }
 
     @Test
@@ -467,7 +523,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipart("boundary123", "version", "1.0.0");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(400, response.getStatus());
     }
@@ -486,7 +542,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -512,7 +568,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.0.tar.gz", "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(200, response.getStatus());
         assertEquals(true, uploadReceived.get());
@@ -537,7 +593,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my#pkg", "my_pkg-1.0.0.tar.gz", "content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(200, response.getStatus());
         assertEquals("/simple/my%23pkg/", observedRawPath.get());
@@ -565,7 +621,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", filename, "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals("/packages/my_pkg-1.0.0%3Fsig.tar.gz", observedRawPath.get());
@@ -588,7 +644,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", sameContent);
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(200, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -620,7 +676,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", sameContent);
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -648,7 +704,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "other-pkg", "my_pkg-1.0.tar.gz", "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -673,7 +729,7 @@ class CodeArtifactPypiControllerTest {
                 "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -694,7 +750,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "demo", "demo-1.0-1-py3-none-any.whl", "wheel bytes");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(200, response.getStatus());
     }
@@ -712,7 +768,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(200, response.getStatus());
         assertTrue(receivedBody.get().contains("new content"));
@@ -731,7 +787,7 @@ class CodeArtifactPypiControllerTest {
                 "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(200, response.getStatus());
         verify(service).completeContainerBackedPublishIfCurrentRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
@@ -759,7 +815,7 @@ class CodeArtifactPypiControllerTest {
                 "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(400, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -789,7 +845,7 @@ class CodeArtifactPypiControllerTest {
                 "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -820,7 +876,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.0.tar.gz", "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -851,7 +907,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "other-pkg", "my_pkg-1.0.0.tar.gz", "new content");
 
         Response response = controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body));
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
@@ -865,7 +921,7 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "new content");
 
         controller.upload(headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY,
-                body);
+                new ByteArrayInputStream(body));
 
         verify(service).completeContainerBackedPublishIfCurrentRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
                 eq(REPOSITORY), eq("pypi-repo-id"), eq("pypi"), eq("my-pkg"), isNull(), eq(11L), anyLong(),
@@ -883,14 +939,14 @@ class CodeArtifactPypiControllerTest {
         byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "content");
 
         assertThrows(IllegalStateException.class, () -> controller.upload(
-                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body));
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, new ByteArrayInputStream(body)));
         verify(pypiserver).endUse("pypi-repo-id");
     }
 
     @Test
     void uploadReleasesTheLeaseOnInvalidMultipartInput() {
         Response response = controller.upload(headers("Bearer good", "application/octet-stream"), DOMAIN,
-                REPOSITORY, new byte[] {1});
+                REPOSITORY, new ByteArrayInputStream(new byte[] {1}));
 
         assertEquals(400, response.getStatus());
         verify(pypiserver).endUse("pypi-repo-id");
@@ -931,12 +987,12 @@ class CodeArtifactPypiControllerTest {
         try {
             Future<Response> first = pool.submit(() -> controller.upload(
                     headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY,
-                    multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "content-A")));
+                    new ByteArrayInputStream(multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "content-A"))));
             assertTrue(firstCheckEntered.await(5, TimeUnit.SECONDS), "first upload never started its check");
 
             Future<Response> second = pool.submit(() -> controller.upload(
                     headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY,
-                    multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "content-B")));
+                    new ByteArrayInputStream(multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", "content-B"))));
 
             // The second upload must block on the same repository's lock, held by the first, and
             // so cannot even reach the backend yet: without the lock this would race ahead and
@@ -950,6 +1006,16 @@ class CodeArtifactPypiControllerTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    private static byte[] readEntity(Response response) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try {
+            ((StreamingOutput) response.getEntity()).write(out);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return out.toByteArray();
     }
 
     private static HttpHeaders headers(String authorization) {
