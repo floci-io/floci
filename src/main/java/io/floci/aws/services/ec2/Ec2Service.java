@@ -5397,7 +5397,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * As above; with {@code dryRun} every instance must be one StartInstances could start, the vCPU
-     * quota included, and the request is then answered with DryRunOperation, nothing started.
+     * quota and Capacity Reservation admission included, and the request is then answered with
+     * DryRunOperation, nothing started or reserved.
      */
     public List<Map<String, String>> startInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
@@ -5420,7 +5421,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         if (dryRun) {
-            instanceIds.forEach(id -> requireStartableInstance(region, id));
+            List<Instance> starting = new ArrayList<>();
+            for (String id : instanceIds) {
+                Instance instance = requireStartableInstance(region, id);
+                String state = instance.getState().getName();
+                if ("stopped".equals(state) || "stopping".equals(state)) {
+                    starting.add(instance);
+                }
+            }
+            // The real start sets each of these pending and admits it into its Capacity Reservation.
+            acquireCapacity(region, starting, true);
             throw dryRunOperation();
         }
         List<Map<String, String>> result = new ArrayList<>();
@@ -11382,9 +11392,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     void acquireCapacity(String region, List<Instance> admitted) {
+        acquireCapacity(region, admitted, false);
+    }
+
+    /**
+     * As above; with {@code dryRun}, {@code admitted} are the stopped instances a StartInstances dry
+     * run names. Each is admitted as the real start admits it once it is pending, the batch counted
+     * against copies of the reservations, and the same refusals are thrown, but nothing is recorded.
+     */
+    private void acquireCapacity(String region, List<Instance> admitted, boolean dryRun) {
         synchronized (capacityReservationLock) {
             Set<String> groupInstances = capacityGroupInstanceIds.get(callerAccountId() + "::" + region);
-            if (groupInstances != null) {
+            if (groupInstances != null && !dryRun) {
                 for (Instance instance : admitted) {
                     if (instance.getCapacityReservationGroupArn() != null) {
                         groupInstances.add(instance.getInstanceId());
@@ -11396,7 +11415,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .stream().map(CapacityReservation::new).toList();
             Map<String, CapacityReservation> changed = new LinkedHashMap<>();
             for (Instance instance : admitted) {
-                if (!holdsCapacity(instance) || instance.isSpot()
+                if ((!dryRun && !holdsCapacity(instance)) || instance.isSpot()
                         || "none".equals(instance.getCapacityReservationPreference())) {
                     continue;
                 }
@@ -11415,7 +11434,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .filter(r -> r.getAvailableInstanceCount() > 0).findFirst().orElse(null);
                 if (selected == null) {
                     if (target != null) {
-                        CapacityReservation reservation = getRequiredCapacityReservation(region, target);
+                        // A dry run counts its batch on the copies, as the real start's save after each
+                        // instance counts it in the store.
+                        CapacityReservation reservation = dryRun
+                                ? candidates.stream().filter(r -> target.equals(r.getCapacityReservationId()))
+                                        .findFirst().orElseGet(() -> getRequiredCapacityReservation(region, target))
+                                : getRequiredCapacityReservation(region, target);
                         if (matchesCapacityReservation(instance, reservation)
                                 && reservation.getAvailableInstanceCount() <= 0) {
                             throw new AwsException("ReservationCapacityExceeded",
@@ -11434,7 +11458,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 selected.setAvailableInstanceCount(selected.getAvailableInstanceCount() - 1);
                 changed.put(key(region, selected.getCapacityReservationId()), selected);
             }
-            if (!changed.isEmpty()) {
+            if (!changed.isEmpty() && !dryRun) {
                 persistCapacityMembership(changed);
             }
         }
