@@ -8546,15 +8546,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void modifySecurityGroupRules(String region, String groupId, List<Map<String, String>> ruleUpdates) {
         ensureDefaultResources(region);
-        // Update description on matching rules
-        for (Map<String, String> update : ruleUpdates) {
-            String ruleId = update.get("SecurityGroupRuleId");
-            String desc = update.get("Description");
-            if (ruleId != null) {
-                SecurityGroupRule rule = securityGroupRules.get(key(region, ruleId)).orElse(null);
-                if (rule != null && desc != null) {
-                    rule.setDescription(desc);
-                    securityGroupRules.put(key(region, ruleId), rule);
+        synchronized (attachmentTopologyLock(region)) {
+            // Update description on matching rules
+            for (Map<String, String> update : ruleUpdates) {
+                String ruleId = update.get("SecurityGroupRuleId");
+                String desc = update.get("Description");
+                if (ruleId != null) {
+                    SecurityGroupRule rule = securityGroupRules.get(key(region, ruleId)).orElse(null);
+                    if (rule != null && desc != null) {
+                        rule.setDescription(desc);
+                        securityGroupRules.put(key(region, ruleId), rule);
+                    }
                 }
             }
         }
