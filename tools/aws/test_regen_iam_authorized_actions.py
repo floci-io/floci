@@ -35,6 +35,9 @@ ANCHOR_SERVICES = [
     service("budgets", {"CreateBudget": ["aws-portal:ModifyBilling", "budgets:ModifyBudget", "budgets:TagResource"],
                         "DescribeBudgets": ["aws-portal:ViewBilling", "budgets:ViewBudget"]},
             ["ModifyBudget", "TagResource", "ViewBudget"]),
+    # Listed with no action, as the reference has them; their API Reference documents the action.
+    service("verifiedpermissions", {"BatchIsAuthorized": [], "BatchIsAuthorizedWithToken": [], "BatchGetPolicy": []},
+            ["IsAuthorized", "IsAuthorizedWithToken", "GetPolicy"]),
 ]
 
 
@@ -62,6 +65,23 @@ def test_several_actions_are_left_to_the_operations_own_name():
 
 def test_an_operation_with_no_action_is_missing_data_not_a_free_call():
     assert r.authorized_actions_from([service("elasticbeanstalk", {"AbortEnvironmentUpdate": []})]) == {}
+
+
+def test_an_operation_listed_with_no_action_takes_the_one_its_api_reference_documents():
+    found = r.authorized_actions_from([service("verifiedpermissions", {"BatchIsAuthorized": []}, ["IsAuthorized"])])
+    assert found == {"verifiedpermissions": {"BatchIsAuthorized": "verifiedpermissions:IsAuthorized"}}
+
+
+def test_a_documented_operation_the_reference_answers_keeps_the_references_answer():
+    found = r.authorized_actions_from([service("verifiedpermissions",
+                                               {"BatchIsAuthorized": ["verifiedpermissions:BatchIsAuthorized"]},
+                                               ["IsAuthorized", "BatchIsAuthorized"])])
+    assert found == {}
+
+
+def test_a_documented_operation_the_reference_does_not_list_is_not_vendored():
+    assert r.authorized_actions_from([service("verifiedpermissions", {"IsAuthorized": ["verifiedpermissions:IsAuthorized"]},
+                                              ["IsAuthorized"])]) == {}
 
 
 def test_an_action_in_another_namespace_is_not_vendored():
@@ -260,6 +280,13 @@ def test_a_missing_anchor_is_rejected():
     document = anchored()
     del document["authorizedActions"]["sns"]
     assert any("sns:PublishBatch" in problem for problem in r.validate(document, []))
+
+
+def test_a_missing_documented_operation_is_rejected():
+    document = anchored()
+    del document["authorizedActions"]["verifiedpermissions"]["BatchGetPolicy"]
+    assert any("verifiedpermissions:BatchGetPolicy" in problem and "API Reference" in problem
+               for problem in r.validate(document, []))
 
 
 def test_an_anchor_mapped_elsewhere_is_rejected():

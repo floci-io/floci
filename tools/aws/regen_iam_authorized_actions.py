@@ -33,6 +33,14 @@ each exclusion is deliberate:
 - **A tagging action alone.** EC2 lists `CreateCapacityReservationDateChangeQuote` as authorized by
   `ec2:CreateTags` only, the tag-on-create permission with the operation's own action missing.
 
+One shape is added by hand, `DOCUMENTED`: an operation the reference lists with no authorized action
+at all, whose API Reference says which action AWS checks for it. Verified Permissions' `BatchIsAuthorized`
+"doesn't have its own IAM permission. To authorize this operation for AWS principals, include the
+permission verifiedpermissions:IsAuthorized in their IAM policies", and so for `BatchGetPolicy` and
+`BatchIsAuthorizedWithToken`. Each entry cites that; it applies only while the reference lists the
+operation and gives it no action, so an answer the reference gains replaces it, and `--verify` then
+reports the entry as a claim AWS does not make, to be dropped.
+
 Two kinds of listed action do not count towards "exactly one":
 
 - **A Billing console permission.** Budgets lists `CreateNotification` as authorized by
@@ -81,7 +89,7 @@ The endpoint is live rather than a pinned dependency, so a fresh generation is n
 As with `regen_iam_action_resources.py`, what must hold is that nothing here is invented:
 
 - `--check` is offline and structural: sorted, every name usable, every action in its own
-  namespace and differing from the operation, and the anchor cases still present; the actions
+  namespace and differing from the operation, and the anchor and documented cases still present; the actions
   without resource types are listed for exactly the scopes `rest-routes.json` reads routes for; and
   an operation authorized by method is one a route of its scope serves, named nowhere else here.
 - `--verify` is the real gate and needs the network. Every vendored entry must still be what AWS
@@ -139,6 +147,19 @@ ANCHORS = {
     ("budgets", "DescribeBudgets"): "budgets:ViewBudget",
 }
 
+# Operations the reference lists with no authorized action, whose API Reference documents the one AWS checks:
+# the action, and the words documenting it. Each applies while the reference gives the operation no action.
+_BATCH_NOTE = ("the API Reference's note on the operation: 'The {op} operation doesn't have its own IAM permission. "
+               "To authorize this operation for AWS principals, include the permission {action} in their IAM "
+               "policies'")
+DOCUMENTED: dict[tuple[str, str], tuple[str, str]] = {
+    ("verifiedpermissions", operation): (f"verifiedpermissions:{action}",
+                                         _BATCH_NOTE.format(op=operation, action=f"verifiedpermissions:{action}"))
+    for operation, action in (("BatchIsAuthorized", "IsAuthorized"),
+                              ("BatchIsAuthorizedWithToken", "IsAuthorizedWithToken"),
+                              ("BatchGetPolicy", "GetPolicy"))
+}
+
 
 def _get_json(url: str):
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -176,6 +197,7 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
     than once with different answers.
     """
     answers: dict[str, dict[str, set[str | None]]] = {}
+    unanswered: dict[tuple[str, str], bool] = {}
     for document in documents:
         namespace = document.get("Name")
         if not isinstance(namespace, str) or not NAMESPACE_RE.match(namespace):
@@ -187,6 +209,7 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
             if not isinstance(name, str) or not NAME_RE.match(name):
                 raise ValueError(f"{namespace}: operation entry without a usable 'Name': {operation!r}")
             authorized = _counted_actions(namespace, _authorized_actions(namespace, operation))
+            unanswered[(namespace, name)] = unanswered.get((namespace, name), True) and not authorized
             if len(authorized) > 1 and name.lower() not in own_actions:
                 # An operation whose own name is no action and that several authorize is the one of them its
                 # name starts with as a word (CloudFront's CreateDistributionWithTags is
@@ -207,6 +230,11 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
     found = {namespace: {name: next(iter(mapped)) for name, mapped in sorted(operations.items())
                          if len(mapped) == 1 and None not in mapped}
              for namespace, operations in sorted(answers.items())}
+    # An operation the reference lists with no action at all has the one its API Reference documents.
+    for (namespace, name), (action, _) in DOCUMENTED.items():
+        if unanswered.get((namespace, name)):
+            found.setdefault(namespace, {})[name] = action
+    found = {namespace: dict(sorted(operations.items())) for namespace, operations in sorted(found.items())}
     return {namespace: operations for namespace, operations in found.items() if operations}
 
 
@@ -366,6 +394,11 @@ def validate(document: dict, routed: list[str], methods: dict[str, dict[str, lis
         if actual != expected:
             problems.append(f"expected {namespace}:{operation} to be authorized as {expected}, "
                             f"not {actual}")
+    for (namespace, operation), (expected, _) in DOCUMENTED.items():
+        actual = namespaces.get(namespace, {}).get(operation)
+        if actual != expected:
+            problems.append(f"expected {namespace}:{operation} to be authorized as {expected}, "
+                            f"as its API Reference documents, not {actual}")
     return problems
 
 

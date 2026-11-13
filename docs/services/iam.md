@@ -2341,7 +2341,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda and AWS Glue they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue and Amazon Verified Permissions they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -3002,7 +3002,11 @@ or on the `x-amz-cbor-1.1` one, names its resource and condition keys (a queue U
 authorizes an operation as a single action of another name, Floci does the same: `SendMessageBatch`
 is checked as `sqs:SendMessage` and `PublishBatch` as `sns:Publish`, so a policy granting the
 single-message action covers the batch call, and one naming the batch operation, which is not an
-IAM action, grants nothing. Budgets operations other than its budget actions are checked as
+IAM action, grants nothing. Verified Permissions' `BatchIsAuthorized`, `BatchIsAuthorizedWithToken` and
+`BatchGetPolicy`, which the Service Reference lists with no action, are checked as
+`verifiedpermissions:IsAuthorized`, `verifiedpermissions:IsAuthorizedWithToken` and
+`verifiedpermissions:GetPolicy`, the permissions their API Reference documents for them, `BatchGetPolicy`
+on the policy store of each of its requests. Budgets operations other than its budget actions are checked as
 `budgets:ModifyBudget` or `budgets:ViewBudget`, which the Service Reference lists for them beside the
 `aws-portal` Billing console permissions. Those are not checked: the Billing and Cost Management user
 guide, on moving off them, says "Programmatic requests to AWS Cost Explorer, AWS Cost and Usage

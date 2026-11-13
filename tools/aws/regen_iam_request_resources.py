@@ -293,7 +293,8 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
-              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
+              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue",
+              "verifiedpermissions")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
@@ -464,10 +465,6 @@ NOT_COVERED: dict[str, str] = {
            "it; reading it needs that format corrected",
     "transcribe": _LATER,
     "transfer": _LATER,
-    "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
-                           "which AWS authorizes as the action on the store the alias points to and "
-                           "GetPolicyStoreAlias on the alias, and an aliasName carries the `policy-store-alias/` its "
-                           "format already gives; reading it needs both",
     "wafv2": _LATER,
 }
 

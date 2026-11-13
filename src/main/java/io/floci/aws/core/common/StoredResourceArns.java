@@ -56,7 +56,8 @@ import java.util.Optional;
  * job run, a managed endpoint, a job template or a security configuration; Cost Explorer, for the tags of an anomaly
  * monitor or subscription; Security Hub, for the tags of a hub or a configuration policy; Control Tower, for the tags
  * of a landing zone or an enabled control; GuardDuty, for the tags of a detector or a Malware Protection plan; Cloud
- * Map, for the tags of a namespace or a service); looked up lazily by {@code ResourceArnBuilder} and
+ * Map, for the tags of a namespace or a service; Verified Permissions, for the policy store an alias names);
+ * looked up lazily by {@code ResourceArnBuilder} and
  * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
  * ARN is of, so IAM never depends on that service directly.</p>
  *

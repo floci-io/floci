@@ -629,6 +629,88 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .post("/").then().statusCode(200).body("Tags", hasSize(0));
     }
 
+    /**
+     * A policy store is checked on the ARN its id gives, a global ARN with no Region, as its handler mints it: a
+     * grant on the store admits a request naming it, the same grant refuses one naming another store, and a grant
+     * on {@code *} admits both.
+     */
+    @Test
+    void aPolicyStoreIsCheckedOnTheArnItsIdNames() {
+        String store = createPolicyStore();
+        String other = createPolicyStore();
+
+        User user = user("res-store");
+        user.policy(allowOn("verifiedpermissions:GetPolicyStore", policyStoreArn(store)) + ","
+                + allowOn("verifiedpermissions:ListPolicies", policyStoreArn(store)));
+        getPolicyStore(user, store).statusCode(200).body("arn", equalTo(policyStoreArn(store)));
+        listPolicies(user, store).statusCode(200);
+        refusedJson(getPolicyStore(user, other), "verifiedpermissions:GetPolicyStore");
+        refusedJson(listPolicies(user, other), "verifiedpermissions:ListPolicies");
+
+        user.policy(allowOn("verifiedpermissions:GetPolicyStore", policyStoreArn(other)));
+        refusedJson(getPolicyStore(user, store), "verifiedpermissions:GetPolicyStore");
+
+        user.policy(allowOn("verifiedpermissions:GetPolicyStore", "*"));
+        getPolicyStore(user, store).statusCode(200);
+        getPolicyStore(user, other).statusCode(200);
+    }
+
+    /**
+     * A request may name its store by an alias, which its handler resolves to the store the alias points to, so it
+     * is checked on that store, as AWS checks it: a grant on the store admits it and a grant on the alias alone does
+     * not. The alias's own operations are checked on the alias, whose name already carries the
+     * {@code policy-store-alias/} its ARN format gives.
+     */
+    @Test
+    void aStoreNamedByAnAliasIsCheckedOnTheStoreTheAliasNames() {
+        String store = createPolicyStore();
+        String alias = "policy-store-alias/res-" + suffix();
+        String aliasArn = "arn:aws:verifiedpermissions:" + REGION + ":" + ACCOUNT + ":" + alias;
+        adminJson("verifiedpermissions", "VerifiedPermissions.CreatePolicyStoreAlias", "1.0")
+                .body("{\"aliasName\":\"" + alias + "\",\"policyStoreId\":\"" + store + "\"}")
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("verifiedpermissions", "VerifiedPermissions.DeletePolicyStoreAlias", "1.0")
+                .body("{\"aliasName\":\"" + alias + "\",\"deletionMode\":\"HardDelete\"}").post("/"));
+
+        User user = user("res-alias");
+        user.policy(allowOn("verifiedpermissions:GetPolicyStore", policyStoreArn(store)));
+        getPolicyStore(user, alias).statusCode(200).body("policyStoreId", equalTo(store));
+        user.policy(allowOn("verifiedpermissions:GetPolicyStore", aliasArn));
+        refusedJson(getPolicyStore(user, alias), "verifiedpermissions:GetPolicyStore");
+
+        user.policy(allowOn("verifiedpermissions:GetPolicyStoreAlias", aliasArn));
+        verifiedPermissions(user, "GetPolicyStoreAlias", "{\"aliasName\":\"" + alias + "\"}").statusCode(200)
+                .body("policyStoreId", equalTo(store));
+        user.policy(allowOn("verifiedpermissions:GetPolicyStoreAlias", policyStoreArn(store)));
+        refusedJson(verifiedPermissions(user, "GetPolicyStoreAlias", "{\"aliasName\":\"" + alias + "\"}"),
+                "verifiedpermissions:GetPolicyStoreAlias");
+    }
+
+    /**
+     * A batch call is checked as the single-item action its API Reference documents, on the store it names, the
+     * Service Reference listing it with no action of its own: {@code BatchGetPolicy} as
+     * {@code verifiedpermissions:GetPolicy} on the store of each of its requests, {@code BatchIsAuthorized} as
+     * {@code verifiedpermissions:IsAuthorized} on its store. A policy naming the batch operation grants nothing.
+     */
+    @Test
+    void aBatchIsCheckedAsItsSingleCallOnTheStoresItNames() {
+        String store = createPolicyStore();
+        String other = createPolicyStore();
+
+        User user = user("res-batch");
+        user.policy(allowOn("verifiedpermissions:GetPolicy", policyStoreArn(store)) + ","
+                + allowOn("verifiedpermissions:IsAuthorized", policyStoreArn(store)));
+        batchGetPolicy(user, store).statusCode(200).body("errors[0].code", equalTo("POLICY_NOT_FOUND"));
+        refusedJson(batchGetPolicy(user, other), "verifiedpermissions:GetPolicy");
+        refusedJson(batchGetPolicy(user, store, other), "verifiedpermissions:GetPolicy");
+        refusedJson(verifiedPermissions(user, "BatchIsAuthorized", "{\"policyStoreId\":\"" + other + "\","
+                + "\"requests\":[{\"action\":{\"actionType\":\"Action\",\"actionId\":\"read\"}}]}"),
+                "verifiedpermissions:IsAuthorized");
+
+        user.policy(allowOn("verifiedpermissions:BatchGetPolicy", "*"));
+        refusedJson(batchGetPolicy(user, store), "verifiedpermissions:GetPolicy");
+    }
+
     /** A repository is checked on the ARN its name gives, whether or not it exists. */
     @Test
     void aRepositoryIsCheckedOnTheArnItsNameGives() {
@@ -3200,6 +3282,43 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static ValidatableResponse getPaymentKey(User user, String identifier) {
         return user.json("payment-cryptography", "PaymentCryptographyControlPlane.GetKey", "1.0")
                 .body("{\"KeyIdentifier\":\"" + identifier + "\"}").post("/").then();
+    }
+
+    /** A policy store with validation off, made as the administrator; its id. */
+    private String createPolicyStore() {
+        String id = adminJson("verifiedpermissions", "VerifiedPermissions.CreatePolicyStore", "1.0")
+                .body("{\"validationSettings\":{\"mode\":\"OFF\"}}").post("/").then().statusCode(200)
+                .extract().path("policyStoreId");
+        cleanup.register(() -> adminJson("verifiedpermissions", "VerifiedPermissions.DeletePolicyStore", "1.0")
+                .body("{\"policyStoreId\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
+    /** A policy store's ARN, which carries no Region. */
+    private static String policyStoreArn(String id) {
+        return "arn:aws:verifiedpermissions::" + ACCOUNT + ":policy-store/" + id;
+    }
+
+    private static ValidatableResponse getPolicyStore(User user, String store) {
+        return verifiedPermissions(user, "GetPolicyStore", "{\"policyStoreId\":\"" + store + "\"}");
+    }
+
+    private static ValidatableResponse listPolicies(User user, String store) {
+        return verifiedPermissions(user, "ListPolicies", "{\"policyStoreId\":\"" + store + "\"}");
+    }
+
+    /** A batch read of one policy in each store named. */
+    private static ValidatableResponse batchGetPolicy(User user, String... stores) {
+        StringBuilder requests = new StringBuilder();
+        for (String store : stores) {
+            requests.append(requests.isEmpty() ? "" : ",")
+                    .append("{\"policyStoreId\":\"").append(store).append("\",\"policyId\":\"p\"}");
+        }
+        return verifiedPermissions(user, "BatchGetPolicy", "{\"requests\":[" + requests + "]}");
+    }
+
+    private static ValidatableResponse verifiedPermissions(User user, String operation, String body) {
+        return user.json("verifiedpermissions", "VerifiedPermissions." + operation, "1.0").body(body).post("/").then();
     }
 
     private static ValidatableResponse describeUserPool(User user, String id) {

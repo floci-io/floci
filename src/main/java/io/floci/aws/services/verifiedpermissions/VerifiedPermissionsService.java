@@ -12,6 +12,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.kms.KmsService;
@@ -32,13 +33,14 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class VerifiedPermissionsService implements Resettable {
+public class VerifiedPermissionsService implements Resettable, StoredResourceArns {
     static final Duration ALIAS_SOFT_DELETE_RETENTION = Duration.ofHours(24);
     private static final Pattern STORE_ID = Pattern.compile("[A-Za-z0-9-/_]{1,200}");
     private static final Pattern ALIAS_NAME = Pattern.compile("policy-store-alias/[A-Za-z0-9-/_]*");
@@ -566,6 +568,33 @@ public class VerifiedPermissionsService implements Resettable {
             throw notFound("Policy store not found: " + identifier);
         }
         return alias.policyStoreId();
+    }
+
+    /** The namespace of the request-resources table whose policy stores and aliases this service finds. */
+    @Override
+    public String namespace() {
+        return "verifiedpermissions";
+    }
+
+    /**
+     * The store a request names by a {@code policyStoreId} that is an alias, {@code policy-store-alias/<name>}, is
+     * the one the alias points to, which every operation taking an alias resolves it to, so the request is checked
+     * on that store, as AWS checks it; an alias that points to none names no store. An alias is its own ARN whether
+     * or not it exists yet, as its create names the alias it makes, and its name already carries the
+     * {@code policy-store-alias/} its ARN format gives, which rendering the format would repeat. A store named by
+     * its id is left as rendered.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (names.size() != 1 || names.getFirst() == null || !names.getFirst().startsWith("policy-store-alias/")) {
+            return Optional.empty();
+        }
+        String name = names.getFirst();
+        return switch (type) {
+            case "policy-store" -> aliases.get(aliasKey(region, name)).map(alias -> storeArn(region, alias.policyStoreId()));
+            case "policy-store-alias" -> Optional.of(aliasArn(region, name));
+            default -> Optional.empty();
+        };
     }
 
     @Override
