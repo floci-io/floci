@@ -1617,6 +1617,92 @@ class Route53CfnProvisionerTest {
         return engine;
     }
 
+    private static final String ZONE = "AWS::Route53::HostedZone";
+
+    private static CloudFormationTemplateEngine zoneEngine() {
+        CloudFormationTemplateEngine engine = recordEngine();
+        when(engine.resolveNode(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        return engine;
+    }
+
+    /** A zone the stack made from {@code oldProps}, then an update that applies {@code newProps}. */
+    private StackResource updatedZone(Route53Service service, Route53CfnProvisioner owner, String oldProps,
+                                      String newProps) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        HostedZone old = new HostedZone("ZOLD", "old.example.test.", "dns-stack/Zone", null, (VpcAssociation) null);
+        HostedZone created = new HostedZone("ZNEW", "new.example.test.", "dns-stack/Zone", null,
+                (VpcAssociation) null);
+        when(service.getHostedZone("ZOLD")).thenReturn(old);
+        when(service.getHostedZone("ZNEW")).thenReturn(created);
+        when(service.createHostedZone(any(), any(), any(), any()))
+                .thenReturn(new Route53Service.CreateZoneResult(created, null));
+        when(service.getAssignedNameServers(any())).thenReturn(List.of("ns-1.example"));
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Zone");
+        resource.setResourceType(ZONE);
+        resource.setPhysicalId("ZOLD");
+        resource.getAttributes().put("Id", "ZOLD");
+        ProvisionContext context = new ProvisionContext(zoneEngine(), "us-east-1", "000000000000", "dns-stack",
+                "ZOLD", event -> { }, mapper.readTree(oldProps));
+
+        owner.provision(resource, mapper.readTree(newProps), context);
+        return resource;
+    }
+
+    @Test
+    void hostedZoneWithChangedNameIsReplacedAndTheOldZoneDeletedWhenTheUpdateCompletes() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+
+        StackResource resource = updatedZone(service, owner, "{\"Name\":\"old.example.test\"}",
+                "{\"Name\":\"new.example.test\"}");
+
+        verify(service).createHostedZone(eq("new.example.test"), any(), any(), any());
+        assertEquals("ZNEW", resource.getPhysicalId());
+        assertTrue(owner.hasReplacementUpdate(resource));
+        assertEquals("ZOLD", owner.updateCleanupPhysicalId(resource));
+        verify(service, never()).deleteHostedZone("ZOLD");
+
+        UpdateCleanupResult cleanup = owner.completeUpdate(resource);
+
+        assertTrue(cleanup.applicable());
+        assertTrue(cleanup.complete());
+        verify(service).deleteHostedZone("ZOLD");
+    }
+
+    @Test
+    void hostedZoneReplacementThatRollsBackKeepsTheOldZoneAndPointsBackAtIt() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = updatedZone(service, owner, "{\"Name\":\"old.example.test\"}",
+                "{\"Name\":\"new.example.test\"}");
+
+        assertTrue(owner.rollbackUpdate(resource));
+
+        assertEquals("ZOLD", resource.getPhysicalId());
+        assertEquals("ZOLD", resource.getAttributes().get("Id"));
+        verify(service, never()).deleteHostedZone("ZOLD");
+        verify(service).deleteHostedZone("ZNEW");
+    }
+
+    @Test
+    void hostedZoneWithChangedDelegationSetIsReplaced() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        HostedZone created = new HostedZone("ZNEW", "old.example.test.", "dns-stack/Zone", null,
+                (VpcAssociation) null);
+        when(service.createHostedZone(any(), any(), any(), any(), any()))
+                .thenReturn(new Route53Service.CreateZoneResult(created, null));
+
+        StackResource resource = updatedZone(service, owner,
+                "{\"Name\":\"old.example.test\",\"DelegationSetId\":\"N1\"}",
+                "{\"Name\":\"old.example.test\",\"DelegationSetId\":\"N2\"}");
+
+        verify(service).createHostedZone(eq("old.example.test"), any(), any(), any(), eq("N2"));
+        assertEquals("ZNEW", resource.getPhysicalId());
+        assertTrue(owner.hasReplacementUpdate(resource));
+    }
+
     @Test
     void deletingAHostedZoneStillDeletesTheZone() {
         Route53Service service = mock(Route53Service.class);
