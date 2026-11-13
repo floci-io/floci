@@ -41,6 +41,11 @@ public class CfnDynamicReferences {
     }
 
     private static final Pattern DYNAMIC_REF = Pattern.compile("\\{\\{resolve:([a-z-]+):(.*?)\\}\\}");
+    /** Whether a string holds the start of a dynamic reference, closed or not. */
+    public static boolean holdsDynamicReference(String value) {
+        return value.contains("{{resolve:");
+    }
+
     /** The dynamic reference texts a string holds, without the text around them; never a resolved value. */
     public static List<String> referencesIn(String value) {
         return DYNAMIC_REF.matcher(value).results().map(MatchResult::group).toList();
@@ -57,7 +62,7 @@ public class CfnDynamicReferences {
      * MasterUserPassword sourced from a generated secret). Unsupported services are left verbatim.
      */
     public String resolveDynamicReferences(String value, String region, boolean allowSsmSecure) {
-        if (value == null || !value.contains("{{resolve:")) {
+        if (value == null || !holdsDynamicReference(value)) {
             return value;
         }
         Matcher m = DYNAMIC_REF.matcher(value);
