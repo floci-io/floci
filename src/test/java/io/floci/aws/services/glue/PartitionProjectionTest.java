@@ -192,6 +192,23 @@ class PartitionProjectionTest {
         assertEquals(Map.of("datehour", List.of(1)), template.groups());
     }
 
+    /**
+     * A multi-folder date followed by more of the template: the read path needs a wildcard per folder
+     * the date spans, or it looks for {@code region=} right after the year and matches no object.
+     */
+    @Test
+    void readPathAndRegexGiveAMultiFolderDateTheSameFolders() {
+        Table t = table("orders", projecting(
+                        "storage.location.template", BUCKET + "/orders/${dt}/region=${region}/",
+                        "projection.dt.type", "date",
+                        "projection.dt.format", "yyyy/MM/dd"),
+                List.of(column("dt"), column("region")));
+
+        assertEquals(BUCKET + "/orders/*/*/*/region=*", PartitionProjection.readPath(t, BUCKET));
+        assertEquals("^s3://audit-logs/orders/([^/]+(?:/[^/]+)(?:/[^/]+))/region=([^/]+)/",
+                PartitionProjection.locationTemplate(t).regex());
+    }
+
     /** Only a date projection's format describes the value's shape; other types keep one folder. */
     @Test
     void slashesInTheFormatOfANonDateProjectionDoNotWidenItsGroup() {
@@ -222,6 +239,18 @@ class PartitionProjectionTest {
                 table("t", projecting(), List.of(column("tenant")))));
         assertFalse(PartitionProjection.hasIncompleteLocationTemplate(
                 table("t", Map.of("storage.location.template", BUCKET + "/x/"), List.of(column("tenant")))));
+    }
+
+    /** An Iceberg table is read through its metadata, so a template it carries is never checked. */
+    @Test
+    void icebergTableWithAnIncompleteTemplateIsNotIncomplete() {
+        Map<String, String> params = projecting("storage.location.template", BUCKET + "/missing/${tenant}/");
+        params.put("table_type", "ICEBERG");
+        Table t = table("audit_events", params, List.of(column("tenant"), column("dt")));
+
+        assertFalse(PartitionProjection.hasIncompleteLocationTemplate(t));
+        assertDoesNotThrow(() -> PartitionProjection.assertLocationTemplatesComplete(
+                "SELECT * FROM audit_events", List.of(t)));
     }
 
     /** Athena's message, as captured from engine v3, for a query reading the table. */

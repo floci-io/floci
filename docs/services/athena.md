@@ -129,7 +129,7 @@ For every other table, the DuckDB read function is chosen from the Glue table's 
 
 A Glue table with `projection.enabled` set to `true` is read the way Athena reads it, from its partition layout rather than from its whole location:
 
-- **Read path**: only the partition folders are read, `<location>/<key>=*/...` in the default `column=value` layout, or the `storage.location.template` with each `${key}` placeholder as a wildcard. Anything else stored under the location, such as query results, is not read as table data.
+- **Read path**: only the partition folders are read, `<location>/<key>=*/...` in the default `column=value` layout, or the `storage.location.template` with each `${key}` placeholder as a wildcard (one per folder, for a `date` format that holds slashes). Anything else stored under the location, such as query results, is not read as table data.
 - **Partition values**: in the default layout, DuckDB's Hive partitioning supplies each key's value. With a template, the view takes each value from the object's S3 path by matching it against the template, and casts it to the key's declared type. A `date` projection whose `format` holds slashes (`yyyy/MM/dd/HH`, the Firehose layout) spans that many folders behind one placeholder. A repeated placeholder must hold the same value at each occurrence, and an object whose path value does not parse as its key's type is not read.
 - **Validation**: as on Athena, a query fails when it leaves an `injected` key without a static equality condition in its `WHERE` clause (`CONSTRAINT_VIOLATION`), or when it reads a table whose template has no placeholder for one of its keys (`INVALID_TABLE_PROPERTY`). Such a table gets no view, so the other tables stay queryable.
 

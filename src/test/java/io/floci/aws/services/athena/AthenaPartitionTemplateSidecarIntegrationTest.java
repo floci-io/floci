@@ -162,6 +162,57 @@ class AthenaPartitionTemplateSidecarIntegrationTest {
                         + " WHERE datehour = '2026/11/10/05'"));
     }
 
+    /**
+     * A multi-folder date with more of the template after it. Reading it with one wildcard for the
+     * date matched no object, which fails the view and with it every other view in the batch.
+     */
+    @Test
+    void dateSpanningFoldersFollowedByMoreOfTheTemplate() {
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("classification", "parquet");
+        parameters.put("projection.enabled", "true");
+        parameters.put("projection.dt.type", "date");
+        parameters.put("projection.dt.format", "yyyy/MM/dd");
+        parameters.put("projection.dt.range", "2026/01/01,NOW");
+        parameters.put("projection.region.type", "injected");
+        parameters.put("storage.location.template", "s3://" + bucket + "/nested/${dt}/region=${region}/");
+        register("sales_nested", "nested", parameters,
+                List.of(column("dt", "string"), column("region", "string")),
+                "nested/2026/03/14/region=eu/part.parquet");
+
+        assertEquals(List.of(Map.of("id", "r1", "region", "eu", "dt", "2026/03/14")),
+                query("SELECT id, region, dt FROM " + view("sales_nested") + " WHERE region = 'eu'"));
+    }
+
+    /**
+     * Ten placeholders put {@code dt} at group 10, past what DuckDB's scalar {@code regexp_extract}
+     * accepts. The keys before it need no projection type for the view, so they set none.
+     */
+    @Test
+    void templateWithTenPlaceholdersReadsTheTenth() {
+        List<String> hierarchy = List.of("account", "team", "service", "env", "cluster", "zone", "rack", "host");
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("classification", "parquet");
+        parameters.put("projection.enabled", "true");
+        parameters.put("projection.region.type", "injected");
+        parameters.put("projection.dt.type", "date");
+        parameters.put("projection.dt.format", "yyyy-MM-dd");
+        parameters.put("projection.dt.range", "2026-01-01,NOW");
+        StringBuilder template = new StringBuilder("s3://" + bucket + "/deep/");
+        List<Column> partitionKeys = new ArrayList<>();
+        for (String key : hierarchy) {
+            template.append("${").append(key).append("}/");
+            partitionKeys.add(column(key, "string"));
+        }
+        parameters.put("storage.location.template", template + "${region}/${dt}/");
+        partitionKeys.add(column("region", "string"));
+        partitionKeys.add(column("dt", "date"));
+        register("sales_deep", "deep", parameters, partitionKeys,
+                "deep/a1/t1/s1/prod/c1/z1/r1/h1/eu/2026-03-14/part.parquet");
+
+        assertEquals(EXPECTED_ROW, queryEuInMarch("sales_deep"));
+    }
+
     // ---- helpers ----
 
     /**

@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -196,6 +197,24 @@ class GlueViewDdlBuilderTest {
 
         assertFalse(ddl.contains("\"events\""), ddl);
         assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"audit\".\"healthy\""), ddl);
+    }
+
+    /** An Iceberg table reads through its metadata, so a template omitting a key costs it no view. */
+    @Test
+    void icebergTableWithAnIncompleteTemplateKeepsItsView() {
+        Table table = icebergTable("orders", "s3://bucket/warehouse/orders",
+                "s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json");
+        table.setPartitionKeys(List.of(column("region", "string"), column("dt", "date")));
+        Map<String, String> parameters = new HashMap<>(table.getParameters());
+        parameters.put("projection.enabled", "true");
+        parameters.put("storage.location.template", "s3://bucket/warehouse/orders/${region}/");
+        table.setParameters(parameters);
+
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"audit\".\"orders\" AS SELECT \"region\" AS \"region\", "
+                + "\"dt\" AS \"dt\" FROM iceberg_scan('s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json');\n"),
+                ddl);
     }
 
     /** The default column=value layout is left to DuckDB's Hive partitioning, as before. */

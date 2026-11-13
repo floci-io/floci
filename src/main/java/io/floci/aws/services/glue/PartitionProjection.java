@@ -88,7 +88,10 @@ public final class PartitionProjection {
      * lands inside the read path, and the next query fails trying to read it as table data.
      *
      * <p>The layout comes from {@code storage.location.template} when set, and otherwise from the
-     * default {@code column=value} form over the partition keys. Values stay wildcards: narrowing
+     * default {@code column=value} form over the partition keys. A template's placeholder becomes one
+     * wildcard per folder its value spans (see {@link #placeholderFolders}): a single {@code *} stops
+     * at the next slash, so a multi-folder value followed by more of the template would match no
+     * object, and a read matching no object fails its view. Values stay wildcards: narrowing
      * them to the partitions a query actually needs requires that query's predicates, so the read
      * stays wide and the query itself does the filtering. The values a templated table's rows carry
      * come from each object's path, through {@link #locationTemplate(Table)}.
@@ -100,7 +103,8 @@ public final class PartitionProjection {
 
         String template = parameter(table, LOCATION_TEMPLATE);
         if (template != null && !template.isBlank()) {
-            String wildcarded = TEMPLATE_PLACEHOLDER.matcher(template).replaceAll("*");
+            String wildcarded = TEMPLATE_PLACEHOLDER.matcher(template).replaceAll(placeholder ->
+                    "*" + "/*".repeat(placeholderFolders(table, placeholderName(placeholder.group())) - 1));
             return stripTrailingSlash(wildcarded);
         }
 
@@ -159,8 +163,8 @@ public final class PartitionProjection {
         }
         Set<String> keys = partitionKeyNames(table);
 
-        // Each placeholder becomes a group exactly where readPath puts a wildcard, so the regex and
-        // the read path describe the same objects. A group spans the folders its key's value does.
+        // Each placeholder becomes a group exactly where readPath puts its wildcards, spanning the same
+        // folders (placeholderFolders), so the regex and the read path describe the same objects.
         StringBuilder regex = new StringBuilder("^");
         Map<String, List<Integer>> groups = new LinkedHashMap<>();
         Matcher placeholder = TEMPLATE_PLACEHOLDER.matcher(template);
@@ -192,9 +196,13 @@ public final class PartitionProjection {
      * each partition column"), and Athena fails every query on the table with
      * {@code INVALID_TABLE_PROPERTY} rather than reading it some other way; see
      * {@link #assertLocationTemplatesComplete}.
+     *
+     * <p>An Iceberg table is never incomplete here: floci reads it through its own metadata, which a
+     * template plays no part in (see {@link GlueTableResolver#isIcebergTable}).
      */
     public static boolean hasIncompleteLocationTemplate(Table table) {
-        if (!enabled(table) || table.getPartitionKeys() == null || table.getPartitionKeys().isEmpty()) {
+        if (GlueTableResolver.isIcebergTable(table) || !enabled(table)
+                || table.getPartitionKeys() == null || table.getPartitionKeys().isEmpty()) {
             return false;
         }
         String template = parameter(table, LOCATION_TEMPLATE);
@@ -251,9 +259,15 @@ public final class PartitionProjection {
         return placeholder.substring(2, placeholder.length() - 1).trim().toLowerCase(Locale.ROOT);
     }
 
+    /** The capture group for one placeholder, spanning the folders its value does. */
+    private static String placeholderGroup(Table table, String key) {
+        return "([^/]+" + "(?:/[^/]+)".repeat(placeholderFolders(table, key) - 1) + ")";
+    }
+
     /**
-     * The capture group for one placeholder: one folder, or as many as its key's projected value
-     * spans.
+     * How many folders one placeholder's value spans: one, or as many as its key's projected value
+     * does. {@link #readPath} and {@link #locationTemplate} both follow it, so the read glob and the
+     * regex agree on where each value ends.
      *
      * <p>A {@code date} projection's {@code format} may itself hold slashes, as in the Firehose
      * layout AWS documents: a single {@code ${datehour}} placeholder with format
@@ -264,14 +278,13 @@ public final class PartitionProjection {
      * <p>TODO: an {@code enum} value holding a slash spans folders too, and would need a group
      * per distinct depth among the listed values.
      */
-    private static String placeholderGroup(Table table, String key) {
+    private static int placeholderFolders(Table table, String key) {
         String type = parameter(table, "projection." + key + ".type");
         String format = parameter(table, "projection." + key + ".format");
-        int extraFolders = 0;
         if ("date".equalsIgnoreCase(type == null ? null : type.trim()) && format != null) {
-            extraFolders = (int) format.chars().filter(c -> c == '/').count();
+            return 1 + (int) format.chars().filter(c -> c == '/').count();
         }
-        return "([^/]+" + "(?:/[^/]+)".repeat(extraFolders) + ")";
+        return 1;
     }
 
     /** {@code literal} escaped for RE2, which takes a backslash before any punctuation. */
@@ -583,6 +596,14 @@ public final class PartitionProjection {
      * The alias, or the table's own name, under which each {@code FROM}, {@code JOIN} or comma-separated
      * source naming {@code tableName} appears. The name must end at an identifier boundary, so
      * {@code events_daily} is not a reference to {@code events}.
+     *
+     * <p>TODO: this matches the query's text, not its resolved sources. A qualifier is not compared
+     * with the table's database, so {@code other_db.events} counts as a reference to the context
+     * database's {@code events}, and a common table expression named {@code events} counts too.
+     * Its callers are also given only the query context database's tables
+     * ({@code AthenaService.tablesForProjectionCheck}), so a table in another database is not
+     * checked. {@link #assertInjectedColumnsFiltered} and {@link #assertLocationTemplatesComplete}
+     * share these limits; resolving the sources the query reads would lift them for both.
      */
     private static List<String> tableAliases(String code, String tableName) {
         String identifier = identifierPattern(tableName);

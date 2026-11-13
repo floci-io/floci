@@ -42,6 +42,9 @@ public final class GlueTableResolver {
      */
     private static final String OBJECT_PATH_COLUMN = "$path";
 
+    /** The largest group index DuckDB's scalar {@code regexp_extract} accepts. */
+    private static final int MAX_SCALAR_GROUP = 9;
+
     private static final Pattern DECIMAL_TYPE = Pattern.compile("decimal\\(\\s*\\d+\\s*,\\s*\\d+\\s*\\)");
 
     private GlueTableResolver() {
@@ -314,9 +317,25 @@ public final class GlueTableResolver {
         return keys;
     }
 
-    /** The text one placeholder matched in the row's object path. */
+    /**
+     * The text one placeholder matched in the row's object path.
+     *
+     * <p>DuckDB's scalar {@code regexp_extract} takes a group index from 0 to 9 only, and a view using
+     * a larger one fails to bind, which fails every view in the batch. A later group, as in a
+     * template with ten or more placeholders (repeats included), is read through the struct form
+     * instead, which names the groups up to it and returns each as a field. The scalar form stays
+     * for the rest, keeping the common view short.
+     */
     private static String pathSegment(PartitionProjection.LocationTemplate template, int group) {
-        return "regexp_extract(" + quote(OBJECT_PATH_COLUMN) + ", '" + escape(template.regex()) + "', " + group + ")";
+        String extract = "regexp_extract(" + quote(OBJECT_PATH_COLUMN) + ", '" + escape(template.regex()) + "', ";
+        if (group <= MAX_SCALAR_GROUP) {
+            return extract + group + ")";
+        }
+        StringBuilder names = new StringBuilder("[");
+        for (int i = 1; i <= group; i++) {
+            names.append(i > 1 ? ", " : "").append("'g").append(i).append('\'');
+        }
+        return extract + names + "]).g" + group;
     }
 
     /**

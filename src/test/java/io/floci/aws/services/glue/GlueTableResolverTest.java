@@ -154,6 +154,26 @@ class GlueTableResolverTest {
                 + " AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 3) AS DATE) IS NOT NULL"));
     }
 
+    /**
+     * DuckDB's scalar {@code regexp_extract} stops at group 9, so a key at group 10 is read through
+     * the struct form, and the keys before it keep the scalar form.
+     */
+    @Test
+    void aKeyPastTheNinthGroupIsExtractedThroughTheStructForm() {
+        Table table = templatedTable("s3://bucket/events/${account}/${team}/${service}/${env}/${cluster}/"
+                        + "${zone}/${rack}/${host}/${region}/${dt}/",
+                column("account", "string"), column("team", "string"), column("service", "string"),
+                column("env", "string"), column("cluster", "string"), column("zone", "string"),
+                column("rack", "string"), column("host", "string"), column("region", "string"),
+                column("dt", "date"));
+
+        String regex = "'^s3://bucket/events/" + "([^/]+)/".repeat(10) + "'";
+        String projection = GlueTableResolver.buildProjection(table);
+        assertThat(projection, containsString("regexp_extract(\"$path\", " + regex + ", 9) AS \"region\""));
+        assertThat(projection, containsString("TRY_CAST(regexp_extract(\"$path\", " + regex + ", "
+                + "['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']).g10 AS DATE) AS \"dt\""));
+    }
+
     @Test
     void templatedReadAddsTheObjectPathAndTurnsOffHivePartitioning() {
         Table table = templatedTable("s3://bucket/events/${region}/", column("region", "string"));
