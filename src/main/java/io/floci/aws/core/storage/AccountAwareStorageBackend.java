@@ -663,6 +663,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return prefix();
     }
 
+    /** The configured owner of data written before account namespaces were introduced. */
+    public String defaultAccountId() {
+        return defaultAccountId;
+    }
+
     private RequestContext requestContext() {
         return requestContextProxy.get();
     }

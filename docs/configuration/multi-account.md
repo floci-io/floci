@@ -215,6 +215,12 @@ including to a nondefault account when its owner is established by the caller's
 predicate. The separate migration helper for known older key formats continues
 to handle intentional account-prefixed legacy keys.
 
+S3 handles older objects in twelve-digit bucket names explicitly. On a scoped
+miss, it verifies the stored bucket and object key before migrating metadata to
+the bucket owner's namespace. Unscoped data belongs to the configured default
+account, so another account's same-named bucket cannot claim it. This applies
+with either setting of the global bucket namespace; existing scoped data wins.
+
 ## Configuration Reference
 
 | Variable | Default | Description |
