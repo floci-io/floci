@@ -28,9 +28,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * {@code GetParametersByPath} is checked against the parameter its {@code Path} names, the root path when it names
- * none, and {@code GetParameters} against each parameter its {@code Names} give, without the version or label selector
- * a name may carry.
+ * {@code GetParametersByPath} is checked against the parameter its {@code Path} names, and {@code GetParameters}
+ * against each parameter its {@code Names} give, without the version or label selector a name may carry.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -129,30 +128,6 @@ class SsmParameterReadIamEnforcementIntegrationTest {
             } finally {
                 root.deleteParameter(r -> r.name(allowed));
                 root.deleteParameter(r -> r.name(other + "/key"));
-            }
-        }
-    }
-
-    @Test
-    void aDenyOnAPathRefusesGetParametersByPathOnItWithATrailingSlash() {
-        String path = "/iam-path-slash-" + UUID.randomUUID();
-        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
-            try {
-                root.putParameter(r -> r.name(path + "/key").type(ParameterType.STRING).value("v"));
-                EnforcementFixtures.UserCredentials credentials = user("""
-                        {"Version":"2012-10-17","Statement":[
-                          {"Effect":"Allow","Action":"ssm:GetParametersByPath",
-                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
-                          {"Effect":"Deny","Action":"ssm:GetParametersByPath",
-                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(path));
-                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
-                        Region.US_EAST_1)) {
-                    SsmException denied = assertThrows(SsmException.class,
-                            () -> user.getParametersByPath(r -> r.path(path + "/")));
-                    assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
-                }
-            } finally {
-                root.deleteParameter(r -> r.name(path + "/key"));
             }
         }
     }

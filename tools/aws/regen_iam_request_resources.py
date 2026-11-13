@@ -123,10 +123,10 @@ namespace's operations whose requests Floci does not serve, each with its reason
 `UNQUALIFIED` are the resource types whose ARN a request may give with a qualifier, one more `:<name>`
 past its format, and whose service checks it without one: Step Functions checks a version or an alias
 on its state machine's ARN, and Parameter Store a version or a label on its parameter's. A value filling a variable
-named `...WithoutLeadingSlash` is read without one leading `/`: a parameter's ARN is `parameter/<name>`, whether or
-not its name starts with a slash. `MINTED_IDS` are the resource types whose service follows the name their
-format ends in with an id it mints, `/<id>`, which the format leaves out and a request naming one by
-its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
+named `...WithoutLeadingSlash` is read as a Parameter Store name, without the whitespace around it and one leading
+`/`: a parameter's ARN is `parameter/<name>`, whether or not its name starts with a slash. `MINTED_IDS` are the
+resource types whose service follows the name their format ends in with an id it mints, `/<id>`, which the
+format leaves out and a request naming one by its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
 asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
 all an id their service mints, which a request names by members the ARN does not hold, with those
 members: each operation whose request has them all names the type by them (`find`), and the reader

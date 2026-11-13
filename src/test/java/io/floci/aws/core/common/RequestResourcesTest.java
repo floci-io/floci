@@ -1066,12 +1066,12 @@ class RequestResourcesTest {
     }
 
     /**
-     * A Parameter Store parameter is {@code parameter/<name>} whether its name starts with a slash or not, a name of
-     * two leading slashes keeping the second; a version or a label after its name, or after its ARN, is checked on
-     * the parameter; a path is checked without the slash it may end in, the root for none; a put is checked on the
-     * name its handler stores, without the spaces around it; and the tagging operations act on the parameter their
-     * {@code ResourceId} names, by its name or its ARN, a legacy {@code parameter<name>} ARN being the one the
-     * service finds for it.
+     * A Parameter Store parameter is {@code parameter/<name>} whether its name starts with a slash or not, without the
+     * whitespace around it, a name of two leading slashes keeping the second and one beginning {@code /parameter/}
+     * keeping that; a version or a label after its name, or after its ARN, is checked on the parameter; a path is
+     * checked as given; and the tagging operations act on the resource of the type their {@code ResourceType} picks,
+     * a parameter by its name or its ARN, a legacy {@code parameter<name>} ARN being the one the service finds for it,
+     * and on none without one.
      */
     @Test
     void aParameterIsNamedWithOrWithoutItsLeadingSlash() {
@@ -1083,23 +1083,28 @@ class RequestResourcesTest {
                     json("{\"Name\":\"" + name + "\",\"Labels\":[\"l\"]}")));
         }
         assertEquals(List.of(parameter + "/x"), of("ssm:GetParameter", json("{\"Name\":\"//x\"}")));
+        assertEquals(List.of(parameter + "parameter/x"), of("ssm:GetParameter",
+                json("{\"Name\":\"/parameter/x\"}")));
         assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\"x:1\"}")));
         assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\"/x:prod\"}")));
         assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\"" + parameter + "x:1\"}")));
         assertEquals(List.of(parameter + "a", parameter + "b"), of("ssm:GetParameters",
                 json("{\"Names\":[\"/a\",\"b:2\"]}")));
-        assertEquals(List.of(parameter + "a"), of("ssm:GetParametersByPath", json("{\"Path\":\"/a/\"}")));
+        assertEquals(List.of(parameter + "a/"), of("ssm:GetParametersByPath", json("{\"Path\":\"/a/\"}")));
         assertEquals(List.of(parameter + "a"), of("ssm:GetParametersByPath", json("{\"Path\":\"/a\"}")));
         assertEquals(List.of(parameter), of("ssm:GetParametersByPath", json("{\"Path\":\"/\"}")));
-        assertEquals(List.of(parameter), of("ssm:GetParametersByPath", json("{}")));
+        assertEquals(List.of(), of("ssm:GetParametersByPath", json("{}")));
         assertEquals(List.of(parameter + "x"), of("ssm:PutParameter", json("{\"Name\":\" x \",\"Value\":\"v\"}")));
         assertEquals(List.of(parameter + "x"), of("ssm:UnlabelParameterVersion",
                 json("{\"Name\":\" /x \",\"Labels\":[\"l\"]}")));
-        assertEquals(List.of(parameter + " x "), of("ssm:GetParameter", json("{\"Name\":\" x \"}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\" x \"}")));
         assertEquals(List.of(parameter + "x"), of("ssm:AddTagsToResource",
                 json("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"/x\",\"Tags\":[]}")));
         assertEquals(List.of(parameter + "x"), of("ssm:ListTagsForResource",
-                json("{\"ResourceType\":\"Document\",\"ResourceId\":\"" + parameter + "x\"}")));
+                json("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"" + parameter + "x\"}")));
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:document/x"), of("ssm:ListTagsForResource",
+                json("{\"ResourceType\":\"Document\",\"ResourceId\":\"x\"}")));
+        assertEquals(List.of(), of("ssm:ListTagsForResource", json("{\"ResourceId\":\"x\"}")));
 
         String legacy = "arn:aws:ssm:us-east-1:000000000000:parameterx";
         StoredResourceArns stored = new StoredResourceArns() {

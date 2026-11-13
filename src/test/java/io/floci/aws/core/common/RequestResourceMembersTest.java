@@ -310,8 +310,7 @@ class RequestResourceMembersTest {
                 + "\"operations\":{\"a:Op\":{\"resources\":[]}}}").formats().get("a").get("thing").minted());
         // A member read when absent as no value, or as an ARN of a type with no format or of more than one variable.
         for (String bad : List.of("\"absent\":{\"Bus\":\"\"}", "\"absent\":{\"Bus[]\":\"default\"}",
-                "\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}", "\"unless\":{\"Bus\":[]}",
-                "\"stripped\":false", "\"trailing\":\"\"", "\"trailing\":\"//\"")) {
+                "\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}", "\"unless\":{\"Bus\":[]}")) {
             assertThrows(IllegalStateException.class, () -> parse(document("\"arnFormats\":{\"a\":{"
                     + "\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
                     + "\"part\":\"arn:${Partition}:a:${Region}:${Account}:part/${ThingName}/${PartId}\"}}",
@@ -327,12 +326,6 @@ class RequestResourceMembersTest {
                         Map.of(), Map.of(), Map.of(), new Member("registryId", false), null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Names[]\"},"
                         + "\"account\":\"registryId\"}")).operations().get("a:Op"));
-        Resource read = parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
-                + "\"stripped\":true,\"trailing\":\"/\"}")).operations().get("a:Op").getFirst();
-        assertTrue(read.stripped());
-        assertEquals("/", read.trailing());
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"trailing\":\"/\"}")));
     }
 
     @Test
