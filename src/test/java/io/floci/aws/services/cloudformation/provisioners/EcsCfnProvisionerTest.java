@@ -340,12 +340,12 @@ class EcsCfnProvisionerTest {
                 && request.getNetworkConfiguration() == null);
     }
 
-    /** An UpdateService request for {@code service} in {@code cluster} with this task definition and desired count. */
+    /** An UpdateService request for {@code service} in {@code cluster} with this task definition and desired count (null: none sent). */
     private static UpdateServiceRequest updating(String cluster, String service, String taskDefinition,
-                                                 int desiredCount) {
+                                                 Integer desiredCount) {
         return argThat(request -> request != null && cluster.equals(request.getCluster())
                 && service.equals(request.getService()) && taskDefinition.equals(request.getTaskDefinition())
-                && Integer.valueOf(desiredCount).equals(request.getDesiredCount())
+                && java.util.Objects.equals(desiredCount, request.getDesiredCount())
                 && request.getNetworkConfiguration() == null);
     }
 
@@ -424,7 +424,7 @@ class EcsCfnProvisionerTest {
 
     @Test
     void anUnnamedServiceKeepsTheNameItGotAtCreateTime() {
-        when(ecs.updateService(updating("web", "my-stack-Service-abc", TASK_DEF_ARN, 1), eq(REGION)))
+        when(ecs.updateService(updating("web", "my-stack-Service-abc", TASK_DEF_ARN, null), eq(REGION)))
                 .thenReturn(service("my-stack-Service-abc"));
         StackResource r = resource("AWS::ECS::Service", "Service");
         r.getAttributes().put("Name", "my-stack-Service-abc");
@@ -432,7 +432,7 @@ class EcsCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode().put("Cluster", "web").put("TaskDefinition", TASK_DEF_ARN),
                 ctx("arn:aws:ecs:us-east-1:000000000000:service/web/my-stack-Service-abc"));
 
-        verify(ecs).updateService(updating("web", "my-stack-Service-abc", TASK_DEF_ARN, 1), eq(REGION));
+        verify(ecs).updateService(updating("web", "my-stack-Service-abc", TASK_DEF_ARN, null), eq(REGION));
     }
 
     @Test
@@ -480,7 +480,7 @@ class EcsCfnProvisionerTest {
 
     @Test
     void theClusterGivenAsAnArnStillCountsAsTheSameCluster() {
-        when(ecs.updateService(updating(CLUSTER_ARN, "front", TASK_DEF_ARN, 1), eq(REGION)))
+        when(ecs.updateService(updating(CLUSTER_ARN, "front", TASK_DEF_ARN, null), eq(REGION)))
                 .thenReturn(service("front"));
         StackResource r = resource("AWS::ECS::Service", "Service");
         r.getAttributes().put("Name", "front");
@@ -488,7 +488,7 @@ class EcsCfnProvisionerTest {
         provisioner.provision(r, mapper.createObjectNode()
                 .put("Cluster", CLUSTER_ARN).put("ServiceName", "front").put("TaskDefinition", TASK_DEF_ARN), ctx(SERVICE_ARN));
 
-        verify(ecs).updateService(updating(CLUSTER_ARN, "front", TASK_DEF_ARN, 1), eq(REGION));
+        verify(ecs).updateService(updating(CLUSTER_ARN, "front", TASK_DEF_ARN, null), eq(REGION));
         assertFalse(provisioner.hasReplacementUpdate(r), "an in-place update owes no cleanup");
     }
 
@@ -1578,12 +1578,12 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
-    void aDroppedDesiredCountSetsTheDesiredCountToOne() {
+    void aDroppedDesiredCountIsOmittedFromTheUpdate() {
         ObjectNode prior = serviceProps().put("DesiredCount", "3");
 
         UpdateServiceRequest request = updateFrom(prior, serviceProps());
 
-        assertEquals(1, request.getDesiredCount());
+        assertNull(request.getDesiredCount());
         verifyNoDeploymentConfigurationReplacement();
     }
 
