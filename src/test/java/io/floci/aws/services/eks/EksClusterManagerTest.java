@@ -493,6 +493,40 @@ class EksClusterManagerTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
+    void startClusterSharesTheNodesMountsWhetherOrNotItsCniIsDisabled(boolean disableCni) {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(config.services().eks().disableCni()).thenReturn(disableCni);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, new RegionResolver("us-east-1", "000000000000"));
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        // k3s starts behind `mount --make-rshared /`, so a CSI node plugin's Bidirectional mounts
+        // work on every node, not only on one whose CNI is replaced.
+        verify(builder).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withCmd(cmdCaptor.capture());
+        assertEquals(List.of("floci-k3s", "server"), cmdCaptor.getValue().subList(0, 2));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
     void startClusterDefaultStorageClassFlag(boolean defaultStorageClass) {
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
