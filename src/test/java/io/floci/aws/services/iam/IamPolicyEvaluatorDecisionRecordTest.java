@@ -121,6 +121,14 @@ class IamPolicyEvaluatorDecisionRecordTest {
                         callerWithBoundary(List.of(), ALLOW_DYNAMODB_ONLY),
                         ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER, same,
                         Outcome.ALLOW, PolicyLayer.RESOURCE),
+                row("direct IAM user grant stays resource-attributed when a boundary does not allow",
+                        callerWithBoundary(List.of(ALLOW_ALL), ALLOW_DYNAMODB_ONLY),
+                        ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER, same,
+                        Outcome.ALLOW, PolicyLayer.RESOURCE),
+                row("direct IAM user grant with a boundary that allows is an identity allow",
+                        callerWithBoundary(List.of(ALLOW_ALL), ALLOW_ALL),
+                        ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER, same,
+                        Outcome.ALLOW, PolicyLayer.IDENTITY),
                 row("direct IAM user resource grant does not bypass a boundary explicit deny",
                         callerWithBoundary(List.of(), ALLOW_ALL_DENY_S3),
                         ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER, same,
@@ -245,5 +253,31 @@ class IamPolicyEvaluatorDecisionRecordTest {
         assertEquals(PolicyLayer.IDENTITY, record.layer());
         assertEquals(new DecidingStatement(PolicyLayer.IDENTITY, -1, 1, 1, "ReadS3"), record.statement());
         assertEquals(Decision.ALLOW, record.decision());
+    }
+
+    @Test
+    void aDirectIamUserGrantIsAttributedToTheResourceOnlyWhenTheBoundaryDoesNotAllow() {
+        String identity = """
+                {"Version":"2012-10-17","Statement":[
+                  {"Sid":"ReadS3","Effect":"Allow","Action":"s3:GetObject","Resource":"*"}
+                ]}""";
+
+        // The boundary does not allow the action: only the resource policy lets the request through.
+        DecisionRecord viaResource = evaluator.explain(callerWithBoundary(List.of(identity), ALLOW_DYNAMODB_ONLY),
+                ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER, ResourceAccountRelationship.SAME_ACCOUNT,
+                ACTION, RESOURCE, null);
+
+        assertEquals(Outcome.ALLOW, viaResource.outcome());
+        assertEquals(PolicyLayer.RESOURCE, viaResource.layer());
+        assertEquals(new DecidingStatement(PolicyLayer.RESOURCE, -1, -1, -1, null), viaResource.statement());
+
+        // The boundary allows the action: the identity policy grants it.
+        DecisionRecord viaIdentity = evaluator.explain(callerWithBoundary(List.of(identity), ALLOW_ALL),
+                ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER, ResourceAccountRelationship.SAME_ACCOUNT,
+                ACTION, RESOURCE, null);
+
+        assertEquals(Outcome.ALLOW, viaIdentity.outcome());
+        assertEquals(PolicyLayer.IDENTITY, viaIdentity.layer());
+        assertEquals(new DecidingStatement(PolicyLayer.IDENTITY, -1, 0, 0, "ReadS3"), viaIdentity.statement());
     }
 }
