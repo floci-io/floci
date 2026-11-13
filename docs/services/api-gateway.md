@@ -860,9 +860,10 @@ An expression embedded in a path is read whole before it is resolved: a body JSO
 names, `[n]` indexes and `['key']` selectors, so `/orders/$request.body.items[0].id` selects the
 first item's `id`, a stage variable name ends at the first character that is not a letter, digit or
 underscore, and a `$request.path`, `$request.header` or `$request.querystring` name ends at the next
-`.`, so `/files/$request.path.name.json` keeps its `.json` suffix. A header value mapped from any source, including the whole `$request.body`, is
-rejected when it contains CR, LF, NUL or any other control character besides tab, as is a mapped
-`Host`: the request never reaches the backend and the caller receives `502` with
+`.`, so `/files/$request.path.name.json` keeps its `.json` suffix. A header value mapped from any
+source, including the whole `$request.body`, is rejected when it contains CR, LF, NUL or any other
+control character besides tab, as is a mapped `Host`: the request never reaches the backend and the
+caller receives `502` with
 `{"message":"Bad Gateway: invalid request header value for <name>"}`.
 
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
