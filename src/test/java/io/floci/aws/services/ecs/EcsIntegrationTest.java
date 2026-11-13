@@ -457,7 +457,7 @@ class EcsIntegrationTest {
                     "cluster": "%s",
                     "taskDefinition": "%s",
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}},
                     "count": 1
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
@@ -547,7 +547,7 @@ class EcsIntegrationTest {
                     "cluster": "%s",
                     "taskDefinition": "empty-containers-task",
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}},
                     "count": 1
                 }
                 """.formatted(CLUSTER_NAME))
@@ -701,7 +701,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}},
                     "tags": [
                         {"key": "Environment", "value": "dev"},
                         {"key": "Project", "value": "project1"}
@@ -796,7 +796,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": 2,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}}
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -818,7 +818,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": 99,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}}
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -842,7 +842,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": -5,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}}
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -885,7 +885,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "%s",
                     "desiredCount": 0,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}}
                 }
                 """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
                 .when()
@@ -1112,7 +1112,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}}
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}}
                 }
                 """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
         .when()
@@ -1198,7 +1198,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}},
                     "loadBalancers": [
                         {
                             "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-a/1234",
@@ -1223,7 +1223,7 @@ class EcsIntegrationTest {
                     "taskDefinition": "review-td",
                     "desiredCount": 1,
                     "launchType": "FARGATE",
-                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-default-us-east-1-a"]}},
+                    "networkConfiguration": {"awsvpcConfiguration": {"subnets": ["subnet-013f16799e920587a"]}},
                     "loadBalancers": [
                         {
                             "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-DIFFERENT/9999",

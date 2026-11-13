@@ -87,7 +87,7 @@ class ElbV2ListenerLookupIntegrationTest {
 
     private static String createBalancer(ElasticLoadBalancingV2Client client, String prefix) {
         return client.createLoadBalancer(r -> r.name(prefix + "-" + UUID.randomUUID().toString().substring(0, 8))
-                .type("application").subnets(List.of("subnet-default-us-east-1-a", "subnet-default-us-east-1-b")))
+                .type("application").subnets(List.of("subnet-013f16799e920587a", "subnet-00af8362367af5f99")))
                 .loadBalancers().get(0).loadBalancerArn();
     }
 

@@ -65,7 +65,7 @@ class CloudFormationEcsDeleteAfterRestoreIntegrationTest {
         // in-memory RUNNING with no container behind it.
         ecs("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"" + family + "\",\"count\":1,"
                 + "\"networkConfiguration\":{\"awsvpcConfiguration\":"
-                + "{\"subnets\":[\"subnet-default-us-east-1-a\"]}}}");
+                + "{\"subnets\":[\"subnet-013f16799e920587a\"]}}}");
 
         deleteStack(stack);
 

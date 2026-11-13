@@ -66,6 +66,7 @@ class DocDbServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         rdsService = Mockito.mock(RdsService.class);
         ec2Service = Mockito.mock(Ec2Service.class);
+        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0)));
         kmsService = Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
         when(rdsService.isManagedClusterParameterGroup(any())).thenAnswer(inv ->

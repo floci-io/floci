@@ -79,7 +79,7 @@ class EcsTaskMetadataControllerTest {
 
     private static Subnet subnet() {
         Subnet subnet = new Subnet();
-        subnet.setSubnetId("subnet-default-us-east-1-a");
+        subnet.setSubnetId("subnet-013f16799e920587a");
         subnet.setVpcId("vpc-0a1b2c3d");
         subnet.setCidrBlock("172.31.32.0/20");
         subnet.setAvailabilityZone("us-east-1a");
@@ -116,7 +116,7 @@ class EcsTaskMetadataControllerTest {
         task.setPrivateDnsName("ip-172-31-0-42.ec2.internal");
 
         AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
-        awsvpc.setSubnets(List.of("subnet-default-us-east-1-a"));
+        awsvpc.setSubnets(List.of("subnet-013f16799e920587a"));
         NetworkConfiguration networkConfiguration = new NetworkConfiguration();
         networkConfiguration.setAwsvpcConfiguration(awsvpc);
         task.setNetworkConfiguration(networkConfiguration);

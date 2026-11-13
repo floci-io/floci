@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class EcsAwsvpcTaskAddressDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = "subnet-default-us-east-1-a";
+    private static final String SUBNET = "subnet-013f16799e920587a";
     private static final int PORT = 8080;
 
     /**

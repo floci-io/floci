@@ -3509,8 +3509,8 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         group.setVpcId("vpc-default");
         group.setSubnetGroupStatus("Complete");
-        group.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
-        group.setSubnetAvailabilityZones(Map.of("subnet-default-a", "us-east-1a", "subnet-default-b", "us-east-1b"));
+        group.setSubnetIds(List.of("subnet-013f16799e920587a", "subnet-00af8362367af5f99"));
+        group.setSubnetAvailabilityZones(Map.of("subnet-013f16799e920587a", "us-east-1a", "subnet-00af8362367af5f99", "us-east-1b"));
         return group;
     }
 
