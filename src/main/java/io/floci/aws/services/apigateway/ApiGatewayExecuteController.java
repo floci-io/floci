@@ -2322,8 +2322,9 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * The {@code $context} values every gateway request shares: the account, the domain the caller addressed, and
-     * the request's ids and time.
+     * The {@code $context} values REST and HTTP APIs build the same way: the account, the domain the caller
+     * addressed, the gateway-generated request id and the request time. An HTTP API reports its request id as
+     * {@code extendedRequestId} instead.
      */
     private record GatewayContextValues(String accountId, String domainName, String domainPrefix,
                                         String extendedRequestId, String requestTime, long requestTimeEpoch) {}
@@ -3027,7 +3028,7 @@ public class ApiGatewayExecuteController {
 
         String hostRegion = region != null ? region : regionResolver.getDefaultRegion();
         Map<String, String> contextVariables =
-                httpApiContextVariables(apiId, stageName, httpMethod, path, route, hostRegion, headers);
+                httpApiContextVariables(apiId, stageName, httpMethod, path, route, requestId, hostRegion, headers);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
                 subtype.subtypeName());
@@ -3058,15 +3059,15 @@ public class ApiGatewayExecuteController {
 
     /** The {@code $context.<name>} values an HTTP API parameter mapping can read for this request. */
     private Map<String, String> httpApiContextVariables(String apiId, String stageName, String httpMethod,
-                                                        String path, Route route, String region,
-                                                        HttpHeaders headers) {
+                                                        String path, Route route, String requestId,
+                                                        String region, HttpHeaders headers) {
         GatewayContextValues values = gatewayContextValues(apiId, region, headers);
         Map<String, String> contextVariables = new LinkedHashMap<>();
         contextVariables.put("accountId", values.accountId());
         contextVariables.put("apiId", apiId);
         contextVariables.put("domainName", values.domainName());
         contextVariables.put("domainPrefix", values.domainPrefix());
-        contextVariables.put("extendedRequestId", values.extendedRequestId());
+        contextVariables.put("extendedRequestId", requestId);
         contextVariables.put("httpMethod", httpMethod);
         contextVariables.put("path", ("$default".equals(stageName) ? "" : "/" + stageName) + path);
         contextVariables.put("protocol", "HTTP/1.1");
@@ -3188,15 +3189,17 @@ public class ApiGatewayExecuteController {
         // $request.header.* mappings keep the caller's values; only what reaches the backend changes.
         Map<String, List<String>> backendHeaders = HttpApiForwardedHeaders.apply(multiValueHeaders, sourceIp,
                 routeContext.localIp(), headers.getHeaderString("Host"), isSecureTransport(uriInfo) ? "https" : "http");
+        String requestId = UUID.randomUUID().toString();
         io.floci.aws.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.floci.aws.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path,
                         pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
-                        UUID.randomUUID().toString(), sourceIp,
+                        requestId, sourceIp,
                         requestHeaders, queryParams, pathParams, body,
                         claims, authorizerContext, backendHeaders, multiValueQueryParams, rawPathParams)
                         .withVariables(stageVariables, httpApiContextVariables(apiId, stageName, httpMethod, path,
-                                route, region != null ? region : regionResolver.getDefaultRegion(), headers));
+                                route, requestId, region != null ? region : regionResolver.getDefaultRegion(),
+                                headers));
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());
