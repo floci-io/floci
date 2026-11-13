@@ -551,6 +551,51 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void aTr34BlockWithANonceDoesNotComeBackWithoutIt() {
+        // The nonce binds the block to the exchange, so a request that names none expects
+        // a block that carries none, and a block that carries one is refused.
+        Tr34Exchange exchange = tr34Exchange();
+        PaymentCryptographyKey key = createKey("TDES_2KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                exchange.exportMaterial(), "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        Map<String, Object> incoming = exchange.importMaterial((String) wrapped.get("KeyMaterial"));
+        incoming.remove("RandomNonce");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aTr34ImportWithoutAnImportTokenIsRefused() {
+        // The service imports a block under the token the import parameters issued, so a
+        // request that names none is refused with the reason, not with a key that is not
+        // found.
+        Tr34Exchange exchange = tr34Exchange();
+        PaymentCryptographyKey key = createKey("TDES_2KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                exchange.exportMaterial(), "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        Map<String, Object> incoming = exchange.importMaterial((String) wrapped.get("KeyMaterial"));
+        incoming.remove("ImportToken");
+        incoming.put("WrappingKeyIdentifier", exchange.receiver().getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("import token"), refused.getMessage());
+    }
+
+    @Test
     void aTr34ExportWithoutAnExportTokenIsRefused() {
         // The service signs the block with the key the export parameters issued, so a
         // request that names no token is refused with the reason, not with a key that is

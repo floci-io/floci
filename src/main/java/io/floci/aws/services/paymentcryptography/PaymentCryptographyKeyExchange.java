@@ -1281,9 +1281,19 @@ final class PaymentCryptographyKeyExchange {
     /** A key out of a TR-34 key block. */
     private Imported importTr34(String region, Map<String, Object> material) {
         String token = text(material, "ImportToken");
+        if (token.isEmpty()) {
+            // The service imports a block under the token the import parameters issued, so a
+            // request that names none is refused with the reason, not with a key that is
+            // not found. The wrapping key the request may name is the receiver's own, and
+            // it is the token that names the key the block is wrapped under.
+            throw validation("a TR-34 key block is imported under the token the import "
+                    + "parameters issued, so the request must name the import token they "
+                    + "issued; this service does not import a block under a wrapping key the "
+                    + "request names");
+        }
         Issued issued = take(importTokens, token, "TR34_KEY_BLOCK");
         if (issued == null) {
-            throw notFound(token.isEmpty() ? "(missing)" : token);
+            throw notFound(token);
         }
         // The shape check settles the members the model requires and the values it names,
         // so the block, the signing certificate, the authority and the format are there.

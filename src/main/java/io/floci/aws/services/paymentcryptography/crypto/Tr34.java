@@ -430,14 +430,15 @@ public final class Tr34 {
                     + "(tamper or wrong content)");
         }
 
-        // The two-pass nonce has to be the one the request quotes.
-        if (randomNonceHex != null) {
-            byte[] nonceAttribute = attributeValue(signedAttributes, OID_RANDOM_NONCE);
-            if (nonceAttribute == null
-                    || !HEX_UPPER.formatHex(nonceAttribute).equalsIgnoreCase(randomNonceHex)) {
-                throw new IllegalArgumentException(
-                        "RandomNonce does not match the nonce in the signed payload");
-            }
+        // The two-pass nonce has to be the one the request quotes. A request that quotes
+        // none expects a block that carries none, so a block that carries one may not come
+        // in under a request that names no nonce.
+        String quoted = randomNonceHex == null ? "" : randomNonceHex;
+        byte[] nonceAttribute = attributeValue(signedAttributes, OID_RANDOM_NONCE);
+        if (nonceAttribute == null
+                || !HEX_UPPER.formatHex(nonceAttribute).equalsIgnoreCase(quoted)) {
+            throw new IllegalArgumentException(
+                    "RandomNonce does not match the nonce in the signed payload");
         }
 
         // Recover the ephemeral key and read the block.
