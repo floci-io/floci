@@ -1028,14 +1028,15 @@ class KmsServiceTest {
                         kmsService.createAlias("alias/race", key.getKeyId(), REGION);
                         return true;
                     } catch (AwsException e) {
-                        return "AlreadyExistsException".equals(e.getErrorCode()) ? false : null;
+                        assertEquals("AlreadyExistsException", e.getErrorCode());
+                        return false;
                     }
                 }));
             }
             start.countDown();
             int created = 0;
             for (Future<Boolean> result : results) {
-                if (Boolean.TRUE.equals(result.get(10, TimeUnit.SECONDS))) {
+                if (result.get(10, TimeUnit.SECONDS)) {
                     created++;
                 }
             }

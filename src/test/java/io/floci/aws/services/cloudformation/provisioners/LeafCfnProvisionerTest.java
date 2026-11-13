@@ -179,6 +179,35 @@ class LeafCfnProvisionerTest {
         }
 
         @Test
+        void updatingAnAliasRetargetsItInPlaceInsteadOfCreatingItAgain() {
+            StackResource r = resource("Alias", "AWS::KMS::Alias");
+            ProvisionContext update = new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                    "alias/app");
+
+            provisioner.provision(r, props("""
+                    {"AliasName": "alias/app", "TargetKeyId": "k-456"}
+                    """), update);
+
+            verify(kms).updateAlias("alias/app", "k-456", REGION);
+            verify(kms, never()).createAlias(anyString(), anyString(), anyString());
+            assertEquals("alias/app", r.getPhysicalId());
+        }
+
+        @Test
+        void updatingAnAliasToANewNameCreatesTheNewAlias() {
+            StackResource r = resource("Alias", "AWS::KMS::Alias");
+            ProvisionContext update = new ProvisionContext(engine, REGION, "000000000000", "my-stack",
+                    "alias/old");
+
+            provisioner.provision(r, props("""
+                    {"AliasName": "alias/new", "TargetKeyId": "k-456"}
+                    """), update);
+
+            verify(kms).createAlias("alias/new", "k-456", REGION);
+            verify(kms, never()).updateAlias(anyString(), anyString(), anyString());
+        }
+
+        @Test
         void aliasWithoutATargetIsNotCreatedButStillGetsAPhysicalId() {
             StackResource r = resource("Alias", "AWS::KMS::Alias");
             provisioner.provision(r, props("""
