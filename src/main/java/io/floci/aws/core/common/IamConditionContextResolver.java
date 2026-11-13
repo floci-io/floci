@@ -39,7 +39,6 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
-import java.net.URLDecoder;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -736,14 +735,19 @@ public class IamConditionContextResolver {
     // ── EC2 ─────────────────────────────────────────────────────────────────────
 
     private Map<String, List<String>> ec2ConditionContext(String action, ContainerRequestContext ctx) {
-        return switch (action) {
-            case "ec2:RunInstances" -> ec2RunInstancesConditionContext(ctx);
-            case "ec2:CreateTags" -> ec2CreateTagsConditionContext(ctx);
-            case "ec2:DeleteTags" -> ec2ResourceTagConditionContext(ctx, "ResourceId.1");
-            case "ec2:TerminateInstances", "ec2:DescribeInstances" ->
-                    ec2ResourceTagConditionContext(ctx, "InstanceId.1");
-            default -> null;
-        };
+        if ("ec2:RunInstances".equals(action)) {
+            return ec2RunInstancesConditionContext(ctx);
+        }
+        RequestResourceMembers.Targets targets = RequestResourceMembers.table().targets().get(action);
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        Map<String, String> form = formParameters(ctx);
+        if ("ec2:CreateTags".equals(action)) {
+            addRequestTags(conditions, form, "Tag.");
+        }
+        if (targets != null) {
+            addResourceTags(conditions, form.get(targets.query() + ".1"), targets);
+        }
+        return conditions.isEmpty() ? null : conditions;
     }
 
     /**
@@ -756,27 +760,6 @@ public class IamConditionContextResolver {
         for (int spec = 1; form.containsKey("TagSpecification." + spec + ".ResourceType"); spec++) {
             addRequestTags(conditions, form, "TagSpecification." + spec + ".Tag.");
         }
-        return conditions.isEmpty() ? null : conditions;
-    }
-
-    /**
-     * CreateTags both requests tags and targets existing resources, so both keys apply: the
-     * {@code Tag.N} pairs being requested, and each {@code ResourceId.N}'s tags as they are
-     * before this call. This context carries the first target; the rest come from
-     * {@link #resolveRemainingTargets}.
-     */
-    private Map<String, List<String>> ec2CreateTagsConditionContext(ContainerRequestContext ctx) {
-        Map<String, String> form = formParameters(ctx);
-        Map<String, List<String>> conditions = new LinkedHashMap<>();
-        addRequestTags(conditions, form, "Tag.");
-        addResourceTags(conditions, form.get("ResourceId.1"));
-        return conditions.isEmpty() ? null : conditions;
-    }
-
-    private Map<String, List<String>> ec2ResourceTagConditionContext(ContainerRequestContext ctx,
-                                                                     String idParameter) {
-        Map<String, List<String>> conditions = new LinkedHashMap<>();
-        addResourceTags(conditions, formParameters(ctx).get(idParameter));
         return conditions.isEmpty() ? null : conditions;
     }
 
@@ -806,14 +789,11 @@ public class IamConditionContextResolver {
         if (!"ec2".equals(credentialScope)) {
             return List.of();
         }
-        String idParameter = switch (action) {
-            case "ec2:CreateTags", "ec2:DeleteTags" -> "ResourceId.";
-            case "ec2:TerminateInstances", "ec2:DescribeInstances" -> "InstanceId.";
-            default -> null;
-        };
-        if (idParameter == null) {
+        RequestResourceMembers.Targets generatedTargets = RequestResourceMembers.table().targets().get(action);
+        if (generatedTargets == null) {
             return List.of();
         }
+        String idParameter = generatedTargets.query() + ".";
         Map<String, String> form = formParameters(ctx);
         List<Map<String, List<String>>> targets = new ArrayList<>();
         if (!form.containsKey(idParameter + 1)) {
@@ -825,7 +805,7 @@ public class IamConditionContextResolver {
             if ("ec2:CreateTags".equals(action)) {
                 addRequestTags(conditions, form, "Tag.");
             }
-            addResourceTags(conditions, form.get(idParameter + i));
+            addResourceTags(conditions, form.get(idParameter + i), generatedTargets);
             targets.add(conditions);
         }
         return targets;
@@ -845,14 +825,24 @@ public class IamConditionContextResolver {
         }
     }
 
-    private void addResourceTags(Map<String, List<String>> conditions, String resourceId) {
+    private void addResourceTags(Map<String, List<String>> conditions, String resourceId,
+                                 RequestResourceMembers.Targets targets) {
         if (resourceId == null || resourceId.isBlank() || !ec2Service.isResolvable()) {
             return;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        List<String> prefixes = List.of(RESOURCE_TAG_PREFIX);
+        for (Map.Entry<String, String> type : targets.prefixes().entrySet()) {
+            if (resourceId.startsWith(type.getValue())) {
+                prefixes = RequestResourceMembers.table().resourceTagKeys()
+                        .getOrDefault("ec2", Map.of()).getOrDefault(type.getKey(), List.of());
+                break;
+            }
+        }
         for (Tag tag : ec2Service.get().resourceTags(region, resourceId)) {
-            conditions.put(RESOURCE_TAG_PREFIX + tag.getKey(),
-                    List.of(tag.getValue() == null ? "" : tag.getValue()));
+            for (String prefix : prefixes) {
+                conditions.put(prefix + tag.getKey(), List.of(tag.getValue() == null ? "" : tag.getValue()));
+            }
         }
     }
 
@@ -898,7 +888,8 @@ public class IamConditionContextResolver {
             int eq = pair.indexOf('=');
             String key = eq < 0 ? pair : pair.substring(0, eq);
             String value = eq < 0 ? "" : pair.substring(eq + 1);
-            parameters.putIfAbsent(URLDecoder.decode(key, charset), URLDecoder.decode(value, charset));
+            parameters.putIfAbsent(QueryFormDecoder.decode(key, charset, ctx),
+                    QueryFormDecoder.decode(value, charset, ctx));
         }
         ctx.setProperty(BUFFERED_FORM_BODY, parameters);
         return parameters;

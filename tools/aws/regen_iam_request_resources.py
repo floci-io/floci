@@ -92,9 +92,10 @@ follow the rule unchanged: a family of a hand-built namespace whose requests nam
 way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
-`ID_TARGETS` stages heterogeneous id-list namespaces separately: botocore supplies the list member
-and its serialized EC2 Query name (including queryName and capitalization), and documented id
-prefixes distinguish the supported resource types. Each generated `targets` entry preserves the
+`ID_TARGETS` stages id-list namespaces separately: a resource ARN's variable names its list member,
+with the configured heterogeneous resource list as a fallback. Botocore supplies its serialized
+EC2 Query name (including queryName and capitalization), and documented id prefixes distinguish
+the supported resource types. `resourceTagKeys` comes from those types' Service Reference condition keys. Each generated `targets` entry preserves the
 request's order and duplicates, including a wildcard for each unsupported id; only resolved ARNs
 use the corresponding target's condition context. Other requests in those namespaces stay on `*`.
 `CORRECTIONS` gives an operation's resources where the rule gets them wrong, each with its reason; a
@@ -651,8 +652,8 @@ KNOWN_VARIABLES = {"Partition", "Region", "Account"}
 # A staged read of heterogeneous resource-id lists. The model supplies the member and its wire name;
 # the Service Reference supplies the action's types and their ARN formats. EC2 documents instance ids
 # with the i- prefix (EC2 User Guide, resource-ids). Only instances are covered here: other ids retain
-# a wildcard entry, and other EC2 requests retain their existing wildcard authorization until their
-# ARN resolution and condition contexts have coverage. No operation names select this read.
+# a wildcard entry. Lists named by their resource ARN variable and heterogeneous Resources lists
+# share this reader and its generated condition contexts; requests without those lists stay unchanged.
 ID_TARGETS = {"ec2": {"member": "Resources", "prefixes": {"instance": "i-"}}}
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
@@ -714,6 +715,20 @@ def checked_actions(documents: list[dict]) -> dict[str, dict]:
                 "clients": sorted({sdk["Name"] for sdk in operation.get("SDK", []) if sdk.get("Package") == "Boto3"}),
             }
     return found
+
+
+def resource_tag_keys(documents: list[dict]) -> dict[str, dict[str, list[str]]]:
+    """Stored-tag key prefixes for the resource types the id-target reader supports."""
+    result = {}
+    for document in documents:
+        namespace = document["Name"]
+        supported = ID_TARGETS.get(namespace, {}).get("prefixes", {})
+        types = {resource["Name"]: sorted(key.removesuffix("${TagKey}")
+                 for key in resource.get("ConditionKeys", []) if key.endswith(":ResourceTag/${TagKey}"))
+                 for resource in document.get("Resources", []) if resource["Name"] in supported}
+        if types:
+            result[namespace] = dict(sorted(types.items()))
+    return dict(sorted(result.items()))
 
 
 def arn_formats(documents: list[dict], namespaces: set[str]) -> dict[str, dict[str, str]]:
@@ -1411,7 +1426,7 @@ def names_type(member: str, kind_stem: str) -> bool:
 # The vendored document
 # --------------------------------------------------------------------------- #
 def id_targets(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> dict | None:
-    """A heterogeneous id list, in model and EC2 Query spelling, with each supported type's discriminator."""
+    """An id list, in model and EC2 Query spelling, with each supported type's discriminator."""
     configured = ID_TARGETS.get(namespace_of(operation))
     if configured is None:
         return None
@@ -1420,7 +1435,16 @@ def id_targets(operation: str, types: list[str], formats: dict[str, str], models
         spec = model["operations"].get(operation.split(":", 1)[1], {})
         if "input" not in spec or "ec2" not in _protocols(model):
             continue
-        member = model["shapes"][spec["input"]["shape"]].get("members", {}).get(configured["member"])
+        members = model["shapes"][spec["input"]["shape"]].get("members", {})
+        variables = {variable for kind in configured["prefixes"] if kind in types and kind in formats
+                     for variable in set(VARIABLE_RE.findall(formats[kind])) - KNOWN_VARIABLES}
+        candidates = [name for name, member in members.items()
+                      if _strings(model, model["shapes"][member["shape"]]) == "[]"
+                      and name.lower().removesuffix("s") in {variable.lower() for variable in variables}]
+        if len(candidates) > 1:
+            raise ValueError(f"{operation}: several id lists name the target: {candidates}")
+        member_name = candidates[0] if candidates else configured["member"]
+        member = members.get(member_name)
         if member is None or _strings(model, model["shapes"][member["shape"]]) != "[]":
             continue
         prefixes = {kind: prefix for kind, prefix in configured["prefixes"].items()
@@ -1431,9 +1455,9 @@ def id_targets(operation: str, types: list[str], formats: dict[str, str], models
             variables = set(VARIABLE_RE.findall(formats[kind])) - KNOWN_VARIABLES
             if len(variables) != 1:
                 raise ValueError(f"{operation}: id target {kind} must have exactly one ARN variable")
-        location = member.get("locationName", configured["member"])
+        location = member.get("locationName", member_name)
         query = member.get("queryName", location[:1].upper() + location[1:])
-        target = {"member": configured["member"] + "[]", "query": query, "prefixes": prefixes}
+        target = {"member": member_name + "[]", "query": query, "prefixes": prefixes}
         if found is not None and found != target:
             raise ValueError(f"{operation}: clients disagree on the id target's serialization")
         found = target
@@ -1617,6 +1641,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                                   if namespace not in NAMESPACES and namespace not in HAND_BUILT
                                   and namespace not in NOT_COVERED),
         "arnFormats": formats,
+        "resourceTagKeys": resource_tag_keys(documents),
         "unqualified": unqualified,
         "mintedIds": minted,
         "operations": operations,
@@ -1679,7 +1704,7 @@ def _check_overrides(covered: dict[str, dict]) -> None:
 def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
-    for key in ("_source", "namespaces", "clientsNotRead", "handBuilt", "notCovered", "otherNamespaces", "arnFormats",
+    for key in ("_source", "namespaces", "clientsNotRead", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
                 "unqualified", "mintedIds"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
@@ -1724,6 +1749,13 @@ def validate(document: dict) -> list[str]:
         return ["arnFormats is not an ARN format for each resource type of namespaces the file reads"]
     if list(operations) != sorted(operations):
         problems.append("operations is not sorted")
+    tag_keys = document.get("resourceTagKeys", {})
+    if not isinstance(tag_keys, dict) or any(
+            not isinstance(kinds, dict) or any(kind not in formats.get(namespace, {})
+                or not isinstance(keys, list) or not all(isinstance(key, str) for key in keys) or keys != sorted(set(keys))
+                or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:ResourceTag/", key) for key in keys)
+                for kind, keys in kinds.items()) for namespace, kinds in tag_keys.items()):
+        problems.append("resourceTagKeys is not stored-tag prefixes for supported resource types")
     unqualified = document.get("unqualified")
     if not isinstance(unqualified, dict) or not all(
             isinstance(kinds, list) and kinds and all(isinstance(kind, str) and kind in formats.get(namespace, {})
@@ -1986,6 +2018,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: could not read the Service Reference ({e})", file=sys.stderr)
             return 2
         untrue, added = verify_against(document, upstream, formats)
+        if document.get("resourceTagKeys", {}) != resource_tag_keys(documents):
+            untrue.append("resourceTagKeys differ from AWS Service Reference")
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)
         if untrue:
