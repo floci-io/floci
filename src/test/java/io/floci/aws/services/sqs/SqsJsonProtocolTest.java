@@ -1086,6 +1086,140 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void malformedMessageAttributeValuesAreRejected() {
+        String attributeQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-attribute-value-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        try {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"empty\":{\"DataType\":\"String\",\"StringValue\":\"\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo(
+                        "Message (user) attribute 'empty' must contain a non-empty value of type 'String'."));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"count\":{\"DataType\":\"Number.int\",\"StringValue\":\"\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"novalue\":{\"DataType\":\"String\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo(
+                        "Message (user) attribute 'novalue' must contain a non-empty value of type 'String'."));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"notype\":{\"StringValue\":\"v\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo("Missing required parameter DataType"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"odd\":{\"DataType\":\"Strin\",\"StringValue\":\"v\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo("Type for parameter MessageAttributes.Attribute_name.DataType must be "
+                        + "prefixed with \"String\", \"Binary\", or \"Number\", but was: Strin"));
+
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
+                        + "{\"Id\":\"ok\",\"MessageBody\":\"x\",\"MessageAttributes\":"
+                        + "{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"AQID\"}}},"
+                        + "{\"Id\":\"empty\",\"MessageBody\":\"x\",\"MessageAttributes\":"
+                        + "{\"a\":{\"DataType\":\"Number\",\"StringValue\":\"\"}}},"
+                        + "{\"Id\":\"bad-binary\",\"MessageBody\":\"x\",\"MessageAttributes\":"
+                        + "{\"b\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}},"
+                        + "{\"Id\":\"plain\",\"MessageBody\":\"x\"}]}")
+            .when().post("/").then()
+                .statusCode(200)
+                .body("Successful.Id", containsInAnyOrder("ok", "plain"))
+                .body("Failed.Id", contains("empty", "bad-binary"))
+                .body("Failed.Code", everyItem(equalTo("InvalidParameterValue")))
+                .body("Failed.SenderFault", everyItem(equalTo(true)));
+
+            String bigBody = "x".repeat(400_000);
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
+                        + "{\"Id\":\"a\",\"MessageBody\":\"" + bigBody + "\"},"
+                        + "{\"Id\":\"b\",\"MessageBody\":\"" + bigBody + "\"},"
+                        + "{\"Id\":\"c\",\"MessageBody\":\"" + bigBody + "\",\"MessageAttributes\":"
+                        + "{\"a\":{\"DataType\":\"String\",\"StringValue\":\"\"}}}]}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("BatchRequestTooLong"));
+
+            String fittingBody = "x".repeat(300_000);
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
+                        + "{\"Id\":\"a\",\"MessageBody\":\"" + fittingBody + "\"},"
+                        + "{\"Id\":\"b\",\"MessageBody\":\"" + fittingBody + "\"},"
+                        + "{\"Id\":\"c\",\"MessageBody\":\"" + fittingBody + "\",\"MessageAttributes\":"
+                        + "{\"big\":{\"StringValue\":\"" + "y".repeat(200_000) + "\"}}}]}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("BatchRequestTooLong"));
+
+            assertMessageCounts(attributeQueueUrl, "2", "0");
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\"}")
+            .when().post("/");
+        }
+    }
+
+    @Test
     void redrivePolicyReadsBackAsCompactJson() {
         String dlqUrl = given()
             .contentType(CONTENT_TYPE)

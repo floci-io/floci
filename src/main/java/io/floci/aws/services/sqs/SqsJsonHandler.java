@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -197,6 +198,26 @@ public class SqsJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static MessageAttributeValue messageAttribute(String name, JsonNode attribute) {
+        return SqsService.messageAttributeValue(name, attribute.path("DataType").asText(null),
+                attribute.path("StringValue").asText(null), attribute.path("BinaryValue").asText(null));
+    }
+
+    private static int messageAttributesSize(JsonNode attrsNode) {
+        int size = 0;
+        if (!attrsNode.isObject()) {
+            return size;
+        }
+        Iterator<Map.Entry<String, JsonNode>> attributes = attrsNode.fields();
+        while (attributes.hasNext()) {
+            Map.Entry<String, JsonNode> attribute = attributes.next();
+            JsonNode value = attribute.getValue();
+            size += SqsService.messageAttributeSize(attribute.getKey(), value.path("DataType").asText(null),
+                    value.path("StringValue").asText(null), value.path("BinaryValue").asText(null));
+        }
+        return size;
+    }
+
     private Response handleSendMessage(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         String messageBody = request.path("MessageBody").asText(null);
@@ -208,20 +229,8 @@ public class SqsJsonHandler {
         Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
         JsonNode attrsNode = request.path("MessageAttributes");
         if (attrsNode.isObject()) {
-            attrsNode.fields().forEachRemaining(entry -> {
-                String name = entry.getKey();
-                String dataType = entry.getValue().path("DataType").asText(null);
-                String stringValue = entry.getValue().path("StringValue").asText(null);
-                String binaryValueBase64 = entry.getValue().path("BinaryValue").asText(null);
-                if (dataType != null) {
-                    if (binaryValueBase64 != null) {
-                        byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                        messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
-                    } else if (stringValue != null) {
-                        messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
-                    }
-                }
-            });
+            attrsNode.fields().forEachRemaining(entry ->
+                    messageAttributes.put(entry.getKey(), messageAttribute(entry.getKey(), entry.getValue())));
         }
 
         // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
@@ -386,29 +395,23 @@ public class SqsJsonHandler {
             String messageGroupId = entry.path("MessageGroupId").asText(null);
             String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
 
-            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
             JsonNode attrsNode = entry.path("MessageAttributes");
+            totalSize += SqsService.computeMessageSize(messageBody, null) + messageAttributesSize(attrsNode);
+
+            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
             if (attrsNode.isObject()) {
-                attrsNode.fields().forEachRemaining(attrEntry -> {
-                    String name = attrEntry.getKey();
-                    String dataType = attrEntry.getValue().path("DataType").asText(null);
-                    String stringValue = attrEntry.getValue().path("StringValue").asText(null);
-                    String binaryValueBase64 = attrEntry.getValue().path("BinaryValue").asText(null);
-                    if (dataType != null) {
-                        if (binaryValueBase64 != null) {
-                            byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                            messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
-                        } else if (stringValue != null) {
-                            messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
-                        }
-                    }
-                });
+                try {
+                    attrsNode.fields().forEachRemaining(attrEntry -> messageAttributes.put(attrEntry.getKey(),
+                            messageAttribute(attrEntry.getKey(), attrEntry.getValue())));
+                } catch (AwsException e) {
+                    failed.add(batchFailure(id, e));
+                    continue;
+                }
             }
 
             String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
                     .path("AWSTraceHeader").path("StringValue").asText(null);
 
-            totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
                     messageGroupId, messageDeduplicationId, messageAttributes,
                     entryAwsTraceHeader));
@@ -435,12 +438,7 @@ public class SqsJsonHandler {
                 }
                 successful.add(success);
             } catch (AwsException e) {
-                ObjectNode fail = objectMapper.createObjectNode();
-                fail.put("Id", id);
-                fail.put("Code", e.getErrorCode());
-                fail.put("Message", e.getMessage());
-                fail.put("SenderFault", true);
-                failed.add(fail);
+                failed.add(batchFailure(id, e));
             }
         }
 
@@ -450,6 +448,15 @@ public class SqsJsonHandler {
             response.set("Failed", failed);
         }
         return Response.ok(response).build();
+    }
+
+    private ObjectNode batchFailure(String id, AwsException e) {
+        ObjectNode fail = objectMapper.createObjectNode();
+        fail.put("Id", id);
+        fail.put("Code", e.getErrorCode());
+        fail.put("Message", e.getMessage());
+        fail.put("SenderFault", true);
+        return fail;
     }
 
     private Response handleListDeadLetterSourceQueues(JsonNode request, String region) {
