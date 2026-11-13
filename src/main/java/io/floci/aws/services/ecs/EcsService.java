@@ -2262,7 +2262,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.setStoppedReason(reason != null ? reason : "Stopped by user");
             task.setStopCode(stopCode);
             task.bumpVersion();
-            deregisterTaskFromLoadBalancers(task, region);
+            task.setTargetsDrainedAt(task.getStoppingAt().plus(deregisterTaskFromLoadBalancers(task, region)));
             deregisterTaskFromServiceDiscovery(task, region);
         }
 
@@ -2272,6 +2272,12 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (taskStops.containsKey(task.getTaskArn())) {
             return task; // the stop already running for it lands it
+        }
+        if (inBackground && task.getTargetsDrainedAt() != null
+                && Instant.now().isBefore(task.getTargetsDrainedAt())) {
+            // As on AWS, the task keeps serving its in-flight requests until its targets have
+            // drained; the first reconciliation tick after that stops it. StopTask does not wait.
+            return task;
         }
         EcsTaskHandle handle = taskHandles.get(task.getTaskArn());
         if (handle == null) {
@@ -2537,21 +2543,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .orElse(null);
     }
 
-    /** Deregisters a stopping task's containers from any ELBv2 target groups its service declared. */
-    private void deregisterTaskFromLoadBalancers(EcsTask task, String region) {
+    /**
+     * Deregisters a stopping task's containers from any ELBv2 target groups its service declared.
+     *
+     * @return how long those targets drain, as {@link EcsLoadBalancerRegistrar#deregisterTask} reports
+     */
+    private Duration deregisterTaskFromLoadBalancers(EcsTask task, String region) {
         // Gated on dockerMode for symmetry with the register hook (inside launchTasks'
         // dockerMode branch): mock-mode tasks have no containers and never registered.
         if (!dockerMode || task.getOwningServiceArn() == null) {
-            return;
+            return Duration.ZERO;
         }
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
         if (cluster == null) {
-            return;
+            return Duration.ZERO;
         }
         EcsServiceModel svc = owningService(task, cluster);
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.deregisterTask(task, svc, region);
+            return lbRegistrar.deregisterTask(task, svc, region);
         }
+        return Duration.ZERO;
     }
 
     /** Deregisters a stopping task from the Cloud Map services it actually joined. */

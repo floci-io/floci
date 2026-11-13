@@ -16,6 +16,7 @@ import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -94,6 +95,27 @@ class EcsLoadBalancerRegistrarTest {
         registrar.deregisterTask(task, svc, REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
                 "target should be deregistered");
+    }
+
+    @Test
+    void deregisterTaskReportsTheLongestDeregistrationDelayOfItsTargetGroups() {
+        String defaultTg = createTargetGroup("reg-tg-drain-default");
+        String shortTg = createTargetGroup("reg-tg-drain-short");
+        elbV2Service.modifyTargetGroupAttributes(REGION, shortTg, Map.of("deregistration_delay.timeout_seconds", "3"));
+        EcsTask task = taskWithContainer("web", 8080, 34600);
+
+        registrar.registerTask(task, serviceWithLb(shortTg, "web", 8080), REGION);
+        assertEquals(Duration.ofSeconds(3), registrar.deregisterTask(task, serviceWithLb(shortTg, "web", 8080), REGION));
+
+        EcsServiceModel both = serviceWithLb(shortTg, "web", 8080);
+        EcsLoadBalancer second = new EcsLoadBalancer();
+        second.setTargetGroupArn(defaultTg);
+        second.setContainerName("web");
+        second.setContainerPort(8080);
+        both.setLoadBalancers(List.of(both.getLoadBalancers().getFirst(), second));
+        registrar.registerTask(task, both, REGION);
+        assertEquals(Duration.ofSeconds(300), registrar.deregisterTask(task, both, REGION));
+        assertEquals(Duration.ZERO, registrar.deregisterTask(task, both, REGION), "nothing left to deregister");
     }
 
     @Test

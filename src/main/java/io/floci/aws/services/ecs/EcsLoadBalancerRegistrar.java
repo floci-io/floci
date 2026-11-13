@@ -19,8 +19,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -100,17 +102,23 @@ public class EcsLoadBalancerRegistrar {
      * with no record registered nothing, as when none of its containers had a reachable binding.
      * Only a task without an ARN, which {@link #registerTask} cannot record, falls back to the
      * targets its containers resolve to now.
+     *
+     * @return how long the deregistered targets drain: the longest
+     *         {@code deregistration_delay.timeout_seconds} of their target groups, during which
+     *         AWS keeps the task running for the requests already in flight
      */
-    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+    public Duration deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+        List<Duration> drains = new ArrayList<>();
         if (task.getTaskArn() == null) {
-            forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
-            return;
+            forEachTarget(task, svc, (tgArn, td) -> drains.add(deregister(region, tgArn, td)));
+        } else {
+            Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
+            if (recorded.isPresent()) {
+                drains.addAll(deregister(recorded.get()));
+                ledger.delete(task.getTaskArn());
+            }
         }
-        Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
-        if (recorded.isPresent()) {
-            deregister(recorded.get());
-            ledger.delete(task.getTaskArn());
-        }
+        return drains.stream().max(Comparator.naturalOrder()).orElse(Duration.ZERO);
     }
 
     /**
@@ -175,22 +183,34 @@ public class EcsLoadBalancerRegistrar {
         }
     }
 
-    private void deregister(EcsRegisteredTargets recorded) {
+    private List<Duration> deregister(EcsRegisteredTargets recorded) {
+        List<Duration> drains = new ArrayList<>();
         if (recorded.targets() == null) {
-            return;
+            return drains;
         }
         for (EcsRegisteredTargets.Target target : recorded.targets()) {
-            deregister(recorded.region(), target.targetGroupArn(), target.toDescription());
+            drains.add(deregister(recorded.region(), target.targetGroupArn(), target.toDescription()));
         }
+        return drains;
     }
 
-    private void deregister(String region, String tgArn, TargetDescription td) {
+    /** @return the target group's deregistration delay, or zero when the target could not be deregistered */
+    private Duration deregister(String region, String tgArn, TargetDescription td) {
         try {
             elbV2Service.deregisterTargets(region, tgArn, List.of(td));
             LOG.infov("Deregistered ECS task target {0}:{1} from target group {2}",
                     td.getId(), td.getPort(), tgArn);
         } catch (Exception e) {
             LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
+            return Duration.ZERO;
+        }
+        String delay = elbV2Service.describeTargetGroupAttributes(region, tgArn)
+                .get("deregistration_delay.timeout_seconds");
+        try {
+            return delay == null ? Duration.ZERO : Duration.ofSeconds(Long.parseLong(delay));
+        } catch (NumberFormatException e) {
+            LOG.warnv("Ignoring the deregistration delay {0} of target group {1}: not a number", delay, tgArn);
+            return Duration.ZERO;
         }
     }
 

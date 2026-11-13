@@ -541,6 +541,10 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
+- A stale or scaled-in task of a service with `loadBalancers` stays `STOPPING`, its containers
+  still running, for the longest `deregistration_delay.timeout_seconds` of its target groups
+  (300 seconds by default), then is stopped on the next reconciler tick. A `StopTask` call does
+  not wait. The target leaves its target group at once rather than reporting `draining`.
 - `updatedAt` starts at `createdAt` and advances when the deployment status changes.
 - `deploymentConfiguration` is stored and reported as given. The deployment circuit breaker
   counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,

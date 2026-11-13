@@ -61,6 +61,11 @@ public class EcsTask {
     private Instant pullStoppedAt;
     private Instant executionStoppedAt;
     private Instant stoppingAt;
+    /**
+     * When the load balancer targets this task was deregistered from finish draining, the
+     * earliest the service scheduler stops its containers. Internal: never serialized.
+     */
+    private Instant targetsDrainedAt;
     private EphemeralStorage ephemeralStorage;
     private boolean enableExecuteCommand;
     private TaskOverride overrides;
@@ -118,6 +123,7 @@ public class EcsTask {
         this.pullStoppedAt = other.pullStoppedAt;
         this.executionStoppedAt = other.executionStoppedAt;
         this.stoppingAt = other.stoppingAt;
+        this.targetsDrainedAt = other.targetsDrainedAt;
         this.ephemeralStorage = other.ephemeralStorage;
         this.enableExecuteCommand = other.enableExecuteCommand;
         this.overrides = other.overrides;
@@ -256,6 +262,9 @@ public class EcsTask {
     /** When the task left RUNNING for STOPPING, which AWS reports alongside {@code stoppedAt}. */
     public Instant getStoppingAt() { return stoppingAt; }
     public void setStoppingAt(Instant stoppingAt) { this.stoppingAt = stoppingAt; }
+
+    public Instant getTargetsDrainedAt() { return targetsDrainedAt; }
+    public void setTargetsDrainedAt(Instant targetsDrainedAt) { this.targetsDrainedAt = targetsDrainedAt; }
 
     public EphemeralStorage getEphemeralStorage() { return ephemeralStorage; }
     public void setEphemeralStorage(EphemeralStorage ephemeralStorage) { this.ephemeralStorage = ephemeralStorage; }
