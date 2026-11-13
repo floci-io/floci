@@ -50,7 +50,7 @@ class RdsDockerCleanupTest {
         RdsClient client = mock(RdsClient.class);
         when(client.deleteDBInstance(anyDelete()))
                 .thenThrow(absent());
-        RdsException rejection = mock(RdsException.class);
+        RdsException rejection = (RdsException) RdsException.builder().message("rejected").statusCode(400).build();
 
         RdsRequests.cleanupDockerInstance(client, "owned", rejection, Duration.ofMillis(20));
 
