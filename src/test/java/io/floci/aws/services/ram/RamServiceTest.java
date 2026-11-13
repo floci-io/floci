@@ -282,6 +282,28 @@ class RamServiceTest {
         assertEquals("ACCEPTED", service.acceptResourceShareInvitation(invitationArn, ACCEPTER, "eu-west-1").status());
     }
 
+    /**
+     * An invitation the owner sent the caller, and a share the owner holds, are acted on in the owner's account, so a
+     * request naming them is checked on their own ARNs; an invitation sent to another account, a deleted share, or no
+     * such resource, is not.
+     */
+    @Test
+    void anInvitationOrAShareOfAnotherAccountIsReachedThereByTheAccountItIsFor() {
+        ResourceShare share = service.createResourceShare(
+                "reached", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        String invitation = service.getResourceShareInvitations(ACCEPTER, List.of(), List.of(), "us-east-1")
+                .get(0).resourceShareInvitationArn();
+
+        assertEquals("ram", service.namespace());
+        assertTrue(service.reachedInItsAccount(invitation, ACCEPTER));
+        assertFalse(service.reachedInItsAccount(invitation, "333333333333"));
+        assertTrue(service.reachedInItsAccount(share.getResourceShareArn(), ACCEPTER));
+        assertFalse(service.reachedInItsAccount("arn:aws:ram:us-east-1:" + OWNER + ":resource-share/absent", ACCEPTER));
+        assertFalse(service.reachedInItsAccount("not-an-arn", ACCEPTER));
+        service.deleteResourceShare(share.getResourceShareArn(), OWNER, "us-east-1");
+        assertFalse(service.reachedInItsAccount(share.getResourceShareArn(), ACCEPTER));
+    }
+
     /** A resource share is regional: the listing operations answer for the request's region only. */
     @Test
     void listingsAnswerForTheRequestsRegionOnly() {

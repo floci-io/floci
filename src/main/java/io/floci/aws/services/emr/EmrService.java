@@ -1539,7 +1539,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         executionRole(cluster, step, accountId), Map.of(), hive.arguments(), hive.runner(),
                         Duration.ZERO, EmrSparkSteps.logFolder(cluster, step), null,
                         EmrSparkSteps.hiveEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
-                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null);
             } else if (application == null && command == null) {
                 job = null;
             } else {
@@ -1554,7 +1554,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), null);
             }
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
                     teardowns.get());

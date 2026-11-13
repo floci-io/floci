@@ -1171,18 +1171,24 @@ The parameters a PostgreSQL client sends when it connects (`options` such as `-c
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
-with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+because the plugin is unavailable. The proxy rewrites that
 clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
 password hashes to. The account is therefore created, can be granted to and can be dropped, but
 holds no password of its own, which is what an IAM DB user is: an account whose credentials come
 from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
 pre-creates for PostgreSQL.
 
-Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
-`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
-connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
-password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
-`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+On a connection that negotiates zstd compression, the proxy forwards command frames unchanged,
+including frames with an uncompressed payload. It does not rewrite this IAM user DDL, so the
+backend rejects the unsupported `AWSAuthenticationPlugin` on that connection.
+
+For users created through the rewrite, `SHOW CREATE USER` reports the substituted plugin rather
+than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
+MySQL IAM token login is supported over TLS: the proxy can request a `mysql_clear_password`
+auth switch to validate the token, then authenticates to the container as the master user.
+Unlike RDS, that MySQL session stays the master user: `CURRENT_USER()` reports the master,
+and the IAM user's own grants do not apply. The PostgreSQL proxy instead hands the session
+over to the role named in the token.
 
 ## Certificate authorities
 

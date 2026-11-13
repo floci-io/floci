@@ -13,8 +13,10 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.S3Uri;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLaunches;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
@@ -36,17 +38,20 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
@@ -57,7 +62,9 @@ import java.util.zip.GZIPOutputStream;
  * Runs a Spark application's {@code spark-submit} in a container of an EMR Serverless image, for an EMR
  * Serverless job run or an EMR step. The image's own entrypoint hands over to a script EMR Serverless
  * supplies at run time, which the public image lacks, so the runner starts {@code spark-submit} itself,
- * in local mode: the container holds the driver and its executors. The container reaches Floci as the
+ * in local mode, the container holding the driver and its executors, unless the job's executors run in containers of
+ * their own, as an EMR Serverless run's do ({@link SparkExecutors}), or on its cluster's YARN, as a step's do. The
+ * container reaches Floci as the
  * other containers Floci launches do, with the run's execution role as its credentials, and S3A, which
  * takes {@code s3://} on every release, is pointed at Floci's S3. With TLS on, every JVM in the container
  * trusts Floci's CA, through the Java trust store copied in before it starts, and the run's archives in S3
@@ -76,6 +83,8 @@ import java.util.zip.GZIPOutputStream;
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(EmrServerlessSparkRunner.class);
+    // Where a run's secret, which its master, workers and driver share, comes from.
+    private static final SecureRandom SECRETS = new SecureRandom();
     private static final String SPARK_SUBMIT = "/usr/lib/spark/bin/spark-submit";
     private static final String HIVE = "/usr/bin/hive";
     // hive's option for a setting, and its single-dash form.
@@ -353,6 +362,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     // The runs inside run(); a stop for a run not here comes after its driver has gone, and is dropped.
     private final ContainerLaunches launches = new ContainerLaunches();
+    // What the workers of each application's runs with executors of their own hold, by application, while any runs.
+    private final Map<String, SparkExecutors.Capacity> capacities = new ConcurrentHashMap<>();
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -392,10 +403,14 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     @Override
-    public Outcome run(Job job, Progress progress) {
+    public Outcome run(Job given, Progress progress) {
+        String network = containerBuilder.resolveDockerNetwork(Optional.ofNullable(given.dockerNetwork())).orElse(null);
+        Job job = executorsApart(given, network) ? given : given.withExecutors(null);
         ContainerLaunches.Launch launch = launches.begin(job.runId());
         Optional<SessionCreds> credentials = Optional.empty();
         Closeable logHandle = null;
+        SparkExecutors executors = null;
+        SparkExecutors.Capacity capacity = null;
         try {
             // A cancel before the run was in launches had nothing to stop, so it is read here.
             if (progress.cancelled()) {
@@ -414,11 +429,14 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     ? awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), endpoint, credentials, job.accountId())
                     : List.of();
             List<Archive> archives = archives(job);
+            List<String> awsEnvironment = awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials,
+                    job.accountId());
+            // Pulled, when it is not the driver's, before the driver starts rather than while it waits for executors.
+            String executorImage = job.executors() != null ? executorImage(job) : null;
+            String secret = job.executors() != null ? newSecret() : null;
             ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
-                    .withEnv(environment(
-                            awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()),
-                            job.environment()));
+                    .withEnv(environment(awsEnvironment, job.environment()));
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.engine() == Engine.HIVE) {
                 List<String> hive = hiveArguments(job, endpoint, executorEnvironment);
@@ -433,10 +451,21 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     container.withEnv(HIVE_SCRATCH_VARIABLE, scratch);
                 }
             } else if (job.command() == null) {
-                List<String> sparkSubmit = job.sparkLog4j2().isEmpty() && job.storage() == null
-                        ? List.of(SPARK_SUBMIT) : List.of("/bin/bash", "-c", SPARK_CONF_WRAPPER, "floci", SPARK_SUBMIT);
+                List<String> sparkSubmit = new ArrayList<>();
+                if (!job.sparkLog4j2().isEmpty() || job.storage() != null) {
+                    sparkSubmit.addAll(List.of("/bin/bash", "-c", SPARK_CONF_WRAPPER, "floci"));
+                }
+                List<String> arguments = sparkSubmitArguments(job, endpoint, executorEnvironment);
+                if (job.executors() != null) {
+                    sparkSubmit.addAll(List.of("/bin/bash", "-c", SparkExecutors.DRIVER_WRAPPER, "floci"));
+                    container.withEnv(SparkExecutors.SECRET_VARIABLE, secret);
+                }
+                sparkSubmit.add(SPARK_SUBMIT);
+                if (job.executors() != null) {
+                    sparkSubmit.add(String.valueOf(SparkExecutors.optionCount(arguments)));
+                }
                 container.withEntrypoint(unpackingFirst(archives, sparkSubmit))
-                        .withCmd(sparkSubmitArguments(job, endpoint, executorEnvironment));
+                        .withCmd(arguments);
             } else {
                 container.withEntrypoint(unpackingFirst(archives, List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci")))
                         .withCmd(job.command())
@@ -501,7 +530,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             lifecycleManager.startCreated(containerId, spec);
             logHandle = attachLog(containerId, job);
             progress.started();
-            Outcome outcome = awaitEnd(containerId, job, launch, progress);
+            if (job.executors() != null) {
+                capacity = joinCapacity(job.executors().application());
+                executors = new SparkExecutors(job.executors(), driver(containerId),
+                        executorContainers(job, executorImage, network,
+                                lifecycleManager.resolveContainerNetworkIp(containerId, network), secret,
+                                awsEnvironment, labels),
+                        capacity, System::nanoTime);
+            }
+            Outcome outcome = awaitEnd(containerId, job, launch, progress, executors);
             writeLogs(job, launch);
             return outcome;
         } catch (InterruptedException e) {
@@ -516,6 +553,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             LOG.warnv(e, "Spark run {0} of {1} could not run", job.runId(), job.service());
             return Outcome.couldNotStart(e.getMessage());
         } finally {
+            // The executors go with their driver, however the run ended, and their workers' share of the
+            // application's capacity with them.
+            if (executors != null) {
+                executors.removeAll();
+                leaveCapacity(job.executors().application(), capacity);
+            }
             String unclaimed = launches.end(job.runId(), launch);
             if (unclaimed != null) {
                 lifecycleManager.stopAndRemove(unclaimed, logHandle, STOP_TIMEOUT_SECONDS);
@@ -574,8 +617,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 if (aliases.consistent(container.getId(), labels)
                         && aliases.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)) {
                     lifecycleManager.removeIfExists(container.getId());
-                    LOG.infov("Removed {0} Spark driver {1}, left running by an earlier Floci process", service,
-                            container.getId());
+                    LOG.infov("Removed {0} Spark {1} {2}, left running by an earlier Floci process", service,
+                            SparkExecutors.COMPONENT.equals(component) ? "executor" : "driver", container.getId());
                 }
             }
         } catch (RuntimeException e) {
@@ -712,6 +755,124 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
+     * Whether a job's executors run in containers of their own: an EMR Serverless Spark run's that says so, on a
+     * network of containers; on the host's, or in another container's namespace, the executors' and the master's
+     * ports would meet another run's, so they run in the driver's container.
+     */
+    static boolean executorsApart(Job job, String network) {
+        return job.executors() != null && job.engine() == Engine.SPARK && job.command() == null
+                && job.storage() == null && !"host".equals(network)
+                && (network == null || !network.startsWith("container:"));
+    }
+
+    private static String newSecret() {
+        byte[] secret = new byte[32];
+        SECRETS.nextBytes(secret);
+        return HexFormat.of().formatHex(secret);
+    }
+
+    // The capacity an application's runs share, which a run joins when its driver starts; a run of no application
+    // shares it with none.
+    SparkExecutors.Capacity joinCapacity(String application) {
+        if (application == null) {
+            return new SparkExecutors.Capacity().joined();
+        }
+        return capacities.compute(application,
+                (key, shared) -> (shared != null ? shared : new SparkExecutors.Capacity()).joined());
+    }
+
+    // A run leaves the capacity it shared, which goes once no run shares it.
+    void leaveCapacity(String application, SparkExecutors.Capacity capacity) {
+        if (application == null) {
+            return;
+        }
+        capacities.computeIfPresent(application, (key, shared) -> shared == capacity && shared.left() ? null : shared);
+    }
+
+    // The driver's container, answering through curl in it, which every EMR Serverless image has, or nothing, as
+    // when the container has just ended.
+    SparkExecutors.Driver driver(String containerId) {
+        return (port, path) -> {
+            try {
+                ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId,
+                        new String[]{"curl", "-sf", "-m", "2", "http://127.0.0.1:" + port + path}, 5);
+                return result.exitCode() == 0 ? result.stdout() : null;
+            } catch (RuntimeException e) {
+                LOG.debugv("Could not ask the driver in container {0}: {1}", containerId, e.getMessage());
+                return null;
+            }
+        };
+    }
+
+    // The image a job's executors run in: the application's for its executors, pulled for every run as the driver's
+    // custom image is, else the release's, pulled when missing, as a driver with a custom image does not pull it.
+    private String executorImage(Job job) {
+        if (job.executors().image() == null) {
+            return lifecycleManager.resolveImageForLaunch(image(job.imageTemplate(), job.releaseLabel(), Engine.SPARK),
+                    ImagePullBehavior.PREFER_CACHED, null).imageId();
+        }
+        String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.executors().image()));
+        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, null).imageId();
+    }
+
+    /**
+     * A job's executors' containers: each a standalone worker, named after the run and its number, on the driver's
+     * network, which finds the master at the driver's address, with the run's secret, the AWS environment the driver
+     * has but for its own variables, Floci's trust store, and the driver's labels, so a reset and the leftover sweep
+     * find it as they find the driver.
+     */
+    SparkExecutors.Containers executorContainers(Job job, String image, String network, String driverAddress,
+                                                 String secret, List<String> awsEnvironment,
+                                                 Map<String, String> driverLabels) {
+        Map<String, String> labels = new LinkedHashMap<>(driverLabels);
+        labels.put(ContainerStorageHelper.COMPONENT_LABEL, SparkExecutors.COMPONENT);
+        return new SparkExecutors.Containers() {
+            @Override
+            public SparkExecutors.Worker start(int index, SparkExecutors.Size size) {
+                ContainerSpec spec = containerBuilder.newContainer(image)
+                        .withName(ContainerStorageHelper.dockerName(config,
+                                job.service() + "-" + job.runId() + "-executor-" + index))
+                        .withEnv(awsEnvironment)
+                        .withEnv(SparkExecutors.SECRET_VARIABLE, secret)
+                        .withEnv(SparkExecutors.MASTER_VARIABLE, driverAddress)
+                        .withEnv(SparkExecutors.CORES_VARIABLE, String.valueOf(size.cores()))
+                        .withEnv(SparkExecutors.MEMORY_VARIABLE, String.valueOf(size.memoryMib()))
+                        .withEntrypoint(List.of("/bin/bash", "-c", SparkExecutors.WORKER_SCRIPT))
+                        .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
+                        .withHostDockerInternalOnLinux()
+                        .withEmbeddedDns()
+                        .withLogRotation()
+                        .withLabels(labels)
+                        .withJavaTrustStore()
+                        .build();
+                String containerId = lifecycleManager.createAndStart(spec).containerId();
+                try {
+                    return new SparkExecutors.Worker(containerId,
+                            lifecycleManager.resolveContainerNetworkIp(containerId, network));
+                } catch (RuntimeException e) {
+                    // Not yet the run's to remove, so removed here.
+                    try {
+                        lifecycleManager.stopAndRemove(containerId, null, STOP_TIMEOUT_SECONDS);
+                    } catch (RuntimeException removal) {
+                        e.addSuppressed(removal);
+                    }
+                    throw e;
+                }
+            }
+
+            @Override
+            public boolean running(String containerId) {
+                return lifecycleManager.probeContainer(containerId) != ContainerLiveness.NOT_RUNNING;
+            }
+
+            @Override
+            public void remove(String containerId) {
+                lifecycleManager.stopAndRemove(containerId, null, STOP_TIMEOUT_SECONDS);
+            }
+        };
+    }
+
+    /**
      * The image a run's driver starts from: the release's, or the template's, or the application's custom
      * image. A custom image's ECR URI leads to Floci's own registry, as a Lambda function's or an ECS task's
      * does, and the image is pulled for every run, as an ECS task's is, so a tag pushed again is what the next
@@ -794,6 +955,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     /**
      * {@code spark-submit}'s arguments: local mode, or YARN for a step on its cluster's (see {@link #yarnSettings}),
+     * or, for a run whose executors run in containers of their own, no master, which the driver's container gives
+     * after the run's own options with what no run may change ({@link SparkExecutors#DRIVER_WRAPPER}), and the
+     * driver's UI on, which Floci follows the driver through,
      * S3A on Floci's S3 for {@code s3://} and {@code s3a://}
      * paths, the cluster's HDFS for {@code hdfs://} paths and those without a scheme on a step, then the run's
      * {@code spark-defaults} and its own options, which win over what comes before them, then its
@@ -803,7 +967,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * none and a write is silently lost.
      */
     static List<String> sparkSubmitArguments(Job job, String flociEndpoint, List<String> executorEnvironment) {
-        List<String> arguments = new ArrayList<>(List.of("--master", master(job)));
+        List<String> arguments = new ArrayList<>();
+        if (job.executors() == null) {
+            arguments.addAll(List.of("--master", master(job)));
+        }
         for (SparkSetting setting : sparkSettings(job, flociEndpoint, executorEnvironment)) {
             conf(arguments, setting.key(), setting.value());
         }
@@ -1212,6 +1379,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         if (onYarn(job)) {
             settings.addAll(yarnSettings(job, executorEnvironment));
         }
+        // The driver's UI, which Floci follows the driver through; its kill links, which any container on the network
+        // reaches, are turned off after the run's own settings (SparkExecutors.DRIVER_WRAPPER).
+        if (job.executors() != null) {
+            settings.add(new SparkSetting("spark.ui.enabled", "true"));
+        }
         job.sparkDefaults().forEach((key, value) -> settings.add(new SparkSetting(key, value)));
         return settings;
     }
@@ -1334,10 +1506,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * while a reset's teardown was passing is stopped once the reset has removed its run. Each look at the
      * container is one short control-plane call, so a run holds no Docker connection while its driver runs.
      */
-    private Outcome awaitEnd(String containerId, Job job, ContainerLaunches.Launch launch, Progress progress)
-            throws InterruptedException {
+    private Outcome awaitEnd(String containerId, Job job, ContainerLaunches.Launch launch, Progress progress,
+                             SparkExecutors executors) throws InterruptedException {
         Instant deadline = job.timeout().isZero() ? null : clock.instant().plus(job.timeout());
         while (!launch.stopRequested() && !progress.cancelled()) {
+            if (executors != null) {
+                executors.follow();
+            }
             InspectContainerResponse.ContainerState state =
                     lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getState();
             if (!Boolean.TRUE.equals(state.getRunning())) {

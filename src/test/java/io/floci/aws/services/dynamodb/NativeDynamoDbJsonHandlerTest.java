@@ -88,7 +88,7 @@ class NativeDynamoDbJsonHandlerTest {
         return node;
     }
 
-    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression, 
+    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression,
     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValues){
         ObjectNode node = mapper.createObjectNode();
         node.put("TableName", tableName);
@@ -116,12 +116,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "UPDATED_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -143,7 +143,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
         createUsersTable("us-east-1");
@@ -193,12 +193,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "UPDATED_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -220,7 +220,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesAllOld()  throws Exception {
         createUsersTable("us-east-1");
@@ -233,12 +233,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "ALL_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -262,7 +262,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesAllNew()  throws Exception {
         createUsersTable("us-east-1");
@@ -275,12 +275,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "ALL_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -304,7 +304,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesNone()  throws Exception {
         createUsersTable("us-east-1");
@@ -317,12 +317,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "NONE");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -612,6 +612,121 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void describeTableReportsProvisionedTableCapacityAsWarmThroughput() throws Exception {
+        service.createTable("table-warm-provisioned",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-provisioned"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsOnDemandTableWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-on-demand",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-on-demand"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void updateTableWalksWarmThroughputThroughCutRaiseAndOnDemandSwitch() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 10, "WriteCapacityUnits": 20}
+                }
+                """), "eu-west-1");
+
+        // cut: warm stays at the previous peak (10/20)
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 8}
+                }
+                """), "eu-west-1");
+        JsonNode warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(10, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(20, warm.get("WriteUnitsPerSecond").asLong());
+
+        // raise: warm follows the new capacity
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 15, "WriteCapacityUnits": 25}
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(15, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25, warm.get("WriteUnitsPerSecond").asLong());
+
+        // on-demand switch: warm only rises to the baseline, never drops the peak
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(12000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warm.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void describeTableFallsBackForLegacyZeroWarmThroughput() throws Exception {
+        service.createTable("table-warm-legacy",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        // Simulate a persisted table from before warm throughput was tracked.
+        TableDefinition table = service.describeTable("table-warm-legacy", "eu-west-1");
+        table.setWarmReadUnitsPerSecond(0);
+        table.setWarmWriteUnitsPerSecond(0);
+        service.persistTable("table-warm-legacy", table, "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-legacy"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void createTableOmitsTableWarmThroughput() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-create",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 4}
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("TableDescription").has("WarmThroughput"),
+                "CreateTable must omit table-level WarmThroughput");
+    }
+
+    @Test
     void describeTableReportsOnDemandGsiWarmThroughput() throws Exception {
         handler.handle("CreateTable", json("""
                 {
@@ -672,6 +787,14 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals(2, describedWarmThroughput.get("ReadUnitsPerSecond").asLong());
         assertEquals(3, describedWarmThroughput.get("WriteUnitsPerSecond").asLong());
         assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
+    }
+
+    private JsonNode describedTable(String tableName) throws Exception {
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        return body.get("Table");
     }
 
     private JsonNode describedGsi(String tableName, String indexName) throws Exception {
@@ -2031,6 +2154,64 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = :v SET b = :v                                   | SET
+            REMOVE a REMOVE b                                       | REMOVE
+            ADD a :s ADD b :s                                       | ADD
+            DELETE a :s DELETE b :s                                 | DELETE
+            add a :s\tADD b :s                                      | ADD
+            REMOVE a REMOVE b REMOVE c                              | REMOVE
+            ADD a :s REMOVE b REMOVE c ADD d :s                     | REMOVE
+            SET a = :v DELETE b :s ADD c :s DELETE d :s SET e = :v  | DELETE
+            """)
+    void updateItemRejectsARepeatedSectionBeforeTheTableLookup(String expression, String section) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: The \"" + section
+                + "\" section can only be used once in an update expression;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            ADD a :v ADD b :v     | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            ADD a :s ADD b :w     | An expression attribute value used in expression is not defined; attribute value: :w
+            """)
+    void updateItemChecksARepeatedSectionAfterTheOtherUpdateExpressionErrors(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRefusesARepeatedSectionForACallerThatSkipsTheHandler() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = item("userId", "u1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
+                "ADD a :s ADD b :s", null, valueAndSet(), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"ADD\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", key, "eu-west-1"));
+    }
+
+    private ObjectNode valueAndSet() {
+        ObjectNode values = singleValue(":v");
+        values.putObject(":s").putArray("SS").add("x");
+        return values;
+    }
+
     @Test
     void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
         createUsersTable("eu-west-1");
@@ -2275,6 +2456,36 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSection() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSectionBeforeUnusedValuesAndTheTableLookup() {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+        update.put("ConditionExpression", "attribute_exists(c)");
+        update.set("ExpressionAttributeValues", singleValue(":u"));
+        update.putObject("ExpressionAttributeNames").put("#u", "u");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
     }
 
     @Test
