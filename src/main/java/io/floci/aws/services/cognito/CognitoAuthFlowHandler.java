@@ -2196,6 +2196,10 @@ final class CognitoAuthFlowHandler {
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
                                                                   Map<String, String> clientMetadata, String triggerSource,
                                                                   List<String> scopes) {
+        if (lambdaService == null || resolveTriggerArn(pool, "PreTokenGeneration") == null) {
+            // No trigger to hand the event to: skip reading the user's groups for it.
+            return null;
+        }
         Map<String, Object> req = new HashMap<>();
         if (user == null) {
             // A machine identity has neither attributes nor groups.
@@ -2313,14 +2317,9 @@ final class CognitoAuthFlowHandler {
      */
     private Map<String, Object> buildGroupConfiguration(UserPool pool, CognitoUser user) {
         List<String> names = user.getGroupNames() == null ? List.of() : new ArrayList<>(user.getGroupNames());
-        List<CognitoGroup> groups = new ArrayList<>();
-        for (String name : names) {
-            try {
-                groups.add(service.getGroup(pool.getId(), name));
-            } catch (AwsException ignored) {
-                // A membership whose group is gone carries no role.
-            }
-        }
+        // One read of the pool's groups; a membership whose group is gone carries no role.
+        List<CognitoGroup> groups = names.isEmpty() ? List.of() : service.listGroups(pool.getId()).stream()
+                .filter(group -> names.contains(group.getGroupName())).toList();
         Map<String, Object> cfg = new HashMap<>();
         cfg.put("groupsToOverride", names);
         cfg.put("iamRolesToOverride", groups.stream().map(CognitoGroup::getRoleArn)

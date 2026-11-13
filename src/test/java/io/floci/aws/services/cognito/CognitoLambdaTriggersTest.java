@@ -9,9 +9,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
+import io.floci.aws.services.cognito.model.CognitoGroup;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.ResourceServerScope;
-import io.floci.aws.services.cognito.model.CognitoGroup;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.cognito.verification.CognitoMessageDispatcher;
@@ -1397,6 +1397,9 @@ class CognitoLambdaTriggersTest {
                 "a tie between different roles sets none");
         assertEquals(b, CognitoAuthFlowHandler.preferredRole(List.of(group(null, b))));
         assertNull(CognitoAuthFlowHandler.preferredRole(List.of(group(0, null))));
+        assertEquals(b, CognitoAuthFlowHandler.preferredRole(List.of(group(0, null), group(5, b))),
+                "a group without a role does not outrank one with a role (CreateGroup: the lowest "
+                        + "precedence group whose role ARN is given)");
     }
 
     private static CognitoGroup group(Integer precedence, String roleArn) {
