@@ -573,6 +573,7 @@ class EksClusterManagerTest {
         private PortAllocator portAllocator;
         private DockerClient dockerClient;
         private ContainerBuilder containerBuilder;
+        private ContainerBuilder.Builder builder;
         private ContainerDetector containerDetector;
         private EksClusterManager manager;
 
@@ -596,7 +597,7 @@ class EksClusterManagerTest {
 
             lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
             containerBuilder = Mockito.mock(ContainerBuilder.class);
-            ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(new ContainerSpec("test-image"));
             portAllocator = Mockito.mock(PortAllocator.class);
@@ -1257,6 +1258,73 @@ class EksClusterManagerTest {
             assertEquals("cid-new", cluster.getContainerId());
             // startCluster removes the broken survivor before reusing its name.
             verify(lifecycleManager).removeIfExists("floci-eks-demo");
+        }
+
+        @Test
+        void recreatingAMissingContainerKeepsTheApiServerPortTheEndpointNames() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocate(6453, 6453)).thenReturn(6453);
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6453");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals(6453, cluster.getHostPort());
+            assertEquals("https://localhost:6453", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6453);
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
+        @Test
+        void recreatingASurvivorThatPublishesNoPortKeepsTheApiServerPortTheEndpointNames() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of()));
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocate(6457, 6457)).thenReturn(6457);
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6457");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://localhost:6457", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6457);
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
+        @Test
+        void recreatingAMissingContainerMovesToAFreePortWhenTheEndpointPortIsTaken() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocate(6457, 6457))
+                    .thenThrow(new RuntimeException("No free port available in range 6457-6457"));
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6457");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(6440, cluster.getHostPort());
+            assertEquals("https://localhost:6440", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6440);
+            verify(portAllocator).allocate(6440, 6499);
+        }
+
+        @Test
+        void recreatingAMissingContainerIgnoresAnEndpointPortOutsideTheConfiguredRange() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6512");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(6440, cluster.getHostPort());
+            assertEquals("https://localhost:6440", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6512, 6512);
         }
 
         @Test
