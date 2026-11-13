@@ -2581,6 +2581,24 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void createAliasOnExistingNameReturnsAlreadyExistsAndKeepsTheFirstTarget() {
+        String first = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String second = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String alias = "alias/dup-" + UUID.randomUUID();
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, first))
+                .then().statusCode(200);
+
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, second))
+                .then().statusCode(400)
+                .body("__type", equalTo("AlreadyExistsException"))
+                .body("message", containsString(":alias/dup-"));
+
+        callKms("DescribeKey", "{\"KeyId\":\"%s\"}".formatted(alias))
+                .then().statusCode(200)
+                .body("KeyMetadata.Arn", equalTo(first));
+    }
+
+    @Test
     void generateDataKeyPairWithoutPlaintextReturnsAPublicKeyThatMatchesTheEncryptedPrivateKey() throws Exception {
         String keyArn = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
         String alias = "alias/data-key-pair-" + UUID.randomUUID();
