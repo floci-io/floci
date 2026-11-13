@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** The batch rules of CheckpointDurableExecution, and that a rejected batch changes nothing. */
@@ -208,6 +209,23 @@ class DurableCheckpointApplierTest {
     }
 
     @Test
+    void closingAContextStoresReplayChildrenAndDefaultsToFalse() {
+        DurableExecution execution = execution();
+        DurableCheckpointApplier.apply(execution, List.of(contextStart("c1"), contextStart("c2"),
+                contextStart("c3")), NOW, REACHABLE);
+        assertNull(execution.getOperations().get("c1").getReplayChildren());
+
+        DurableCheckpointApplier.apply(execution, List.of(
+                update("c1", null, DurableOperationType.CONTEXT, DurableOperationAction.SUCCEED, null),
+                contextClose("c2", DurableOperationAction.SUCCEED, true),
+                contextClose("c3", DurableOperationAction.FAIL, false)), NOW, REACHABLE);
+
+        assertEquals(false, execution.getOperations().get("c1").getReplayChildren());
+        assertEquals(true, execution.getOperations().get("c2").getReplayChildren());
+        assertEquals(false, execution.getOperations().get("c3").getReplayChildren());
+    }
+
+    @Test
     void aRejectedBatchLeavesTheExecutionUntouched() {
         DurableExecution execution = execution();
         long sequence = execution.getChangeSequence();
@@ -254,6 +272,12 @@ class DurableCheckpointApplierTest {
 
     private static DurableOperationUpdate contextStart(String id) {
         return update(id, null, DurableOperationType.CONTEXT, DurableOperationAction.START, null);
+    }
+
+    private static DurableOperationUpdate contextClose(String id, DurableOperationAction action,
+                                                       Boolean replayChildren) {
+        return new DurableOperationUpdate(id, null, null, DurableOperationType.CONTEXT, null, action, null, null, null,
+                null, replayChildren, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate waitStart(String id) {
