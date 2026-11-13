@@ -50,6 +50,10 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 | BatchDeleteTableVersion | Deletes several archived versions, reporting the ones not deleted in `Errors`. |
 | SearchTables | Searches every table of the catalog by `SearchText` (substring, or exact when quoted), property `Filters` (string keys use the tokenised match of the API reference, time keys honour `Comparator`, other keys read table parameters) and `SortCriteria`, paged by `MaxResults` and `NextToken`. |
 
+`BatchDeleteTable` requires `TablesToDelete` with 0 to 100 names. Missing or oversized lists
+fail with `InvalidInputException` before any table is deleted. Valid batches keep their per-table
+`Errors` response.
+
 #### Partitions
 
 | Action | Description |

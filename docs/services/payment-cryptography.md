@@ -46,7 +46,7 @@
   with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
   A key that is gone does not come back: a tagging request for it is refused. The
   service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is read and checked but not waited for.
+  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
   created disabled or with tags comes back that way. The `KeyUsage` and the
   `KeyModesOfUse` of the key are required, as the reference requires them. The answer
@@ -60,7 +60,8 @@
   refused, and the permission check reads the same member the request does.
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
   that state alone, and with every key when it names none. Each key in the list is the
-  whole key rather than the summary the model names, which a client reads as the summary.
+  summary the model names: its identifier, its state, its attributes, its check value
+  and its two flags.
 - **The members a request may name that the service does not read:** `CreateKey` and
   `ImportKey` take `ReplicationRegions`, and `ImportKey` takes `RequesterComment`, and the
   service reads none of them. No replica is made and no approval is recorded, because the

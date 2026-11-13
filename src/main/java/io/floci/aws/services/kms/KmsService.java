@@ -76,6 +76,7 @@ public class KmsService implements ResourceProvider {
     // Guards the scan-and-mint sequence in ensureAwsManagedKeys so two concurrent first reads of
     // a region's alias namespace cannot each mint a key for the same alias/aws/* name.
     private final Object awsManagedKeyLock = new Object();
+    private final Object aliasCreateLock = new Object();
 
     @Inject
     public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -1528,7 +1529,14 @@ public class KmsService implements ResourceProvider {
 
         String aliasArn = regionResolver.buildArn("kms", region, aliasName);
         KmsAlias alias = new KmsAlias(aliasName, aliasArn, key.getKeyId());
-        aliasStore.put(region + "::" + aliasName, alias);
+        String storageKey = region + "::" + aliasName;
+        synchronized (aliasCreateLock) {
+            if (aliasStore.get(storageKey).isPresent()) {
+                throw new AwsException("AlreadyExistsException",
+                        "An alias with the name " + aliasArn + " already exists", 400);
+            }
+            aliasStore.put(storageKey, alias);
+        }
         LOG.infov("Created KMS alias: {0} -> {1}", aliasName, key.getKeyId());
     }
 
