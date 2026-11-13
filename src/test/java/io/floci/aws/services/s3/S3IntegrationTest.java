@@ -210,7 +210,12 @@ class S3IntegrationTest {
             .statusCode(200)
             .body(containsString("CopyObjectResult"));
 
-        // Verify the copy
+        given().when().get("/test-bucket/greeting-copy.txt").then().statusCode(403)
+                .body("Error.Code", equalTo("InvalidObjectState"));
+        given().body("<RestoreRequest><Days>1</Days></RestoreRequest>")
+                .when().post("/test-bucket/greeting-copy.txt?restore").then().statusCode(202);
+
+        // Verify the restored copy
         given()
             .header("x-amz-checksum-mode", "ENABLED")
         .when()
@@ -249,7 +254,12 @@ class S3IntegrationTest {
             .statusCode(200)
             .body(containsString("CopyObjectResult"));
 
-        // Verify the copy inherits the source checksum (CRC64NVME)
+        given().when().get("/test-bucket/greeting-copy-no-override.txt").then().statusCode(403)
+                .body("Error.Code", equalTo("InvalidObjectState"));
+        given().body("<RestoreRequest><Days>1</Days></RestoreRequest>")
+                .when().post("/test-bucket/greeting-copy-no-override.txt?restore").then().statusCode(202);
+
+        // Verify the restored copy inherits the source checksum (CRC64NVME)
         given()
             .header("x-amz-checksum-mode", "ENABLED")
         .when()

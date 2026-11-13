@@ -84,6 +84,31 @@ class Ec2InstanceConnectEndpointServiceTest {
     }
 
     @Test
+    void endpointGroupsRemainUntilTheEndpointIsDeleted() {
+        Ec2Service service = mockModeService();
+        String vpc = service.createVpc(REGION, "10.73.0.0/16", false).getVpcId();
+        String subnet = service.createSubnet(REGION, vpc, "10.73.1.0/24", "us-east-1a").getSubnetId();
+        String group = service.createSecurityGroup(REGION, "endpoint-group", "owned endpoint group", vpc).getGroupId();
+        String unrelated = service.createSecurityGroup(REGION, "unrelated-group", "unattached group", vpc).getGroupId();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnet, List.of(group),
+                null, null, List.of(), null);
+        String endpointId = endpoint.getInstanceConnectEndpointId();
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(REGION, group)).getErrorCode());
+        assertEquals(group, service.describeSecurityGroups(REGION, List.of(group), List.of(), Map.of())
+                .getFirst().getGroupId());
+        assertEquals(List.of(group), service.describeInstanceConnectEndpoints(REGION, List.of(endpointId), Map.of())
+                .getFirst().getSecurityGroupIds());
+        service.deleteSecurityGroup(REGION, unrelated);
+        assertTrue(service.describeSecurityGroups(REGION, List.of(unrelated), List.of(), Map.of()).isEmpty());
+
+        service.deleteInstanceConnectEndpoint(REGION, endpointId);
+        service.deleteSecurityGroup(REGION, group);
+        assertTrue(service.describeSecurityGroups(REGION, List.of(group), List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
     void aLiveEndpointBlocksDeletingItsSubnetAndVpc() {
         Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.74.0.0/16", false).getVpcId();

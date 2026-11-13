@@ -181,6 +181,11 @@ class ProjectionEvaluatorTest {
     }
 
     @Test
+    void acceptsSizeAsAnAttributeName() {
+        assertDoesNotThrow(() -> ProjectionEvaluator.validateExpression("size, a.SIZE", null));
+    }
+
+    @Test
     void allowableIndexBeyondTheListJustDropsTheAttribute() {
         ObjectNode result = ProjectionEvaluator.project(listItem(), "l[4294967294]", null);
         assertNull(result.get("l"), "an in-range index past the list end matches nothing");

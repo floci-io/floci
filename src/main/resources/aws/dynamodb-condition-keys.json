@@ -18,6 +18,10 @@
       "dynamodb:LeadingKeys",
       "dynamodb:ReturnConsumedCapacity"
     ],
+    "dynamodb:BulkPutItems": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:CancelBulkOperation": [],
     "dynamodb:ConditionCheckItem": [
       "aws:ResourceTag/${TagKey}",
       "dynamodb:Attributes",
@@ -64,6 +68,7 @@
       "aws:ResourceTag/${TagKey}"
     ],
     "dynamodb:DescribeBackup": [],
+    "dynamodb:DescribeBulkOperation": [],
     "dynamodb:DescribeContinuousBackups": [
       "aws:ResourceTag/${TagKey}"
     ],
@@ -131,6 +136,7 @@
       "dynamodb:FisTargetArns"
     ],
     "dynamodb:ListBackups": [],
+    "dynamodb:ListBulkOperations": [],
     "dynamodb:ListContributorInsights": [],
     "dynamodb:ListExports": [
       "aws:ResourceTag/${TagKey}"
@@ -220,6 +226,7 @@
     "dynamodb:StartAwsBackupJob": [
       "aws:ResourceTag/${TagKey}"
     ],
+    "dynamodb:StartBulkOperation": [],
     "dynamodb:TagResource": [
       "aws:RequestTag/${TagKey}",
       "aws:ResourceTag/${TagKey}",

@@ -35,6 +35,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -88,7 +90,7 @@ class NativeDynamoDbJsonHandlerTest {
         return node;
     }
 
-    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression, 
+    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression,
     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValues){
         ObjectNode node = mapper.createObjectNode();
         node.put("TableName", tableName);
@@ -116,12 +118,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "UPDATED_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -143,7 +145,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
         createUsersTable("us-east-1");
@@ -193,12 +195,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "UPDATED_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -220,7 +222,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesAllOld()  throws Exception {
         createUsersTable("us-east-1");
@@ -233,12 +235,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "ALL_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -262,7 +264,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesAllNew()  throws Exception {
         createUsersTable("us-east-1");
@@ -275,12 +277,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "ALL_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -304,7 +306,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesNone()  throws Exception {
         createUsersTable("us-east-1");
@@ -317,12 +319,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
-        "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
+        JsonNode request = createRequest("Users", key,
+        "SET changeAttr = :changeVal,  newAttr = :newVal REMOVE delAttr",
         null, exprValues, "NONE");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -612,6 +614,121 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void describeTableReportsProvisionedTableCapacityAsWarmThroughput() throws Exception {
+        service.createTable("table-warm-provisioned",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-provisioned"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsOnDemandTableWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-on-demand",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-on-demand"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void updateTableWalksWarmThroughputThroughCutRaiseAndOnDemandSwitch() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 10, "WriteCapacityUnits": 20}
+                }
+                """), "eu-west-1");
+
+        // cut: warm stays at the previous peak (10/20)
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 8}
+                }
+                """), "eu-west-1");
+        JsonNode warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(10, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(20, warm.get("WriteUnitsPerSecond").asLong());
+
+        // raise: warm follows the new capacity
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 15, "WriteCapacityUnits": 25}
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(15, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25, warm.get("WriteUnitsPerSecond").asLong());
+
+        // on-demand switch: warm only rises to the baseline, never drops the peak
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
+        assertEquals(12000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warm.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void describeTableFallsBackForLegacyZeroWarmThroughput() throws Exception {
+        service.createTable("table-warm-legacy",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        // Simulate a persisted table from before warm throughput was tracked.
+        TableDefinition table = service.describeTable("table-warm-legacy", "eu-west-1");
+        table.setWarmReadUnitsPerSecond(0);
+        table.setWarmWriteUnitsPerSecond(0);
+        service.persistTable("table-warm-legacy", table, "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-legacy"));
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void createTableOmitsTableWarmThroughput() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-create",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 4}
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("TableDescription").has("WarmThroughput"),
+                "CreateTable must omit table-level WarmThroughput");
+    }
+
+    @Test
     void describeTableReportsOnDemandGsiWarmThroughput() throws Exception {
         handler.handle("CreateTable", json("""
                 {
@@ -672,6 +789,14 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals(2, describedWarmThroughput.get("ReadUnitsPerSecond").asLong());
         assertEquals(3, describedWarmThroughput.get("WriteUnitsPerSecond").asLong());
         assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
+    }
+
+    private JsonNode describedTable(String tableName) throws Exception {
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        return body.get("Table");
     }
 
     private JsonNode describedGsi(String tableName, String indexName) throws Exception {
@@ -1949,6 +2074,24 @@ class NativeDynamoDbJsonHandlerTest {
         return (ObjectNode) mapper.createObjectNode().set(placeholder, attributeValue("S", "x"));
     }
 
+    // Defines each placeholder the expression uses: :v and :s a string, :n a number, :l a list,
+    // :ss a string set and :m a map.
+    private ObjectNode valuesFor(String expression) {
+        ObjectNode values = mapper.createObjectNode();
+        Matcher placeholder = Pattern.compile(":[a-z]+").matcher(expression);
+        while (placeholder.find()) {
+            switch (placeholder.group()) {
+                case ":v", ":s" -> values.set(placeholder.group(), attributeValue("S", "x"));
+                case ":n" -> values.set(":n", attributeValue("N", "1"));
+                case ":l" -> values.putObject(":l").putArray("L");
+                case ":ss" -> values.putObject(":ss").putArray("SS").add("x");
+                case ":m" -> values.putObject(":m").putObject("M");
+                default -> { }
+            }
+        }
+        return values;
+    }
+
     @Test
     void updateItemRejectsAnUpdateExpressionOver4096BytesBeforeTheTableLookup() {
         ObjectNode request = updateUserRequest();
@@ -2019,8 +2162,55 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"SET a = :v REMOVE b, c", "SET a = if_not_exists(b, :v), c = :v", "SET a = b + :v, c = :v"})
+    @ValueSource(strings = {"SET a = :v REMOVE b, c", "SET a = if_not_exists(b, :v), c = :v", "SET a = b + :n, c = :n"})
     void updateItemReadsACommaOutsideASetTargetAsASeparator(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SET                               | <EOF>         | SET
+            `   `                             | <EOF>         | `   `
+            SET a = :v,                       | <EOF>         | ,
+            SET a = :v b = :v                 | b             | :v b =
+            REMOVE a = :v                     | =             | a = :v
+            ADD a b                           | b             | a b
+            ADD a :v + :v                     | +             | :v + :v
+            ADD a if_not_exists(b, :v)        | if_not_exists | a if_not_exists(
+            ADD a :v ADD b                    | <EOF>         | b
+            ADD ADD :v                        | ADD           | ADD ADD :v
+            ADD a :v, ADD b :v                | ADD           | , ADD b
+            SET a = :v,REMOVE b               | REMOVE        | ,REMOVE b
+            SET set = :v                      | set           | SET set =
+            SET and = :v                      | and           | SET and =
+            SET :v = a                        | :v            | SET :v =
+            SET a[] = :v                      | ]             | [] =
+            SET a[01] = :v                    | 1             | 01]
+            SET a.[1] = :v                    | [             | .[1
+            SET a[1]b = :v                    | b             | ]b =
+            SET a = :v + :v + :v              | +             | :v + :v
+            SET a = -:v                       | -             | = -:v
+            SET a = (:v + :v) + :v            | +             | ) + :v
+            SET a = :v - (:v + :v)            | +             | :v + :v
+            SET a = if_not_exists(b, :v + :v) | +             | :v + :v
+            SET a = if_not_exists()           | )             | ()
+            SET a = if_not_exists(b, :v).c    | .             | ).c
+            SET a = #f(:v)                    | (             | #f(:v
+            SET a = :v[1]                     | [             | :v[1
+            SET a = 1                         | 1             | = 1
+            SET a = (:v = :v)                 | =             | :v = :v
+            SET a = $ ((:v))                  | $             | = $ (
+            FOO a = :v                        | FOO           | FOO a
+            """)
+    void updateItemRejectsAMalformedUpdateExpressionBeforeTheTableLookup(String expression, String token,
+                                                                          String near) {
         ObjectNode request = updateUserRequest();
         request.put("TableName", "Missing");
         request.put("UpdateExpression", expression);
@@ -2028,7 +2218,263 @@ class NativeDynamoDbJsonHandlerTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: Syntax error; "
+                + "token: \"" + token + "\", near: \"" + near + "\"", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            ADD a :v ADD b | <EOF> | b
+            `   `          | <EOF> | `   `
+            SET a = -:v    | -     | = -:v
+            """)
+    void updateItemCallersThatSkipTheHandlerGetTheSameSyntaxError(String expression, String token, String near) {
+        createUsersTable("eu-west-1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", item("userId", "u1"),
+                null, expression, null, singleValue(":v"), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = ((:v)) $", "SET a = ((:v)) REMOVE", "SET a = :v + ((:v))",
+            "SET a = list_append(((:v)), :v)", "SET a = (((:v) + :v))", "SET a = ((:v + :v))"})
+    void updateItemRefusesRedundantParenthesesAsSoonAsItClosesThem(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: "
+                + "The expression has redundant parentheses;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = (:n) + (:n)", "SET a = ((:n) + :n)", "SET a = (:n + :n)", "SET a = (b)",
+            "SET a = list_append((:l), :l)", "SET a = list_append(if_not_exists(b, :l), :l)",
+            "SET a = (if_not_exists(b, :n) + :n)", "SET a[ 1 ] = :v", "SET a[0].b[10] = :v",
+            "REMOVE a[0], b.c", "set a = :v remove b", "SET\ta = :v\nREMOVE b"})
+    void updateItemAcceptsTheUpdateExpressionGrammar(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        if (expression.contains(":")) {
+            request.set("ExpressionAttributeValues", valuesFor(expression));
+        }
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a =        | a = = b  | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            SET a =        | a = :zz  | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :zz
+            SET a = :zz    | a = :yy  | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :yy
+            SET a = ((:v)) | a = :zz  | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :zz
+            """)
+    void updateItemChecksTheConditionInFullBeforeItParsesTheUpdate(String expression, String condition,
+                                                                    String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.put("ConditionExpression", condition);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a =   | attribute_exists(a) | Invalid UpdateExpression: Syntax error; token: "<EOF>", near: "="
+            ADD a :v, |                     | Invalid UpdateExpression: Syntax error; token: "<EOF>", near: ","
+            SET a =   | a = = b             | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            SET a =   | a = :zz             | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :zz
+            """)
+    void transactWriteItemsParsesTheUpdateAfterTheConditionAndBeforeTheTableLookup(String expression,
+                                                                                    String condition,
+                                                                                    String message) {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", expression);
+        if (condition != null) {
+            update.put("ConditionExpression", condition);
+        }
+        ObjectNode request = transactWrite("Update", update);
+        update.put("TableName", "Missing");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:n)                                  | Invalid function name; function: foo
+            SET a = IF_NOT_EXISTS(b, :n)                     | Invalid function name; function: IF_NOT_EXISTS
+            SET a = size(b)                                  | The function is not allowed in an update expression; function: size
+            SET a = begins_with(b, :s)                       | The function is not allowed in an update expression; function: begins_with
+            SET a = size(b, c)                               | The function is not allowed in an update expression; function: size
+            SET a = if_not_exists(b)                         | Incorrect number of operands for operator or function; operator or function: if_not_exists, number of operands: 1
+            SET a = if_not_exists(b, :n, :n)                 | Incorrect number of operands for operator or function; operator or function: if_not_exists, number of operands: 3
+            SET a = list_append(:l)                          | Incorrect number of operands for operator or function; operator or function: list_append, number of operands: 1
+            SET a = if_not_exists(:n, b)                     | Operator or function requires a document path; operator or function: if_not_exists
+            SET a = if_not_exists(if_not_exists(b, :n), :n)  | Operator or function requires a document path; operator or function: if_not_exists
+            SET a = list_append(:l, :l) + :n                 | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = (list_append(:l, :l)) + :n               | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(:n, :l) + :n                 | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = if_not_exists(b, list_append(:l, :l))    | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(list_append(:l, :l), :l)     | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = list_append(:n, :l)                      | Incorrect operand type for operator or function; operator or function: list_append, operand type: N
+            SET a = list_append(b, :s)                       | Incorrect operand type for operator or function; operator or function: list_append, operand type: S
+            SET a = :s + :n                                  | Incorrect operand type for operator or function; operator or function: +, operand type: S
+            SET a = :n - :l                                  | Incorrect operand type for operator or function; operator or function: -, operand type: L
+            SET a = b + (:ss)                                | Incorrect operand type for operator or function; operator or function: +, operand type: SS
+            ADD a :l                                         | Incorrect operand type for operator or function; operator: ADD, operand type: LIST, typeSet: ALLOWED_FOR_ADD_OPERAND
+            DELETE a :n                                      | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
+            """)
+    void updateItemChecksTheFunctionsAndOperandTypesBeforeTheTableLookup(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:u)                  | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = foo(#u)                  | An expression attribute name used in the document path is not defined; attribute name: #u
+            SET a = foo(:n), b = :u          | Invalid function name; function: foo
+            SET a = :u, b = foo(:n)          | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = if_not_exists(:n, :u)    | An expression attribute value used in expression is not defined; attribute value: :u
+            SET a = list_append(:l, :l) + :u | The function is not allowed to be used this way in an expression; function: list_append
+            SET a = :s + :u                  | An expression attribute value used in expression is not defined; attribute value: :u
+            SET out = foo(:n)                | Attribute name is a reserved keyword; reserved word: out
+            SET a = foo(:n), out = :n        | Invalid function name; function: foo
+            SET out = :u                     | Attribute name is a reserved keyword; reserved word: out
+            ADD c :u SET a = foo(:n)         | An expression attribute value used in expression is not defined; attribute value: :u
+            ADD b :s SET a = foo(:n)         | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            SET a = foo(:n) ADD b :s         | Invalid function name; function: foo
+            SET a = foo(:n) SET b = :n       | Invalid function name; function: foo
+            """)
+    void updateItemChecksNamesValuesAndCallsInWrittenOrder(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = if_not_exists(b, :n) + :n", "SET a = :n - if_not_exists(b, :s)",
+            "SET a = (list_append(:l, :l))", "SET a = list_append(:l, if_not_exists(b, :n))",
+            "SET a = if_not_exists(b, if_not_exists(c, :n))", "SET a = if_not_exists((b), :n)",
+            "SET a = list_append(b, c)", "SET size = :n", "SET a = size", "ADD a :n, b :ss", "DELETE a :ss"})
+    void updateItemAcceptsTheUpdateFunctionsAndOperandTypes(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valuesFor(expression));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = foo(:n)           | Invalid function name; function: foo
+            SET out = :n              | Attribute name is a reserved keyword; reserved word: out
+            SET a = foo(:n), out = :n | Invalid function name; function: foo
+            DELETE a :n               | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
+            """)
+    void transactWriteItemsChecksTheFunctionsAndReservedWordsBeforeTheTableLookup(String expression,
+                                                                                    String message) {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", expression);
+        update.set("ExpressionAttributeValues", valuesFor(expression));
+        ObjectNode request = transactWrite("Update", update);
+        update.put("TableName", "Missing");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = :v SET b = :v                                   | SET
+            REMOVE a REMOVE b                                       | REMOVE
+            ADD a :s ADD b :s                                       | ADD
+            DELETE a :s DELETE b :s                                 | DELETE
+            add a :s\tADD b :s                                      | ADD
+            REMOVE a REMOVE b REMOVE c                              | REMOVE
+            ADD a :s REMOVE b REMOVE c ADD d :s                     | REMOVE
+            SET a = :v DELETE b :s ADD c :s DELETE d :s SET e = :v  | DELETE
+            """)
+    void updateItemRejectsARepeatedSectionBeforeTheTableLookup(String expression, String section) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: The \"" + section
+                + "\" section can only be used once in an update expression;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            ADD a :v ADD b :v     | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            ADD a :s ADD b :w     | An expression attribute value used in expression is not defined; attribute value: :w
+            """)
+    void updateItemChecksARepeatedSectionAfterTheOtherUpdateExpressionErrors(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRefusesARepeatedSectionForACallerThatSkipsTheHandler() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = item("userId", "u1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
+                "ADD a :s ADD b :s", null, valueAndSet(), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"ADD\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", key, "eu-west-1"));
+    }
+
+    private ObjectNode valueAndSet() {
+        ObjectNode values = singleValue(":v");
+        values.putObject(":s").putArray("SS").add("x");
+        return values;
     }
 
     @Test
@@ -2275,6 +2721,36 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSection() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSectionBeforeUnusedValuesAndTheTableLookup() {
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+        update.put("ConditionExpression", "attribute_exists(c)");
+        update.set("ExpressionAttributeValues", singleValue(":u"));
+        update.putObject("ExpressionAttributeNames").put("#u", "u");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
     }
 
     @Test

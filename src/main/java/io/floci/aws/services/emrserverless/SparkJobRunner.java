@@ -78,9 +78,10 @@ public interface SparkJobRunner {
      * {@code core-site.xml} properties its {@code hadoop} command gets, on a cluster, after those of the
      * cluster's storage, which they replace where a name is the same (empty for none); the
      * {@code log4j2.properties} lines its Spark gets after those of its configuration, which they replace where
-     * a key is the same (empty for none); and, on a cluster, the {@code mapred-site.xml} properties its
+     * a key is the same (empty for none); on a cluster, the {@code mapred-site.xml} properties its
      * MapReduce gets, the {@code log4j.properties} lines and the {@code hadoop-env.sh} exports its {@code hadoop}
-     * command gets (each empty for none).
+     * command gets (each empty for none); and, for an EMR Serverless Spark run, where its executors run, in
+     * containers of their own (null for Spark's local mode, in the driver's container).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel, Engine engine,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
@@ -88,22 +89,42 @@ public interface SparkJobRunner {
                String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
                List<String> archives, Storage storage, Map<String, String> coreSite,
                Map<String, String> sparkLog4j2, Map<String, String> mapredSite, Map<String, String> hadoopLog4j,
-               Map<String, String> hadoopEnvironment) {
+               Map<String, String> hadoopEnvironment, Executors executors) {
 
         /** This job, on {@code storage}. */
         public Job onStorage(Storage storage) {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment);
+                    hadoopEnvironment, executors);
         }
 
         /** This job, run in {@code image}. */
         public Job inImage(String image) {
             return new Job(service, runId, accountId, region, releaseLabel, engine, image, customImage, dockerNetwork,
                     executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs, environment,
-                    archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment);
+                    archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment, executors);
         }
+
+        /** This job, its executors where {@code executors} has them. */
+        public Job withExecutors(Executors executors) {
+            return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
+                    dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
+                    cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
+                    hadoopEnvironment, executors);
+        }
+    }
+
+    /**
+     * An EMR Serverless Spark run's executors, each in a container of its own, as each has a worker of its own on EMR
+     * Serverless: at most {@code containers} at once; in {@code image}, the application's custom image for its
+     * executors, or the release's EMR Serverless image when null; and none that would take the workers of
+     * {@code application}'s runs, its drivers' among them, past its maximum capacity: {@code vcpus}, {@code memoryGb}
+     * and {@code diskGb} in all, each 0 for no limit, as that capacity "is cumulative across all workers at any given
+     * point in time". {@code application} names the application its runs share that capacity in, or is null for a
+     * run that shares it with none.
+     */
+    record Executors(int containers, String image, long vcpus, long memoryGb, long diskGb, String application) {
     }
 
     /**

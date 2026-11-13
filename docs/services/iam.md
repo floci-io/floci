@@ -488,6 +488,40 @@ instead of the previous document with the same policy name; exceeding the limit 
 `LimitExceeded` (HTTP 409) and preserves the stored policies. These limits match the
 [AWS IAM quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html).
 
+Every write that takes a policy document holds it to being one, which nothing here did before. All
+of them model `MalformedPolicyDocument` and none of them answered it, so a document that was no
+policy was stored and told apart only later, when something tried to decide with it. A role's trust
+policy was the sharpest case: the evaluator reads a document it cannot parse as matching nothing, so
+a role written that way could no longer be assumed.
+
+Which reading an operation applies follows what the document is. A trust policy, on `CreateRole` and
+`UpdateAssumeRolePolicy`, is held to the grammar alone and under the wording IAM's trust-policy
+validator uses: `This policy contains invalid Json` for a text that is not, in its entirety, a JSON object,
+and `Policy has no statements` for an object carrying no `Statement`, "the main element for a policy.
+This element is required." Its statements name a principal and the actions it may take rather than
+resources, so the elements an identity statement must carry are not asked of one. An inline policy,
+on `PutUserPolicy`, `PutGroupPolicy` and `PutRolePolicy`, is held to that grammar under the identity
+validator's one sentence for both cases, `Syntax errors in policy.`, and to the values the policy
+language defines: a `Version` outside `2012-10-17` and `2008-10-17` answers that same sentence, a
+statement whose `Effect` is not literally `Allow` or `Deny` answers `The policy failed legacy
+parsing`, and a resource named neither by ARN nor by `*` answers `Resource <value> must be in ARN
+format or "*".` A managed policy, on `CreatePolicy` and `CreatePolicyVersion`, is held to those and
+to its statements' own elements besides, `Policy statement must contain actions.` and `Policy
+statement must contain resources.`, where a statement that is no object at all is the syntax case
+rather than a missing element.
+
+A document carrying `Statement` with nothing in it is still a policy, one that grants nothing, and a
+member the request leaves out is still answered as absent by the constraints ahead of the operation.
+None of these sentences is published and none is captured: they are the ones AWS's own emulator
+answers, a first-party implementation rather than a recording, and the split between the two
+validators' wordings is its reading too. The reading sits in the service rather than at the protocol edge, so what CloudFormation
+provisions is held to it as well: those provisioners write through the same methods. Putting a
+document back is not a new write, though. A failed update restores the trust policy, inline policy
+or policy version it captured before the attempt without holding it to this reading, because a
+document an earlier version accepted must not be refused on the way back, which would leave the
+role or the policy without what the rollback removed. A document already stored is likewise read
+exactly as it was: what an earlier version accepted still decides what it decided.
+
 When CloudFormation renames an inline policy, Floci releases its tracked old name on
 retained principals before writing the replacement. Failed updates restore the captured
 previous policies, including historical documents saved before these limits were enforced.
@@ -762,7 +796,7 @@ resource or trust policy that referred to the old name still refers to it after 
 
 | Action | Description |
 |--------|-------------|
-| SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
+| SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies, beside any documents the request supplies. |
 | SimulateCustomPolicy | Evaluates requested actions and resources against a standalone set of policy documents, with an optional permissions boundary. |
 | GetContextKeysForCustomPolicy | Lists the context keys referenced across a set of policy documents. |
 | GetContextKeysForPrincipalPolicy | Lists the context keys referenced across a resolved principal's policies, plus any additional documents supplied. |
@@ -802,18 +836,61 @@ provided in the request: <value>", captured from a real account on 2026-10-31 fo
 means the six colon-delimited segments every ARN carries, so a valid ARN naming something that is
 neither a user nor a role still answers the `InvalidInput` about the entity type rather than about
 the shape. The length wording follows the captures of real IAM length violations, naming only the
-bound the value broke and leaving the value itself out of the message. `SimulateCustomPolicy`
+bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
-limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
-resource-based policy (`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither
-returns `MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`:
-only the top-level `EvalDecision` is populated. `SimulatePrincipalPolicy` reads neither
-`PolicyInputList` nor `PermissionsBoundaryPolicyInputList`, so a document passed in either one does
-not enter that simulation, and `ResourceHandlingOption` is accepted and read by neither action, so
-none of the EC2 scenarios it names has its required resources enforced.
+limit; extra documents beyond the first are ignored. Neither evaluates a resource-based policy
+(`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither returns
+`MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`: only the
+top-level `EvalDecision` is populated, so which policy allowed an action is not reported even where
+AWS names one, `PolicyInputList.1` in its own example for the principal simulator.
+`ResourceHandlingOption` is accepted and read by neither action, so none of the EC2 scenarios it
+names has its required resources enforced.
 `ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
 entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
 not by the declared type.
+
+`PolicyInputList` and `PermissionsBoundaryPolicyInputList` on `SimulatePrincipalPolicy` are read,
+the documents a simulation is handed beside the ones the principal holds. A `PolicyInputList`
+document is "an optional list of additional policy documents to include in the simulation", so each
+is evaluated with the weight of a policy the principal holds: an allow in one allows an action the
+attached policies do not, which is what AWS's own example for this operation turns on, and a deny in
+one stops an action they allow. A `PermissionsBoundaryPolicyInputList` document is the boundary that
+simulation runs with in place of the stored one, "if a permissions boundary is attached to an entity
+and you pass in a different permissions boundary policy using this parameter, then the new
+permissions boundary policy is used for the simulation", and it is the boundary when the entity
+carries none, the member being "the IAM permissions boundary policy to simulate". Every index a
+request numbers is read, in the documented `PolicyInputList.member.N` spelling and the bare
+`PolicyInputList.N` one alike.
+
+Neither document is attached to anything, so no `PolicyExclusionList` identifier reaches either: a
+simulation that leaves out every part a `PolicyType` can name still carries what the request handed
+in, and a boundary handed in still holds the simulation down where the stored one was left out.
+
+Either document is held to the shape the model declares for a policy document, 1 to 131072
+characters of the printable set the member lists, so one past that length is a 400
+`ValidationError` naming `policyInputList.1.member` or
+`permissionsBoundaryPolicyInputList.1.member`, under the index the request numbered it with and
+answered ahead of the simulation. On `SimulateCustomPolicy` a `PolicyInputList` document is held to
+neither the length nor the pattern: the member is carried by hand in the generated constraints there because that
+operation requires it and answers an empty list in its own wording, "At least one PolicyInputList
+member is required.", which the walk would reword into a null violation. It is optional here, so
+there is nothing of this operation's own in front of the walk and the member is read from the model
+with the rest.
+
+A document a request supplies is held to being a policy document on every operation that takes one,
+the two simulators and the two context-key readers alike. The member takes "the complete, valid
+JSON text of an IAM policy", so a value that does not parse as a JSON object, and one that parses
+and carries no `Statement`, "the main element for a policy. This element is required.", is a 400
+`InvalidInput` naming the entry by the index it arrived under, "Policy input list item 1 has
+invalid content". A supplied permissions boundary that is no policy document is the same code with
+the fixed "Syntax errors in policy.", the member carrying one document and the refusal identifying
+none. Neither sentence is published and both are the ones AWS's own emulator answers.
+`PolicyEvaluation`, the 500 the two simulators model for a policy that "could not be successfully
+evaluated", is answered by neither action: it carries no sender fault where `InvalidInput` does,
+and the two context-key readers take the same member and model no `PolicyEvaluation` at all. A
+document already stored is read as it always was, contributing nothing to the decision rather than
+failing the call, so a policy the account accepted once does not make every later simulation
+fail.
 
 `PolicyExclusionList` on `SimulatePrincipalPolicy` is read. The member asks "what the simulation
 result would be if a policy were removed, without changing which policies are actually attached to
@@ -1949,8 +2026,14 @@ Region than the request's is checked as given and as each resource of that name 
 on instead, in the ARN's account or the caller's and in the ARN's Region or the request's (ECR's
 tag handlers keep the ARN's account in the request's Region), and the request is refused if any is
 denied; one of a type AWS owns, whose ARN's account is `aws` (an IAM Identity Center application
-provider), is checked in that account alone. Every other request is checked on `*`, as is an operation whose action acts on no
-resource type or whose request names none, where AWS checks `*` too. `make
+provider), is checked in that account alone, and so is one its service acts on in the account the ARN names
+(the sink an OAM `CreateLink` links to, a RAM invitation sent to the caller or a share another account owns). A
+request leaving out an optional member holding the ARN of a resource its service then uses one of its own for
+is checked on the one the service finds: Resource Explorer's `Search` and `ListResources` with no `ViewArn`
+on the Region's default view. A field of each value of a map of structures, named after a type the action acts
+on, names one resource for each: an FIS experiment template's create and update are checked on each action
+its `actions` map names by `actionId`, `action/<actionId>`. Every other request is checked on `*`, as is an
+operation whose action acts on no resource type or whose request names none, where AWS checks `*` too. `make
 iam-request-resources-check` re-derives the table from the pinned botocore, `make
 iam-request-resources-verify` checks it against AWS, and the namespaces it does not read yet are
 listed in it with their reason.
@@ -2072,8 +2155,8 @@ that type when it is left out. GuardDuty's detector operations are checked on `d
 from their path, and a publishing destination on
 `detector/<DetectorId>/publishingdestination/<DestinationId>`; its list, member and organization
 operations act on no resource type and are checked on `*`. An `EnableSecurityHub` or a GuardDuty
-create carrying tags also needs `securityhub:TagResource` on the hub or `guardduty:TagResource` on `*`,
-a detector's id being one GuardDuty mints (below).
+create carrying tags also needs `securityhub:TagResource` on the hub or `guardduty:TagResource` on the
+resource it creates, with the id GuardDuty mints open (`detector/*`, `detector/<DetectorId>/ipset/*`).
 
 A route no rule maps is the operation whose route it matches in botocore's model of its service,
 vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
@@ -2395,7 +2478,12 @@ resource, so its tags are checked on that one, built from the parent's ARN with 
 listeners and rules, holds. A create that names another resource beside the one it makes tags the
 one it makes alone, the resource of the type it is named after: Cloud Map's `CreateService` is
 checked on its namespace and on `service/*`, and its tags on `service/*`; CodePipeline's
-`PutWebhook` on the webhook and the pipeline it connects to, and its tags on the webhook. Where the
+`PutWebhook` on the webhook and the pipeline it connects to, and its tags on the webhook. A create
+whose action acts on no resource type is checked on `*`, and its tags on the resource it makes, of the
+type it is named after with the ids its service mints open, where its tagging action acts on that type:
+Resource Explorer's `CreateView` on `view/<ViewName>/*`, OAM's `CreateSink` on `sink/*`, ACM's
+`RequestCertificate` on `certificate/*`; a Cloud Map namespace's tags, whose `TagResource` acts on no
+type, stay on `*`. Where the
 tagging action takes
 its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, CloudFormation's
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:

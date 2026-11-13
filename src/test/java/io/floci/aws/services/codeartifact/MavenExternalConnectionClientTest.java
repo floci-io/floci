@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -59,6 +61,34 @@ class MavenExternalConnectionClientTest {
 
         assertTrue(result.isPresent());
         assertArrayEquals(content, result.get().content());
+    }
+
+    /**
+     * {@code fetchAsset(..., Path)} is the streamed sibling a large Maven release import actually
+     * uses: unlike the {@code byte[]} overload above, it writes straight to a file via an {@link
+     * AssetDigestingInputStream}-wrapped copy, so this confirms that wrapping still lands the real
+     * bytes on disk and reports their real size, not just that the plain {@code byte[]} path works.
+     */
+    @Test
+    void fetchAssetToAPathWritesTheRealBytesAndReportsTheirSize() throws IOException {
+        byte[] content = "pom-content".getBytes(StandardCharsets.UTF_8);
+        server.createContext("/com/example/widget/1.0/widget-1.0.pom", exchange -> {
+            exchange.sendResponseHeaders(200, content.length);
+            exchange.getResponseBody().write(content);
+            exchange.close();
+        });
+        Path destination = Files.createTempFile("maven-external-connection-test-", ".pom");
+
+        try {
+            Optional<MavenExternalConnectionClient.FetchedFile> result =
+                    client.fetchAsset("fake", "com/example/widget/1.0/widget-1.0.pom", destination);
+
+            assertTrue(result.isPresent());
+            assertEquals(content.length, result.get().size());
+            assertArrayEquals(content, Files.readAllBytes(destination));
+        } finally {
+            Files.deleteIfExists(destination);
+        }
     }
 
     @Test

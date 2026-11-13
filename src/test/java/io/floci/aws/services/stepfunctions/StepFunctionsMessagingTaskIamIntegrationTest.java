@@ -487,7 +487,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         Map<String, Object> task = Map.of("Type", "Task", "Resource", "arn:aws:states:::events:putEvents",
                 "Parameters", Map.of("Entries", List.of(entry(given, target.source()))), "End", true);
 
-        assertFailed(terminal(start(machine(task, role(STATES_TRUST, allow(given + "-other", "events:PutEvents"))), "{}")),
+        assertFailed(terminal(start(machine(task, role(STATES_TRUST, allow(target.resourceArn() + "-other", "events:PutEvents"))), "{}")),
                 "EventBridge.AccessDeniedException");
         assertEquals(0, target.sink().receive().size());
 

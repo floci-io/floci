@@ -56,6 +56,7 @@ public class DurableExecution {
     /** Set on an execution a chained invoke started. Its close completes that operation of the parent. */
     private String parentExecutionArn;
     private String parentOperationId;
+    private String traceHeader;
 
     public DurableExecution() {
     }
@@ -136,6 +137,8 @@ public class DurableExecution {
 
     public String getVersion() { return version; }
     public void setVersion(String version) { this.version = version; }
+    public String getTraceHeader() { return traceHeader; }
+    public void setTraceHeader(String traceHeader) { this.traceHeader = traceHeader; }
 
     public DurableExecutionStatus getStatus() { return status; }
     public void setStatus(DurableExecutionStatus status) { this.status = status; }

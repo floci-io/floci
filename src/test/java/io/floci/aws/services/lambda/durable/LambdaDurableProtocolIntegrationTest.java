@@ -27,6 +27,7 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -63,6 +64,78 @@ class LambdaDurableProtocolIntegrationTest {
         .then()
             .statusCode(anyOf(is(201), is(409)));
         invoker.drain();
+    }
+
+    @Test
+    void anInvokeTraceHeaderReachesTheInvocationAndTheExecution() throws Exception {
+        String traceHeader = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "traced-1")
+                .header("X-Amzn-Trace-Id", traceHeader)
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        String arn = MAPPER.readTree(invocation.payload()).get("DurableExecutionArn").asText();
+        assertEquals(traceHeader, invocation.traceId());
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn)
+        .then()
+            .statusCode(200)
+            .body("TraceHeader.XAmznTraceId", equalTo(traceHeader));
+
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"{}\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
+    }
+
+    @Test
+    void aChainedInvokeTraceHeaderReachesTheChildInvocationAndExecution() throws Exception {
+        String traceHeader = "Root=1-6af70000-0000000000000000000000e1;Parent=00000000000000e1;Sampled=1";
+        Response accepted = given()
+                .header("X-Amz-Invocation-Type", "Event")
+                .header("X-Amz-Durable-Execution-Name", "chained-trace-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations");
+        String arn = accepted.getHeader("X-Amz-Durable-Execution-Arn");
+
+        Invocation parent = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(parent.payload());
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("""
+                {
+                    "CheckpointToken": "%s",
+                    "Updates": [{"Id": "i1", "Name": "child", "Type": "CHAINED_INVOKE", "SubType": "ChainedInvoke",
+                                 "Action": "START", "ChainedInvokeOptions": {"FunctionName": "%s:$LATEST",
+                                 "XAmznTraceId": "%s"}}]
+                }
+                """.formatted(event.get("CheckpointToken").asText(), FUNCTION, traceHeader))
+        .when()
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint")
+        .then()
+            .statusCode(200);
+        parent.response().complete(handlerResponse("{\"Status\": \"PENDING\"}"));
+
+        Invocation child = invoker.awaitInvocation(Duration.ofSeconds(30));
+        String childArn = MAPPER.readTree(child.payload()).get("DurableExecutionArn").asText();
+        assertNotEquals(arn, childArn);
+        assertEquals(traceHeader, child.traceId());
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + childArn)
+        .then()
+            .statusCode(200)
+            .body("TraceHeader.XAmznTraceId", equalTo(traceHeader));
+        child.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"{}\"}"));
+
+        Invocation resumed = invoker.awaitInvocation(Duration.ofSeconds(30));
+        assertEquals(arn, MAPPER.readTree(resumed.payload()).get("DurableExecutionArn").asText());
+        resumed.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"{}\"}"));
     }
 
     @Test

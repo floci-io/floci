@@ -156,6 +156,7 @@ quarkus:
       - --initialize-at-run-time=io.floci.aws.services.bedrockagentcore.BedrockAgentCoreEventService
       - --initialize-at-run-time=io.floci.aws.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.floci.aws.services.emr.EmrService
+      - --initialize-at-run-time=io.floci.aws.services.emrserverless.EmrServerlessSparkRunner
       - --initialize-at-run-time=io.floci.aws.services.elasticbeanstalk.ElasticBeanstalkService
       - --initialize-at-run-time=io.floci.aws.services.elb.ElbClassicService
       - --initialize-at-run-time=io.floci.aws.services.datasync.DataSyncService
@@ -432,6 +433,7 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      restore-completion-delay-seconds: 0   # FLOCI_SERVICES_S3_RESTORE_COMPLETION_DELAY_SECONDS
       lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
       lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     dynamodb:
@@ -1048,8 +1050,9 @@ floci:
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs
-      # Remove the drivers a previous run of this deployment left on the daemon before the first
-      # job run starts. Scoped to this deployment's own containers.
+      executor-containers: 0        # a docker Spark run's executors at once, each in a container; 0 = local mode
+      # Remove the drivers and executors a previous run of this deployment left on the daemon before
+      # the first job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
     ssoadmin:
       enabled: true

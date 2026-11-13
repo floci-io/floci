@@ -54,7 +54,11 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
         String aliasName = ctx.resolveOptional(props, "AliasName");
         String targetKeyId = ctx.resolveOptional(props, "TargetKeyId");
         if (aliasName != null && targetKeyId != null) {
-            kmsService.createAlias(aliasName, targetKeyId, ctx.region());
+            if (ctx.isUpdate() && aliasName.equals(ctx.priorPhysicalId())) {
+                kmsService.updateAlias(aliasName, targetKeyId, ctx.region());
+            } else {
+                kmsService.createAlias(aliasName, targetKeyId, ctx.region());
+            }
         }
         r.setPhysicalId(aliasName != null
                 ? aliasName

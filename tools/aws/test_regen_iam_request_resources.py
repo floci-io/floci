@@ -43,6 +43,20 @@ def test_a_member_fills_a_variable_its_stem_relates_to_and_of_its_kind():
         {"type": "thing", "fill": {"ThingName": "SpecialThingName"}}]
 
 
+def test_a_member_naming_the_type_before_the_variable_wins_over_a_bare_one():
+    formats = {"snapshot": "arn:${Partition}:svc:${Region}:${Account}:snapshot:${ClusterName}/${SnapshotName}",
+               "cluster": FORMATS["thing"].replace("thing/${ThingName}", "cluster:${ClusterName}")}
+    # The snapshot's cluster is the one its SnapshotClusterIdentifier names; ClusterIdentifier is the cluster's own.
+    assert r.resources_for("svc:RestoreFromClusterSnapshot", ["cluster", "snapshot"], formats,
+                           members("ClusterIdentifier", "SnapshotIdentifier", "SnapshotClusterIdentifier")) == [
+        {"type": "cluster", "fill": {"ClusterName": "ClusterIdentifier"}},
+        {"type": "snapshot", "fill": {"ClusterName": "SnapshotClusterIdentifier", "SnapshotName": "SnapshotIdentifier"}}]
+    # The tenant's id is its own, not the bare Id of the invalidation the operation reads.
+    assert r.resources_for("svc:GetInvalidationForTenant", ["tenant"],
+                           {"tenant": "arn:${Partition}:svc::${Account}:tenant/${Id}"}, members("TenantId", "Id")) == [
+        {"type": "tenant", "fill": {"Id": "TenantId"}}]
+
+
 def test_a_bare_name_fills_the_type_the_operation_is_about_and_no_other():
     assert r.resources_for("svc:CreateThing", ["thing"], FORMATS, members("Name")) == [
         {"type": "thing", "fill": {"ThingName": "Name"}}]
@@ -77,10 +91,66 @@ def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent
     named = [{"types": ["catalog", "thing"], "arn": "CatalogArn"}]
     assert r.with_absent_arn(named, FORMATS, {"CatalogArn"}) == named + [
         {"type": "catalog", "fill": {}, "when": {"CatalogArn": [None]}}]
-    # A required member is always there, and a type with a variable of its own names no one resource without it.
+    # A required member is always there.
     assert r.with_absent_arn(named, FORMATS, set()) == named
-    assert r.with_absent_arn([{"types": ["thing"], "arn": "ThingArn"}], FORMATS, {"ThingArn"}) == [
-        {"types": ["thing"], "arn": "ThingArn"}]
+
+
+def test_an_optional_arn_member_of_a_type_with_variables_names_its_services_default_when_absent():
+    # Resource Explorer's Search with no ViewArn searches with the Region's default view, which its service finds.
+    named = [{"types": ["thing"], "arn": "ThingArn"}]
+    default = {"type": "thing", "fill": {}, "when": {"ThingArn": [None]}, "default": True}
+    assert r.with_absent_arn(named, FORMATS, {"ThingArn"}) == named + [default]
+    assert r.with_absent_arn(named, FORMATS, set()) == named
+    # A member named after another type names no default of this one, and the default takes no account member.
+    assert r.with_absent_arn([{"types": ["thing"], "arn": "PoolArn"}], FORMATS, {"PoolArn"}) == [
+        {"types": ["thing"], "arn": "PoolArn"}]
+    assert r.with_account([default], FORMATS, ["registryId"]) == [default]
+
+
+VIEWS = {"view": "arn:${Partition}:svc:${Region}:${Account}:view/${ViewName}/${ViewUuid}",
+         "managed-view": "arn:${Partition}:svc:${Region}:${Account}:managed-view/${ManagedViewName}/${ManagedViewUuid}",
+         "index": "arn:${Partition}:svc:${Region}:${Account}:index/${IndexUuid}",
+         "userpool": "arn:${Partition}:svc:${Region}:${Account}:userpool/${UserPoolId}",
+         "grouppool": "arn:${Partition}:svc:${Region}:${Account}:grouppool/${GroupPoolId}"}
+
+
+def test_a_create_whose_action_acts_on_no_type_makes_the_one_named_as_it_is():
+    # Its tags are checked on what it makes: the type of its own name before one ending with it, its ids open.
+    assert r.makes_for("svc:CreateView", [], VIEWS, members("ViewName", "ClientToken")) == [
+        {"type": "view", "fill": {"ViewName": "ViewName"}}]
+    assert r.makes_for("svc:CreateIndex", [], VIEWS, members("ClientToken")) == [{"type": "index", "fill": {}}]
+    # A create whose action acts on types is checked on them, and an operation creating nothing makes nothing.
+    assert r.makes_for("svc:CreateView", ["view"], VIEWS, members("ViewName")) == []
+    assert r.makes_for("svc:DescribeView", [], VIEWS, members("ViewName")) == []
+    # Nor does a create named after no type, or one named after none exactly and related to two.
+    assert r.makes_for("svc:CreateSearch", [], VIEWS, {}) == []
+    assert r.makes_for("svc:CreatePool", [], VIEWS, {}) == []
+
+
+def test_a_built_document_with_what_a_create_makes_a_default_and_a_maps_ids_validates(corrections, tmp_path):
+    service = model({"CreateThing": {"ThingName": "String"}, "ListThings": {"ThingArn": "String"}, "ApplySteps": {}})
+    service["shapes"]["Step"] = {"type": "structure", "members": {"poolId": {"shape": "String"},
+                                                                  "note": {"shape": "String"}}}
+    service["shapes"]["Steps"] = {"type": "map", "key": {"shape": "String"}, "value": {"shape": "Step"}}
+    service["shapes"]["ApplyStepsIn"]["members"]["steps"] = {"shape": "Steps"}
+    write_models(tmp_path, {"svc": service})
+    documents = [reference("svc", {"CreateThing": [], "ListThings": ["thing"], "ApplySteps": ["pool"]},
+                           {"thing": FORMATS["thing"], "pool": FORMATS["pool"]})]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    operations = document["operations"]
+    assert operations["svc:CreateThing"] == {"action": "svc:CreateThing", "types": [], "resources": [],
+                                             "makes": [{"type": "thing", "fill": {"ThingName": "ThingName"}}]}
+    assert operations["svc:ListThings"]["resources"] == [
+        {"types": ["thing"], "arn": "ThingArn"}, {"type": "thing", "fill": {}, "when": {"ThingArn": [None]}, "default": True}]
+    # A field of each value of a map of structures, named after a type the action acts on, names one of it each.
+    assert operations["svc:ApplySteps"]["resources"] == [{"type": "pool", "fill": {"PoolId": "steps{}.poolId"}}]
+    assert json.loads(r.render(document)) == document
+    # A create acting on types makes nothing this way, and a default is for a request naming none, by no member.
+    operations["svc:ListThings"]["makes"] = [{"type": "thing", "fill": {}}]
+    operations["svc:CreateThing"]["resources"] = [{"type": "thing", "fill": {"ThingName": "ThingName"},
+                                                   "when": {"ThingArn": [None]}, "default": True}]
+    assert len(r.validate(document)) == 2
 
 
 def test_types_named_only_through_the_same_members_are_alternatives():
@@ -337,6 +407,30 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+def test_an_account_member_of_a_types_own_structure_gives_that_types_account_alone(tmp_path):
+    service = model({"RestoreThing": {"ThingName": "String", "PoolId": "String", "OwnerAccount": "String"}})
+    service["shapes"]["Thing"] = {"type": "structure", "members": {"OwnerAccount": {"shape": "String"}}}
+    service["shapes"]["Pool"] = {"type": "structure", "members": {"PoolId": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.structure_account_members(models, "RestoreThing", ["thing", "pool"]) == {"thing": "OwnerAccount"}
+    resources = [{"type": "thing", "fill": {"ThingName": "ThingName"}}, {"type": "pool", "fill": {"PoolId": "PoolId"}},
+                 {"types": ["thing"], "arn": "ThingArn"}]
+    assert r.with_structure_account(resources, FORMATS, {"thing": "OwnerAccount"}) == [
+        {"type": "thing", "fill": {"ThingName": "ThingName"}, "account": "OwnerAccount"},
+        {"type": "pool", "fill": {"PoolId": "PoolId"}}, {"types": ["thing"], "arn": "ThingArn"}]
+    # An account another rule gave stays, and a format without an account takes none.
+    given = [{"type": "thing", "fill": {}, "account": "registryId"}]
+    assert r.with_structure_account(given, FORMATS, {"thing": "OwnerAccount"}) == given
+    assert r.with_structure_account([{"type": "catalog", "fill": {}}], {"catalog": "arn:${Partition}:svc:::catalog"},
+                                    {"catalog": "OwnerAccount"}) == [{"type": "catalog", "fill": {}}]
+    # A structure with two such members says nothing about which one is its account.
+    service["shapes"]["Thing"]["members"]["SourceAccount"] = {"shape": "String"}
+    service["shapes"]["RestoreThingIn"]["members"]["SourceAccount"] = {"shape": "String"}
+    write_models(tmp_path / "two", {"svc": service})
+    assert r.structure_account_members(r.load_models(tmp_path / "two", {"svc"}), "RestoreThing", ["thing"]) == {}
 
 
 ACCOUNTS = {"account": "arn:${Partition}:account::${Account}:account",
@@ -1142,3 +1236,43 @@ def test_sso_access_scope_does_not_authorize_target_applications():
     derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
                           document["arnFormats"]["sso"], models)
     assert derived["resources"] == [{"types": ["Application"], "arn": "ApplicationArn"}]
+
+
+def test_a_path_segment_in_ies_names_the_type_in_y():
+    # lever_model's operation stands in for Route 53's ListTrafficPolicyVersions, /trafficpolicies/{Id}/versions.
+    labels = r.path_labels({"route53": lever_model("/2013-04-01/trafficpolicies/{id}/versions")},
+                           "UpdateSafetyLeverState")
+    assert labels == {"id": "trafficpolicy"}
+    formats = {"trafficpolicy": "arn:${Partition}:route53:::trafficpolicy/${Id}"}
+    assert r.resources_for("route53:ListTrafficPolicyVersions", ["trafficpolicy"], formats, members("id"),
+                           labels=labels) == [{"type": "trafficpolicy", "fill": {"Id": "id"}}]
+    assert r.resources_for("route53:ListTrafficPolicyVersions", ["trafficpolicy"], formats, members("id")) == []
+
+
+def test_a_member_whose_enum_lists_two_of_the_actions_types_picks_the_type():
+    formats = {"healthcheck": "arn:${Partition}:route53:::healthcheck/${Id}",
+               "hostedzone": "arn:${Partition}:route53:::hostedzone/${Id}"}
+    members = {"ResourceType": "ResourceType", "ResourceId": "ResourceId"}
+    enums = {"ResourceType": {"healthcheck", "hostedzone"}}
+    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, enums) == [
+        {"type": "healthcheck", "fill": {"Id": "ResourceId"}, "when": {"ResourceType": ["healthcheck"]}},
+        {"type": "hostedzone", "fill": {"Id": "ResourceId"}, "when": {"ResourceType": ["hostedzone"]}}]
+    # An enum listing one of the action's types, or none of them, picks nothing.
+    assert r.picked_by_enum(["hostedzone"], formats, members, enums) is None
+    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, {"ResourceType": {"other"}}) is None
+    # Without a member naming the resource, the request names none of them.
+    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, {"ResourceType": "ResourceType"}, enums) is None
+
+
+def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_id_fills_it():
+    formats = {"document": "arn:${Partition}:ssm:${Region}:${Account}:document/${DocumentName}",
+               "managed-instance": "arn:${Partition}:ssm:${Region}:${Account}:managed-instance/${InstanceId}",
+               "parameter": "arn:${Partition}:ssm:${Region}:${Account}:parameter/${ParameterNameWithoutLeadingSlash}"}
+    members = {"ResourceType": "ResourceType", "ResourceId": "ResourceId"}
+    enums = {"ResourceType": {"Document", "ManagedInstance", "Parameter", "Automation"}}
+    assert r.picked_by_enum(["document", "managed-instance", "parameter"], formats, members, enums) == [
+        {"type": "document", "fill": {"DocumentName": "ResourceId"}, "when": {"ResourceType": ["Document"]}},
+        {"type": "managed-instance", "fill": {"InstanceId": "ResourceId"},
+         "when": {"ResourceType": ["ManagedInstance"]}},
+        {"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"},
+         "when": {"ResourceType": ["Parameter"]}}]

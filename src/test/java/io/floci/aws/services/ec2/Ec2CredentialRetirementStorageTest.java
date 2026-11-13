@@ -27,6 +27,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
@@ -51,7 +52,7 @@ class Ec2CredentialRetirementStorageTest {
         try {
             IamService iam = spy(new IamService(factory, config,
                     new RegionResolver("us-east-1", ACCOUNT), Clock.fixed(NOW, ZoneOffset.UTC)));
-            iam.createRole("worker", "/", "{}", null, 3600, null);
+            iam.createRole("worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
             String profile = iam.createInstanceProfile("profile", "/").getArn();
             iam.addRoleToInstanceProfile("profile", "worker");
             Ec2InstanceCredentials credentials = new Ec2InstanceCredentials(iam);
@@ -122,7 +123,7 @@ class Ec2CredentialRetirementStorageTest {
         try {
             IamService iam = spy(new IamService(factory, config,
                     new RegionResolver("us-east-1", ACCOUNT), Clock.systemUTC()));
-            iam.createRole("worker", "/", "{}", null, 3600, null);
+            iam.createRole("worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
             String profile = iam.createInstanceProfile("profile", "/").getArn();
             iam.addRoleToInstanceProfile("profile", "worker");
             Instance instance = instance("i-imds-retirement");

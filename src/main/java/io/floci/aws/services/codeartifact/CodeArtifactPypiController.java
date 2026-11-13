@@ -2,6 +2,7 @@ package io.floci.aws.services.codeartifact;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.MultipartFormParser;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -17,6 +18,10 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -24,8 +29,8 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -33,6 +38,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.MatchResult;
 import java.util.regex.Pattern;
 
@@ -236,6 +242,15 @@ public class CodeArtifactPypiController {
                                   @PathParam("repository") String repository,
                                   @PathParam("filename") String filename) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
+        // A real (200) proxyGetStreamed response's body is only drained later, when JAX-RS writes
+        // the deferred StreamingOutput: this flag lets that case defer releasing the lease (via
+        // StreamingResponses.closingWith) until that real drain happens, instead of this method's
+        // own return letting a concurrent DeleteRepository stop the pypiserver container
+        // mid-download. A 404 from either attempt below leaves this flag unset, so the outer
+        // finally releases the lease immediately once this method actually returns: nothing is
+        // left streaming, and the lease must stay held across the external-connection import and
+        // retry that can follow a first-attempt 404 anyway.
+        AtomicBoolean leaseTransferred = new AtomicBoolean();
         try {
             ArchivedOrDisposedMatch match = archivedOrDisposedVersionFromFilename(handle, domain, repository, filename);
             if (match != null) {
@@ -246,15 +261,20 @@ public class CodeArtifactPypiController {
                     return Response.status(404).build();
                 }
             }
-            Response response = proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
+            Response response = proxyGetStreamed(handle.baseUrl(),
+                    "/packages/" + SidecarUriUtils.encodeSegment(filename), leaseTransferred,
+                    () -> pypiserver.endUse(handle.repoId()));
             if (match == null && response.getStatus() == 404
                     && externalConnectionImporter.tryImportAsset(handle.region(), domain, handle.owner(), repository,
                             handle.repoId(), filename)) {
-                return proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
+                return proxyGetStreamed(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename),
+                        leaseTransferred, () -> pypiserver.endUse(handle.repoId()));
             }
             return response;
         } finally {
-            pypiserver.endUse(handle.repoId());
+            if (!leaseTransferred.get()) {
+                pypiserver.endUse(handle.repoId());
+            }
         }
     }
 
@@ -276,35 +296,90 @@ public class CodeArtifactPypiController {
     @POST
     @Consumes(MediaType.WILDCARD)
     public Response upload(@Context HttpHeaders headers, @PathParam("domain") String domain,
-                            @PathParam("repository") String repository, byte[] body) {
-        byte[] content = body != null ? body : new byte[0];
-        // Same 5 GB AWS quota PublishPackageVersion enforces, and just as nominal: RESTEasy
-        // Reactive has already buffered the full body into this byte[] before this method runs,
-        // so this rejects anything that made it this far rather than bounding memory use upfront.
-        if (content.length > CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES) {
-            return Response.status(413).build();
-        }
+                            @PathParam("repository") String repository, InputStream body) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
         try {
-            return uploadWithLease(headers, domain, repository, content, handle);
+            return uploadWithLease(headers, domain, repository, body, handle);
         } finally {
             pypiserver.endUse(handle.repoId());
         }
     }
 
-    private Response uploadWithLease(HttpHeaders headers, String domain, String repository, byte[] content,
+    /**
+     * Stages the whole raw multipart body to disk before anything else touches it (its own
+     * envelope has no exact size semantics of its own, so nothing is checked against the 5 GB
+     * asset quota yet): {@link #forwardUpload} can then send this exact file straight to
+     * pypiserver with no multipart rebuild at all, since it already re-sends the entire inbound
+     * body verbatim, not a reconstructed one. The staging copy itself is still capped, at {@code
+     * CodeArtifactService.MAX_MULTIPART_ENVELOPE_BYTES}, well above the real quota to leave room
+     * for the envelope's own overhead: leaving this particular copy fully uncapped would let a
+     * client force an arbitrarily large file onto disk before the real per-asset check downstream
+     * ever runs.
+     */
+    private Response uploadWithLease(HttpHeaders headers, String domain, String repository, InputStream body,
             RepositoryHandle handle) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String boundary = MultipartFormParser.extractBoundary(contentType).orElse(null);
         if (boundary == null) {
             return Response.status(400).entity("Could not determine multipart boundary from Content-Type.").build();
         }
-        MultipartFormParser.ParsedForm form = MultipartFormParser.parse(content, boundary);
+        java.nio.file.Path stagedWholeBody;
+        try {
+            stagedWholeBody = service.stageAssetBody(
+                    new AssetDigestingInputStream(body, CodeArtifactService.MAX_MULTIPART_ENVELOPE_BYTES));
+        } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+            return Response.status(413).build();
+        }
+        try {
+            return uploadStagedBody(domain, repository, contentType, boundary, stagedWholeBody, handle);
+        } finally {
+            service.deleteStagedAssetBody(stagedWholeBody);
+        }
+    }
+
+    /**
+     * {@code stagedWholeBody}'s own file part is extracted into a second, clean staged file (never
+     * the whole multipart envelope nor that one part held in a single array), so everything below
+     * this point (the 5 GB size cap, the existing-content comparison, the byte count recorded on
+     * a successful publish) runs against real content alone, the same as every other format's
+     * own asset.
+     */
+    private Response uploadStagedBody(String domain, String repository, String contentType, String boundary,
+            java.nio.file.Path stagedWholeBody, RepositoryHandle handle) {
+        java.nio.file.Path stagedAsset = stagedWholeBody.resolveSibling(stagedWholeBody.getFileName() + ".asset");
+        try {
+            MultipartFormParser.ExtractedForm form;
+            try {
+                form = MultipartFormParser.extractFilePart(stagedWholeBody, boundary, stagedAsset);
+            } catch (IOException e) {
+                return Response.status(400).entity("Could not parse the uploaded multipart body.").build();
+            }
+            return uploadExtractedForm(domain, repository, contentType, form, stagedWholeBody, stagedAsset, handle);
+        } finally {
+            service.deleteStagedAssetBody(stagedAsset);
+        }
+    }
+
+    private Response uploadExtractedForm(String domain, String repository, String contentType,
+            MultipartFormParser.ExtractedForm form, java.nio.file.Path stagedWholeBody,
+            java.nio.file.Path stagedAsset, RepositoryHandle handle) {
         String packageName = form.fields().get("name");
         String version = form.fields().get("version");
-        Optional<MultipartFormParser.FilePart> file = form.file();
+        Optional<MultipartFormParser.ExtractedFile> file = form.file();
         if (packageName == null || packageName.isBlank() || file.isEmpty()) {
             return Response.status(400).entity("Upload must include name and content fields.").build();
+        }
+        long assetSize;
+        try {
+            assetSize = Files.size(stagedAsset);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        // Same 5 GB AWS quota PublishPackageVersion enforces: checked against the real asset
+        // bytes alone (never the surrounding multipart envelope), once they are known, rather
+        // than before anything was read at all the way a non-multipart format's own cap can be.
+        if (assetSize > CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES) {
+            return Response.status(413).build();
         }
         // Raised by Greptile's review: pypiserver files an upload under the identity its own
         // filename embeds, not under whatever this form's name/version fields happen to say
@@ -374,11 +449,12 @@ public class CodeArtifactPypiController {
                 }
             }
 
-            Optional<byte[]> existing = existingFileContent(handle.baseUrl(), packageName, file.get().filename());
-            if (existing.isPresent()) {
-                if (Arrays.equals(existing.get(), file.get().content())) {
-                    return Response.status(200).build();
-                }
+            ExistingFileComparison existing = compareExistingFile(handle.baseUrl(), packageName,
+                    file.get().filename(), stagedAsset);
+            if (existing == ExistingFileComparison.MATCHES) {
+                return Response.status(200).build();
+            }
+            if (existing == ExistingFileComparison.DIFFERS) {
                 return Response.status(409)
                         .entity("File already exists. See "
                                 + "https://docs.aws.amazon.com/codeartifact/latest/ug/PyPI-format.html")
@@ -397,11 +473,15 @@ public class CodeArtifactPypiController {
             long readmeFenceSnapshot = version == null || version.isBlank() ? 0L
                     : service.currentContainerBackedVersionFence(handle.region(), domain, handle.owner(),
                             repository, "pypi", null, packageName, version);
-            Response response = forwardUpload(handle.baseUrl(), contentType, content);
+            // The entire original raw multipart body is re-sent verbatim, boundary and all,
+            // exactly as the byte[]-based version of this call always has: pypiserver parses its
+            // own multipart form the same way twine built it, so there was never a need to
+            // rebuild one here, only to stream the one already staged instead of a resident array.
+            Response response = forwardUpload(handle.baseUrl(), contentType, stagedWholeBody);
             boolean uploadSucceeded = response.getStatus() == 200 || response.getStatus() == 201;
             if (uploadSucceeded) {
                 service.completeContainerBackedPublishIfCurrentRepository(handle.region(), domain, handle.owner(),
-                        repository, handle.repoId(), "pypi", packageName, version, file.get().content().length,
+                        repository, handle.repoId(), "pypi", packageName, version, assetSize,
                         fenceSnapshot, beforeRevision, form.fields().get("description"), readmeFenceSnapshot);
             }
             return response;
@@ -426,7 +506,19 @@ public class CodeArtifactPypiController {
      * {@code ?} would be reinterpreted by {@link URI#create} as a fragment or query string,
      * silently fetching a different path than the one actually requested.
      */
-    private Optional<byte[]> existingFileContent(String baseUrl, String packageName, String filename) {
+    private enum ExistingFileComparison { NOT_LISTED, MATCHES, DIFFERS }
+
+    /**
+     * {@code existingFileContent}'s own streamed sibling: compares pypiserver's own stored file
+     * against {@code localAsset} chunk by chunk from each side, rather than buffering the remote
+     * file into a {@code byte[]} first (capped at ~2 GiB) just to compare it against another
+     * array. Uses {@code readNBytes} so a short individual {@code read()} on either side (always
+     * possible, never guaranteed to fill the buffer) can't be mistaken for the two disagreeing,
+     * the same technique {@code ReposiliteSidecarClient}'s own streamed idempotent-match check
+     * uses.
+     */
+    private ExistingFileComparison compareExistingFile(String baseUrl, String packageName, String filename,
+            java.nio.file.Path localAsset) {
         String normalized = PypiserverSidecarClient.normalizePackageName(packageName);
         URI indexUri = SidecarUriUtils.combine(URI.create(baseUrl),
                 SIMPLE_PATH + SidecarUriUtils.encodeSegment(normalized) + "/");
@@ -440,7 +532,7 @@ public class CodeArtifactPypiController {
                             + " before publishing", e);
         }
         if (indexResponse.statusCode() == 404) {
-            return Optional.empty();
+            return ExistingFileComparison.NOT_LISTED;
         }
         if (indexResponse.statusCode() != 200) {
             throw new IllegalStateException(
@@ -448,25 +540,37 @@ public class CodeArtifactPypiController {
                             + ": upstream returned " + indexResponse.statusCode());
         }
         if (!indexListsFilename(indexResponse.body(), filename)) {
-            return Optional.empty();
+            return ExistingFileComparison.NOT_LISTED;
         }
 
         URI fileUri = SidecarUriUtils.combine(URI.create(baseUrl), "/packages/"
                 + SidecarUriUtils.encodeSegment(filename));
         HttpRequest fileRequest = HttpRequest.newBuilder(fileUri).timeout(Duration.ofSeconds(10)).GET().build();
-        HttpResponse<byte[]> fileResponse;
+        HttpResponse<InputStream> fileResponse;
         try {
-            fileResponse = httpClient.send(fileRequest, BodyHandlers.ofByteArray());
+            fileResponse = httpClient.send(fileRequest, BodyHandlers.ofInputStream());
         } catch (Exception e) {
             throw new IllegalStateException(
                     "Could not fetch the existing pypi file " + filename + " to check for a content match", e);
         }
         if (fileResponse.statusCode() != 200) {
+            try {
+                fileResponse.body().close();
+            } catch (IOException ignored) {
+                // Closing an unread stream best-effort only; the exception thrown right below is
+                // the one that actually matters here.
+            }
             throw new IllegalStateException(
                     "Could not fetch the existing pypi file " + filename + " to check for a content match: "
                             + "upstream returned " + fileResponse.statusCode());
         }
-        return Optional.of(fileResponse.body());
+        try (InputStream remote = fileResponse.body(); InputStream local = Files.newInputStream(localAsset)) {
+            return StreamEquality.contentsMatch(remote, local) ? ExistingFileComparison.MATCHES
+                    : ExistingFileComparison.DIFFERS;
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "Could not compare the existing pypi file " + filename + " against the uploaded content", e);
+        }
     }
 
     private record ArchivedOrDisposedMatch(String packageName, String version) {
@@ -529,12 +633,22 @@ public class CodeArtifactPypiController {
         return filenames;
     }
 
-    private Response forwardUpload(String baseUrl, String contentType, byte[] content) {
-        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/"))
-                .timeout(Duration.ofSeconds(30))
-                .header("Content-Type", contentType)
-                .POST(BodyPublishers.ofByteArray(content))
-                .build();
+    private Response forwardUpload(String baseUrl, String contentType, java.nio.file.Path stagedWholeBody) {
+        long stagedSize;
+        try {
+            stagedSize = Files.size(stagedWholeBody);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(URI.create(baseUrl + "/"))
+                .timeout(SidecarUriUtils.transferTimeout(stagedSize))
+                .header("Content-Type", contentType);
+        try {
+            requestBuilder.POST(BodyPublishers.ofFile(stagedWholeBody));
+        } catch (FileNotFoundException e) {
+            throw new UncheckedIOException(e);
+        }
+        HttpRequest request = requestBuilder.build();
         HttpResponse<Void> response;
         try {
             response = httpClient.send(request, BodyHandlers.discarding());
@@ -564,6 +678,43 @@ public class CodeArtifactPypiController {
         }
         String contentType = response.headers().firstValue("Content-Type").orElse("application/octet-stream");
         return Response.status(response.statusCode()).entity(response.body()).type(contentType).build();
+    }
+
+    /**
+     * {@link #proxyGet}'s streamed sibling, for {@link #downloadFile}'s real asset downloads: that
+     * method's own {@code byte[]} is fine for {@link #packageIndex}'s small HTML listing, but a
+     * downloaded package file can be gigabytes.
+     *
+     * <p>On a real 200, {@code leaseTransferred} is set so the caller's lease release ({@code
+     * afterClose}) runs only once the entity stream this method returns is actually closed (via
+     * {@link StreamingResponses#closingWith}), keeping the sidecar container leased for as long
+     * as the real transfer takes rather than just until this method returns. A 404 leaves it
+     * unset: nothing is left streaming, so the caller releases it synchronously instead.
+     *
+     * <p>Uses the worst-case download timeout, not {@link #proxyGet}'s flat 10 seconds: the real
+     * asset file this fetches can be gigabytes, and its real size isn't known until the response
+     * itself arrives.
+     */
+    private Response proxyGetStreamed(String baseUrl, String encodedPath, AtomicBoolean leaseTransferred,
+            Runnable afterClose) {
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), encodedPath))
+                .timeout(SidecarUriUtils.maxTransferTimeout()).GET().build();
+        HttpResponse<InputStream> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypi sidecar at " + encodedPath, e);
+        }
+        if (response.statusCode() == 404) {
+            StreamingResponses.closeQuietly(response.body());
+            return Response.status(404).build();
+        }
+        String contentType = response.headers().firstValue("Content-Type").orElse("application/octet-stream");
+        Response.ResponseBuilder builder = Response.status(response.statusCode()).type(contentType);
+        response.headers().firstValueAsLong("Content-Length").ifPresent(len -> builder.header("Content-Length", len));
+        leaseTransferred.set(true);
+        InputStream body = StreamingResponses.closingWith(response.body(), afterClose);
+        return StreamingResponses.streamingResponse(body, stream -> builder.entity(stream).build());
     }
 
     private RepositoryHandle requireRepository(HttpHeaders headers, String domain, String repository) {

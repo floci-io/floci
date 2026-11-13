@@ -146,6 +146,7 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      restore-completion-delay-seconds: 0
       lifecycle-sweep-enabled: false   # tests run the sweep themselves, so no bucket's rules apply behind another test's back
       lifecycle-sweep-interval-seconds: 60
     dynamodb:

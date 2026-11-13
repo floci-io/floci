@@ -139,6 +139,9 @@ public final class DurableWire {
         node.put("DurableExecutionName", execution.getName());
         node.put("FunctionArn", execution.getFunctionArn());
         node.put("Version", execution.getVersion());
+        if (execution.getTraceHeader() != null) {
+            node.putObject("TraceHeader").put("XAmznTraceId", execution.getTraceHeader());
+        }
         node.put("Status", execution.getStatus().name());
         putTimestamp(node, "StartTimestamp", execution.getStartTimestamp(), false);
         if (execution.getEndTimestamp() != null) {
@@ -284,7 +287,8 @@ public final class DurableWire {
                 integer(callbackOptions, "HeartbeatTimeoutSeconds", path + "callbackOptions", 0,
                         MAX_CALLBACK_TIMEOUT_SECONDS),
                 chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "FunctionName"),
-                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "TenantId"));
+                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "TenantId"),
+                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "XAmznTraceId"));
     }
 
     private static <E extends Enum<E>> E enumMember(Map<?, ?> map, String member, Class<E> type) {

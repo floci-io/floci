@@ -38,6 +38,7 @@ import io.floci.aws.services.dynamodb.model.IncrementalExportSpecification;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.PointInTimeChange;
+import io.floci.aws.services.dynamodb.model.ProvisionedThroughput;
 import io.floci.aws.services.dynamodb.model.StreamDescription;
 import io.floci.aws.services.dynamodb.model.TableBackup;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
@@ -648,6 +649,11 @@ public class DynamoDbService {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
         }
+        // Track warm throughput: on-demand uses fixed values, provisioned uses the capacity.
+        ProvisionedThroughput tp = readCapacity != null && writeCapacity != null
+                ? new ProvisionedThroughput(readCapacity, writeCapacity) : null;
+        table.setWarmReadUnitsPerSecond(TableDefinition.defaultWarmReadUnits(billingMode, tp));
+        table.setWarmWriteUnitsPerSecond(TableDefinition.defaultWarmWriteUnits(billingMode, tp));
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
@@ -2610,9 +2616,32 @@ public class DynamoDbService {
 
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
+            if (readCapacity > table.getWarmReadUnitsPerSecond()) {
+                table.setWarmReadUnitsPerSecond(readCapacity);
+            }
         }
         if (writeCapacity != null) {
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
+            if (writeCapacity > table.getWarmWriteUnitsPerSecond()) {
+                table.setWarmWriteUnitsPerSecond(writeCapacity);
+            }
+        }
+
+        // Handle billing mode switch.
+        if (billingMode != null && !billingMode.equals(table.getBillingMode())) {
+            table.setBillingMode(billingMode);
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                table.getProvisionedThroughput().setReadCapacityUnits(0L);
+                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+                long wru = TableDefinition.defaultWarmReadUnits("PAY_PER_REQUEST", null);
+                long wwu = TableDefinition.defaultWarmWriteUnits("PAY_PER_REQUEST", null);
+                if (wru > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(wru);
+                }
+                if (wwu > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(wwu);
+                }
+            }
         }
 
         for (String indexName : gsiDeletes) {
@@ -3498,12 +3527,11 @@ public class DynamoDbService {
                                         List<String> touched) {
         // Parse SET and REMOVE clauses from expressions like:
         // "SET #n = :newName, age = :newAge REMOVE oldField"
-        if (expression.isBlank()) {
+        if (expression.isEmpty()) {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        requireAssignmentAfterSetTarget(expression);
-        requireClosedParentheses(expression, "");
+        DynamoDbUpdateExpressionSyntax.check(expression);
         // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
         // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
         // comma-separated action parsing below work regardless of formatting. Normalize
@@ -3512,6 +3540,7 @@ public class DynamoDbService {
         // name as a bare identifier instead.
         String remaining = expression.trim().replaceAll("\\s+", " ");
         DynamoDbReservedWords.check(remaining, "UpdateExpression");
+        requireSectionsUsedOnce(remaining);
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -3967,44 +3996,6 @@ public class DynamoDbService {
         return clause;
     }
 
-    private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
-            "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
-
-    void requireAddOrDeleteOperandTypes(String updateExpression, JsonNode exprAttrValues, boolean inValidationEnvelope) {
-        if (updateExpression == null || exprAttrValues == null) {
-            return;
-        }
-        String remaining = updateExpression.trim().replaceAll("\\s+", " ");
-        while (!remaining.isEmpty()) {
-            String keyword = remaining.substring(0, Math.max(remaining.indexOf(' '), 0)).toUpperCase();
-            String body = remaining.substring(keyword.length()).trim();
-            int nextClause = findNextClauseKeyword(body);
-            String actions = nextClause < 0 ? body : body.substring(0, nextClause);
-            remaining = nextClause < 0 ? "" : body.substring(nextClause);
-            Set<String> allowed = switch (keyword) {
-                case "ADD" -> Set.of("N", "SS", "NS", "BS");
-                case "DELETE" -> Set.of("SS", "NS", "BS");
-                default -> null;
-            };
-            while (allowed != null && !actions.isBlank()) {
-                int comma = findNextComma(actions);
-                String[] words = (comma < 0 ? actions : actions.substring(0, comma)).trim().split(" ");
-                actions = comma < 0 ? "" : actions.substring(comma + 1);
-                JsonNode operand = exprAttrValues.get(words[words.length - 1]);
-                if (operand == null) {
-                    continue;
-                }
-                String type = DynamoDbAttributeValueValidator.typeOf(operand);
-                if (!allowed.contains(type)) {
-                    throw new AwsException("ValidationException", (inValidationEnvelope ? "1 validation error detected: " : "")
-                            + "Invalid UpdateExpression: Incorrect operand type for operator or function;"
-                            + " operator: " + keyword + ", operand type: " + OPERAND_TYPE_NAMES.get(type)
-                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND", 400);
-                }
-            }
-        }
-    }
-
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
         for (String type : types) {
             if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
@@ -4141,7 +4132,7 @@ public class DynamoDbService {
             arr.add(value);
         }
     }
-    
+
     private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
         List<Object> tokens = parsePath(path, exprAttrNames);
         if (tokens.isEmpty()) return;
@@ -4394,88 +4385,19 @@ public class DynamoDbService {
         }
     }
 
-    // DynamoDB reads an unclosed call or group to the end of the expression and reports the
-    // raw text from its last token on, trailing whitespace included. UpdateItem wraps the
-    // error in the validation envelope, TransactWriteItems does not.
-    static void requireClosedParentheses(String expression, String envelope) {
-        int depth = 0;
-        int lastToken = 0;
-        for (int i = 0; i < expression.length(); i++) {
-            char c = expression.charAt(i);
-            if (Character.isWhitespace(c)) {
-                continue;
+    static void requireSectionsUsedOnce(String expression) {
+        Set<String> seen = new HashSet<>();
+        for (ExpressionEvaluator.Token token : ExpressionEvaluator.tokenize(expression)) {
+            String word = token.value().toUpperCase(Locale.ROOT);
+            if (token.type() == ExpressionEvaluator.TokenType.IDENTIFIER && UPDATE_SECTIONS.contains(word)
+                    && !seen.add(word)) {
+                throw new AwsException("ValidationException", "Invalid UpdateExpression: The \"" + word
+                        + "\" section can only be used once in an update expression;", 400);
             }
-            if (c == '(') {
-                depth++;
-            } else if (c == ')') {
-                depth--;
-                if (depth < 0) {
-                    return;
-                }
-            }
-            if (i == 0 || isUpdatePunctuation(c) || isUpdatePunctuation(expression.charAt(i - 1))
-                    || Character.isWhitespace(expression.charAt(i - 1))) {
-                lastToken = i;
-            }
-        }
-        if (depth > 0) {
-            throw new AwsException("ValidationException",
-                    envelope + "Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \""
-                            + expression.substring(lastToken) + "\"", 400);
         }
     }
 
-    private static boolean isUpdatePunctuation(char c) {
-        return "()[],.=+-".indexOf(c) >= 0;
-    }
-
-    // DynamoDB reads a SET target path up to "=", so a comma before it fails on the comma.
-    static void requireAssignmentAfterSetTarget(String expression) {
-        List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize(expression);
-        boolean inSet = false;
-        int target = -1;
-        int depth = 0;
-        for (int i = 0; i < tokens.size(); i++) {
-            ExpressionEvaluator.Token token = tokens.get(i);
-            if (target >= 0) {
-                switch (token.type()) {
-                    case COMMA -> throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: Syntax error; token: \",\", near: \""
-                                    + expression.substring(tokens.get(i - 1).pos(), tokens.get(i + 1).end()) + "\"",
-                            400);
-                    case EQ -> {
-                        if (i == target) {
-                            return;
-                        }
-                        target = -1;
-                    }
-                    case IDENTIFIER, NAME_REF, DOT, LBRACKET, NUMBER, RBRACKET -> { }
-                    default -> {
-                        return;
-                    }
-                }
-                continue;
-            }
-            switch (token.type()) {
-                case LPAREN -> depth++;
-                case RPAREN -> depth--;
-                case COMMA -> target = inSet && depth == 0 ? i + 1 : -1;
-                case IDENTIFIER -> {
-                    String word = token.value().toUpperCase(Locale.ROOT);
-                    if (depth == 0 && List.of("SET", "REMOVE", "ADD", "DELETE").contains(word)) {
-                        inSet = word.equals("SET");
-                        target = inSet ? i + 1 : -1;
-                    }
-                }
-                case UNKNOWN -> {
-                    if (!isUpdatePunctuation(token.value().charAt(0))) {
-                        return;
-                    }
-                }
-                default -> { }
-            }
-        }
-    }
+    static final Set<String> UPDATE_SECTIONS = Set.of("SET", "REMOVE", "ADD", "DELETE");
 
     static int findNextComma(String s) {
         // Find next comma that is not inside a function call

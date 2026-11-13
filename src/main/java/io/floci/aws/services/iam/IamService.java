@@ -1184,6 +1184,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                               String description, int maxSessionDuration, Map<String, String> tags,
                               String permissionsBoundaryArn) {
         validateRoleName(roleName);
+        IamPolicyDocuments.checkTrustPolicy(assumeRolePolicyDocument);
         validateRoleDescription(description);
         if (permissionsBoundaryArn != null) {
             requirePolicy(permissionsBoundaryArn); // validate before anything is created
@@ -1578,6 +1579,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void updateAssumeRolePolicy(String roleName, String policyDocument) {
         validateRoleName(roleName);
+        IamPolicyDocuments.checkTrustPolicy(policyDocument);
         IamRole role = getRole(roleName);
         requireNotServiceLinked(role, roleName);
         role.setAssumeRolePolicyDocument(policyDocument);
@@ -1592,7 +1594,27 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * that check and this call would silently receive the update meant for the original role.
      */
     public void updateAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId) {
+        updateAssumeRolePolicy(roleName, policyDocument, expectedRoleId, true);
+    }
+
+    /**
+     * Writes {@code policyDocument} back without holding it to being a policy document, for a caller
+     * putting back what this store already held. A failed CloudFormation update restores what it
+     * captured before the attempt, and a document an earlier version of Floci accepted must not be
+     * refused on the way back: that would leave the role without the policy it was assumed under and the stack unable to
+     * roll back. A new write is held to the reading; putting an old one back is
+     * not, which is the same rule as reading a stored document exactly as it was.
+     */
+    public void restoreAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId) {
+        updateAssumeRolePolicy(roleName, policyDocument, expectedRoleId, false);
+    }
+
+    private void updateAssumeRolePolicy(String roleName, String policyDocument, String expectedRoleId,
+                                        boolean heldToBeingAPolicy) {
         validateRoleName(roleName);
+        if (heldToBeingAPolicy) {
+            IamPolicyDocuments.checkTrustPolicy(policyDocument);
+        }
         synchronized (resourceNameLock) {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
@@ -1630,6 +1652,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamPolicy createPolicy(String policyName, String path, String description,
                                   String document, Map<String, String> tags) {
+        IamPolicyDocuments.checkManagedPolicy(document);
         synchronized (resourceNameLock) {
             String normalizedPath = normalizePath(path);
             String arn = iamArn("policy", normalizedPath, policyName);
@@ -1896,6 +1919,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
+        return createPolicyVersion(policyArn, document, setAsDefault, true);
+    }
+
+    /**
+     * Writes {@code document} back without holding it to being a policy document, for a caller
+     * putting back what this store already held. A failed CloudFormation update restores what it
+     * captured before the attempt, and a document an earlier version of Floci accepted must not be
+     * refused on the way back: that would leave the policy without the version the rollback pruned. A new write is held to the reading; putting an old one back is
+     * not, which is the same rule as reading a stored document exactly as it was.
+     */
+    public PolicyVersion restorePolicyVersion(String policyArn, String document, boolean setAsDefault) {
+        return createPolicyVersion(policyArn, document, setAsDefault, false);
+    }
+
+    private PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault,
+                                              boolean heldToBeingAPolicy) {
+        if (heldToBeingAPolicy) {
+            IamPolicyDocuments.checkManagedPolicy(document);
+        }
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         Map<String, PolicyVersion> versions = policy.getVersions();
@@ -2116,6 +2158,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putUserPolicy(String userName, String policyName, String policyDocument) {
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
+            IamPolicyDocuments.checkInlinePolicy(policyDocument);
             Map<String, String> inlinePolicies = user.getInlinePolicies();
             synchronized (inlinePolicies) {
                 checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
@@ -2160,6 +2203,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void putGroupPolicy(String groupName, String policyName, String policyDocument) {
         synchronized (resourceNameLock) {
             IamGroup group = getGroup(groupName);
+            IamPolicyDocuments.checkInlinePolicy(policyDocument);
             Map<String, String> inlinePolicies = group.getInlinePolicies();
             synchronized (inlinePolicies) {
                 checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,
@@ -2202,10 +2246,29 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void putRolePolicy(String roleName, String policyName, String policyDocument) {
+        putRolePolicy(roleName, policyName, policyDocument, true);
+    }
+
+    /**
+     * Writes {@code policyDocument} back without holding it to being a policy document, for a caller
+     * putting back what this store already held. A failed CloudFormation update restores what it
+     * captured before the attempt, and a document an earlier version of Floci accepted must not be
+     * refused on the way back: that would leave the role without the inline policy the rollback removed. A new write is held to the reading; putting an old one back is
+     * not, which is the same rule as reading a stored document exactly as it was.
+     */
+    public void restoreRolePolicy(String roleName, String policyName, String policyDocument) {
+        putRolePolicy(roleName, policyName, policyDocument, false);
+    }
+
+    private void putRolePolicy(String roleName, String policyName, String policyDocument,
+                               boolean heldToBeingAPolicy) {
         synchronized (resourceNameLock) {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
             requireNotServiceLinked(role, roleName);
+            if (heldToBeingAPolicy) {
+                IamPolicyDocuments.checkInlinePolicy(policyDocument);
+            }
             Map<String, String> inlinePolicies = role.getInlinePolicies();
             synchronized (inlinePolicies) {
                 checkInlinePolicyQuota(inlinePolicies, policyName, policyDocument,

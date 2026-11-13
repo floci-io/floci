@@ -201,7 +201,12 @@ public class RedshiftQueryHandler {
         case "DescribeClusterSnapshots" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            List<Snapshot> snapshots = service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
+            String ownerAccount = params.getFirst("OwnerAccount");
+            boolean shared = service.isOtherAccount(ownerAccount);
+            List<Snapshot> snapshots = shared
+                    ? service.describeSharedSnapshots(ownerAccount, snapshotIdentifier, clusterIdentifier)
+                    : service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
+            String owner = shared ? ownerAccount : regionResolver.getAccountId();
             String snapshotType = params.getFirst("SnapshotType");
             if (snapshotType != null) {
                 if (!List.of("manual", "automated").contains(snapshotType)) {
@@ -214,7 +219,7 @@ public class RedshiftQueryHandler {
                       .start("DescribeClusterSnapshotsResult")
                         .start("Snapshots");
             for (Snapshot snapshot : snapshots) {
-                xmlBuilder.raw(buildSnapshotXml(snapshot));
+                xmlBuilder.raw(buildSnapshotXml(snapshot, owner));
             }
             String xml = xmlBuilder
                         .end("Snapshots")
@@ -223,6 +228,31 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DescribeClusterSnapshotsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "AuthorizeSnapshotAccess", "RevokeSnapshotAccess" -> {
+            boolean authorize = "AuthorizeSnapshotAccess".equals(action);
+            String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            String snapshotClusterIdentifier = params.getFirst("SnapshotClusterIdentifier");
+            RestoredSnapshot named = resolveSnapshot(snapshotIdentifier, snapshotClusterIdentifier,
+                    params.getFirst("SnapshotArn"), authorizationHeader);
+            if (named.owner() != null) {
+                throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + named.name() + " not found", 404);
+            }
+            String accountId = requireParam(params, "AccountWithRestoreAccess");
+            Snapshot snapshot = authorize
+                    ? service.authorizeSnapshotAccess(named.name(), named.cluster(), accountId)
+                    : service.revokeSnapshotAccess(named.name(), named.cluster(), accountId);
+            String xml = new XmlBuilder()
+                    .start(action + "Response")
+                      .start(action + "Result")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end(action + "Result")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end(action + "Response")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -286,8 +316,9 @@ public class RedshiftQueryHandler {
             String nodeType = params.getFirst("NodeType");
             RestoredSnapshot snapshot = resolveSnapshot(snapshotIdentifier,
                     params.getFirst("SnapshotClusterIdentifier"), snapshotArn, authorizationHeader);
+            String ownerAccount = snapshot.owner() != null ? snapshot.owner() : params.getFirst("OwnerAccount");
             Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, snapshot.name(),
-                    snapshot.cluster(), nodeType);
+                    snapshot.cluster(), nodeType, ownerAccount);
             String xml = new XmlBuilder()
                     .start("RestoreFromClusterSnapshotResponse")
                       .start("RestoreFromClusterSnapshotResult")
@@ -1253,8 +1284,14 @@ public class RedshiftQueryHandler {
         };
     }
 
-    /** The snapshot a restore names: its name, and the cluster it was taken from, which the request is checked on. */
-    private record RestoredSnapshot(String cluster, String name) {
+    /**
+     * The snapshot a restore names: its name, and the cluster it was taken from, which the request is checked on.
+     * {@code owner} is the account an ARN names when it is not the caller's, otherwise null.
+     */
+    private record RestoredSnapshot(String cluster, String name, String owner) {
+        RestoredSnapshot(String cluster, String name) {
+            this(cluster, name, null);
+        }
     }
 
     /**
@@ -1288,20 +1325,27 @@ public class RedshiftQueryHandler {
                 || slash < 0 || slash == resource.length() - 1) {
             throw new AwsException("InvalidParameterValue", "Invalid SnapshotArn: " + snapshotArn, 400);
         }
-        // An ARN from another account or region must not match a local snapshot by name.
-        if (!arn.accountId().equals(regionResolver.getAccountId())
-                || !arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
+        // An ARN from another region must not match a local snapshot by name. One from another account names that
+        // account's snapshot, which the service checks was shared with the caller.
+        String requestRegion = regionResolver.resolveRegionFromAuth(authorizationHeader);
+        if (!arn.region().equals(requestRegion)
+                || !arn.partition().equals(regionResolver.partitionForRegion(requestRegion))) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
+        String owner = arn.accountId().equals(regionResolver.getAccountId()) ? null : arn.accountId();
         String cluster = resource.substring("snapshot:".length(), slash);
         if (cluster.isBlank() || snapshotClusterIdentifier != null && !snapshotClusterIdentifier.isBlank()
                 && !snapshotClusterIdentifier.equals(cluster)) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
-        return new RestoredSnapshot(cluster, resource.substring(slash + 1));
+        return new RestoredSnapshot(cluster, resource.substring(slash + 1), owner);
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
+        return buildSnapshotXml(snapshot, regionResolver.getAccountId());
+    }
+
+    private String buildSnapshotXml(Snapshot snapshot, String ownerAccount) {
         // Both are absent on snapshots persisted before these fields existed; omit them.
         String createTime = snapshot.getSnapshotCreateTime() != null
                 ? DateTimeFormatter.ISO_INSTANT.format(snapshot.getSnapshotCreateTime())
@@ -1317,7 +1361,13 @@ public class RedshiftQueryHandler {
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
             .elem("MasterUsername", snapshot.getMasterUsername())
-            .elem("SourceRegion", snapshot.getSourceRegion());
+            .elem("SourceRegion", snapshot.getSourceRegion())
+            .elem("OwnerAccount", ownerAccount)
+            .start("AccountsWithRestoreAccess");
+        for (String account : snapshot.getAccountsWithRestoreAccess()) {
+            builder.start("AccountWithRestoreAccess").elem("AccountId", account).end("AccountWithRestoreAccess");
+        }
+        builder.end("AccountsWithRestoreAccess");
         if (snapshot.getKmsKeyId() != null) {
             builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
         }

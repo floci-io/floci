@@ -388,7 +388,9 @@ returns the management account id, while `Fn::GetAtt Org.Id` returns the organiz
 - `Policy` — `TargetIds` is reconciled on update: targets the template adds are attached and ones
   it drops are detached. Deleting the resource detaches its remaining targets first, since
   `DeletePolicy` refuses while a policy is still attached.
-- `ResourcePolicy` — backed by `PutResourcePolicy`, which is already create-or-update.
+- `ResourcePolicy` — backed by `PutResourcePolicy`, which is create-or-update but applies `Tags`
+  only when it creates the policy, so an update converges `Tags` through `TagResource` and
+  `UntagResource` on the policy's `rp-` id.
 
 `Fn::GetAtt OrganizationalUnit.Path` and `Fn::GetAtt Account.Paths` return the organization path —
 `o-<org>/r-<root>/[ou-<ou>/…]<id>/`. An account has one parent and therefore one path, so the
@@ -600,6 +602,32 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   reads the previous value from the previous template, resolved on that update, so a change made
   only through a parameter, or anything else the update changes, is not seen there.
 - `KmsKeyId` is still accepted and ignored, so an encrypted instance reports no key.
+
+## ELBv2 target group targets
+
+`AWS::ElasticLoadBalancingV2::TargetGroup` registers its `Targets` once the group is created, as
+`RegisterTargets` does, so `DescribeTargetHealth` reports them. A target is its `Id` and its `Port`,
+the group's port when it names none, so one instance can be declared on several ports. A Lambda
+target has no port and is its function ARN alone.
+
+- On `UpdateStack` (no interruption, as in AWS), the group keeps its ARN. The targets the template
+  gains are registered first, then the targets the previous template declared and the new one
+  drops are deregistered. A template that drops `Targets` deregisters every target the stack
+  declared. A target registered some other way, by `RegisterTargets`, an Auto Scaling group or an
+  ECS service, stays registered until a template declares it and a later one drops it. A declared
+  target registered with another `AvailabilityZone` is registered again with the declared one.
+- A target `RegisterTargets` refuses registers nothing, as it checks every target before it
+  registers any. A group the stack had just created for the resource is then deleted again, and a
+  group the update kept is left as it was. If deregistering fails after the registration, a kept
+  group gets back the registrations it had.
+- A failed update deregisters the targets the update registered and registers the ones it
+  deregistered again. When the group is gone by then, the rollback fails with
+  `TargetGroupNotFound` and leaves the stack in `UPDATE_ROLLBACK_FAILED`. `ContinueUpdateRollback`
+  fails the same way until the target group is passed in `ResourcesToSkip` (see
+  [Failed update rollbacks](#failed-update-rollbacks)).
+- A target group created before Floci registered `Targets` has no targets from its template. The
+  first update that changes the group registers the declared targets and deregisters nothing.
+- `QuicServerId` is accepted and ignored, as Floci's `RegisterTargets` has no QUIC support.
 
 ## S3 ownership controls
 

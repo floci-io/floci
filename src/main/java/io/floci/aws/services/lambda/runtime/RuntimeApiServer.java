@@ -1072,6 +1072,9 @@ public class RuntimeApiServer {
             if (invocation.getClientContext() != null) {
                 response.putHeader("Lambda-Runtime-Client-Context", invocation.getClientContext());
             }
+            if (invocation.getTraceId() != null) {
+                response.putHeader("Lambda-Runtime-Trace-Id", invocation.getTraceId());
+            }
             write = response.end(body);
         } catch (IllegalStateException alreadyEnded) {
             write = Future.failedFuture(alreadyEnded);

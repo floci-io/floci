@@ -14,6 +14,15 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.*;
 
 class EksAccessEntryTest {
+
+    /**
+     * A role is assumable by something, so its trust policy carries a statement: an empty object
+     * declares none, which IAM refuses rather than stores.
+     */
+    private static final String TRUST_POLICY = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+            "Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}""";
+
     @Test
     void sdkRoundTripPaginationAndClusterCleanup() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
@@ -22,9 +31,9 @@ class EksAccessEntryTest {
         String secondRole = "access-b-" + suffix;
         try (EksClient eks = TestFixtures.eksClient(); IamClient iam = TestFixtures.iamClient()) {
             String first = iam.createRole(builder -> builder.roleName(firstRole).path("/nodes/")
-                    .assumeRolePolicyDocument("{}")).role().arn();
+                    .assumeRolePolicyDocument(TRUST_POLICY)).role().arn();
             String second = iam.createRole(builder -> builder.roleName(secondRole)
-                    .assumeRolePolicyDocument("{}")).role().arn();
+                    .assumeRolePolicyDocument(TRUST_POLICY)).role().arn();
             try {
                 createCluster(eks, cluster, first);
                 CreateAccessEntryRequest request = CreateAccessEntryRequest.builder().clusterName(cluster)

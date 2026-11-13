@@ -24,14 +24,20 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,6 +55,7 @@ import java.util.stream.IntStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -59,12 +66,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -352,6 +361,61 @@ class CodeArtifactServiceTest {
     }
 
     /**
+     * Stands in for a real sidecar's {@code fetchPackageVersionAssetDigest} (the digest-only
+     * sibling {@code listPackageVersionAssets}/dispose byte-accounting now call instead of the
+     * full {@code fetchPackageVersionAsset}, so a mocked sidecar needs this stubbed too), computed
+     * over the exact algorithm set {@code CodeArtifactService} itself uses.
+     */
+    private static RepositorySidecarManager.AssetDigest digestOf(byte[] content) {
+        try {
+            MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
+            Map<String, String> hashes = new HashMap<>();
+            hashes.put("MD5", Digests.md5Hex(content));
+            hashes.put("SHA-1", Digests.sha1Hex(content));
+            hashes.put("SHA-256", Digests.sha256Hex(content));
+            hashes.put("SHA-512", HexFormat.of().formatHex(sha512.digest(content)));
+            return new RepositorySidecarManager.AssetDigest(content.length, hashes);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * {@code copyContainerBackedPackageVersions} now writes a copy through {@code
+     * copyPackageVersionAsset}'s {@code Path} overload, a file staged under the batch's own
+     * cleanup, deleted by the time the call returns, too late for a test to read it back
+     * afterward. Call this to set up the capture BEFORE invoking {@code copyPackageVersions},
+     * reading the file's bytes from inside the stubbed answer instead, while it still exists; the
+     * real write still happens underneath (the answer calls the real method), so this is additive
+     * instrumentation, not a replacement stub.
+     */
+    private static AtomicReference<byte[]> captureCopiedAssetContent(ReposiliteSidecarClient client,
+            String sourceRepoId, String sourceRepo, String destRepoId, String destRepo, String namespace,
+            String packageName, String version, String assetName) {
+        AtomicReference<byte[]> captured = new AtomicReference<>();
+        doAnswer(invocation -> {
+            captured.set(Files.readAllBytes(invocation.getArgument(9)));
+            return null;
+        }).when(client).copyPackageVersionAsset(eq(sourceRepoId), eq("dom"), eq(sourceRepo), eq(destRepoId),
+                eq(destRepo), eq(namespace), eq(packageName), eq(version), eq(assetName), any(Path.class),
+                anyLong());
+        return captured;
+    }
+
+    /** {@link #captureCopiedAssetContent}'s own counterpart for a rollback's {@code storePackageVersionAsset}. */
+    private static AtomicReference<byte[]> captureStoredAssetContent(ReposiliteSidecarClient client,
+            String destRepoId, String destRepo, String namespace, String packageName, String version,
+            String assetName) {
+        AtomicReference<byte[]> captured = new AtomicReference<>();
+        doAnswer(invocation -> {
+            captured.set(Files.readAllBytes(invocation.getArgument(7)));
+            return null;
+        }).when(client).storePackageVersionAsset(eq(destRepoId), eq("dom"), eq(destRepo), eq(namespace),
+                eq(packageName), eq(version), eq(assetName), any(Path.class), anyLong());
+        return captured;
+    }
+
+    /**
      * {@code recordContainerBackedAssetBytes} is what each of the three sidecar-backed proxies
      * calls after a real (non-idempotent, non-rejected) write; this is the unit-level proof that
      * it feeds {@code assetSizeBytes} correctly across all three formats plus generic at once,
@@ -510,6 +574,13 @@ class CodeArtifactServiceTest {
         HttpClient http = mock(HttpClient.class);
         HttpResponse<byte[]> absent = mock(HttpResponse.class);
         when(absent.statusCode()).thenReturn(404);
+        // A real HttpClient's body() is never null even for a 404 (Copilot's review of this PR:
+        // compareExistingNupkg now closes this body on the 404 branch), so this stub matches that
+        // instead of letting Mockito's default null stand in for a response shape that never
+        // actually occurs. doReturn, not when(...).thenReturn(...): this same mock also answers
+        // calls expecting an HttpResponse<byte[]>, and an InputStream is what the one caller that
+        // actually reads body() here (BodyHandlers.ofInputStream()) needs.
+        doReturn(new ByteArrayInputStream(new byte[0])).when(absent).body();
         HttpResponse<Void> published = mock(HttpResponse.class);
         when(published.statusCode()).thenReturn(201);
         when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenAnswer(call -> {
@@ -544,7 +615,7 @@ class CodeArtifactServiceTest {
         body.writeBytes(packageBytes);
         body.writeBytes("\r\n--boundary123--\r\n".getBytes(StandardCharsets.UTF_8));
 
-        Response response = controller.push(headers, "dom", "repo", body.toByteArray());
+        Response response = controller.push(headers, "dom", "repo", new ByteArrayInputStream(body.toByteArray()));
 
         assertEquals(201, response.getStatus());
         assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
@@ -675,7 +746,7 @@ class CodeArtifactServiceTest {
         AtomicBoolean wroteOldAsset = new AtomicBoolean();
         CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
-                oldClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                oldClaim.episodeId(), oldId, "demo.1.0.0.nupkg", 1,
                 () -> wroteOldAsset.set(true));
 
         assertFalse(result.fenceMatched());
@@ -703,7 +774,7 @@ class CodeArtifactServiceTest {
         AtomicBoolean wroteOldAsset = new AtomicBoolean();
         CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
-                newClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                newClaim.episodeId(), oldId, "demo.1.0.0.nupkg", 1,
                 () -> wroteOldAsset.set(true));
 
         assertFalse(result.fenceMatched());
@@ -1802,6 +1873,33 @@ class CodeArtifactServiceTest {
         order.verify(verdaccioClient).endUse(repoId);
     }
 
+    /**
+     * {@code getPackageVersionAssetStreamed}'s real HTTP caller (CodeArtifactController) only
+     * drains and closes the returned stream later, when JAX-RS writes the deferred response body:
+     * the lease must stay held until that real close happens, not just until this method itself
+     * returns, or a concurrent DeleteRepository could stop this npm sidecar mid-download.
+     */
+    @Test
+    void getPackageVersionAssetStreamedKeepsTheLeaseHeldUntilTheReturnedStreamIsClosed() throws Exception {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        byte[] tarball = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+        when(verdaccioClient.fetchPackageVersionAssetStreamed(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz")))
+                .thenReturn(Optional.of(new RepositorySidecarManager.StreamedAsset(
+                        new ByteArrayInputStream(tarball), tarball.length)));
+
+        CodeArtifactService.PackageVersionAssetStreamResult result = service.getPackageVersionAssetStreamed(REGION,
+                "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", null);
+
+        verify(verdaccioClient, never()).endUse(repoId);
+        result.content().close();
+        verify(verdaccioClient).endUse(repoId);
+    }
+
     @Test
     void describePackageBracketsVerdaccioExistenceCheckWithUse() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -2352,7 +2450,7 @@ class CodeArtifactServiceTest {
 
         CodeArtifactService.AssetRetentionAttemptResult retained = service.retainAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "nuget", null, "widget", "1.0.0", versionFence, packageFence,
-                claim.episodeId(), oldId, "widget.1.0.0.nupkg", new byte[] {1},
+                claim.episodeId(), oldId, "widget.1.0.0.nupkg", 1,
                 () -> wroteOldAsset.set(true));
         assertTrue(retained.fenceMatched());
         assertTrue(retained.wroteNewContent());
@@ -2627,7 +2725,7 @@ class CodeArtifactServiceTest {
                 reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
 
         assertFalse(result.fenceMatched());
-        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any(byte[].class));
     }
 
     /**
@@ -2669,7 +2767,7 @@ class CodeArtifactServiceTest {
                 episodeId, reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
 
         assertFalse(result.fenceMatched());
-        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any(byte[].class));
     }
 
     /**
@@ -2707,6 +2805,8 @@ class CodeArtifactServiceTest {
                 .thenReturn(List.of("widget-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(repoId, "dom", "repo", "com.example", "widget", "1.0",
                 "widget-1.0.jar")).thenReturn(Optional.of(content));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(repoId, "dom", "repo", "com.example", "widget", "1.0",
+                "widget-1.0.jar")).thenReturn(Optional.of(digestOf(content)));
 
         service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "widget",
                 List.of("1.0"), null, null);
@@ -2765,7 +2865,7 @@ class CodeArtifactServiceTest {
                 reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
 
         assertFalse(result.fenceMatched());
-        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any(byte[].class));
     }
 
     /**
@@ -3311,6 +3411,10 @@ class CodeArtifactServiceTest {
                 eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my-pkg-1.0.0.tgz"));
         when(verdaccioClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), isNull(), eq("my-pkg"),
                 eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(tarball));
+        when(verdaccioClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(tarball), tarball.length)));
         recordReadme("dom", "src", "npm", null, "my-pkg", "1.0.0", "# Real Readme");
 
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "npm", null, "my-pkg", List.of("1.0.0"),
@@ -3338,6 +3442,10 @@ class CodeArtifactServiceTest {
                 eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my_pkg-1.0.0.tar.gz"));
         when(pypiserverClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), isNull(), eq("my-pkg"),
                 eq("1.0.0"), eq("my_pkg-1.0.0.tar.gz"))).thenReturn(Optional.of(sdist));
+        when(pypiserverClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0.tar.gz"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(sdist), sdist.length)));
         recordReadme("dom", "src", "pypi", null, "my-pkg", "1.0.0", "A pypi description");
 
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "pypi", null, "my-pkg", List.of("1.0.0"),
@@ -3367,6 +3475,18 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(pomBytes), pomBytes.length)));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.jar");
+        AtomicReference<byte[]> copiedPom = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.pom");
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
@@ -3374,10 +3494,8 @@ class CodeArtifactServiceTest {
         assertTrue(result.failedVersions().isEmpty());
         assertEquals("Published", result.successfulVersions().get("1.0").status());
         assertFalse(result.successfulVersions().get("1.0").revision().isBlank());
-        verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(jarBytes));
-        verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"), eq(pomBytes));
+        assertArrayEquals(jarBytes, copiedJar.get());
+        assertArrayEquals(pomBytes, copiedPom.get());
         verify(reposiliteClient, never()).deletePackageVersionAsset(any(), any(), any(), any(), any(), any(),
                 any());
     }
@@ -3404,6 +3522,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
         long srcPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "src", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome srcClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
@@ -3451,11 +3573,19 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
         long srcPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "src", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome srcClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
@@ -3498,11 +3628,19 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
         long dstPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "dst", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome dstClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
@@ -3612,6 +3750,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes.clone()));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes.clone()), jarBytes.length)));
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
@@ -3637,12 +3783,20 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        byte[] sourceBytes = "source-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] differentBytes = "different-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("source-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(sourceBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("different-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(differentBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(sourceBytes), sourceBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(differentBytes), differentBytes.length)));
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
@@ -3666,11 +3820,21 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "stale-readme.txt"));
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.jar");
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false);
@@ -3685,7 +3849,9 @@ class CodeArtifactServiceTest {
         order.verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"),
                 eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"));
         order.verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(newJarBytes));
+                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), any(Path.class),
+                eq((long) newJarBytes.length));
+        assertArrayEquals(newJarBytes, copiedJar.get());
         verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("stale-readme.txt"));
     }
@@ -3717,15 +3883,24 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(pomBytes), pomBytes.length)));
         doThrow(new IllegalStateException("sidecar unreachable")).when(reposiliteClient).copyPackageVersionAsset(
                 eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId), eq("dst"), eq("com.example"), eq("a"), eq("1.0"),
-                eq("a-1.0.pom"), eq(pomBytes));
+                eq("a-1.0.pom"), any(Path.class), eq((long) pomBytes.length));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.jar");
 
         assertThrows(IllegalStateException.class, () -> service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false));
 
-        verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(jarBytes));
+        assertArrayEquals(jarBytes, copiedJar.get());
         verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"));
     }
@@ -3759,15 +3934,28 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(newPomBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newPomBytes), newPomBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
         doThrow(new IllegalStateException("sidecar unreachable")).when(reposiliteClient).copyPackageVersionAsset(
                 eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId), eq("dst"), eq("com.example"), eq("a"), eq("1.0"),
-                eq("a-1.0.pom"), eq(newPomBytes));
+                eq("a-1.0.pom"), any(Path.class), eq((long) newPomBytes.length));
+        AtomicReference<byte[]> restoredJar = captureStoredAssetContent(reposiliteClient, dstRepoId, "dst",
+                "com.example", "a", "1.0", "a-1.0.jar");
 
         assertThrows(IllegalStateException.class, () -> service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false));
 
-        verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(oldJarBytes));
+        assertArrayEquals(oldJarBytes, restoredJar.get());
     }
 
     @Test
@@ -3786,6 +3974,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
 
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "maven", "com.example", "a",
                 List.of("1.0"), null, false, false);
@@ -3813,6 +4005,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(pomBytes), pomBytes.length)));
 
         long before = service.describeDomain(REGION, "dom", null).assetSizeBytes();
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "maven", "com.example", "a",
@@ -3875,6 +4075,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
 
         String describedRevision = service.describePackageVersion(REGION, "dom", null, "src", "maven",
                 "com.example", "a", "1.0").getRevision();
@@ -4483,6 +4687,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(jarBytes)));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(digestOf(pomBytes)));
 
         CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
                 null, "repo", "maven", "com.example", "a", "1.0", null, null);
@@ -4818,8 +5026,8 @@ class CodeArtifactServiceTest {
                 .thenReturn(true);
         when(verdaccioClient.listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
                 .thenReturn(List.of("my-pkg-1.0.0.tgz"));
-        when(verdaccioClient.fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
-                "my-pkg-1.0.0.tgz")).thenReturn(Optional.of(new byte[] {1, 2, 3}));
+        when(verdaccioClient.fetchPackageVersionAssetDigest(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz")).thenReturn(Optional.of(digestOf(new byte[] {1, 2, 3})));
 
         CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
                 null, "repo", "npm", null, "my-pkg", "1.0.0", null, null);
@@ -4829,7 +5037,7 @@ class CodeArtifactServiceTest {
         order.verify(verdaccioClient).beginUse(repoId);
         order.verify(verdaccioClient).packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
         order.verify(verdaccioClient).listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
-        order.verify(verdaccioClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+        order.verify(verdaccioClient).fetchPackageVersionAssetDigest(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
                 "my-pkg-1.0.0.tgz");
         order.verify(verdaccioClient).endUse(repoId);
     }
@@ -5412,6 +5620,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(new byte[25]));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(new byte[40])));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(digestOf(new byte[25])));
         doThrow(new IllegalStateException("sidecar unreachable"))
                 .when(reposiliteClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"),
                         eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"));
@@ -5633,6 +5845,8 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(new byte[40])));
 
         CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
                 null, "repo", "maven", "com.example", "a", List.of("1.0"), null);
@@ -5958,6 +6172,8 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(new byte[40])));
 
         service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"),
                 null, null);
@@ -5993,6 +6209,11 @@ class CodeArtifactServiceTest {
         when(pypiserverClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
                 eq("1.0"), eq("my_pkg-1.0-py3-none-any.whl"))).thenAnswer(invocation ->
                         sdistDeleted.get() ? Optional.empty() : Optional.of(new byte[25]));
+        when(pypiserverClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0"), eq("my-pkg-1.0.tar.gz"))).thenReturn(Optional.of(digestOf(new byte[40])));
+        when(pypiserverClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0"), eq("my_pkg-1.0-py3-none-any.whl"))).thenAnswer(invocation ->
+                        sdistDeleted.get() ? Optional.empty() : Optional.of(digestOf(new byte[25])));
         doAnswer(invocation -> {
             sdistDeleted.set(true);
             return null;
@@ -6027,6 +6248,9 @@ class CodeArtifactServiceTest {
         when(verdaccioClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
                 eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of("tgz-bytes".getBytes(
                         StandardCharsets.UTF_8)));
+        when(verdaccioClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(digestOf(
+                        "tgz-bytes".getBytes(StandardCharsets.UTF_8))));
         recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "hello");
 
         CodeArtifactService.PackageVersionStatusChangeResult changed = service.updatePackageVersionsStatus(REGION,
@@ -6070,6 +6294,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJar));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJar));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJar), newJar.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJar), oldJar.length)));
         when(reposiliteClient.listPackageVersions(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"))).thenReturn(List.of(
                         new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));

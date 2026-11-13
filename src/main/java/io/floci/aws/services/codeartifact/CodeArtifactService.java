@@ -12,6 +12,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServiceConfigAccess;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -25,6 +26,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -39,7 +41,6 @@ import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -132,6 +133,14 @@ public class CodeArtifactService implements Resettable {
     // Package-private: reused by CodeArtifactMavenController so the Maven proxy enforces the same
     // documented 5 GB AWS quota rather than duplicating the constant.
     static final long MAX_ASSET_FILE_SIZE_BYTES = 5L * 1024 * 1024 * 1024;
+    // Package-private: the pypi/NuGet push controllers stage their whole raw multipart request
+    // body to disk before they have parsed far enough to know the real asset's own size (the
+    // envelope's boundaries, headers, and handful of small text fields have no size semantics of
+    // their own against the 5 GB asset quota). Without a cap on that staging step itself, a
+    // client could still force an arbitrarily large, wholly uncapped file onto disk before the
+    // real per-asset quota check downstream ever gets a chance to run. 64 MiB of slack is many
+    // times more than any real multipart envelope's own overhead ever needs.
+    static final long MAX_MULTIPART_ENVELOPE_BYTES = MAX_ASSET_FILE_SIZE_BYTES + 64L * 1024 * 1024;
     private static final int MAX_ASSETS_PER_PACKAGE_VERSION = 350;
     // AWS's own wire model: every batch package-version action's own PackageVersionList shape
     // (CopyPackageVersionsRequest.versions, UpdatePackageVersionsStatusRequest.versions,
@@ -153,6 +162,13 @@ public class CodeArtifactService implements Resettable {
     public record ResourcePolicy(String resourceArn, String revision, String document) {}
     public record PublishPackageVersionResult(CodeArtifactPackageVersion packageVersion, PackageAsset asset) {}
     public record PackageVersionAssetResult(PackageAsset asset, String packageVersionRevision) {}
+    /**
+     * {@link PackageVersionAssetResult}'s streamed sibling, for {@code GetPackageVersionAsset}'s
+     * real HTTP entry point: the caller owns closing {@code content}. {@code contentLength} is -1
+     * when it could not be determined up front.
+     */
+    public record PackageVersionAssetStreamResult(InputStream content, long contentLength, String assetName,
+            String packageVersionRevision) {}
     public record PackageVersionReadmeResult(String format, String namespace, String packageName, String version,
             String versionRevision, String readme) {}
     public record SuccessfulPackageVersionInfo(String revision, String status) {}
@@ -872,30 +888,76 @@ public class CodeArtifactService implements Resettable {
 
     // ------------------------------------------------------- package versions
 
-    public synchronized PublishPackageVersionResult publishPackageVersion(String region, String domain,
+    public PublishPackageVersionResult publishPackageVersion(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
             String version, String assetName, String assetSha256, String unfinishedParam, byte[] content) {
+        byte[] assetContent = content != null ? content : new byte[0];
+        return publishPackageVersion(region, domain, domainOwner, repository, format, namespace, packageName,
+                version, assetName, assetSha256, unfinishedParam, new ByteArrayInputStream(assetContent));
+    }
+
+    /**
+     * {@code byte[]}-taking sibling's own streamed real implementation: every production caller
+     * (the generic {@code PublishPackageVersion} controller route) goes through this one, for an
+     * asset too large to ever hold as a single {@code byte[]} (~2 GiB, the JVM array limit) the
+     * way the one above still does. Staging the body to disk and digesting it (the only genuinely
+     * slow part of a large publish) happens here, outside this method's own lock, so a multi-GB
+     * upload does not serialize every other CodeArtifact operation for as long as it takes to
+     * read; {@link #publishPackageVersionLocked} then does the fast, lock-protected decision and
+     * write against the already-staged file and already-computed hashes.
+     */
+    public PublishPackageVersionResult publishPackageVersion(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String assetSha256, String unfinishedParam, InputStream body) {
         if (!"generic".equals(format)) {
             throw validation("format must be 'generic'; PublishPackageVersion only supports the generic "
                     + "package format.");
-        }
-        boolean unfinished = parseBoolean(unfinishedParam);
-        validatePackageToken("package", packageName);
-        validatePackageToken("packageVersion", version);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
         }
         validateAssetName(assetName);
         if (assetSha256 == null || !SigV4RequestValidator.isSha256Hex(assetSha256)) {
             throw validation("assetSHA256 is required and must be a 64-character SHA-256 hex digest.");
         }
-        byte[] assetContent = content != null ? content : new byte[0];
-        if (assetContent.length > MAX_ASSET_FILE_SIZE_BYTES) {
+        // Raised by Qodo's review of this PR: these are cheap, request-only checks with no
+        // dependency on the upload itself, so running them before staging+digesting (up to 5 GB,
+        // the only genuinely slow part of this method) rejects a malformed coordinate or a
+        // request aimed at a nonexistent repository immediately, instead of only after paying for
+        // the full staging cost first. publishPackageVersionLocked has exactly one caller (this
+        // method), so this is a move, not a duplicate: the repository/domain checks that still
+        // need the lock stay there.
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        AssetUpload upload;
+        try {
+            AssetDigestingInputStream digesting = new AssetDigestingInputStream(body, MAX_ASSET_FILE_SIZE_BYTES);
+            Path staged = stageAssetBody(digesting);
+            upload = new AssetUpload(staged, digesting.size(), digesting.hashesHex());
+        } catch (AssetDigestingInputStream.AssetTooLargeException e) {
             throw new AwsException("ServiceQuotaExceededException",
                     "The maximum asset file size is 5 Gigabytes.", 402,
                     resourceFields(assetName, "asset"));
         }
-        String actualSha256 = Digests.sha256Hex(assetContent);
+        try {
+            return publishPackageVersionLocked(region, domain, domainOwner, repository, format, namespace,
+                    packageName, version, assetName, assetSha256, unfinishedParam, upload);
+        } finally {
+            // A no-op when the write below already moved this same file into place: deleting an
+            // already-moved path is simply not there to delete.
+            deleteStagedAssetBody(upload.content());
+        }
+    }
+
+    /** {@link #publishPackageVersion(String, String, String, String, String, String, String, String, String,
+     * String, String, InputStream)}'s own already-staged, already-digested upload. */
+    private record AssetUpload(Path content, long size, Map<String, String> hashes) {}
+
+    private synchronized PublishPackageVersionResult publishPackageVersionLocked(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String assetSha256, String unfinishedParam, AssetUpload upload) {
+        boolean unfinished = parseBoolean(unfinishedParam);
+        String actualSha256 = upload.hashes().get("SHA-256");
         if (!assetSha256.equalsIgnoreCase(actualSha256)) {
             throw validation("assetSHA256 does not match the SHA-256 hash of the uploaded content.");
         }
@@ -954,7 +1016,7 @@ public class CodeArtifactService implements Resettable {
             // (missing file, or bytes corrupted independently of Floci) still self-heal here, since
             // existingFileMatches actually reads the file back rather than trusting it's fine.
             if (!existingFileMatches(owner, key, assetName, actualSha256)) {
-                writeAssetContent(owner, key, assetName, assetContent);
+                writeAssetContent(owner, key, assetName, upload.content());
             }
             return new PublishPackageVersionResult(pv, existingAsset);
         }
@@ -982,7 +1044,7 @@ public class CodeArtifactService implements Resettable {
                 // Only rewrites when the actual disk bytes don't check out: see the identical
                 // reasoning on the Published branch above.
                 if (!existingFileMatches(owner, key, assetName, actualSha256)) {
-                    writeAssetContent(owner, key, assetName, assetContent);
+                    writeAssetContent(owner, key, assetName, upload.content());
                 }
                 return new PublishPackageVersionResult(pv, existingAsset);
             }
@@ -995,10 +1057,9 @@ public class CodeArtifactService implements Resettable {
 
         PackageAsset asset = new PackageAsset();
         asset.setName(assetName);
-        asset.setSize(assetContent.length);
-        asset.setContent(assetContent);
-        asset.setHashes(computeHashes(assetContent));
-        writeAssetContent(owner, key, assetName, assetContent);
+        asset.setSize(upload.size());
+        asset.setHashes(new LinkedHashMap<>(upload.hashes()));
+        writeAssetContent(owner, key, assetName, upload.content());
         assets.put(assetName, asset);
         pv.setAssets(assets);
 
@@ -1096,12 +1157,12 @@ public class CodeArtifactService implements Resettable {
                         nextToken, 100, 1000, "ValidationException");
                 List<AssetSummary> pageAssets = new ArrayList<>();
                 for (String assetName : namePage.items()) {
-                    byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
-                                    packageName, version, assetName)
+                    RepositorySidecarManager.AssetDigest digest = manager.fetchPackageVersionAssetDigest(repoId,
+                                    domain, repository, namespace, packageName, version, assetName)
                             .orElseThrow(() -> new AwsException("InternalServerException", "Could not list version '"
                                     + version + "' of package '" + packageName + "': its asset '" + assetName
                                     + "' disappeared between listing and fetching it.", 500));
-                    pageAssets.add(new AssetSummary(assetName, content.length, computeHashes(content)));
+                    pageAssets.add(new AssetSummary(assetName, digest.size(), digest.hashes()));
                 }
                 page = new PaginatedResult<>(pageAssets, namePage.nextToken());
                 revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
@@ -2054,8 +2115,9 @@ public class CodeArtifactService implements Resettable {
             String version, List<String> assetNames) {
         Map<String, Long> sizeByAssetName = new LinkedHashMap<>();
         for (String assetName : assetNames) {
-            sizeByAssetName.put(assetName, manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
-                    packageName, version, assetName).map(bytes -> (long) bytes.length).orElse(0L));
+            sizeByAssetName.put(assetName, manager.fetchPackageVersionAssetDigest(repoId, domain, repository,
+                    namespace, packageName, version, assetName).map(RepositorySidecarManager.AssetDigest::size)
+                    .orElse(0L));
         }
         String key = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName)));
@@ -3341,6 +3403,38 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * {@link #deployMavenAssetUnderVersionFence(String, String, String, String, String, String,
+     * String, long, long, long, ReposiliteSidecarClient, String, String, byte[])}'s own streamed
+     * sibling, for a release too large to ever hold as one {@code byte[]} (Maven's real-world
+     * assets are the least likely of any format here to actually need this, but the mechanism is
+     * shared infrastructure, not a per-format one): {@code contentLength} is the caller's own
+     * already-known size (from staging/digesting the upload), passed through rather than re-read
+     * from disk a second time.
+     */
+    public synchronized MavenDeployAttemptResult deployMavenAssetUnderVersionFence(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, String version,
+            long versionFenceSnapshot, long packageFenceSnapshot, long episodeId, ReposiliteSidecarClient reposilite,
+            String repoId, String gav, Path content, long contentLength) {
+        if (!retentionWriteStillAllowed(region, domain, domainOwner, repository, "maven", namespace, packageName,
+                version, repoId, versionFenceSnapshot, episodeId)) {
+            return new MavenDeployAttemptResult(false, null);
+        }
+        ReposiliteSidecarClient.DeployOutcome outcome;
+        try {
+            outcome = reposilite.deployArtifact(repoId, gav, content);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not deploy {0} while retaining a Maven release through an external connection.",
+                    gav);
+            return new MavenDeployAttemptResult(true, null);
+        }
+        if ((outcome.status() == 200 || outcome.status() == 201) && outcome.wroteNewContent()) {
+            recordContainerBackedAssetBytes(region, domain, domainOwner, repository, "maven", namespace,
+                    packageName, contentLength, packageFenceSnapshot);
+        }
+        return new MavenDeployAttemptResult(true, outcome);
+    }
+
+    /**
      * The shared fence/status/claim-episode gate {@link #deployMavenAssetUnderVersionFence} and
      * {@link #retainAssetUnderVersionFence} both check, inside the very same {@code synchronized}
      * call, right before their own format-specific sidecar write: see {@link
@@ -3407,7 +3501,7 @@ public class CodeArtifactService implements Resettable {
     public synchronized AssetRetentionAttemptResult retainAssetUnderVersionFence(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
             String version, long versionFenceSnapshot, long packageFenceSnapshot, long episodeId,
-            String repositoryContainerId, String assetName, byte[] content, Runnable write) {
+            String repositoryContainerId, String assetName, long contentLength, Runnable write) {
         if (!retentionWriteStillAllowed(region, domain, domainOwner, repository, format, namespace, packageName,
                 version, repositoryContainerId, versionFenceSnapshot, episodeId)) {
             return new AssetRetentionAttemptResult(false, false);
@@ -3420,7 +3514,7 @@ public class CodeArtifactService implements Resettable {
             return new AssetRetentionAttemptResult(true, false);
         }
         recordContainerBackedAssetBytes(region, domain, domainOwner, repository, format, namespace, packageName,
-                content.length, packageFenceSnapshot);
+                contentLength, packageFenceSnapshot);
         return new AssetRetentionAttemptResult(true, true);
     }
 
@@ -3707,20 +3801,8 @@ public class CodeArtifactService implements Resettable {
     public PackageVersionAssetResult getPackageVersionAsset(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version,
             String assetName, String packageVersionRevision) {
-        if (format == null || !PACKAGE_FORMATS.contains(format)) {
-            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
-        }
-        requireNonBlank(domain, "domain");
-        requireNonBlank(repository, "repository");
-        requireNonBlank(packageName, "package");
-        requireNonBlank(version, "packageVersion");
-        requireNonBlank(assetName, "asset");
-        validatePackageToken("package", packageName);
-        validatePackageToken("packageVersion", version);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
-        }
-        String owner = effectiveOwner(domainOwner);
+        String owner = validateAssetFetchArguments(format, domain, repository, packageName, version, assetName,
+                namespace, domainOwner);
 
         // Maven, npm, pypi, and nuget are metadata-free passthroughs straight to their own sidecar
         // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarClient/BagetterSidecarClient): publish for
@@ -3752,6 +3834,60 @@ public class CodeArtifactService implements Resettable {
         // rather than trusting whatever happens to already be on the object.
         asset.setContent(readAssetContent(owner, key, assetName));
         return new PackageVersionAssetResult(asset, pv.getRevision());
+    }
+
+    /**
+     * {@link #getPackageVersionAsset}'s streamed sibling, for {@code GetPackageVersionAsset}'s real
+     * HTTP entry point, which has to hand back whatever was actually published, and that can be
+     * gigabytes: the {@code byte[]}-returning method above stays exactly as it was for its ~40
+     * direct test call sites and anything else that only ever fetches a small fixture. The caller
+     * owns closing the returned stream.
+     */
+    public PackageVersionAssetStreamResult getPackageVersionAssetStreamed(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String packageVersionRevision) {
+        String owner = validateAssetFetchArguments(format, domain, repository, packageName, version, assetName,
+                namespace, domainOwner);
+
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return getContainerBackedPackageVersionAssetStreamed(region, domain, owner, repository, format,
+                    namespace, packageName, version, assetName, packageVersionRevision);
+        }
+
+        String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+        CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        requireAssetDownloadable(pv.getStatus(), version);
+        if (packageVersionRevision != null && !packageVersionRevision.equals(pv.getRevision())) {
+            throw notFound("Package version '" + version + "' was not found at revision '"
+                    + packageVersionRevision + "'.", version, "package-version");
+        }
+        PackageAsset asset = pv.getAssets().get(assetName);
+        if (asset == null) {
+            throw notFound("Asset '" + assetName + "' was not found on package version '" + version + "'.",
+                    assetName, "asset");
+        }
+        return new PackageVersionAssetStreamResult(openAssetContent(owner, key, assetName), asset.getSize(),
+                assetName, pv.getRevision());
+    }
+
+    private String validateAssetFetchArguments(String format, String domain, String repository, String packageName,
+            String version, String assetName, String namespace, String domainOwner) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        requireNonBlank(packageName, "package");
+        requireNonBlank(version, "packageVersion");
+        requireNonBlank(assetName, "asset");
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        return effectiveOwner(domainOwner);
     }
 
     private PackageVersionAssetResult getContainerBackedPackageVersionAsset(String region, String domain,
@@ -3790,6 +3926,47 @@ public class CodeArtifactService implements Resettable {
             return new PackageVersionAssetResult(asset, revision);
         } finally {
             endSidecarUse(manager, repoId);
+        }
+    }
+
+    /** {@link #getContainerBackedPackageVersionAsset}'s streamed sibling; see that method's own javadoc. */
+    private PackageVersionAssetStreamResult getContainerBackedPackageVersionAssetStreamed(String region,
+            String domain, String owner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String packageVersionRevision) {
+        if ("maven".equals(format) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when requesting an asset from a maven package version.");
+        }
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        boolean leaseTransferred = false;
+        try {
+            PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                    format, namespace, packageName, version, repoId);
+            String revision = state.revision();
+            if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
+                throw notFound("Package version '" + version + "' was not found at revision '"
+                        + packageVersionRevision + "'.", version, "package-version");
+            }
+            requireAssetDownloadable(state.status(), version);
+            RepositorySidecarManager.StreamedAsset streamed = manager.fetchPackageVersionAssetStreamed(repoId,
+                            domain, repository, namespace, packageName, version, assetName)
+                    .orElseThrow(() -> notFound("Asset '" + assetName + "' was not found on package version '"
+                            + version + "'.", assetName, "asset"));
+            // The caller (CodeArtifactController) only drains this stream later, when JAX-RS
+            // actually writes the deferred StreamingOutput response body: releasing the lease
+            // here, as soon as this method returns, would let a concurrent DeleteRepository stop
+            // this sidecar container mid-download. Tying the release to the stream's own close
+            // instead keeps the container alive for exactly as long as beginUse/endUse promise.
+            InputStream content = StreamingResponses.closingWith(streamed.content(),
+                    () -> endSidecarUse(manager, repoId));
+            leaseTransferred = true;
+            return new PackageVersionAssetStreamResult(content, streamed.contentLength(), assetName, revision);
+        } finally {
+            if (!leaseTransferred) {
+                endSidecarUse(manager, repoId);
+            }
         }
     }
 
@@ -4049,20 +4226,33 @@ public class CodeArtifactService implements Resettable {
         // hashes before any version in this same batch has anything written to the destination
         // or committed: a missing or corrupted source asset for version 3 of 5 must never leave
         // versions 1 and 2 committed while the batch as a whole fails, and must never be
-        // discovered only after this method already started mutating the destination.
-        Map<String, Map<String, byte[]>> verifiedContentByVersion = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            verifiedContentByVersion.put(version, verifyAndReadSourceAssets(owner, sourceByVersion.get(version)));
-        }
+        // discovered only after this method already started mutating the destination. Each
+        // asset is staged to its own temp file rather than held as a byte[] (a whole batch's
+        // worth of multi-GB assets could never fit as resident arrays at once); every staged
+        // file across the whole batch call is collected here and deleted exactly once in the
+        // finally below, regardless of how the batch finishes, the same convention
+        // copyContainerBackedPackageVersions already uses.
+        List<Path> stagedFiles = new ArrayList<>();
+        try {
+            Map<String, Map<String, Path>> verifiedContentByVersion = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                verifiedContentByVersion.put(version, verifyAndReadSourceAssets(owner, sourceByVersion.get(version),
+                        stagedFiles));
+            }
 
-        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            CodeArtifactPackageVersion copied = copyGenericPackageVersionAssets(owner, region, domain,
-                    destinationRepository, format, namespace, packageName, version, sourceByVersion.get(version),
-                    verifiedContentByVersion.get(version));
-            successes.put(version, new SuccessfulPackageVersionInfo(copied.getRevision(), copied.getStatus()));
+            Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                CodeArtifactPackageVersion copied = copyGenericPackageVersionAssets(owner, region, domain,
+                        destinationRepository, format, namespace, packageName, version,
+                        sourceByVersion.get(version), verifiedContentByVersion.get(version));
+                successes.put(version, new SuccessfulPackageVersionInfo(copied.getRevision(), copied.getStatus()));
+            }
+            return new CopyPackageVersionsResult(successes, Map.of());
+        } finally {
+            for (Path staged : stagedFiles) {
+                deleteStagedAssetBody(staged);
+            }
         }
-        return new CopyPackageVersionsResult(successes, Map.of());
     }
 
     /**
@@ -4195,97 +4385,136 @@ public class CodeArtifactService implements Resettable {
 
         // Same verify-before-write ordering as the generic path's own two-pass split: every
         // pending version's source assets are fetched and confirmed present before any version in
-        // this batch has anything written to the destination.
-        Map<String, Map<String, byte[]>> verifiedContentByVersion = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            Map<String, byte[]> contentByAsset = new LinkedHashMap<>();
-            for (String assetName : sourceAssetNamesByVersion.get(version)) {
-                byte[] content = manager.fetchPackageVersionAsset(sourceRepoId, domain, sourceRepository, namespace,
-                                packageName, version, assetName)
-                        .orElseThrow(() -> new AwsException("InternalServerException", "Could not copy version '"
-                                + version + "' of package '" + packageName + "': its asset '" + assetName
-                                + "' disappeared from the source repository between listing and fetching it.",
-                                500));
-                contentByAsset.put(assetName, content);
+        // this batch has anything written to the destination. Each asset is staged to its own
+        // temp file rather than held as a byte[] (a whole batch's worth of multi-GB assets could
+        // never fit as resident arrays at once); every staged file across the whole batch call,
+        // source content and destination rollback snapshots alike, is collected here and deleted
+        // exactly once in the finally below, regardless of how the batch finishes.
+        List<Path> stagedFiles = new ArrayList<>();
+        try {
+            Map<String, Map<String, Path>> verifiedContentByVersion = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                Map<String, Path> contentByAsset = new LinkedHashMap<>();
+                for (String assetName : sourceAssetNamesByVersion.get(version)) {
+                    RepositorySidecarManager.StreamedAsset streamed = manager.fetchPackageVersionAssetStreamed(
+                                    sourceRepoId, domain, sourceRepository, namespace, packageName, version,
+                                    assetName)
+                            .orElseThrow(() -> new AwsException("InternalServerException", "Could not copy "
+                                    + "version '" + version + "' of package '" + packageName + "': its asset '"
+                                    + assetName + "' disappeared from the source repository between listing and "
+                                    + "fetching it.", 500));
+                    Path staged = stageStreamedAsset(streamed);
+                    stagedFiles.add(staged);
+                    contentByAsset.put(assetName, staged);
+                }
+                verifiedContentByVersion.put(version, contentByAsset);
             }
-            verifiedContentByVersion.put(version, contentByAsset);
-        }
 
-        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            List<String> destAssetNames = destAssetNamesByVersion.getOrDefault(version, List.of());
-            Map<String, byte[]> originalContent = new LinkedHashMap<>();
-            for (String destAssetName : destAssetNames) {
-                manager.fetchPackageVersionAsset(destRepoId, domain, destinationRepository, namespace, packageName,
-                                version, destAssetName)
-                        .ifPresent(content -> originalContent.put(destAssetName, content));
-            }
-            List<String> touchedAssetNames = new ArrayList<>();
-            // Snapshotted immediately before this version's own writes, the same way every other
-            // container-backed write path already takes its fence snapshot right before issuing
-            // the real write it will later report: recording this version's bytes must still
-            // reflect the latest live state even if an earlier version in this same batch call
-            // already changed it (there is no shared snapshot spanning the whole batch to go
-            // stale as later versions are processed).
-            long packageFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
-                    destinationRepository, format, namespace, packageName);
-            long bytesWritten = 0L;
-            try {
-                // Every asset this version already held at the destination is deleted first, in
-                // its own phase, before anything new is written: pypiserver's own delete call
-                // (confirmed live) removes every file sharing that exact package name and
-                // version, not just the one asset name passed to it, so deleting a same-named
-                // asset in the middle of a per-asset write loop would silently wipe a sibling
-                // asset (e.g. the wheel of a release also carrying an sdist) already rewritten
-                // earlier in that same loop. Clearing everything up front, before any of this
-                // version's new content exists to be collaterally wiped, is correct for every
-                // format: Reposilite/Verdaccio/BaGetter's own deletes are already scoped to
-                // exactly the asset (or, for npm/nuget, the single asset their formats ever hold
-                // per version) being removed, so doing them first changes nothing for them, and
-                // still satisfies Reposilite's own redeployment:false rejection of a plain PUT
-                // over differing existing content the same way the previous interleaved ordering
-                // did.
+            Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                List<String> destAssetNames = destAssetNamesByVersion.getOrDefault(version, List.of());
+                Map<String, Path> originalContent = new LinkedHashMap<>();
                 for (String destAssetName : destAssetNames) {
-                    manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
-                            packageName, version, destAssetName);
-                    touchedAssetNames.add(destAssetName);
+                    manager.fetchPackageVersionAssetStreamed(destRepoId, domain, destinationRepository, namespace,
+                                    packageName, version, destAssetName)
+                            .ifPresent(streamed -> {
+                                Path staged = stageStreamedAsset(streamed);
+                                stagedFiles.add(staged);
+                                originalContent.put(destAssetName, staged);
+                            });
                 }
-                for (Map.Entry<String, byte[]> entry : verifiedContentByVersion.get(version).entrySet()) {
-                    String assetName = entry.getKey();
-                    manager.copyPackageVersionAsset(sourceRepoId, domain, sourceRepository, destRepoId,
-                            destinationRepository, namespace, packageName, version, assetName, entry.getValue());
-                    if (!touchedAssetNames.contains(assetName)) {
-                        touchedAssetNames.add(assetName);
+                List<String> touchedAssetNames = new ArrayList<>();
+                // Snapshotted immediately before this version's own writes, the same way every other
+                // container-backed write path already takes its fence snapshot right before issuing
+                // the real write it will later report: recording this version's bytes must still
+                // reflect the latest live state even if an earlier version in this same batch call
+                // already changed it (there is no shared snapshot spanning the whole batch to go
+                // stale as later versions are processed).
+                long packageFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
+                        destinationRepository, format, namespace, packageName);
+                long bytesWritten = 0L;
+                try {
+                    // Every asset this version already held at the destination is deleted first, in
+                    // its own phase, before anything new is written: pypiserver's own delete call
+                    // (confirmed live) removes every file sharing that exact package name and
+                    // version, not just the one asset name passed to it, so deleting a same-named
+                    // asset in the middle of a per-asset write loop would silently wipe a sibling
+                    // asset (e.g. the wheel of a release also carrying an sdist) already rewritten
+                    // earlier in that same loop. Clearing everything up front, before any of this
+                    // version's new content exists to be collaterally wiped, is correct for every
+                    // format: Reposilite/Verdaccio/BaGetter's own deletes are already scoped to
+                    // exactly the asset (or, for npm/nuget, the single asset their formats ever hold
+                    // per version) being removed, so doing them first changes nothing for them, and
+                    // still satisfies Reposilite's own redeployment:false rejection of a plain PUT
+                    // over differing existing content the same way the previous interleaved ordering
+                    // did.
+                    for (String destAssetName : destAssetNames) {
+                        manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                                packageName, version, destAssetName);
+                        touchedAssetNames.add(destAssetName);
                     }
-                    bytesWritten += entry.getValue().length;
+                    for (Map.Entry<String, Path> entry : verifiedContentByVersion.get(version).entrySet()) {
+                        String assetName = entry.getKey();
+                        long contentLength = Files.size(entry.getValue());
+                        manager.copyPackageVersionAsset(sourceRepoId, domain, sourceRepository, destRepoId,
+                                destinationRepository, namespace, packageName, version, assetName, entry.getValue(),
+                                contentLength);
+                        if (!touchedAssetNames.contains(assetName)) {
+                            touchedAssetNames.add(assetName);
+                        }
+                        bytesWritten += contentLength;
+                    }
+                    manager.recordVersionAvailable(destRepoId, domain, destinationRepository, namespace, packageName,
+                            version);
+                } catch (IOException e) {
+                    rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository,
+                            namespace, packageName, version, originalContent, touchedAssetNames);
+                    throw new UncheckedIOException(e);
+                } catch (RuntimeException e) {
+                    rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository,
+                            namespace, packageName, version, originalContent, touchedAssetNames);
+                    throw e;
                 }
-                manager.recordVersionAvailable(destRepoId, domain, destinationRepository, namespace, packageName,
+                if (bytesWritten > 0) {
+                    recordContainerBackedAssetBytes(region, domain, owner, destinationRepository, format, namespace,
+                            packageName, bytesWritten, packageFenceSnapshot);
+                }
+                copyCapturedReadmeIfApplicable(region, domain, owner, sourceRepository, destinationRepository,
+                        format, namespace, packageName, version);
+                copyMavenRetainedVersionOriginIfApplicable(region, domain, owner, sourceRepository,
+                        destinationRepository, format, namespace, packageName, version);
+                // Drops any status override left over from whatever used to be at this destination
+                // coordinate (an Archived version this copy's allowOverwrite just replaced, most
+                // concretely): the response below reports Published, and a stale override would
+                // otherwise keep describing (and keep requireAssetDownloadable blocking downloads of)
+                // content that no longer matches what is now really there. A destination that
+                // never had an override is an inexpensive no-op (see that method's own javadoc).
+                clearContainerBackedStatusOverride(owner, region, domain, destinationRepository, format, namespace,
+                        packageName, version);
+                String revision = synthesizeContainerBackedRevision(format, destRepoId, namespace, packageName,
                         version);
-            } catch (RuntimeException e) {
-                rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository, namespace,
-                        packageName, version, originalContent, touchedAssetNames);
-                throw e;
+                successes.put(version, new SuccessfulPackageVersionInfo(revision, "Published"));
             }
-            if (bytesWritten > 0) {
-                recordContainerBackedAssetBytes(region, domain, owner, destinationRepository, format, namespace,
-                        packageName, bytesWritten, packageFenceSnapshot);
+            return new CopyPackageVersionsResult(successes, Map.of());
+        } finally {
+            for (Path staged : stagedFiles) {
+                deleteStagedAssetBody(staged);
             }
-            copyCapturedReadmeIfApplicable(region, domain, owner, sourceRepository, destinationRepository, format,
-                    namespace, packageName, version);
-            copyMavenRetainedVersionOriginIfApplicable(region, domain, owner, sourceRepository,
-                    destinationRepository, format, namespace, packageName, version);
-            // Drops any status override left over from whatever used to be at this destination
-            // coordinate (an Archived version this copy's allowOverwrite just replaced, most
-            // concretely): the response below reports Published, and a stale override would
-            // otherwise keep describing (and keep requireAssetDownloadable blocking downloads of)
-            // content that no longer matches what is now really there. A destination that
-            // never had an override is an inexpensive no-op (see that method's own javadoc).
-            clearContainerBackedStatusOverride(owner, region, domain, destinationRepository, format, namespace,
-                    packageName, version);
-            String revision = synthesizeContainerBackedRevision(format, destRepoId, namespace, packageName, version);
-            successes.put(version, new SuccessfulPackageVersionInfo(revision, "Published"));
         }
-        return new CopyPackageVersionsResult(successes, Map.of());
+    }
+
+    /**
+     * Stages an already-fetched streamed asset to a temp file via {@link #stageAssetBody}, closing
+     * the stream afterward regardless of outcome: {@link #stageAssetBody} itself never closes the
+     * body it is handed, since its other caller (a controller's own inbound request stream) owns
+     * that separately.
+     */
+    private Path stageStreamedAsset(RepositorySidecarManager.StreamedAsset streamed) {
+        try {
+            return stageAssetBody(streamed.content());
+        } finally {
+            StreamingResponses.closeQuietly(streamed.content());
+        }
     }
 
     /**
@@ -4393,18 +4622,18 @@ public class CodeArtifactService implements Resettable {
      */
     private void rollbackContainerBackedVersionWrite(RepositorySidecarManager manager, String destRepoId,
             String domain, String destinationRepository, String namespace, String packageName, String version,
-            Map<String, byte[]> originalContent, List<String> touchedAssetNames) {
+            Map<String, Path> originalContent, List<String> touchedAssetNames) {
         for (String assetName : touchedAssetNames) {
             try {
-                byte[] original = originalContent.get(assetName);
+                Path original = originalContent.get(assetName);
                 if (original != null) {
                     manager.storePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
-                            packageName, version, assetName, original);
+                            packageName, version, assetName, original, Files.size(original));
                 } else {
                     manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
                             packageName, version, assetName);
                 }
-            } catch (RuntimeException rollbackFailure) {
+            } catch (IOException | RuntimeException rollbackFailure) {
                 LOG.warnv(rollbackFailure, "Best-effort rollback could not restore {0}/{1} package ''{2}'' "
                         + "version ''{3}'' asset ''{4}'' after a failed copy; the destination may still be "
                         + "left in a partially-copied state for this version.", domain, destinationRepository,
@@ -4417,7 +4646,9 @@ public class CodeArtifactService implements Resettable {
      * {@code true} only when {@code source} and {@code dest} hold the exact same asset names for
      * this version, each fetching to byte-identical content: the container-backed equivalent of
      * {@link #packageVersionContentMatches}, which compares persisted hashes instead since generic
-     * assets have one and these don't.
+     * assets have one and these don't. Streams both sides against each other rather than fetching
+     * either as a resident {@code byte[]}, the same reason {@code ReposiliteSidecarClient
+     * #existingArtifactMatches}'s own {@code Path} overload does.
      */
     private static boolean containerBackedVersionContentMatches(RepositorySidecarManager manager,
             String sourceRepoId, String sourceRepository, String destRepoId, String destinationRepository,
@@ -4427,35 +4658,69 @@ public class CodeArtifactService implements Resettable {
             return false;
         }
         for (String assetName : sourceAssetNames) {
-            byte[] sourceContent = manager.fetchPackageVersionAsset(sourceRepoId, domain, sourceRepository,
-                    namespace, packageName, version, assetName).orElse(null);
-            byte[] destContent = manager.fetchPackageVersionAsset(destRepoId, domain, destinationRepository,
-                    namespace, packageName, version, assetName).orElse(null);
-            if (!Arrays.equals(sourceContent, destContent)) {
+            Optional<RepositorySidecarManager.StreamedAsset> source = manager.fetchPackageVersionAssetStreamed(
+                    sourceRepoId, domain, sourceRepository, namespace, packageName, version, assetName);
+            Optional<RepositorySidecarManager.StreamedAsset> dest = manager.fetchPackageVersionAssetStreamed(
+                    destRepoId, domain, destinationRepository, namespace, packageName, version, assetName);
+            if (source.isEmpty() != dest.isEmpty()) {
+                source.ifPresent(s -> StreamingResponses.closeQuietly(s.content()));
+                dest.ifPresent(d -> StreamingResponses.closeQuietly(d.content()));
+                return false;
+            }
+            if (source.isPresent() && !streamsEqual(source.get().content(), dest.get().content())) {
                 return false;
             }
         }
         return true;
     }
 
+    /** Reads both streams in lockstep without ever holding either one's content whole, then closes both. */
+    private static boolean streamsEqual(InputStream a, InputStream b) {
+        try (InputStream closeA = a; InputStream closeB = b) {
+            return StreamEquality.contentsMatch(closeA, closeB);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     /**
-     * Reads every one of {@code source}'s assets and confirms each one's actual bytes still hash
-     * to what its own persisted metadata claims, returning the verified bytes keyed by asset name.
-     * Guards against two distinct ways {@link #readAssetContent} can otherwise hand back the
-     * wrong bytes silently: a missing in-memory entry, which it answers with an empty array
-     * rather than an error, and disk corruption independent of Floci, which it never checks at
-     * all. Thrown as {@code InternalServerException} rather than folded into a per-version
-     * {@code CopyPackageVersionsResult} failure: this is this emulator's own storage integrity
-     * failing, not a caller-facing outcome any AWS-documented error code for this action
-     * describes.
+     * Stages every one of {@code source}'s assets to its own temp file and confirms each one's
+     * actual bytes still hash to what its own persisted metadata claims, returning the verified
+     * content keyed by asset name. Guards against two distinct ways {@link #readAssetContent}
+     * could otherwise hand back the wrong bytes silently: a missing in-memory entry, which it
+     * answers with an empty array rather than an error, and disk corruption independent of Floci,
+     * which it never checks at all. Thrown as {@code InternalServerException} rather than folded
+     * into a per-version {@code CopyPackageVersionsResult} failure: this is this emulator's own
+     * storage integrity failing, not a caller-facing outcome any AWS-documented error code for
+     * this action describes.
+     *
+     * <p>Each asset is staged via {@link #openAssetContent} wrapped in an {@link
+     * AssetDigestingInputStream} rather than read whole with {@link #readAssetContent}: a source
+     * asset can be up to the real 5 GB CodeArtifact quota, far past what a {@code byte[]} can ever
+     * hold (~2 GiB), and this digests it in the same single streaming pass that stages it, rather
+     * than a separate full-array hash afterward. Every staged file, verified or not, is appended
+     * to {@code stagedFiles} so the caller's own batch-wide cleanup deletes it exactly once,
+     * including a file staged for an asset that then fails its own hash check.
      */
-    private Map<String, byte[]> verifyAndReadSourceAssets(String owner, CodeArtifactPackageVersion source) {
+    private Map<String, Path> verifyAndReadSourceAssets(String owner, CodeArtifactPackageVersion source,
+            List<Path> stagedFiles) {
         String sourceKey = packageVersionKey(source.getRegion(), source.getDomainName(), source.getRepositoryName(),
                 source.getFormat(), source.getNamespace(), source.getPackageName(), source.getVersion());
-        Map<String, byte[]> verified = new LinkedHashMap<>();
+        Map<String, Path> verified = new LinkedHashMap<>();
         for (PackageAsset sourceAsset : source.getAssets().values()) {
-            byte[] content = readAssetContent(owner, sourceKey, sourceAsset.getName());
-            String actualSha256 = computeHashes(content).get("SHA-256");
+            AssetDigestingInputStream digesting = new AssetDigestingInputStream(
+                    openAssetContent(owner, sourceKey, sourceAsset.getName()), MAX_ASSET_FILE_SIZE_BYTES);
+            Path staged;
+            try {
+                staged = stageAssetBody(digesting);
+            } finally {
+                // stageAssetBody itself never closes the body it is handed (see
+                // stageStreamedAsset's own javadoc); openAssetContent's disk-mode source is a real
+                // file handle, so without this it leaks one descriptor per asset copied.
+                StreamingResponses.closeQuietly(digesting);
+            }
+            stagedFiles.add(staged);
+            String actualSha256 = digesting.hashesHex().get("SHA-256");
             String expectedSha256 = sourceAsset.getHashes().get("SHA-256");
             if (expectedSha256 == null || !expectedSha256.equalsIgnoreCase(actualSha256)) {
                 throw new AwsException("InternalServerException", "Could not copy version '" + source.getVersion()
@@ -4463,7 +4728,7 @@ public class CodeArtifactService implements Resettable {
                         + "' is missing from the source repository's storage or no longer matches its recorded "
                         + "hash.", 500);
             }
-            verified.put(sourceAsset.getName(), content);
+            verified.put(sourceAsset.getName(), staged);
         }
         return verified;
     }
@@ -4517,7 +4782,7 @@ public class CodeArtifactService implements Resettable {
      */
     private CodeArtifactPackageVersion copyGenericPackageVersionAssets(String owner, String region, String domain,
             String destinationRepository, String format, String namespace, String packageName, String version,
-            CodeArtifactPackageVersion source, Map<String, byte[]> verifiedContent) {
+            CodeArtifactPackageVersion source, Map<String, Path> verifiedContent) {
         String destKey = packageVersionKey(region, domain, destinationRepository, format, namespace, packageName,
                 version);
         CodeArtifactPackageVersion existingDest = packageVersions.getForAccount(owner, destKey).orElse(null);
@@ -5407,16 +5672,112 @@ public class CodeArtifactService implements Resettable {
             Path tmp = filePath.resolveSibling(filePath.getFileName() + ".tmp-" + UUID.randomUUID());
             try {
                 Files.write(tmp, content);
-                try {
-                    Files.move(tmp, filePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (AtomicMoveNotSupportedException e) {
-                    Files.move(tmp, filePath, StandardCopyOption.REPLACE_EXISTING);
-                }
+                moveIntoPlace(tmp, filePath);
             } finally {
                 Files.deleteIfExists(tmp);
             }
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    /**
+     * {@link #writeAssetContent(String, String, String, byte[])}'s own streamed sibling: {@code
+     * stagedContent} already holds the asset's full bytes on disk (written by {@link
+     * #stageAssetBody}), so the disk-mode path is a plain atomic move into place rather than a
+     * second full write, the one real saving streaming a large upload is for, versus buffering
+     * it into a {@code byte[]} first and writing that out the way the method above still does for
+     * small, already-resident content. {@code inMemory} test mode has no file to move, so it reads
+     * the (necessarily small, test-fixture-sized) staged file back into a {@code byte[]} and
+     * reuses the exact same map-based store the byte[] overload does.
+     */
+    private void writeAssetContent(String owner, String packageVersionKey, String assetName, Path stagedContent) {
+        if (inMemory) {
+            try {
+                writeAssetContent(owner, packageVersionKey, assetName, Files.readAllBytes(stagedContent));
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to read staged CodeArtifact asset body: "
+                        + stagedContent, e);
+            }
+            return;
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            Files.createDirectories(filePath.getParent());
+            moveIntoPlace(stagedContent, filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    private static void moveIntoPlace(Path source, Path destination) throws IOException {
+        try {
+            Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * Writes a streamed asset upload to a new file under a staging directory and returns it, the
+     * CodeArtifact sibling of {@code S3Service#stageBody}: an upload larger than a {@code byte[]}
+     * can ever hold (~2 GiB) needs somewhere real to land before anything else: hashing,
+     * forwarding to a sidecar, an idempotency compare, can all happen against it. The caller owns
+     * deleting the returned file exactly once, on every exit path (written into place, discarded
+     * as an idempotent no-op, rejected for being too large, or failed outright); it is never
+     * deleted automatically just by virtue of being staged.
+     */
+    Path stageAssetBody(InputStream body) {
+        Path staged;
+        try {
+            if (inMemory) {
+                // inMemory test mode constructs this service with no real asset directory on
+                // disk at all (nothing backs the asset store itself in that mode): the JVM's own
+                // default temp directory is the only place to stage a streamed body, and it is
+                // never moved into assetRoot in this mode anyway, just read back into a byte[]
+                // for the in-memory map (see writeAssetContent(..., Path)).
+                staged = Files.createTempFile("codeartifact-asset-", ".incoming");
+            } else {
+                // Staged under assetRoot itself, not the JVM's default temp directory: the real
+                // write path below (writeAssetContent(..., Path) -> moveIntoPlace) needs source
+                // and destination on the same filesystem for its ATOMIC_MOVE to actually be
+                // atomic, rather than silently falling back to a copy+delete the moment assetRoot
+                // happens to sit on a different mount than the default temp directory, which
+                // would double the disk I/O for every large asset this streams.
+                Path incoming = assetRoot.resolve(".incoming");
+                Files.createDirectories(incoming);
+                staged = Files.createTempFile(incoming, "codeartifact-asset-", ".incoming");
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to create a staging file for a CodeArtifact asset upload", e);
+        }
+        try {
+            Files.copy(body, staged, StandardCopyOption.REPLACE_EXISTING);
+            return staged;
+        } catch (IOException e) {
+            deleteQuietlyStaged(staged);
+            throw new UncheckedIOException("Failed to stage a CodeArtifact asset upload", e);
+        } catch (RuntimeException e) {
+            deleteQuietlyStaged(staged);
+            throw e;
+        }
+    }
+
+    private void deleteQuietlyStaged(Path staged) {
+        deleteStagedAssetBody(staged);
+    }
+
+    /**
+     * Every controller that calls {@link #stageAssetBody} owns deleting the file it gets back
+     * exactly once, on every exit path. This is the one place that deletion happens, so a
+     * controller's own {@code finally} block never needs to hand-roll the same
+     * log-and-swallow-{@code IOException} logic four times over.
+     */
+    void deleteStagedAssetBody(Path staged) {
+        try {
+            Files.deleteIfExists(staged);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete a staged CodeArtifact asset upload at {0}", staged);
         }
     }
 
@@ -5428,6 +5789,20 @@ public class CodeArtifactService implements Resettable {
         Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
         try {
             return Files.readAllBytes(filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    /** {@link #readAssetContent}'s streamed sibling, for an asset too large to hold as one {@code byte[]}. */
+    private InputStream openAssetContent(String owner, String packageVersionKey, String assetName) {
+        if (inMemory) {
+            byte[] content = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
+            return new ByteArrayInputStream(content != null ? content : new byte[0]);
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            return Files.newInputStream(filePath);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
         }

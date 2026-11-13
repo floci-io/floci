@@ -3,6 +3,7 @@ package io.floci.aws.services.kinesis;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -23,17 +24,17 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Comparator;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
@@ -81,6 +82,9 @@ public class KinesisService implements ResourceProvider {
     // append + persist so the in-memory log, the assigned sequence order and the WAL write order
     // all agree, and serializes every other read-modify-write on a stream against deleteStream.
     private final ConcurrentHashMap<String, Object> streamAppendLocks = new ConcurrentHashMap<>();
+    // Stream objects are replaced on reload; weak keys avoid retaining deleted streams.
+    private final Map<KinesisStream, List<OpenShardRange>> openShardRangeIndexes =
+            Collections.synchronizedMap(new WeakHashMap<>());
     // Package-private test seam, run inside the append critical section after the sequence is
     // allocated and before the record is appended. Default no-op in production.
     Runnable putRecordAppendHook = () -> {};
@@ -286,6 +290,7 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
+            validateTagCapacity(stream.getTags(), tags);
             stream.getTags().putAll(tags);
             store.put(key, stream);
         }
@@ -386,6 +391,10 @@ public class KinesisService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException", "Invalid tag key or value", 400);
             }
         }
+        validateTagCapacity(current, added);
+    }
+
+    private static void validateTagCapacity(Map<String, String> current, Map<String, String> added) {
         Set<String> keys = new HashSet<>(current.keySet());
         keys.addAll(added.keySet());
         if (keys.size() > 50 && added.keySet().stream().anyMatch(key -> !current.containsKey(key))) {
@@ -527,6 +536,17 @@ public class KinesisService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException", "Shard " + shardId + " is already closed", 400);
             }
 
+            List<KinesisShard> legacyOpenShards = legacyOpenShardsToNormalize(stream);
+            KinesisShard.HashKeyRange parentRange = effectiveOpenShardRange(parent, legacyOpenShards);
+            BigInteger splitPoint = new BigInteger(newStartingHashKey);
+            BigInteger parentStart = new BigInteger(parentRange.startingHashKey());
+            BigInteger parentEnd = new BigInteger(parentRange.endingHashKey());
+            if (splitPoint.compareTo(parentStart) <= 0 || splitPoint.compareTo(parentEnd) > 0) {
+                throw new AwsException("InvalidArgumentException",
+                        "NewStartingHashKey must be inside the parent shard's hash range.", 400);
+            }
+            normalizeOpenShardRanges(stream, legacyOpenShards);
+
             parent.setClosed(true);
             parent.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(
                     parent.getSequenceNumberRange().startingSequenceNumber(),
@@ -572,6 +592,17 @@ public class KinesisService implements ResourceProvider {
             if (shard1.isClosed() || shard2.isClosed()) {
                 throw new AwsException("InvalidArgumentException", "One or both shards are already closed", 400);
             }
+            List<KinesisShard> legacyOpenShards = legacyOpenShardsToNormalize(stream);
+            KinesisShard.HashKeyRange range1 = effectiveOpenShardRange(shard1, legacyOpenShards);
+            KinesisShard.HashKeyRange range2 = effectiveOpenShardRange(shard2, legacyOpenShards);
+            BigInteger start1 = new BigInteger(range1.startingHashKey());
+            BigInteger end1 = new BigInteger(range1.endingHashKey());
+            BigInteger start2 = new BigInteger(range2.startingHashKey());
+            BigInteger end2 = new BigInteger(range2.endingHashKey());
+            if (!end1.add(BigInteger.ONE).equals(start2) && !end2.add(BigInteger.ONE).equals(start1)) {
+                throw new AwsException("InvalidArgumentException", "Shards must have adjacent hash ranges.", 400);
+            }
+            normalizeOpenShardRanges(stream, legacyOpenShards);
 
             shard1.setClosed(true);
             shard2.setClosed(true);
@@ -579,7 +610,7 @@ public class KinesisService implements ResourceProvider {
             shard1.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard1.getSequenceNumberRange().startingSequenceNumber(), seq));
             shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
 
-            // Combine hash ranges (assuming they are adjacent)
+            // Combine the adjacent hash ranges.
             BigInteger s1Start = new BigInteger(shard1.getHashKeyRange().startingHashKey());
             BigInteger s2Start = new BigInteger(shard2.getHashKeyRange().startingHashKey());
 
@@ -643,7 +674,10 @@ public class KinesisService implements ResourceProvider {
 
             currentOpenShardCount = (int) stream.getShards().stream().filter(s -> !s.isClosed()).count();
             validateTargetShardCount(streamName, currentOpenShardCount, targetShardCount);
-            recordShardCountUpdate(stream, key);
+            List<Instant> updateTimestamps = nextShardCountUpdateTimestamps(stream);
+            normalizeOpenShardRanges(stream);
+            stream.setShardCountUpdateTimestamps(updateTimestamps);
+            store.put(key, stream);
 
             applyUniformScaling(streamName, stream, currentOpenShardCount, targetShardCount, region);
 
@@ -685,7 +719,7 @@ public class KinesisService implements ResourceProvider {
     }
 
     /** Enforces the "no more than ten UpdateShardCount calls per rolling 24 hours" default limit. */
-    private void recordShardCountUpdate(KinesisStream stream, String storageKey) {
+    private List<Instant> nextShardCountUpdateTimestamps(KinesisStream stream) {
         Instant now = Instant.now();
         Instant windowStart = now.minus(SHARD_COUNT_UPDATE_WINDOW);
         List<Instant> recent = new ArrayList<>(stream.getShardCountUpdateTimestamps().stream()
@@ -697,8 +731,7 @@ public class KinesisService implements ResourceProvider {
                             + MAX_SHARD_COUNT_UPDATES_PER_DAY + " times in the past 24 hours.", 400);
         }
         recent.add(now);
-        stream.setShardCountUpdateTimestamps(recent);
-        store.put(storageKey, stream);
+        return recent;
     }
 
     /**
@@ -1335,85 +1368,88 @@ public class KinesisService implements ResourceProvider {
     }
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {
-        if (explicitHashKey != null) {
+        List<OpenShardRange> ranges = openShardRangeIndexes.get(stream);
+        if (ranges == null) {
             normalizeOpenShardRanges(stream);
-            return selectShardByExplicitHashKey(stream, explicitHashKey);
+            ranges = stream.getShards().stream()
+                    .filter(shard -> !shard.isClosed())
+                    .map(shard -> new OpenShardRange(shard,
+                            new BigInteger(shard.getHashKeyRange().startingHashKey()),
+                            new BigInteger(shard.getHashKeyRange().endingHashKey())))
+                    .sorted(Comparator.comparing(OpenShardRange::start))
+                    .toList();
+            openShardRangeIndexes.put(stream, ranges);
         }
+        BigInteger hashKey = explicitHashKey != null ? parseExplicitHashKey(explicitHashKey)
+                : new BigInteger(1, Digests.md5(partitionKey.getBytes(StandardCharsets.UTF_8)));
+        return selectShardByHashKey(ranges, hashKey);
+    }
 
-        // Preserve ordinary-key placement, then resolve historical parents to an open descendant.
-        // The producer holds the stream lock, shared with splitShard and mergeShards.
-        List<KinesisShard> shards = stream.getShards();
-        int index = (int) (Math.abs((long) partitionKey.hashCode()) % shards.size());
-        KinesisShard selected = shards.get(index);
-        if (!selected.isClosed()) {
-            return selected;
-        }
-
-        List<KinesisShard> snapshot = List.copyOf(shards);
-        Map<String, List<KinesisShard>> children = new HashMap<>();
-        for (KinesisShard shard : snapshot) {
-            if (shard.getParentShardId() != null) {
-                children.computeIfAbsent(shard.getParentShardId(), ignored -> new ArrayList<>()).add(shard);
-            }
-            if (shard.getAdjacentParentShardId() != null) {
-                children.computeIfAbsent(shard.getAdjacentParentShardId(), ignored -> new ArrayList<>()).add(shard);
-            }
-        }
-        Deque<KinesisShard> pending = new ArrayDeque<>();
-        Set<String> visited = new HashSet<>();
-        pending.add(selected);
-        visited.add(selected.getShardId());
-        while (!pending.isEmpty()) {
-            KinesisShard shard = pending.removeFirst();
-            if (!shard.isClosed()) {
-                return shard;
-            }
-            for (KinesisShard child : children.getOrDefault(shard.getShardId(), List.of())) {
-                if (visited.add(child.getShardId())) {
-                    pending.addLast(child);
-                }
+    private KinesisShard selectShardByHashKey(List<OpenShardRange> ranges, BigInteger hashKey) {
+        int low = 0;
+        int high = ranges.size() - 1;
+        while (low <= high) {
+            int middle = (low + high) >>> 1;
+            OpenShardRange range = ranges.get(middle);
+            if (hashKey.compareTo(range.start()) < 0) {
+                high = middle - 1;
+            } else if (hashKey.compareTo(range.end()) > 0) {
+                low = middle + 1;
+            } else if (!range.shard().isClosed()) {
+                return range.shard();
+            } else {
+                break;
             }
         }
         throw new AwsException("InvalidArgumentException",
-                "Selected shard " + selected.getShardId() + " has no open descendant.", 400);
+                "ExplicitHashKey does not map to an open shard.", 400);
     }
 
-    private KinesisShard selectShardByExplicitHashKey(KinesisStream stream, String explicitHashKey) {
-        BigInteger hashKey = parseExplicitHashKey(explicitHashKey);
-        return stream.getShards().stream()
-                .filter(shard -> !shard.isClosed())
-                .filter(shard -> containsHashKey(shard, hashKey))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("InvalidArgumentException",
-                        "ExplicitHashKey does not map to an open shard.", 400));
+    private record OpenShardRange(KinesisShard shard, BigInteger start, BigInteger end) {}
+
+    // Only untouched legacy streams can be evenly repartitioned. Repartitioning a stream that
+    // already has split/merge children would silently change those children's persisted ranges.
+    private void normalizeOpenShardRanges(KinesisStream stream) {
+        normalizeOpenShardRanges(stream, legacyOpenShardsToNormalize(stream));
     }
 
-    private static boolean containsHashKey(KinesisShard shard, BigInteger hashKey) {
-        BigInteger start = new BigInteger(shard.getHashKeyRange().startingHashKey());
-        BigInteger end = new BigInteger(shard.getHashKeyRange().endingHashKey());
-        return hashKey.compareTo(start) >= 0 && hashKey.compareTo(end) <= 0;
+    private void normalizeOpenShardRanges(KinesisStream stream, List<KinesisShard> legacyOpenShards) {
+        openShardRangeIndexes.remove(stream);
+        int openShardCount = legacyOpenShards.size();
+        for (int i = 0; i < openShardCount; i++) {
+            legacyOpenShards.get(i).setHashKeyRange(new KinesisShard.HashKeyRange(
+                    shardStartingHashKey(i, openShardCount),
+                    shardEndingHashKey(i, openShardCount)));
+        }
     }
 
-    // Streams created before explicit-hash routing persisted the same full-span range on every
-    // shard, so an explicit key matches all open shards and first-match routing collapses onto
-    // shardId-...000. Repartition those legacy overlapping open shards into the disjoint ranges a
-    // freshly created stream would have, ordered by shard id, so explicit routing is correct after
-    // an upgrade without recreating the stream. Already-disjoint open shards (new streams, split or
-    // merged streams) are left untouched. The caller persists the mutated stream under its lock.
-    private static void normalizeOpenShardRanges(KinesisStream stream) {
+    private static KinesisShard.HashKeyRange effectiveOpenShardRange(
+            KinesisShard shard, List<KinesisShard> legacyOpenShards) {
+        if (legacyOpenShards.isEmpty()) {
+            return shard.getHashKeyRange();
+        }
+        int index = legacyOpenShards.indexOf(shard);
+        return new KinesisShard.HashKeyRange(
+                shardStartingHashKey(index, legacyOpenShards.size()),
+                shardEndingHashKey(index, legacyOpenShards.size()));
+    }
+
+    private static List<KinesisShard> legacyOpenShardsToNormalize(KinesisStream stream) {
         List<KinesisShard> openShards = stream.getShards().stream()
                 .filter(shard -> !shard.isClosed())
                 .sorted(Comparator.comparing(KinesisShard::getShardId))
                 .toList();
         if (openShards.size() <= 1 || openShardRangesDisjoint(openShards)) {
-            return;
+            return List.of();
         }
-        int openShardCount = openShards.size();
-        for (int i = 0; i < openShardCount; i++) {
-            openShards.get(i).setHashKeyRange(new KinesisShard.HashKeyRange(
-                    shardStartingHashKey(i, openShardCount),
-                    shardEndingHashKey(i, openShardCount)));
+        if (openShards.stream().anyMatch(shard -> shard.getParentShardId() != null
+                || shard.getAdjacentParentShardId() != null
+                || !MIN_HASH_KEY_VALUE.equals(shard.getHashKeyRange().startingHashKey())
+                || !MAX_HASH_KEY.toString().equals(shard.getHashKeyRange().endingHashKey()))) {
+            throw new AwsException("InvalidArgumentException",
+                    "Overlapping open shard hash ranges cannot be normalized safely.", 400);
         }
+        return openShards;
     }
 
     private static boolean openShardRangesDisjoint(List<KinesisShard> openShards) {

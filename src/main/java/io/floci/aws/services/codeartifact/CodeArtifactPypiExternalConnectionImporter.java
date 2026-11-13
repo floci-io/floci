@@ -10,10 +10,12 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -292,7 +294,8 @@ public class CodeArtifactPypiExternalConnectionImporter {
                 importedRequested = importedAny;
                 return importedRequested;
             }
-            String importLockKey = repoId + "|" + packageName.get() + "|" + version.get();
+            String importLockKey = repoId + "|" + PypiserverSidecarClient.normalizePackageName(packageName.get())
+                    + "|" + version.get();
 
             // Splits the version's own files into the one filename actually requested (imported
             // synchronously below, so downloadFile's own proxy retry has real bytes to serve the
@@ -429,72 +432,105 @@ public class CodeArtifactPypiExternalConnectionImporter {
             long versionFenceSnapshot, long packageFenceSnapshot, long episodeId, String importLockKey,
             JsonNode file, String candidateFilename) {
         String url = file.path("url").asText(null);
-        Optional<PypiExternalConnectionClient.FetchedAsset> fetched;
+        Path staged;
         try {
-            fetched = externalConnectionClient.fetchFile(externalConnectionName, url);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not fetch {0} from {1} while retaining a pypi package through an "
-                    + "external connection; skipping this file.", url, externalConnectionName);
-            return FileImportStatus.SKIPPED;
+            staged = Files.createTempFile("codeartifact-pypi-import-", ".bin");
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to create a staging file for a pypi external-connection "
+                    + "import", e);
         }
-        if (fetched.isEmpty()) {
-            return FileImportStatus.SKIPPED;
-        }
-        byte[] content = fetched.get().content();
-        // The same 5 GB AWS quota CodeArtifactPypiController#upload already enforces on a direct
-        // publish: without this, a single huge real file would be buffered whole (fetchFile has no
-        // streaming size cap of its own) and then written and counted as if any size were
-        // acceptable here just because it came from an external connection rather than a direct
-        // upload (raised in review).
-        if (content.length > CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES) {
-            LOG.warnv("Skipping {0}: the real registry''s own file is larger than this emulator''s "
-                    + "{1}-byte asset quota.", candidateFilename, CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
-            return FileImportStatus.SKIPPED;
-        }
-        // PEP 691/700's own hashes.sha256, verified against the real fetched bytes before they are
-        // ever written: fetchFile already restricts which host a file's bytes can come from, but a
-        // host passing that check is not the same as the bytes genuinely matching what the trusted
-        // index response itself said this exact file is (a truncated transfer, or a compromised/
-        // misbehaving file host, would otherwise be retained and served as if it were correct).
-        // Verified only when the index actually names a hash (PEP 691 makes the field optional,
-        // though pypi.org's own real responses always include it): its absence is not itself proof
-        // of tampering, so this does not refuse a file over a missing hash alone, only a mismatched
-        // one.
-        String expectedSha256 = file.path("hashes").path("sha256").asText(null);
-        if (expectedSha256 != null && !expectedSha256.equalsIgnoreCase(sha256Hex(content))) {
-            LOG.warnv("Skipping {0}: its real bytes do not match the sha256 the registry''s own index "
-                    + "names for it.", candidateFilename);
-            return FileImportStatus.SKIPPED;
-        }
-        // The lock below, the recheck inside it, and the write together close a gap the bare
-        // in-memory alreadyPresent snapshot taken once before this whole import started cannot on
-        // its own: a second call into this exact version -- a different pip request racing this
-        // one, or the background sibling batch racing the synchronous requested-file path -- could
-        // reach the very same candidate. retainAssetUnderVersionFence's own write has no way to
-        // tell a fresh write from a re-write of identical content (see AssetRetentionAttemptResult's
-        // own javadoc), so without serializing the recheck and the write together on a lock keyed
-        // to this exact version, two such calls could both see candidateFilename missing and both
-        // write it, double-counting its bytes in DescribeDomain's assetSizeBytes.
-        synchronized (siblingWriteLocks.computeIfAbsent(importLockKey, key -> new Object())) {
-            if (pypiserver.listPackageVersionAssetNames(repoId, domain, repository, null, packageName, version)
-                    .contains(candidateFilename)) {
-                return FileImportStatus.ALREADY_PRESENT;
+        try {
+            Optional<PypiExternalConnectionClient.FetchedFile> fetched;
+            try {
+                fetched = externalConnectionClient.fetchFile(externalConnectionName, url, staged);
+            } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+                // The same 5 GB AWS quota CodeArtifactPypiController#upload already enforces on a
+                // direct publish, now checked by fetchFile(Path) itself during the download
+                // (via AssetDigestingInputStream.copyCapped) rather than in a second pass over
+                // the staged file afterward: a file this large is rejected before it is ever
+                // fully pulled across the network and written to local disk.
+                LOG.warnv("Skipping {0}: the real registry''s own file is larger than this emulator''s "
+                        + "{1}-byte asset quota.", candidateFilename, CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+                return FileImportStatus.SKIPPED;
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not fetch {0} from {1} while retaining a pypi package through an "
+                        + "external connection; skipping this file.", url, externalConnectionName);
+                return FileImportStatus.SKIPPED;
             }
-            // The fence check and the real write happen inside the very same synchronized call
-            // DeletePackageVersions/DeletePackage/DeleteRepository/DisposePackageVersions already
-            // hold across their own entire operation, so a write here and one of those four
-            // operations can never interleave.
-            CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
-                    domain, owner, repository, "pypi", null, packageName, version, versionFenceSnapshot,
-                    packageFenceSnapshot, episodeId, repoId, candidateFilename, content,
-                    () -> pypiserver.storePackageVersionAsset(repoId, domain, repository, null, packageName, version,
-                            candidateFilename, content));
-            if (!result.fenceMatched()) {
-                // The version itself is gone: every later candidate in this same attempt would
-                // fail the exact same way.
-                return FileImportStatus.FENCE_GONE;
+            if (fetched.isEmpty()) {
+                return FileImportStatus.SKIPPED;
             }
-            return result.wroteNewContent() ? FileImportStatus.WROTE : FileImportStatus.SKIPPED;
+            long contentLength;
+            String actualSha256;
+            // A second streaming pass over the now-staged, already-size-checked file, purely to
+            // compute the PEP 691/700 sha256 check below: fetchFile(Path) only reports the real
+            // byte count back, not its own digests, so this reuses AssetDigestingInputStream for
+            // that hash alone. The cap passed here can never actually trip (the file is already
+            // guaranteed no larger than it by the pass above); it is just the same bounded
+            // reader, not a second enforcement point.
+            try (InputStream in = Files.newInputStream(staged)) {
+                AssetDigestingInputStream digesting = new AssetDigestingInputStream(in,
+                        CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+                digesting.transferTo(OutputStream.nullOutputStream());
+                contentLength = digesting.size();
+                actualSha256 = digesting.hashesHex().get("SHA-256");
+            } catch (IOException e) {
+                LOG.warnv(e, "Could not read the staged copy of {0} while retaining a pypi package through an "
+                        + "external connection; skipping this file.", candidateFilename);
+                return FileImportStatus.SKIPPED;
+            }
+            // PEP 691/700's own hashes.sha256, verified against the real fetched bytes before they
+            // are ever written: fetchFile already restricts which host a file's bytes can come
+            // from, but a host passing that check is not the same as the bytes genuinely matching
+            // what the trusted index response itself said this exact file is (a truncated
+            // transfer, or a compromised/misbehaving file host, would otherwise be retained and
+            // served as if it were correct). Verified only when the index actually names a hash
+            // (PEP 691 makes the field optional, though pypi.org's own real responses always
+            // include it): its absence is not itself proof of tampering, so this does not refuse a
+            // file over a missing hash alone, only a mismatched one.
+            String expectedSha256 = file.path("hashes").path("sha256").asText(null);
+            if (expectedSha256 != null && !expectedSha256.equalsIgnoreCase(actualSha256)) {
+                LOG.warnv("Skipping {0}: its real bytes do not match the sha256 the registry''s own index "
+                        + "names for it.", candidateFilename);
+                return FileImportStatus.SKIPPED;
+            }
+            // The lock below, the recheck inside it, and the write together close a gap the bare
+            // in-memory alreadyPresent snapshot taken once before this whole import started cannot
+            // on its own: a second call into this exact version -- a different pip request racing
+            // this one, or the background sibling batch racing the synchronous requested-file path
+            // -- could reach the very same candidate. retainAssetUnderVersionFence's own write has
+            // no way to tell a fresh write from a re-write of identical content (see
+            // AssetRetentionAttemptResult's own javadoc), so without serializing the recheck and
+            // the write together on a lock keyed to this exact version, two such calls could both
+            // see candidateFilename missing and both write it, double-counting its bytes in
+            // DescribeDomain's assetSizeBytes.
+            synchronized (siblingWriteLocks.computeIfAbsent(importLockKey, key -> new Object())) {
+                if (pypiserver.listPackageVersionAssetNames(repoId, domain, repository, null, packageName, version)
+                        .contains(candidateFilename)) {
+                    return FileImportStatus.ALREADY_PRESENT;
+                }
+                // The fence check and the real write happen inside the very same synchronized call
+                // DeletePackageVersions/DeletePackage/DeleteRepository/DisposePackageVersions
+                // already hold across their own entire operation, so a write here and one of those
+                // four operations can never interleave.
+                CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
+                        domain, owner, repository, "pypi", null, packageName, version, versionFenceSnapshot,
+                        packageFenceSnapshot, episodeId, repoId, candidateFilename, contentLength,
+                        () -> pypiserver.storePackageVersionAsset(repoId, domain, repository, null, packageName,
+                                version, candidateFilename, staged, contentLength));
+                if (!result.fenceMatched()) {
+                    // The version itself is gone: every later candidate in this same attempt would
+                    // fail the exact same way.
+                    return FileImportStatus.FENCE_GONE;
+                }
+                return result.wroteNewContent() ? FileImportStatus.WROTE : FileImportStatus.SKIPPED;
+            }
+        } finally {
+            try {
+                Files.deleteIfExists(staged);
+            } catch (IOException e) {
+                LOG.warnv(e, "Could not delete a staged pypi external-connection import file at {0}", staged);
+            }
         }
     }
 
@@ -542,14 +578,6 @@ public class CodeArtifactPypiExternalConnectionImporter {
         return candidateVersions.stream()
                 .filter(version -> PypiserverSidecarClient.filenameEmbedsVersion(filename, packageName, version))
                 .findFirst();
-    }
-
-    private static String sha256Hex(byte[] content) {
-        try {
-            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(content));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is not available in this JVM", e);
-        }
     }
 
     private String pypiExternalConnectionName(String region, String domain, String owner, String repository) {

@@ -3,6 +3,7 @@ package io.floci.aws.services.ec2;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -192,7 +193,7 @@ class Ec2VpcEndpointSecurityGroupConsumerTest {
         given()
             .formParam("Action", "ModifyVpcEndpoint")
             .formParam("VpcEndpointId", "vpce-doesnotexist")
-            .formParam("PolicyDocument", "{}")
+            .formParam("PolicyDocument", EMPTY_POLICY_DOCUMENT)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")

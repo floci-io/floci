@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -141,6 +143,35 @@ class NpmExternalConnectionClientTest {
 
         assertTrue(result.isPresent());
         assertArrayEquals(content, result.get().content());
+    }
+
+    /**
+     * {@code fetchTarball(..., Path)} is the streamed sibling that a large tarball import
+     * actually uses: unlike the {@code byte[]} overload above, it writes straight to a file via
+     * an {@link AssetDigestingInputStream}-wrapped copy, so this confirms that wrapping still
+     * lands the real bytes on disk and reports their real size, not just that the plain {@code
+     * byte[]} path works.
+     */
+    @Test
+    void fetchTarballToAPathWritesTheRealBytesAndReportsTheirSize() throws IOException {
+        byte[] content = "tarball-content".getBytes(StandardCharsets.UTF_8);
+        server.createContext("/widget/-/widget-1.0.0.tgz", exchange -> {
+            exchange.sendResponseHeaders(200, content.length);
+            exchange.getResponseBody().write(content);
+            exchange.close();
+        });
+        Path destination = Files.createTempFile("npm-external-connection-test-", ".tgz");
+
+        try {
+            Optional<NpmExternalConnectionClient.FetchedFile> result =
+                    client.fetchTarball("fake", null, "widget", "1.0.0", destination);
+
+            assertTrue(result.isPresent());
+            assertEquals(content.length, result.get().size());
+            assertArrayEquals(content, Files.readAllBytes(destination));
+        } finally {
+            Files.deleteIfExists(destination);
+        }
     }
 
     @Test

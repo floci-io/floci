@@ -6,10 +6,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.List;
@@ -23,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -97,15 +101,29 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         when(pypiserver.listPackageVersionAssetNames(anyString(), anyString(), anyString(), any(), anyString(),
                 anyString())).thenReturn(List.of());
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
         when(externalConnectionClient.fetchSimpleIndex(eq("public:pypi"), eq(PACKAGE_NAME)))
                 .thenReturn(Optional.of(new PypiExternalConnectionClient.FetchedAsset(
                         simpleIndexJson(List.of(VERSION), SDIST_FILENAME, WHEEL_FILENAME))));
-        when(externalConnectionClient.fetchFile(eq("public:pypi"), eq(urlFor(SDIST_FILENAME))))
-                .thenReturn(Optional.of(new PypiExternalConnectionClient.FetchedAsset(SDIST_CONTENT)));
-        when(externalConnectionClient.fetchFile(eq("public:pypi"), eq(urlFor(WHEEL_FILENAME))))
-                .thenReturn(Optional.of(new PypiExternalConnectionClient.FetchedAsset(WHEEL_CONTENT)));
+        stubFetchFile(urlFor(SDIST_FILENAME), SDIST_CONTENT);
+        stubFetchFile(urlFor(WHEEL_FILENAME), WHEEL_CONTENT);
+    }
+
+    /**
+     * {@code fetchFile}'s real, streamed signature takes the destination {@link Path} to write
+     * to, generated fresh by the importer itself for every real call, so a test fixture can't
+     * name it in advance the way it could the old {@code byte[]}-returning method: this answers
+     * whatever path the importer actually passes by writing {@code content} straight to it, the
+     * same real effect the real method has.
+     */
+    private void stubFetchFile(String url, byte[] content) {
+        when(externalConnectionClient.fetchFile(eq("public:pypi"), eq(url), any(Path.class))).thenAnswer(
+                invocation -> {
+                    Path destination = invocation.getArgument(2);
+                    Files.write(destination, content);
+                    return Optional.of(new PypiExternalConnectionClient.FetchedFile(content.length));
+                });
     }
 
     @Test
@@ -121,7 +139,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         assertTrue(imported);
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("pypi"),
                 isNull(), eq(PACKAGE_NAME), eq(VERSION), eq(99L), eq(42L), eq(EPISODE_ID), eq(REPO_ID),
-                eq(SDIST_FILENAME), eq(SDIST_CONTENT), any());
+                eq(SDIST_FILENAME), eq((long) SDIST_CONTENT.length), any());
         verify(service).ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, DOMAIN, OWNER, REPOSITORY,
                 "pypi", null, PACKAGE_NAME, 42L, REPO_ID);
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null,
@@ -137,13 +155,13 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         // moment tryImportAsset returns.
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("pypi"),
                 isNull(), eq(PACKAGE_NAME), eq(VERSION), anyLong(), anyLong(), eq(EPISODE_ID), eq(REPO_ID),
-                eq(WHEEL_FILENAME), eq(WHEEL_CONTENT), any());
+                eq(WHEEL_FILENAME), eq((long) WHEEL_CONTENT.length), any());
         // AWS: "CodeArtifact will import all the assets in that package version" -- the sdist is
         // still imported, just handed off to run in the background (raised in review: hectorvent,
         // #7741), so this waits for it rather than asserting it happened synchronously.
         verify(service, timeout(2000)).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER),
                 eq(REPOSITORY), eq("pypi"), isNull(), eq(PACKAGE_NAME), eq(VERSION), anyLong(), anyLong(),
-                eq(EPISODE_ID), eq(REPO_ID), eq(SDIST_FILENAME), eq(SDIST_CONTENT), any());
+                eq(EPISODE_ID), eq(REPO_ID), eq(SDIST_FILENAME), eq((long) SDIST_CONTENT.length), any());
     }
 
     @Test
@@ -154,10 +172,10 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, WHEEL_FILENAME);
 
         assertTrue(imported);
-        verify(externalConnectionClient, never()).fetchFile(eq("public:pypi"), eq(urlFor(SDIST_FILENAME)));
+        verify(externalConnectionClient, never()).fetchFile(eq("public:pypi"), eq(urlFor(SDIST_FILENAME)), any());
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                eq(SDIST_FILENAME), any(), any());
+                eq(SDIST_FILENAME), anyLong(), any());
     }
 
     @Test
@@ -214,7 +232,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, SDIST_FILENAME);
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchFile(anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchFile(anyString(), anyString(), any());
         verify(service, never()).finishRetainedVersionOriginAttempt(anyString(), anyString(), anyString(),
                 anyString(), anyString(), any(), anyString(), anyString(), anyLong(), anyBoolean());
     }
@@ -229,7 +247,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, SDIST_FILENAME);
 
         assertTrue(imported);
-        verify(externalConnectionClient, never()).fetchFile(anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchFile(anyString(), anyString(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null,
                 PACKAGE_NAME, VERSION, EPISODE_ID, true);
     }
@@ -252,10 +270,10 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         assertTrue(imported);
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                eq(SDIST_FILENAME), any(), any());
+                eq(SDIST_FILENAME), anyLong(), any());
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("pypi"),
                 isNull(), eq(PACKAGE_NAME), eq(VERSION), anyLong(), anyLong(), eq(EPISODE_ID), eq(REPO_ID),
-                eq(WHEEL_FILENAME), eq(WHEEL_CONTENT), any());
+                eq(WHEEL_FILENAME), eq((long) WHEEL_CONTENT.length), any());
     }
 
     /**
@@ -276,7 +294,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         assertTrue(imported);
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                eq(SDIST_FILENAME), any(), any());
+                eq(SDIST_FILENAME), anyLong(), any());
     }
 
     /**
@@ -432,7 +450,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(),
-                any(), anyLong(), anyLong(), anyLong(), any(), any(), any(), any());
+                any(), anyLong(), anyLong(), anyLong(), any(), any(), anyLong(), any());
     }
 
     /** A file whose real bytes genuinely match the index's own sha256 is still imported normally. */
@@ -454,7 +472,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         assertTrue(imported);
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("pypi"),
                 isNull(), eq(PACKAGE_NAME), eq(VERSION), anyLong(), anyLong(), eq(EPISODE_ID), eq(REPO_ID),
-                eq(SDIST_FILENAME), eq(SDIST_CONTENT), any());
+                eq(SDIST_FILENAME), eq((long) SDIST_CONTENT.length), any());
     }
 
     /**
@@ -482,7 +500,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         when(service.retainedVersionOriginConnection(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null, PACKAGE_NAME,
                 VERSION)).thenReturn(Optional.of("public:pypi"));
         when(service.retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(), any(), anyLong(),
-                anyLong(), anyLong(), any(), eq(SDIST_FILENAME), any(), any())).thenAnswer(invocation -> {
+                anyLong(), anyLong(), any(), eq(SDIST_FILENAME), anyLong(), any())).thenAnswer(invocation -> {
             if (sdistWriteAttempts.getAndIncrement() == 0) {
                 firstWriteStarted.countDown();
                 assertTrue(releaseFirstWrite.await(5, TimeUnit.SECONDS), "test never released the first write");
@@ -491,7 +509,7 @@ class CodeArtifactPypiExternalConnectionImporterTest {
             return new CodeArtifactService.AssetRetentionAttemptResult(true, true);
         });
         when(service.retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(), any(), anyLong(),
-                anyLong(), anyLong(), any(), eq(WHEEL_FILENAME), any(), any()))
+                anyLong(), anyLong(), any(), eq(WHEEL_FILENAME), anyLong(), any()))
                 .thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -513,7 +531,61 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         }
 
         verify(service, times(1)).retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(),
-                any(), anyLong(), anyLong(), anyLong(), any(), eq(SDIST_FILENAME), any(), any());
+                any(), anyLong(), anyLong(), anyLong(), any(), eq(SDIST_FILENAME), anyLong(), any());
+    }
+
+    @Test
+    void hyphenatedSdistAndUnderscoredWheelShareTheRetentionLock() throws Exception {
+        String sdist = "widget-name-1.0.0.tar.gz";
+        String wheel = "widget_name-1.0.0-py3-none-any.whl";
+        CountDownLatch firstWheelWrite = new CountDownLatch(1);
+        CountDownLatch releaseWheelWrite = new CountDownLatch(1);
+        AtomicBoolean sdistWritten = new AtomicBoolean(false);
+        AtomicBoolean wheelWritten = new AtomicBoolean(false);
+        AtomicInteger wheelWrites = new AtomicInteger();
+        when(externalConnectionClient.fetchSimpleIndex(eq("public:pypi"), anyString()))
+                .thenReturn(Optional.of(new PypiExternalConnectionClient.FetchedAsset(
+                        simpleIndexJson(List.of(VERSION), sdist, wheel))));
+        stubFetchFile(urlFor(sdist), SDIST_CONTENT);
+        stubFetchFile(urlFor(wheel), WHEEL_CONTENT);
+        when(pypiserver.listPackageVersionAssetNames(anyString(), anyString(), anyString(), any(), anyString(),
+                anyString())).thenAnswer(invocation -> wheelWritten.get() ? List.of(sdist, wheel)
+                        : sdistWritten.get() ? List.of(sdist) : List.of());
+        when(service.retainedVersionOriginConnection(anyString(), anyString(), anyString(), anyString(),
+                anyString(), any(), anyString(), anyString())).thenReturn(Optional.of("public:pypi"));
+        when(service.retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(), any(),
+                anyLong(), anyLong(), anyLong(), any(), eq(sdist), anyLong(), any())).thenAnswer(invocation -> {
+            sdistWritten.set(true);
+            return new CodeArtifactService.AssetRetentionAttemptResult(true, true);
+        });
+        when(service.retainAssetUnderVersionFence(any(), any(), any(), any(), any(), any(), any(), any(),
+                anyLong(), anyLong(), anyLong(), any(), eq(wheel), anyLong(), any())).thenAnswer(invocation -> {
+            if (wheelWrites.incrementAndGet() == 1) {
+                firstWheelWrite.countDown();
+                assertTrue(releaseWheelWrite.await(5, TimeUnit.SECONDS), "wheel write was never released");
+            }
+            wheelWritten.set(true);
+            return new CodeArtifactService.AssetRetentionAttemptResult(true, true);
+        });
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            assertTrue(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, sdist));
+            assertTrue(firstWheelWrite.await(5, TimeUnit.SECONDS), "background wheel write never started");
+            AtomicReference<Thread> requestThread = new AtomicReference<>();
+            Future<Boolean> requestedWheel = pool.submit(() -> {
+                requestThread.set(Thread.currentThread());
+                return importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, wheel);
+            });
+            ThreadStates.awaitBlockedOrDone(requestThread, requestedWheel);
+            assertFalse(requestedWheel.isDone(), "the wheel request must wait for the background sibling");
+            assertEquals(Thread.State.BLOCKED, requestThread.get().getState());
+            releaseWheelWrite.countDown();
+            assertTrue(requestedWheel.get(5, TimeUnit.SECONDS));
+            assertEquals(1, wheelWrites.get());
+        } finally {
+            releaseWheelWrite.countDown();
+            pool.shutdownNow();
+        }
     }
 
     private static String urlFor(String filename) {

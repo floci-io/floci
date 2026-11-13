@@ -127,7 +127,7 @@ class EksIrsaDockerIntegrationTest {
         String issuer = oidcService.newIssuerUrl("us-east-1");
         cluster.setIdentity(new ClusterIdentity(
                 new OidcIdentity(issuer)));
-        oidcService.ensureKeyForAccount(ACCOUNT, clusterName, issuer);
+        oidcService.ensureKeyForAccount(ACCOUNT, EksService.clusterKey("us-east-1", clusterName), issuer);
 
         eksClusterManager.startCluster(cluster);
         assertNotNull(cluster.getContainerId(), "Container ID must not be null");
