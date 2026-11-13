@@ -2596,7 +2596,8 @@ public class Ec2QueryHandler {
         xml.start(wrapper)
                 .elem("ipamPoolAllocationId", allocation.getIpamPoolAllocationId())
                 .elem("cidr", allocation.getCidr())
-                .elem("resourceType", allocation.getResourceType());
+                .elem("resourceType", allocation.getResourceType())
+                .elem("resourceOwner", allocation.getResourceOwner());
         if (allocation.getDescription() != null) {
             xml.elem("description", allocation.getDescription());
         }

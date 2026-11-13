@@ -51,6 +51,9 @@ class Ec2IntegrationTest {
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+    /** A second account, which reaches the default account's IPAM pools by id. */
+    private static final String WORKLOAD_AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=000000000002/20260205/us-east-1/ec2/aws4_request";
 
     private static String instanceId;
     private static String vpcId;
@@ -6045,6 +6048,109 @@ class Ec2IntegrationTest {
         .when().post("/")
         .then().statusCode(200)
             .body("DescribeTagsResponse.tagSet.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(3227)
+    void anotherAccountsAllocationTagsGoWhenTheOwnerReleasesItOrDeletesThePool() {
+        String ipamId = given()
+            .formParam("Action", "CreateIpam")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("CreateIpamResponse.ipam.ipamId");
+        String scopeId = given()
+            .formParam("Action", "DescribeIpams")
+            .formParam("IpamId.1", ipamId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("DescribeIpamsResponse.ipamSet.item.privateDefaultScopeId");
+        String poolId = given()
+            .formParam("Action", "CreateIpamPool")
+            .formParam("IpamScopeId", scopeId)
+            .formParam("AddressFamily", "ipv4")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("CreateIpamPoolResponse.ipamPool.ipamPoolId");
+        given()
+            .formParam("Action", "ProvisionIpamPoolCidr")
+            .formParam("IpamPoolId", poolId)
+            .formParam("Cidr", "10.0.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        String released = allocateTaggedFromSharedPool(poolId);
+        given()
+            .formParam("Action", "GetIpamPoolAllocations")
+            .formParam("IpamPoolId", poolId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetIpamPoolAllocationsResponse.ipamPoolAllocationSet.item.resourceOwner", equalTo("000000000002"));
+        given()
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceId.1", released)
+            .formParam("Tag.1.Key", "team")
+            .formParam("Tag.1.Value", "owner")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .formParam("Action", "ReleaseIpamPoolAllocation")
+            .formParam("IpamPoolId", poolId)
+            .formParam("IpamPoolAllocationId", released)
+            .formParam("Cidr", "10.0.0.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        assertNoTagsInEitherAccount(released);
+
+        String heldByThePool = allocateTaggedFromSharedPool(poolId);
+        given()
+            .formParam("Action", "DeleteIpamPool")
+            .formParam("IpamPoolId", poolId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        assertNoTagsInEitherAccount(heldByThePool);
+    }
+
+    /** The second account allocates from the default account's pool and tags the allocation in its own account. */
+    private String allocateTaggedFromSharedPool(String poolId) {
+        String allocationId = given()
+            .formParam("Action", "AllocateIpamPoolCidr")
+            .formParam("IpamPoolId", poolId)
+            .formParam("NetmaskLength", "24")
+            .formParam("TagSpecification.1.ResourceType", "ipam-pool-allocation")
+            .formParam("TagSpecification.1.Tag.1.Key", "team")
+            .formParam("TagSpecification.1.Tag.1.Value", "workload")
+            .header("Authorization", WORKLOAD_AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("AllocateIpamPoolCidrResponse.ipamPoolAllocation.resourceOwner", equalTo("000000000002"))
+            .extract().path("AllocateIpamPoolCidrResponse.ipamPoolAllocation.ipamPoolAllocationId");
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", allocationId)
+            .header("Authorization", WORKLOAD_AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.value", equalTo("workload"));
+        return allocationId;
+    }
+
+    private void assertNoTagsInEitherAccount(String resourceId) {
+        for (String auth : new String[] {AUTH_HEADER, WORKLOAD_AUTH_HEADER}) {
+            given()
+                .formParam("Action", "DescribeTags")
+                .formParam("Filter.1.Name", "resource-id")
+                .formParam("Filter.1.Value.1", resourceId)
+                .header("Authorization", auth)
+            .when().post("/")
+            .then().statusCode(200)
+                .body("DescribeTagsResponse.tagSet.item.size()", equalTo(0));
+        }
     }
 
     @Test

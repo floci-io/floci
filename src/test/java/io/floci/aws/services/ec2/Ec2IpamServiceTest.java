@@ -12,6 +12,7 @@ import io.floci.aws.services.ec2.model.IpamPoolAllocation;
 import io.floci.aws.services.ec2.model.IpamPoolCidr;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.testing.Ec2ServiceFixtures;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -618,7 +620,8 @@ class Ec2IpamServiceTest {
     @SuppressWarnings("unchecked")
     private record SharedPoolFixture(Ec2IpamService service, AccountAwareStorageBackend<IpamPool> pools,
                                      AccountAwareStorageBackend<Ipam> ipams, AtomicReference<String> caller,
-                                     Ipam ipam, IpamPool pool) {}
+                                     Ipam ipam, IpamPool pool, Ec2Service ec2,
+                                     AccountAwareStorageBackend<List<Tag>> tags) {}
 
     @SuppressWarnings("unchecked")
     private SharedPoolFixture sharedPoolOwnedByAnotherAccount() {
@@ -634,11 +637,14 @@ class Ec2IpamServiceTest {
                 new InMemoryStorage<>(), contextInstance, "000000000000");
         AccountAwareStorageBackend<IpamPool> pools = new AccountAwareStorageBackend<>(
                 new InMemoryStorage<>(), contextInstance, "000000000000");
+        AccountAwareStorageBackend<List<Tag>> tags = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), contextInstance, "000000000000");
+        Ec2Service ec2 = Ec2ServiceFixtures.mockModeService(
+                new InMemoryStorageFactory(Ec2ServiceFixtures.ACCOUNT).withStore("ec2-tags.json", tags));
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn(workloadAccount);
         Ec2IpamService service = new Ec2IpamService(
-                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(), mock(Ec2Service.class),
-                contextInstance);
+                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(), ec2, contextInstance);
 
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION), ownerAccount);
         IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
@@ -646,7 +652,50 @@ class Ec2IpamServiceTest {
         service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10.0.0.0/16");
 
         caller.set(workloadAccount);
-        return new SharedPoolFixture(service, pools, ipams, caller, ipam, pool);
+        return new SharedPoolFixture(service, pools, ipams, caller, ipam, pool, ec2, tags);
+    }
+
+    @Test
+    void anotherAccountsAllocationTagsLeaveNoEntryInEitherAccount() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        String poolId = fixture.pool().getIpamPoolId();
+        List<String> ids = new ArrayList<>(List.of(poolId));
+        for (int i = 0; i < 2; i++) {
+            IpamPoolAllocation allocation = fixture.service().allocateIpamPoolCidr(REGION, poolId, 24,
+                    null, null, null, List.of(new Tag("team", "workload")));
+            assertEquals("222222222222", allocation.getResourceOwner());
+            ids.add(allocation.getIpamPoolAllocationId());
+        }
+        fixture.caller().set("111111111111");
+        fixture.ec2().createTags(REGION, ids, List.of(new Tag("team", "owner")));
+        Function<String, Integer> entries = id ->
+                fixture.tags().scanAllAccountEntries(key -> key.endsWith(id)).size();
+        assertEquals(2, entries.apply(ids.get(1)));
+
+        fixture.service().releaseIpamPoolAllocation(REGION, poolId, ids.get(1), null);
+        assertEquals(0, entries.apply(ids.get(1)));
+        assertEquals(2, entries.apply(ids.get(2)));
+
+        fixture.service().deleteIpamPool(REGION, poolId);
+        for (String id : ids) {
+            assertEquals(0, entries.apply(id), id);
+        }
+    }
+
+    @Test
+    void anAllocationStoredWithoutAResourceOwnerFallsBackToThePoolOwnersAccount() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        String poolId = fixture.pool().getIpamPoolId();
+        fixture.caller().set("111111111111");
+        String allocationId = fixture.service().allocateIpamPoolCidr(REGION, poolId, 24,
+                null, null, null, List.of(new Tag("team", "owner"))).getIpamPoolAllocationId();
+        fixture.pools().getForAccount("111111111111", REGION + "|" + poolId).orElseThrow()
+                .getAllocations().getFirst().setResourceOwner(null);
+
+        fixture.caller().set("222222222222");
+        fixture.service().releaseIpamPoolAllocation(REGION, poolId, allocationId, null);
+
+        assertTrue(fixture.tags().scanAllAccountEntries(key -> key.endsWith(allocationId)).isEmpty());
     }
 
     @Test

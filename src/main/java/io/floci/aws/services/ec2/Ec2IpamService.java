@@ -418,7 +418,7 @@ public class Ec2IpamService {
         for (IpamPool pool : pools.scan(k -> true)) {
             if (ipamId.equals(pool.getIpamId())) {
                 pools.delete(key(pool.getRegion(), pool.getIpamPoolId()));
-                deletePoolTags(pool);
+                deletePoolTags(ownedIpam.accountId(), pool);
             }
         }
         ipam.setState("delete-complete");
@@ -670,19 +670,27 @@ public class Ec2IpamService {
         OwnedPool ownedPool = requireOwnedPoolForMutation(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         deletePool(ownedPool);
-        deletePoolTags(pool);
+        deletePoolTags(ownedPool.accountId(), pool);
         pool.setState("delete-complete");
         return pool;
     }
 
     /** A pool's tags go with it, and so do those of the allocations it still held. */
-    private void deletePoolTags(IpamPool pool) {
-        List<String> ids = new ArrayList<>();
-        ids.add(pool.getIpamPoolId());
+    private void deletePoolTags(String ownerAccountId, IpamPool pool) {
+        ec2.removeTags(ownerAccountId, pool.getRegion(), pool.getIpamPoolId());
         for (IpamPoolAllocation allocation : pool.getAllocations()) {
-            ids.add(allocation.getIpamPoolAllocationId());
+            deleteAllocationTags(ownerAccountId, pool.getRegion(), allocation);
         }
-        ec2.deleteTags(pool.getRegion(), ids, List.of());
+    }
+
+    /** The pool's owner and the account that made the allocation each keep their own tags on it; both go. */
+    private void deleteAllocationTags(String ownerAccountId, String region, IpamPoolAllocation allocation) {
+        String id = allocation.getIpamPoolAllocationId();
+        ec2.removeTags(ownerAccountId, region, id);
+        String maker = allocation.getResourceOwner();
+        if (maker != null && !maker.equals(ownerAccountId)) {
+            ec2.removeTags(maker, region, id);
+        }
     }
 
     public IpamPoolCidr provisionIpamPoolCidr(String region, String ipamPoolId, String cidr) {
@@ -788,7 +796,7 @@ public class Ec2IpamService {
         allocation.setCidr(chosen);
         allocation.setDescription(description);
         allocation.setResourceType("custom");
-        allocation.setResourceOwner(config.defaultAccountId());
+        allocation.setResourceOwner(callerAccountId());
         allocation.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
         pool.getAllocations().add(allocation);
         savePool(ownedPool);
@@ -803,10 +811,9 @@ public class Ec2IpamService {
                                              String ipamPoolAllocationId, String cidr) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
-        List<String> released = pool.getAllocations().stream()
+        List<IpamPoolAllocation> released = pool.getAllocations().stream()
                 .filter(a -> (ipamPoolAllocationId != null && ipamPoolAllocationId.equals(a.getIpamPoolAllocationId()))
                         || (ipamPoolAllocationId == null && cidr != null && cidr.equals(a.getCidr())))
-                .map(IpamPoolAllocation::getIpamPoolAllocationId)
                 .toList();
         if (released.isEmpty()) {
             String identifier = ipamPoolAllocationId != null
@@ -815,9 +822,11 @@ public class Ec2IpamService {
             throw new AwsException("InvalidIpamPoolAllocationId.NotFound",
                     "Allocation " + identifier + " not found in pool " + ipamPoolId + ".", 400);
         }
-        pool.getAllocations().removeIf(a -> released.contains(a.getIpamPoolAllocationId()));
+        pool.getAllocations().removeAll(released);
         savePool(ownedPool);
-        ec2.deleteTags(pool.getRegion(), released, List.of());
+        for (IpamPoolAllocation allocation : released) {
+            deleteAllocationTags(ownedPool.accountId(), pool.getRegion(), allocation);
+        }
         return true;
     }
 

@@ -10729,6 +10729,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         tags.delete(key(region, resourceId));
     }
 
+    /** Drops a deleted resource's tags in {@code accountId}, or in the caller's account when that is null. */
+    public void removeTags(String accountId, String region, String resourceId) {
+        if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount && accountId != null) {
+            tagsByAccount.deleteForAccount(accountId, key(region, resourceId));
+        } else {
+            removeTags(region, resourceId);
+        }
+    }
+
     /** The tags currently on one resource in {@code region}, as CreateTags and DeleteTags maintain them. */
     public List<Tag> resourceTags(String region, String resourceId) {
         return List.copyOf(tagsOf(region, resourceId).orElse(List.of()));
