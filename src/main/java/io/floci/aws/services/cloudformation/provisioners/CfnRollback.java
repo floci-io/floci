@@ -386,6 +386,26 @@ public final class CfnRollback {
      */
     public static final String NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR = "__FlociNetworkConnectorUpdateSnapshot";
 
+    /**
+     * Holds the mutable configuration an EFS file system carried before an in-place update changed
+     * it (throughput, backup, lifecycle, policy, protection and tags), so a failed stack update can
+     * put it back. Written by {@code EfsCfnProvisioner} before it reconciles and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String EFS_FILE_SYSTEM_UPDATE_SNAPSHOT_ATTR = "__FlociEfsFileSystemUpdateSnapshot";
+
+    /**
+     * Holds the security groups an EFS mount target carried before an in-place update changed them,
+     * so a failed stack update can put them back.
+     */
+    public static final String EFS_MOUNT_TARGET_UPDATE_SNAPSHOT_ATTR = "__FlociEfsMountTargetUpdateSnapshot";
+
+    /**
+     * Holds the tags an EFS access point carried before an in-place update changed them, so a
+     * failed stack update can put them back.
+     */
+    public static final String EFS_ACCESS_POINT_UPDATE_SNAPSHOT_ATTR = "__FlociEfsAccessPointUpdateSnapshot";
+
     private CfnRollback() {
     }
 
