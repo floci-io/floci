@@ -6227,6 +6227,19 @@ public class CognitoService implements ResourceProvider {
         }
     }
 
+    /**
+     * The id of the Floci pool that issued and signed this token, after the same alg, issuer, kid
+     * and signature checks Cognito applies to its own tokens; empty when any of them fails.
+     */
+    public Optional<String> verifiedIssuingPoolId(String token) {
+        try {
+            return Optional.of(verifyJwtSignatureAndIssuer(token).poolId());
+        } catch (Exception e) {
+            LOG.debug("Token not verified as issued by a Floci pool", e);
+            return Optional.empty();
+        }
+    }
+
     private VerifiedJwt verifyJwtSignatureAndIssuer(String token) throws Exception {
         if (token == null || token.isBlank()) {
             throw new IllegalArgumentException("missing token");
