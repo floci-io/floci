@@ -86,10 +86,13 @@ does not exist.", as AWS does.
 Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
 they report `TERMINATED` with zero running or provisioned capacity; their requested and target
 capacities remain recorded. `ListInstances` numbers the synthetic IDs and addresses of the `MASTER`
-group's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
-`DescribeCluster`'s `MasterPublicDnsName` says, while the other groups resize, and every other instance's private
-address is `10.<group>.0.<n>`, its group's number in the cluster and its own in the group, so it too stays while
-another group resizes; it retains each group's
+group's or fleet's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
+`DescribeCluster`'s `MasterPublicDnsName` says, while the others resize, and every other instance's private
+address is `10.<group>.0.<n>`, its group's or fleet's number in the cluster and its own in it, so it too stays while
+another resizes. An instance fleet has an instance for each unit of its capacity, its on-demand ones first, each of the
+first instance type in its `InstanceTypeConfigs`. `InstanceGroupId` and `InstanceGroupTypes` keep instance groups'
+instances, `InstanceFleetId` and `InstanceFleetType` instance fleets', and a call's filters all apply together.
+`ListInstances` retains each group's or fleet's
 instances with their original synthetic IDs and `TERMINATED` status for 30 days after termination. New groups or fleets are rejected
 on terminated clusters. As on AWS, `ModifyInstanceGroups` answers `ValidationException` "An instance
 group may only be modified when the cluster is running or waiting." for a cluster in any other state,
@@ -100,7 +103,16 @@ running or waiting." with `ErrorCode` `MODIFY_INSTANCE_FLEET_OF_RUNNING_JOBFLOW_
 other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `TERMINATING` or
 `TERMINATED` cluster the "shutting down" answer, and `AddInstanceGroups` gives it as
 `ValidationException`, as `AddJobFlowSteps` does. `InstanceStates` filters the modeled `RUNNING` and
-`TERMINATED` instances.
+`TERMINATED` instances. As `ListInstances` "Provides information for all active Amazon EC2 instances and Amazon EC2
+instances terminated in the last 30 days, up to a maximum of 2,000", a call lists at most 2,000 and gives a `Marker`
+for the next; a `Marker` no call gave is refused with `InvalidRequestException`.
+A cluster has instance groups or instance fleets, never both, as "instance fleets and instance groups cannot coexist in a
+cluster": `RunJobFlow` with both is refused with `ValidationException` "The RunJobFlow request can contain
+InstanceFleets parameters or InstanceGroups parameters, but not both.", the API reference's own words, and
+`AddInstanceGroups` on a cluster with instance fleets with `ValidationException`, `AddInstanceFleet` on one with
+instance groups with `InvalidRequestException`, each saying the cluster uses the other kind; AWS's wording for these is
+not documented, so it is Floci's. A fleet without its `InstanceFleetType`, or with an `InstanceTypeConfigs` member
+without its `InstanceType`, both required, is refused with the framework's `ValidationException`.
 
 A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
@@ -244,8 +256,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   Each core and task node is a container of its own on that network, `emr-<cluster-id>-node-<group>-<n>`, with its data
   in a volume of its own: "Core nodes run the Data Node daemon", "a core node runs YARN NodeManager daemons, Hadoop
   MapReduce tasks, and Spark executors", and "Task nodes don't run the Data Node daemon". Its name on the network is the
-  private DNS name `ListInstances` gives it, which YARN and HDFS know it by; an instance fleet's nodes are named the same
-  way, though `ListInstances` does not list a fleet's instances. How many there are follows the instance
+  private DNS name `ListInstances` gives it, which YARN and HDFS know it by, an instance fleet's as an instance group's.
+  How many there are follows the instance
   groups' counts or the instance fleets' target capacities, at most `yarn-max-worker-nodes`, 4 by default, core nodes
   first, as each costs 300 to 800 MB while idle; with 0 the cluster runs on its primary node alone. `ModifyInstanceGroups`,
   `AddInstanceGroups`, `ModifyInstanceFleet` and `AddInstanceFleet` reach the nodes of a cluster a step has started them
@@ -486,8 +498,9 @@ holding the driver and its executors, or a command or a script. The cluster itse
 - **No more nodes than `yarn-max-worker-nodes`.** A cluster that names more core and task instances runs that many,
   core nodes first, while `ListInstances` still lists them all. Its core and task nodes offer the same capacity whatever
   their instance type.
-- **An instance fleet's unit of capacity is one node.** Floci does not read a fleet's instance types, so it has no
-  `WeightedCapacity` to divide its target capacity by.
+- **An instance fleet's unit of capacity is one instance.** Floci does not choose among a fleet's instance types as EMR
+  does: `ListInstances` gives each of its instances the first in its `InstanceTypeConfigs`, and its target capacity is
+  divided by no `WeightedCapacity`, so it has an instance and a node for each unit.
 - **A resize shows at once.** An instance group is `RUNNING` with its new count, and an instance fleet its new capacity,
   as soon as the resize is asked for, while the nodes take a few seconds to follow, or longer to decommission. A core
   group shrunk below the copies HDFS keeps says the count asked for, while its nodes stop at the copies; EMR documents

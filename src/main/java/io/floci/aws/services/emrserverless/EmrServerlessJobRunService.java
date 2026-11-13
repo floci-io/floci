@@ -1182,7 +1182,6 @@ public class EmrServerlessJobRunService implements Resettable {
         return limits;
     }
 
-
     /**
      * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes; an earlier release, or
      * a STREAMING run, keeps the model's 0 to 1,000,000, 0 meaning none. No source gives AWS's error, so
