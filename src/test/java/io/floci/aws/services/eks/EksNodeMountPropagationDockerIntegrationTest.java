@@ -3,6 +3,7 @@ package io.floci.aws.services.eks;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.services.eks.model.Cluster;
+import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.RealEksProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -13,12 +14,13 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Docker integration test verifying that a cluster's node shares its mounts as an EKS node does, so a pod asking
@@ -47,11 +49,8 @@ class EksNodeMountPropagationDockerIntegrationTest {
 
     @BeforeEach
     void requireDocker() {
-        boolean dockerAvailable = isDockerAvailable();
-        if (!dockerAvailable) {
-            LOG.warn("Docker daemon is not available; skipping EksNodeMountPropagationDockerIntegrationTest");
-        }
-        Assumptions.assumeTrue(dockerAvailable, "Docker daemon must be available for EKS mount propagation test");
+        Assumptions.assumeTrue(DockerAvailability.answers(dockerClient),
+                "Docker daemon must be available for EKS mount propagation test");
     }
 
     @AfterEach
@@ -81,11 +80,11 @@ class EksNodeMountPropagationDockerIntegrationTest {
         assertNotNull(cluster.getContainerId(), "Container ID must not be null");
         String containerId = cluster.getContainerId();
 
-        assertTrue(waitFor(60, () -> eksClusterManager.isReady(cluster)),
-                "k3s API server must become ready within 60 seconds");
+        await("k3s API server ready").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .until(() -> eksClusterManager.isReady(cluster));
         eksClusterManager.finalizeCluster(cluster);
-        assertTrue(waitFor(30, () -> kubectl(containerId, "get", "serviceaccount", "default").exitCode() == 0),
-                "default serviceaccount must be created within 30 seconds");
+        await("default serviceaccount created").atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofSeconds(2))
+                .until(() -> kubectl(containerId, "get", "serviceaccount", "default").exitCode() == 0);
 
         String podYaml = """
                 apiVersion: v1
@@ -121,26 +120,11 @@ class EksNodeMountPropagationDockerIntegrationTest {
                 "cat << 'EOF' | kubectl apply -f -\n" + podYaml + "\nEOF");
         assertEquals(0, applied.exitCode(), "kubectl apply failed: " + applied.stderr());
 
-        boolean running = waitFor(90, () -> "Running".equals(
-                kubectl(containerId, "get", "pod", POD, "-o", "jsonpath={.status.phase}").stdout().trim()));
-        assertTrue(running, () -> "the pod must start, but its container reports: " + kubectl(containerId,
-                "get", "pod", POD, "-o", "jsonpath={.status.containerStatuses[0].state}").stdout());
-    }
-
-    private boolean waitFor(int seconds, Check check) throws Exception {
-        long deadline = System.currentTimeMillis() + seconds * 1000L;
-        while (System.currentTimeMillis() < deadline) {
-            if (check.passes()) {
-                return true;
-            }
-            Thread.sleep(2000);
-        }
-        return false;
-    }
-
-    @FunctionalInterface
-    private interface Check {
-        boolean passes() throws Exception;
+        await("mount propagation pod running").atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(2))
+                .untilAsserted(() -> assertEquals("Running",
+                        kubectl(containerId, "get", "pod", POD, "-o", "jsonpath={.status.phase}").stdout().trim(),
+                        () -> "the pod must start, but its container reports: " + kubectl(containerId, "get", "pod",
+                                POD, "-o", "jsonpath={.status.containerStatuses[0].state}").stdout()));
     }
 
     private ContainerExec.Result kubectl(String containerId, String... args) {
@@ -152,14 +136,5 @@ class EksNodeMountPropagationDockerIntegrationTest {
 
     private ContainerExec.Result exec(String containerId, String... cmd) {
         return ContainerExec.run(dockerClient, containerId, cmd, 30).throwIfTimedOut(containerId);
-    }
-
-    private boolean isDockerAvailable() {
-        try {
-            dockerClient.pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
     }
 }
