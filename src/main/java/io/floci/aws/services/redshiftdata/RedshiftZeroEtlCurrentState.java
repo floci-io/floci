@@ -1,0 +1,185 @@
+package io.floci.aws.services.redshiftdata;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.dynamodb.model.AttributeDefinition;
+import io.floci.aws.services.dynamodb.model.KeySchemaElement;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
+
+import java.math.BigDecimal;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+/**
+ * The table a DynamoDB zero-ETL integration projects its source's current item state into, shaped as AWS shapes
+ * it: in the target's {@code public} schema under the DynamoDB table's name, one column per key attribute and a
+ * {@code value} column holding the whole item in DynamoDB JSON. AWS types {@code value} as SUPER; the PostgreSQL
+ * data plane holds it as {@code jsonb}, so {@code value->'payload'->'L'->0->>'S'} reads what
+ * {@code "value"."payload"."L"[0]."S"} reads on Redshift.
+ *
+ * <p>Key columns take the DynamoDB key types: a string is {@code TEXT}, a number {@code NUMERIC(38,18)}, the
+ * precision and scale AWS documents as the maximum for keys, and binary {@code BYTEA}. Every other attribute lives in
+ * {@code value} alone, so items that differ in shape need no schema change.
+ */
+public final class RedshiftZeroEtlCurrentState {
+
+    /** The longest table or key column name AWS replicates. PostgreSQL truncates identifiers past 63 bytes. */
+    static final int MAX_IDENTIFIER = 127;
+    static final String VALUE_COLUMN = "value";
+
+    /** One projected change: the item to upsert under its keys, or, with a null item, the keys to delete. */
+    public record Change(JsonNode keys, JsonNode item) {
+        public boolean isDelete() {
+            return item == null;
+        }
+    }
+
+    record KeyColumn(String name, String dynamoDbType) {}
+
+    private final String tableName;
+    private final List<KeyColumn> keyColumns;
+
+    RedshiftZeroEtlCurrentState(String tableName, List<KeyColumn> keyColumns) {
+        this.tableName = tableName;
+        this.keyColumns = List.copyOf(keyColumns);
+    }
+
+    /** The projection of a DynamoDB table, its partition key column before its sort key's. */
+    public static RedshiftZeroEtlCurrentState of(TableDefinition table) {
+        String tableName = table.getTableName();
+        if (tableName == null || tableName.isBlank() || tableName.length() > MAX_IDENTIFIER) {
+            throw new AwsException("InvalidParameterValue",
+                    "Table names from DynamoDB greater than " + MAX_IDENTIFIER + " characters are not supported.", 400);
+        }
+        List<KeyColumn> columns = new ArrayList<>();
+        for (String keyType : List.of("HASH", "RANGE")) {
+            for (KeySchemaElement element : table.getKeySchema()) {
+                if (keyType.equals(element.getKeyType())) {
+                    columns.add(new KeyColumn(element.getAttributeName(), attributeType(table, element.getAttributeName())));
+                }
+            }
+        }
+        if (columns.isEmpty()) {
+            throw new AwsException("InternalFailure", "DynamoDB table " + tableName + " has no key schema.", 500);
+        }
+        for (KeyColumn column : columns) {
+            if (column.name().length() > MAX_IDENTIFIER) {
+                throw new AwsException("InvalidParameterValue", "Column names for the partition key or sort key "
+                        + "greater than " + MAX_IDENTIFIER + " characters are not supported.", 400);
+            }
+            if (VALUE_COLUMN.equals(column.name())) {
+                throw new AwsException("InvalidParameterValue",
+                        "A key attribute named " + VALUE_COLUMN + " collides with the replicated item column.", 400);
+            }
+        }
+        return new RedshiftZeroEtlCurrentState(tableName, columns);
+    }
+
+    private static String attributeType(TableDefinition table, String attributeName) {
+        for (AttributeDefinition definition : table.getAttributeDefinitions()) {
+            if (attributeName.equals(definition.getAttributeName())) {
+                return definition.getAttributeType();
+            }
+        }
+        throw new AwsException("InternalFailure",
+                "DynamoDB table " + table.getTableName() + " defines no type for key attribute " + attributeName + ".", 500);
+    }
+
+    public String tableName() {
+        return tableName;
+    }
+
+    List<String> keyColumnNames() {
+        return keyColumns.stream().map(KeyColumn::name).toList();
+    }
+
+    /**
+     * The change an AWS stream record makes to the current state: a {@code REMOVE} deletes its keys, and any other
+     * event upserts its {@code NewImage}. A record of a stream that carries no new image (a {@code KEYS_ONLY} or
+     * {@code OLD_IMAGE} view) is projected from the item as it is now, read through {@code lookup}, and a key that
+     * no longer has one is deleted. A record without keys projects nothing.
+     */
+    public static Change changeOf(JsonNode record, Function<JsonNode, JsonNode> lookup) {
+        JsonNode dynamodb = record.path("dynamodb");
+        JsonNode keys = dynamodb.get("Keys");
+        if (keys == null || !keys.isObject() || keys.isEmpty()) {
+            return null;
+        }
+        if ("REMOVE".equals(record.path("eventName").asText())) {
+            return new Change(keys, null);
+        }
+        JsonNode newImage = dynamodb.get("NewImage");
+        if (newImage != null && newImage.isObject()) {
+            return new Change(keys, newImage);
+        }
+        JsonNode current = lookup.apply(keys);
+        return new Change(keys, current != null && current.isObject() ? current : null);
+    }
+
+    String ddl() {
+        String columns = keyColumns.stream()
+                .map(column -> quote(column.name()) + " " + sqlType(column) + " NOT NULL")
+                .collect(Collectors.joining(", "));
+        String primaryKey = keyColumns.stream().map(column -> quote(column.name())).collect(Collectors.joining(", "));
+        return "CREATE TABLE IF NOT EXISTS " + qualifiedName() + " (" + columns + ", "
+                + quote(VALUE_COLUMN) + " JSONB NOT NULL, PRIMARY KEY (" + primaryKey + "))";
+    }
+
+    String upsertSql() {
+        String names = keyColumns.stream().map(column -> quote(column.name())).collect(Collectors.joining(", "));
+        String placeholders = keyColumns.stream().map(column -> "?").collect(Collectors.joining(", "));
+        return "INSERT INTO " + qualifiedName() + " (" + names + ", " + quote(VALUE_COLUMN) + ") VALUES ("
+                + placeholders + ", ?::jsonb) ON CONFLICT (" + names + ") DO UPDATE SET "
+                + quote(VALUE_COLUMN) + " = EXCLUDED." + quote(VALUE_COLUMN);
+    }
+
+    String deleteSql() {
+        return "DELETE FROM " + qualifiedName() + " WHERE " + keyColumns.stream()
+                .map(column -> quote(column.name()) + " = ?").collect(Collectors.joining(" AND "));
+    }
+
+    /** The {@code value} parameter of {@link #upsertSql()}, after the key parameters. */
+    int valueParameterIndex() {
+        return keyColumns.size() + 1;
+    }
+
+    /** Binds the record's key attributes as the statement's first parameters, in key column order. */
+    void bindKeys(PreparedStatement statement, JsonNode keys) throws SQLException {
+        int index = 1;
+        for (KeyColumn column : keyColumns) {
+            JsonNode attribute = keys.get(column.name());
+            JsonNode typed = attribute == null ? null : attribute.get(column.dynamoDbType());
+            if (typed == null || typed.isNull()) {
+                throw new AwsException("InternalFailure", "A DynamoDB stream record of " + tableName
+                        + " carries no " + column.dynamoDbType() + " value for key attribute " + column.name() + ".", 500);
+            }
+            switch (column.dynamoDbType()) {
+                case "N" -> statement.setBigDecimal(index, new BigDecimal(typed.asText()));
+                case "B" -> statement.setBytes(index, Base64.getDecoder().decode(typed.asText()));
+                default -> statement.setString(index, typed.asText());
+            }
+            index++;
+        }
+    }
+
+    String qualifiedName() {
+        return "public." + quote(tableName);
+    }
+
+    private static String sqlType(KeyColumn column) {
+        return switch (column.dynamoDbType()) {
+            case "N" -> "NUMERIC(38,18)";
+            case "B" -> "BYTEA";
+            default -> "TEXT";
+        };
+    }
+
+    private static String quote(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+}

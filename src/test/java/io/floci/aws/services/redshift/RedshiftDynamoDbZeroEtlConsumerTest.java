@@ -19,6 +19,8 @@ import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.Integration;
+import io.floci.aws.services.redshiftdata.RedshiftZeroEtlCurrentState;
+import io.floci.aws.services.redshiftdata.RedshiftZeroEtlCurrentState.Change;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.floci.aws.testing.ThreadStates;
 import io.quarkus.test.junit.QuarkusTest;
@@ -27,6 +29,7 @@ import io.vertx.core.Vertx;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -51,6 +54,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -813,6 +817,128 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         verify(writer).createLandingTable(integration.getAccountId(), namespaceArn, "floci_zetl_orders");
         verify(writer).writeBatch(integration.getAccountId(), namespaceArn, "floci_zetl_orders",
                 List.of(first.awsRecord()));
+    }
+
+    @Test
+    void projectsStreamRecordsIntoTheCurrentStateTableAfterTheyLand() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-projected-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        DynamoDbStreamReader.Record inserted = imageRecord("s1", "INSERT", "1", "first");
+        DynamoDbStreamReader.Record removed = keysOnlyRecord("s2", "REMOVE", "1");
+        streams.shard(table.getStreamArn(), SHARD_ID, null).addAll(List.of(inserted, removed));
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer).pollOnce(integration);
+
+        ArgumentCaptor<RedshiftZeroEtlCurrentState> state = ArgumentCaptor.forClass(RedshiftZeroEtlCurrentState.class);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Change>> changes = ArgumentCaptor.forClass(List.class);
+        InOrder inOrder = inOrder(writer);
+        inOrder.verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
+                List.of(inserted.awsRecord(), removed.awsRecord()));
+        inOrder.verify(writer).createCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), state.capture());
+        inOrder.verify(writer).applyChanges(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), eq(state.getValue()),
+                changes.capture());
+        assertEquals(tableName, state.getValue().tableName());
+        assertEquals(List.of(new Change(inserted.awsRecord().path("dynamodb").path("Keys"),
+                        inserted.awsRecord().path("dynamodb").path("NewImage")),
+                new Change(removed.awsRecord().path("dynamodb").path("Keys"), null)), changes.getValue());
+        assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void aRecordWithoutANewImageIsProjectedFromTheSourceItem() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-keys-only-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        ObjectNode item = itemWithId("1");
+        item.putObject("note").put("S", "as it is now");
+        RequestScopes.runAs("111111111111", () -> dynamoDbService.putItem(tableName, item, "us-east-1"));
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        streams.shard(table.getStreamArn(), SHARD_ID, null).addAll(List.of(
+                keysOnlyRecord("s1", "MODIFY", "1"), keysOnlyRecord("s2", "MODIFY", "gone")));
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, mock(RedshiftService.class), writer)
+                .pollOnce(integration);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Change>> changes = ArgumentCaptor.forClass(List.class);
+        verify(writer).applyChanges(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any(), changes.capture());
+        assertEquals(item, changes.getValue().get(0).item());
+        assertTrue(changes.getValue().get(1).isDelete());
+    }
+
+    @Test
+    void theCurrentStateTableIsCreatedOnceAndTheProjectionFailureKeepsTheCheckpoint() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        doThrow(new AwsException("InternalFailure", "Could not apply Redshift zero-ETL changes to orders.", 500))
+                .doNothing()
+                .when(writer).applyChanges(any(), any(), any(), any());
+        String tableName = "orders-retried-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        DynamoDbStreamReader.Record first = imageRecord("s1", "INSERT", "1", "first");
+        streams.shard(table.getStreamArn(), SHARD_ID, null).add(first);
+        RedshiftDynamoDbZeroEtlConsumer consumer =
+                new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer);
+
+        assertThrows(AwsException.class, () -> consumer.pollOnce(integration));
+        assertTrue(integration.getShardSequenceNumbers().isEmpty());
+
+        consumer.pollOnce(integration);
+
+        verify(writer, times(1)).createCurrentStateTable(any(), any(), any());
+        verify(writer, times(2)).applyChanges(any(), any(), any(), any());
+        assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void backfilledItemsAreProjectedAsUpserts() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-backfill-state-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, false);
+        ObjectNode item = itemWithId("1");
+        RequestScopes.runAs("111111111111", () -> dynamoDbService.putItem(tableName, item, "us-east-1"));
+        Integration integration = tableSourceIntegration(table);
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, mock(RedshiftService.class), writer)
+                .pollOnce(integration);
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Change>> changes = ArgumentCaptor.forClass(List.class);
+        InOrder inOrder = inOrder(writer);
+        inOrder.verify(writer).createCurrentStateTable(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any());
+        inOrder.verify(writer).writeBatch(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), eq("floci_zetl_orders"), any());
+        inOrder.verify(writer).applyChanges(eq(integration.getAccountId()), eq(WAREHOUSE_ARN), any(), changes.capture());
+        assertEquals(List.of(new Change(item, item)), changes.getValue());
+    }
+
+    private static DynamoDbStreamReader.Record imageRecord(String sequenceNumber, String eventName, String id,
+                                                           String note) {
+        DynamoDbStreamReader.Record record = keysOnlyRecord(sequenceNumber, eventName, id);
+        ObjectNode image = ((ObjectNode) record.awsRecord().path("dynamodb")).putObject("NewImage");
+        image.putObject("id").put("S", id);
+        image.putObject("note").put("S", note);
+        return record;
+    }
+
+    private static DynamoDbStreamReader.Record keysOnlyRecord(String sequenceNumber, String eventName, String id) {
+        ObjectNode awsRecord = MAPPER.createObjectNode()
+                .put("eventID", "event-" + sequenceNumber)
+                .put("eventName", eventName);
+        ObjectNode dynamodb = awsRecord.putObject("dynamodb").put("SequenceNumber", sequenceNumber);
+        dynamodb.putObject("Keys").putObject("id").put("S", id);
+        return new DynamoDbStreamReader.Record(sequenceNumber, awsRecord);
     }
 
     private TableDefinition createTableAs(String accountId, String tableName, boolean streamed) {

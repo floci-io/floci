@@ -476,6 +476,35 @@ approximation to indicate that initial backfill is in progress); it becomes `act
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
 
+#### Current-state table
+
+Beside the landing log, the integration projects the source table's current item state into a table
+shaped as AWS shapes it: in the target database's `public` schema, under the DynamoDB table's name,
+with one column per key attribute and a `value` column holding the whole item in DynamoDB JSON. AWS
+types `value` as SUPER. Floci's data plane is PostgreSQL, so `value` is `jsonb` and a path is read with
+the JSON operators: `value->'payload'->'L'->0->>'S'` here is `"value"."payload"."L"[0]."S"` on Redshift.
+
+```sql
+SELECT id, value->'note'->>'S' AS note FROM public."orders";
+```
+
+- Key columns take the DynamoDB key types: `S` is `TEXT`, `N` is `NUMERIC(38,18)` (the precision and
+  scale AWS documents as the maximum for keys), `B` is `BYTEA`. The partition key comes first, then the
+  sort key, and together they are the primary key. Every other attribute lives only in `value`, so items
+  of differing shape need no schema change.
+- Each `INSERT` and `MODIFY` replaces the item under its keys with the record's new image, each `REMOVE`
+  deletes it, and the backfill scan upserts each item it reads. A record of a stream with no new image
+  (a `KEYS_ONLY` or `OLD_IMAGE` view) is projected from the item as the source holds it at that moment.
+- Changes are applied in shard order after the batch has landed, and the shard checkpoint advances only
+  once both are written. The projection is idempotent, so an item that lands twice, once from the scan
+  and once from the stream, or a batch written again after a failed poll, leaves the same state. AWS
+  refreshes every 15 to 30 minutes; Floci applies each poll.
+- A table name or key column name longer than 127 characters is refused, as AWS refuses it. PostgreSQL
+  truncates identifiers past 63 bytes, so two names that differ only after that point share a table.
+- The table lives in the same database as the user's own tables (`dev` on a cluster, the namespace's
+  database on Serverless), not in a database created from the integration, and is kept when the
+  integration is deleted, as AWS keeps replicated data.
+
 ### S3 event integrations
 
 `CreateIntegration` also takes an Amazon S3 bucket as the source (`arn:aws:s3:::<bucket>`), the first step of
@@ -555,7 +584,7 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-Schema inference, relational projection and `CREATE DATABASE ... FROM INTEGRATION` are not
+`CREATE DATABASE ... FROM INTEGRATION`, history mode and `SVV_INTEGRATION*` views are not
 supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
 is not accepted as a target.
 

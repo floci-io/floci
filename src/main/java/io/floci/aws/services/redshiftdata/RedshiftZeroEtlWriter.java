@@ -69,6 +69,54 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
+    /** Creates the table the integration projects its source's current item state into, if it does not exist. */
+    public void createCurrentStateTable(String accountId, String targetArn, RedshiftZeroEtlCurrentState state) {
+        try (Connection connection = connectionFactory.open(target(accountId, targetArn));
+             Statement statement = connection.createStatement()) {
+            statement.executeUpdate(state.ddl());
+        } catch (SQLException e) {
+            throw new AwsException("InternalFailure",
+                    "Could not create Redshift zero-ETL table " + state.tableName() + ".", 500);
+        }
+    }
+
+    /**
+     * Applies the changes to the current-state table in order, in one transaction: an upsert replaces the item
+     * under its keys and a delete removes it. Both are idempotent, so a batch written again after a failure
+     * leaves the same state.
+     */
+    public void applyChanges(String accountId, String targetArn, RedshiftZeroEtlCurrentState state,
+                             List<RedshiftZeroEtlCurrentState.Change> changes) {
+        if (changes == null || changes.isEmpty()) {
+            return;
+        }
+        try (Connection connection = connectionFactory.open(target(accountId, targetArn))) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement upsert = connection.prepareStatement(state.upsertSql());
+                 PreparedStatement delete = connection.prepareStatement(state.deleteSql())) {
+                for (RedshiftZeroEtlCurrentState.Change change : changes) {
+                    if (change.isDelete()) {
+                        state.bindKeys(delete, change.keys());
+                        delete.executeUpdate();
+                    } else {
+                        state.bindKeys(upsert, change.keys());
+                        upsert.setString(state.valueParameterIndex(), objectMapper.writeValueAsString(change.item()));
+                        upsert.executeUpdate();
+                    }
+                }
+                connection.commit();
+            } catch (SQLException | JsonProcessingException | RuntimeException e) {
+                connection.rollback();
+                throw e;
+            }
+        } catch (SQLException e) {
+            throw new AwsException("InternalFailure",
+                    "Could not apply Redshift zero-ETL changes to " + state.tableName() + ".", 500);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InternalFailure", "Could not serialize a DynamoDB item.", 500);
+        }
+    }
+
     /** Writes AWS DynamoDB Streams {@code Records[]} elements, skipping event ids already landed. */
     public void writeBatch(String accountId, String targetArn, String tableName, List<JsonNode> records) {
         if (records == null || records.isEmpty()) {
