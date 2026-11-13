@@ -15,17 +15,10 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -296,27 +289,9 @@ class AwsConfigServiceTaggingTest {
         String arn = service.putConformancePack(REGION, "pack", "s3://bucket/t.yaml", null).conformancePackArn();
 
         tagStore.parkNextWrite();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> tag = pool.submit(() -> service.tagResource(REGION, arn, ENV_PROD));
-            assertTrue(tagStore.awaitParked(), "the tag write must reach its persist");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> delete = pool.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                service.deleteConformancePack(REGION, "pack");
-            });
-            awaitBlockedOrDone(deleteThread, delete);
-            assertFalse(delete.isDone(), "the delete ran while a tag write on the same pack was mid-flight");
-
-            tagStore.release();
-            tag.get(2, TimeUnit.SECONDS);
-            delete.get(2, TimeUnit.SECONDS);
-        } catch (ExecutionException e) {
-            throw new AssertionError(e.getCause());
-        } finally {
-            tagStore.release();
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(tagStore,
+                () -> service.tagResource(REGION, arn, ENV_PROD),
+                () -> service.deleteConformancePack(REGION, "pack"));
 
         assertTrue(service.storedTags(arn).isEmpty(), "a tag entry outlived the pack it was written for");
     }

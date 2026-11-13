@@ -21,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -100,23 +101,9 @@ class SnsPolicyAndSandboxEditsTest {
 
         // The verification parks right after reading the number, before writing it back verified.
         sandbox.parkNextRead();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> verify = pool.submit(() -> service.verifySmsSandboxPhoneNumber(PHONE_NUMBER, code, REGION));
-            assertTrue(sandbox.awaitParked(), "the verification must reach its read of the number");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> delete = pool.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                service.deleteSmsSandboxPhoneNumber(PHONE_NUMBER, REGION);
-            });
-            awaitBlockedOrDone(deleteThread, delete);
-
-            sandbox.release();
-            verify.get(2, TimeUnit.SECONDS);
-            delete.get(2, TimeUnit.SECONDS);
-        } finally {
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(sandbox,
+                () -> service.verifySmsSandboxPhoneNumber(PHONE_NUMBER, code, REGION),
+                () -> service.deleteSmsSandboxPhoneNumber(PHONE_NUMBER, REGION));
 
         assertTrue(service.listSmsSandboxPhoneNumbers(null, null, REGION).items().isEmpty(),
                 "a number deleted while it was being verified came back");
@@ -130,23 +117,9 @@ class SnsPolicyAndSandboxEditsTest {
 
         // The resend parks right after reading the number, before storing its fresh code.
         sandbox.parkNextRead();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> resend = pool.submit(() -> service.createSmsSandboxPhoneNumber(PHONE_NUMBER, null, REGION));
-            assertTrue(sandbox.awaitParked(), "the resend must reach its read of the number");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> delete = pool.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                service.deleteSmsSandboxPhoneNumber(PHONE_NUMBER, REGION);
-            });
-            awaitBlockedOrDone(deleteThread, delete);
-
-            sandbox.release();
-            resend.get(2, TimeUnit.SECONDS);
-            delete.get(2, TimeUnit.SECONDS);
-        } finally {
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(sandbox,
+                () -> service.createSmsSandboxPhoneNumber(PHONE_NUMBER, null, REGION),
+                () -> service.deleteSmsSandboxPhoneNumber(PHONE_NUMBER, REGION));
 
         assertTrue(service.listSmsSandboxPhoneNumbers(null, null, REGION).items().isEmpty(),
                 "a number deleted while a code was being resent came back");
