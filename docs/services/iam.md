@@ -1921,7 +1921,15 @@ Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, 
 Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub and Amazon GuardDuty they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
-of a type the action acts on, or members filling the variables of a type's format. A member holding
+of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
+stated by hand but what AWS was measured to check where neither botocore nor the Service Reference says
+it, each entry citing the measurement (a policy probe against real AWS, or AWS's own AccessDenied message
+naming the resource): DynamoDB's `ListTables` is checked on the literal `table/*` of the request's
+partition, Region and account, and Step Functions' `SendTaskSuccess`, `SendTaskFailure` and
+`SendTaskHeartbeat` on the activity or the unqualified state machine their task token belongs to, though
+the Service Reference lists no resource type for either. A service only looks up what it holds where the
+table asks it to (the resource a name finds, the one an id reaches, its default one); none says what an
+operation acts on. A member holding
 an ARN may be one inside a structure or inside each of a list's structures: `SetRulePriorities` is
 checked on the rules its `RulePriorities` name, and `CreateStateMachineAlias` on the state machine
 its routing configuration's versions are of. A variable the
@@ -1937,30 +1945,36 @@ and answers with every repository, names no repository, and a number or a null a
 member whose botocore shape is an account id gives the account the type is in: ECR's `registryId`
 selects the registry its handler acts in, so `repository/<name>` is checked in that account, and a
 `registryId` that is no account id names no repository, while a null one is the caller's, as ECR
-reads it. `StartExecution` and
-`StartSyncExecution` take Step Functions Local's `<stateMachineArn>#<test case>` and run the
-machine before the `#`, so that machine is the one checked. `StartPipelineExecution` and
+reads it. Step Functions Local's `<stateMachineArn>#<test case>`, which `StartExecution` and
+`StartSyncExecution` take and run the machine before the `#` of, is checked as given: it is no ARN AWS has,
+and nothing botocore or the Service Reference says reads it otherwise, so a grant covering such executions
+names it (`stateMachine:<name>*`). `StartPipelineExecution` and
 `GetPipelineState` name their pipeline by a bare `name`, which is read as the pipeline's;
 `CreatePipeline` and `UpdatePipeline` by `pipeline.name`, not by `pipeline.roleArn`, which holds the
 role CodePipeline assumes; `PutWebhook` names the webhook by `webhook.name` and the pipeline it
 connects to by `webhook.targetPipeline`. A CodePipeline webhook is `webhook:<name>`, the ARN AWS
 gives it, and a custom action type `actiontype:Custom/<category>/<provider>/<version>`, its owner
-being `Custom`, which the request does not give. Cloud Map's `CreateService` is checked on the
+being `Custom`, which the request does not give and the operation's name gives as the one value of
+botocore's `ActionOwner` enum it is. Cloud Map's `CreateService` is checked on the
 namespace its `NamespaceId` names or, when it gives none or a JSON null, the one its
-`DnsConfig.NamespaceId` names, as Cloud Map reads them, and on the service it creates. A CodeBuild build is checked on its
-project, which its id names before its `:` (`<project>:<id>`), as CodeBuild authorizes
-`BatchGetBuilds`, `StopBuild`, `RetryBuild` and `BatchDeleteBuilds`. `CreateBudget` and `UpdateBudget`
+`DnsConfig.NamespaceId` names, as Cloud Map reads them, and on the service it creates. A CodeBuild build is checked on the
+project CodeBuild holds it under, as CodeBuild authorizes `BatchGetBuilds`, `StopBuild`, `RetryBuild` and
+`BatchDeleteBuilds`; an id of no build it holds names no project, as nothing botocore or the Service
+Reference says gives a build id's project, so such a request is checked on `*`. `CreateBudget` and `UpdateBudget`
 are checked on the budget their `Budget.BudgetName` or `NewBudget.BudgetName` names, and Cost and Usage
 Reports' `PutReportDefinition` and `ModifyReportDefinition` on the report their `ReportDefinition.ReportName`
 or `ReportName` names, not on the billing view ARN each may carry, which names no budget or report. An Athena request
 naming no workgroup is checked on `workgroup/primary`, where `StartQueryExecution` runs its query,
 `ListQueryExecutions` and `ListNamedQueries` list, and `GetWorkGroup` answers. Athena's
 `ListDatabases`, `ListTableMetadata` and `GetTableMetadata` are checked on the catalog their
-`CatalogName` names and on `datacatalog/AwsDataCatalog`, the Glue Data Catalog Floci reads whichever
-catalog they name, and a `GetDataCatalog` naming no catalog on `datacatalog/AwsDataCatalog`, the one it
-answers. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
-their `BillingViewArn` gives: Floci serves no billing views and answers the account's costs whichever
-one is named. Data Exports' `CreateExport` is not checked on the
+`CatalogName` names, and a `GetDataCatalog` naming no catalog on `datacatalog/AwsDataCatalog`, the one it
+answers. Floci reads their metadata from the account's Glue Data Catalog alone, so they refuse with
+`MetadataException` a catalog whose metadata is elsewhere, one of another type than `GLUE` or registered
+for another account's catalog, and read no catalog but the one checked. Cost Explorer's cost and usage
+reads are checked on the billing view their `BillingViewArn` gives, and on `*` when they give none.
+Floci answers the costs of the caller's primary billing view alone, which it takes as `billingview/primary`
+since AWS does not document that view's ARN, and refuses any other with `ResourceNotFoundException`, as AWS
+does a view it does not hold. Data Exports' `CreateExport` is not checked on the
 ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `StartLogging`,
 `StopLogging` and `GetTrailStatus` are checked on the trail their bare `Name` names, by name or by
 ARN, its tag operations on the resource whose ARN their `ResourceId` gives, and its dashboard
@@ -1969,14 +1983,13 @@ Amazon EMR's requests naming a cluster by its job flow id, in `JobFlowId` or `Jo
 `cluster/<id>`, as when they name it by `ClusterId`, and `AddTags` and `RemoveTags` on the cluster their
 `ResourceId` names, the one Floci tags, not on one their `ClusterId` gives. A `ModifyInstanceGroups`
 naming its instance groups with no `ClusterId`, or a null one, is checked on the cluster each group is
-in, the one EMR finds it in. A Rekognition stream processor is checked on `streamprocessor/<name>`, the ARN its `Name`
+in, the one EMR finds it in, botocore documenting `ClusterId` as "the cluster to which the instance group
+belongs". A Rekognition stream processor is checked on `streamprocessor/<name>`, the ARN its `Name`
 gives. IAM Identity Center's `CreateAccountAssignment`, `DeleteAccountAssignment` and
 `ProvisionPermissionSet` are checked on the account their `TargetId` names, `account/<id>`, beside the
-instance and the permission set, and a `ProvisionPermissionSet` for `ALL_PROVISIONED_ACCOUNTS` on each
-account the permission set is provisioned to. AWS does not document which accounts such a request is
-authorized on, so checking each one it provisions is Floci's reading, and it provisions to the accounts it was
-checked on: one another request provisions the permission set to while it runs is left as that request
-left it. A permission set, an application or a trusted token issuer
+instance and the permission set. A `ProvisionPermissionSet` for `ALL_PROVISIONED_ACCOUNTS` names no
+account, and nothing botocore or the Service Reference says names the accounts it provisions to, so it is
+checked on its instance and permission set alone. A permission set, an application or a trusted token issuer
 a create makes has the id of the instance its `InstanceArn` names, `permissionSet/<instance id>/*`.
 Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked on each ARN their
 `MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
@@ -2174,7 +2187,8 @@ Analyzer's analyzer operations, Security Hub's hub operations and GuardDuty's de
 table of request resources reading the resource they name. Every route Floci serves of AWS Lake
 Formation and Amazon Inspector is one AWS authorizes on no resource type, as is every one of Amazon Macie's but
 `CreateMember`, so those are checked by their routes alone. `CreateMember`, on `POST /members`, is checked on the
-member its `account.accountId` names, and needs `macie2:TagResource` when it carries tags. API Gateway's
+account's members, `member/*`, as nothing botocore or the Service Reference says names the member it makes by its
+`account.accountId`, and needs `macie2:TagResource` when it carries tags. API Gateway's
 routes are checked by their routes alone too, on the path Floci builds the ARN from, and the authorized
 actions list the operations AWS checks as the action their HTTP method names (above). A route whose action AWS checks on a
 resource Floci neither builds nor reads would not be checked, since checked on `*` a grant scoped to
@@ -2416,13 +2430,12 @@ when the caller may not pass the role.
   `StartAutomationExecution`, Config `PutRemediationConfigurations`); one the Service Reference
   passes roles from to several services without saying which member goes where (EMR `RunJobFlow`,
   whose `JobFlowRole` also names an instance profile, EKS `UpdateClusterConfig`, CloudWatch Logs
-  `CreateImportTask`, SageMaker `CreateTrainingSession`); one whose body is XML (S3
-  `PutBucketReplication`); and one the botocore models Floci is pinned to do not have yet (SSM
-  `RegisterDefaultHostManagementConfiguration`, Kinesis Analytics `ImportSnapshot`), whose role is
-  read as soon as a release that has it is pinned, since the generator and its offline gate refuse
-  that reason once the models carry the operation. EC2's `RequestSpotFleet` names its roles in
-  EC2's own protocol, one of them as an instance profile. The REST services whose routes no rule
-  maps yet, and API Gateway, which is authorized by HTTP method, are not read either.
+  `CreateImportTask`); one whose body is XML (S3 `PutBucketReplication`); and one the botocore
+  models Floci is pinned to do not have yet (SSM `RegisterDefaultHostManagementConfiguration`,
+  Kinesis Analytics `ImportSnapshot`, Secrets Manager `AssociateCrossAccountReplica`), whose role
+  the generator reads as soon as a release that has it is pinned. EC2's `RequestSpotFleet` names
+  its roles in EC2's own protocol, one of them as an instance profile. The REST services whose
+  routes no rule maps yet, and API Gateway, which is authorized by HTTP method, are not read either.
 
 A request that names a Lambda network connector also needs `lambda:PassNetworkConnector` on it. The
 Lambda developer guide has "The caller must have `lambda:PassNetworkConnector` on the referenced

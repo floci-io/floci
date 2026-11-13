@@ -23,6 +23,10 @@ import java.util.Optional;
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
  * invitations and shares of other accounts they act on); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
  * for the namespace a request is of, so IAM never depends on that service directly.</p>
+ *
+ * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
+ * {@code through}, a default): never a fact about what an operation acts on, which the table alone says, from
+ * botocore and the Service Reference, or from AWS behaviour measured where neither carries it.</p>
  */
 public interface StoredResourceArns {
 
