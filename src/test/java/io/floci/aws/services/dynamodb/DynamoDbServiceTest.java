@@ -4012,9 +4012,8 @@ class DynamoDbServiceTest {
     }
 
     @Test
-    void updateItemSetDoubledOuterParensStillApplies() {
+    void updateItemRefusesDoubledOuterParens() {
         String region = "eu-west-1";
-        // Defence-in-depth: even multiply-wrapped expressions should parse the same as bare.
         createUsersTable(region);
 
         ObjectNode existing = mapper.createObjectNode();
@@ -4031,12 +4030,13 @@ class DynamoDbServiceTest {
         ObjectNode exprNames = mapper.createObjectNode();
         exprNames.put("#cnt", "counter");
 
-        service.updateItem("Users", key, null,
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
                 "SET #cnt = ((#cnt - :v))",
-                exprNames, exprValues, null, region);
+                exprNames, exprValues, null, region));
+        assertEquals("Invalid UpdateExpression: The expression has redundant parentheses;", ex.getMessage());
 
         JsonNode stored = service.getItem("Users", key, region);
-        assertEquals("7", stored.get("counter").get("N").asText());
+        assertEquals("10", stored.get("counter").get("N").asText());
     }
 
     @Test
