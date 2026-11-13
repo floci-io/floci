@@ -116,6 +116,8 @@ public class EksClusterManager
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
     private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
     private static final String ENDPOINT_HOST_LABEL = "io.floci.eks.endpoint-host";
+    /** Marks a node started behind {@link #RSHARE_ENTRYPOINT}, whose mounts are shared. */
+    private static final String SHARED_MOUNTS_LABEL = "io.floci.eks.shared-mounts";
     private static final Pattern HOSTNAME = Pattern.compile(
             "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*");
 
@@ -680,6 +682,7 @@ public class EksClusterManager
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
         labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
+        labels.put(SHARED_MOUNTS_LABEL, "true");
         if (!"localhost".equals(endpointHost)) {
             labels.put(ENDPOINT_HOST_LABEL, endpointHost);
         }
@@ -761,19 +764,16 @@ public class EksClusterManager
             serverArgs.addAll(callerArgs);
         }
 
-        if (config.services().eks().disableCni()) {
-            // A container's /sys mount defaults to private propagation, which breaks
-            // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
-            // slave mount") — real EKS/kubeadm nodes don't hit this since they're VMs,
-            // not nested containers. `mount --make-rshared /` before k3s starts fixes
-            // it; kind's own node image runs the same fix in its entrypoint for the
-            // same reason. RSHARE_ENTRYPOINT is POSIX sh-compatible (no bashisms) — the
-            // k3s image has no bash, only busybox sh.
-            specBuilder.withEntrypoint(RSHARE_ENTRYPOINT);
-            specBuilder.withCmd(buildRshareWrappedCmd(serverArgs));
-        } else {
-            specBuilder.withCmd(serverArgs);
-        }
+        // A container's mounts default to private propagation, which a pod asking for mount
+        // propagation cannot start on: a CSI node plugin mounts its volumes under
+        // /var/lib/kubelet/pods with Bidirectional propagation ("is not a shared mount"), a node
+        // exporter reads / with HostToContainer, and Cilium mounts its BPF filesystem on /sys
+        // ("is not a shared or slave mount"). An EKS node is a VM, whose mounts are shared.
+        // `mount --make-rshared /` before k3s starts gives the node the same; kind's own node
+        // image runs the same fix in its entrypoint. RSHARE_ENTRYPOINT is POSIX sh-compatible
+        // (no bashisms): the k3s image has no bash, only busybox sh.
+        specBuilder.withEntrypoint(RSHARE_ENTRYPOINT);
+        specBuilder.withCmd(buildRshareWrappedCmd(serverArgs));
         ContainerSpec spec = specBuilder.build();
 
         // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
@@ -864,7 +864,10 @@ public class EksClusterManager
             startCluster(cluster);
             return;
         }
-        if (capacityChanged || onAnotherNetwork(existing.get())
+        // A node started before its mounts were shared keeps private mounts, on which a CSI node plugin's
+        // Bidirectional mounts fail: it is replaced on the same data volume, as one with another capacity is.
+        boolean privateMounts = existingLabels == null || !"true".equals(existingLabels.get(SHARED_MOUNTS_LABEL));
+        if (capacityChanged || privateMounts || onAnotherNetwork(existing.get())
                 || !endpointHost.equals(certificateHost(existingLabels))) {
             replaceClusterContainer(cluster, null);
         }
@@ -1589,20 +1592,19 @@ public class EksClusterManager
 
     /**
      * Overrides the image's default {@code ["/bin/k3s"]} entrypoint so a {@code mount
-     * --make-rshared /} can run immediately before k3s starts (see the disableCni branch
-     * in {@link #startCluster} for why). POSIX sh-compatible — the k3s image has no bash.
-     * A failed mount is logged to stderr rather than silently ignored, since it means the
-     * external CNI's BPF filesystem mount will fail later in a much more confusing way.
+     * --make-rshared /} can run immediately before k3s starts (see {@link #startCluster} for
+     * why). POSIX sh-compatible: the k3s image has no bash. A failed mount is logged to stderr
+     * rather than silently ignored, since it means a pod asking for mount propagation, a CSI
+     * node plugin or an external CNI, will fail later in a much more confusing way.
      */
     static final List<String> RSHARE_ENTRYPOINT = List.of("sh", "-c",
             "mount --make-rshared / || echo 'floci: WARN: mount --make-rshared / failed; "
-                    + "external CNI may not work' >&2; exec /bin/k3s \"$@\"");
+                    + "CSI drivers and an external CNI may not work' >&2; exec /bin/k3s \"$@\"");
 
     /**
      * Builds the CMD to pair with {@link #RSHARE_ENTRYPOINT}: an unused $0 placeholder
      * followed by the real k3s server args, so the entrypoint's "$@" expands to exactly
-     * {@code serverArgs} — the same args {@code withCmd(serverArgs)} would pass directly
-     * when the entrypoint isn't overridden.
+     * {@code serverArgs}, the args the image's own {@code /bin/k3s} entrypoint would take.
      */
     static List<String> buildRshareWrappedCmd(List<String> serverArgs) {
         List<String> wrappedCmd = new ArrayList<>();

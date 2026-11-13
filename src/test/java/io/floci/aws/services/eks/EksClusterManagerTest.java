@@ -456,7 +456,8 @@ class EksClusterManagerTest {
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1",
                 "io.floci.eks.node-capacity", "m5.large:unbounded",
-                "io.floci.eks.default-storage-class", "false"));
+                "io.floci.eks.default-storage-class", "false",
+                "io.floci.eks.shared-mounts", "true"));
     }
 
     @ParameterizedTest
@@ -489,6 +490,40 @@ class EksClusterManagerTest {
         } else {
             verify(builder, never()).withEmbeddedDns();
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void startClusterSharesTheNodesMountsWhetherOrNotItsCniIsDisabled(boolean disableCni) {
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().eks().defaultImage()).thenReturn("rancher/k3s:v1.30.0-k3s1");
+        when(config.services().eks().disableCni()).thenReturn(disableCni);
+
+        ContainerLifecycleManager lifecycleManager = Mockito.mock(ContainerLifecycleManager.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.create(any())).thenReturn("container-id");
+
+        ContainerBuilder containerBuilder = Mockito.mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+
+        EksClusterManager manager = new EksClusterManager(containerBuilder, lifecycleManager,
+                Mockito.mock(ContainerDetector.class), Mockito.mock(PortAllocator.class),
+                Mockito.mock(DockerHostResolver.class), Mockito.mock(EcrRegistryManager.class),
+                config, new RegionResolver("us-east-1", "000000000000"));
+
+        Cluster cluster = new Cluster();
+        cluster.setName("my-cluster");
+
+        manager.startCluster(cluster);
+
+        // k3s starts behind `mount --make-rshared /`, so a CSI node plugin's Bidirectional mounts
+        // work on every node, not only on one whose CNI is replaced.
+        verify(builder).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> cmdCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withCmd(cmdCaptor.capture());
+        assertEquals(List.of("floci-k3s", "server"), cmdCaptor.getValue().subList(0, 2));
     }
 
     @ParameterizedTest
@@ -578,13 +613,13 @@ class EksClusterManagerTest {
         // Container's getters are final, so survivors are built from JSON instead of mocked.
         private Container survivingContainer(String id) {
             return containerFromJson("{\"Id\":\"" + id + "\","
-                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}");
+                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\"}}");
         }
 
         private Container survivingContainerOwnedBy(String id, String accountId) {
             return containerFromJson("{\"Id\":\"" + id + "\","
                     + "\"Labels\":{\"io.floci.account\":\"" + accountId + "\","
-                    + "\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}");
+                    + "\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\"}}");
         }
 
         private Container containerFromJson(String json) {
@@ -677,7 +712,7 @@ class EksClusterManagerTest {
         @Test
         void restoreClusterPreservesDefaultStorageClassLabelFromSurvivingContainer() {
             Container container = containerFromJson("{\"Id\":\"cid-new\","
-                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                    + "\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\","
                     + "\"io.floci.eks.default-storage-class\":\"false\"}}");
             when(lifecycleManager.findByName("floci-eks-demo"))
                     .thenReturn(Optional.of(container));
@@ -742,10 +777,28 @@ class EksClusterManagerTest {
         private void restoreSurvivorOn(String networks) {
             when(containerBuilder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.of("floci_default"));
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
-                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"},"
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\"},"
                             + "\"NetworkSettings\":{\"Networks\":{" + networks + "}}}")));
             when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
                     .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+        }
+
+        @Test
+        void replacesASurvivorStartedBeforeItsMountsWereShared() {
+            // Created by an earlier Floci: no shared-mounts label, so its node's mounts are private.
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(dockerClient).stopContainerCmd("cid-old");
+            // The replacement is started behind the entrypoint that shares the node's mounts.
+            verify(containerBuilder.newContainer("rancher/k3s:v1.30.0-k3s1")).withEntrypoint(EksClusterManager.RSHARE_ENTRYPOINT);
         }
 
         @Test
@@ -769,7 +822,7 @@ class EksClusterManagerTest {
         void adoptsASurvivorCreatedForTheConfiguredEndpointHost() {
             when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
-                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\","
                             + "\"io.floci.eks.endpoint-host\":\"aws.example.test\"}}")));
             when(lifecycleManager.adopt(eq("cid-1"), eq(List.of(6443)), any()))
                     .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
@@ -785,7 +838,7 @@ class EksClusterManagerTest {
         @Test
         void recreatesASurvivorCreatedForAnotherEndpointHostWhenTheHostIsUnset() {
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
-                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\","
+                    "{\"Id\":\"cid-old\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\","
                             + "\"io.floci.eks.endpoint-host\":\"aws.example.test\"}}")));
             when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
                     .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
@@ -852,7 +905,8 @@ class EksClusterManagerTest {
         void aSurvivorSizedFromTheConfiguredTypeIsKept() {
             when(config.services().eks().nodeInstanceType()).thenReturn(Optional.of("t2.2xlarge"));
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
-                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large@t2.2xlarge:unbounded\"}}")));
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large@t2.2xlarge:unbounded\","
+                    + "\"io.floci.eks.shared-mounts\":\"true\"}}")));
             when(lifecycleManager.adopt(eq("cid-1"), eq(List.of(6443)), any()))
                     .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6440)));
 
@@ -869,7 +923,7 @@ class EksClusterManagerTest {
             when(config.services().eks().endpointMode()).thenReturn("network");
             when(config.services().eks().endpointHost()).thenReturn(Optional.of("aws.example.test"));
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
-                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\"}}")));
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large:unbounded\",\"io.floci.eks.shared-mounts\":\"true\"}}")));
             when(lifecycleManager.adopt(eq("cid-1"), eq(List.of(6443)), any()))
                     .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6512)));
 
