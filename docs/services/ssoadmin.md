@@ -115,7 +115,8 @@ an operation can fail after an earlier account was refreshed.
 Removing the final assignment for a permission set in an account deletes its generated role.
 Deleting a permission set or its Identity Center instance also removes its tracked roles.
 A later assignment creates a role with a new suffix. Roles are tracked by both ARN and IAM
-role ID, so cleanup refuses to remove a manually recreated role with the same name.
+role ID, so cleanup leaves a manually recreated role with the same name untouched while
+removing the Identity Center assignment or permission set.
 
 The local access portal issues credentials for this role after checking the user's assignments.
 The generated trust policy permits the SSO service principal; provisioning an AWS SAML identity

@@ -72,7 +72,11 @@ public class SsoPermissionSetRoleProvisioner {
                         (int) Duration.parse(permissionSet.sessionDuration()).getSeconds());
             } catch (RuntimeException failure) {
                 if (created) {
-                    iam.deleteRole(role.getRoleName(), role.getRoleId());
+                    try {
+                        iam.deleteRole(role.getRoleName(), role.getRoleId());
+                    } catch (RuntimeException cleanupFailure) {
+                        failure.addSuppressed(cleanupFailure);
+                    }
                 }
                 throw failure;
             }
@@ -96,14 +100,21 @@ public class SsoPermissionSetRoleProvisioner {
     }
 
     private IamRole trackedRole(PermissionSetProvisioning provisioning) {
-        String resource = AwsArnUtils.parse(provisioning.roleArn()).resource();
-        String roleName = resource.substring(resource.lastIndexOf('/') + 1);
-        IamRole role = iam.findRole(provisioning.accountId(), roleName).orElse(null);
-        if (role != null && (!role.getArn().equals(provisioning.roleArn())
-                || !role.getRoleId().equals(provisioning.roleId()))) {
+        IamRole role = findRole(provisioning);
+        if (role != null && !ownsRole(provisioning, role)) {
             throw new AwsException("ConflictException", "The provisioned IAM role identity has changed.", 400);
         }
         return role;
+    }
+
+    private IamRole findRole(PermissionSetProvisioning provisioning) {
+        String resource = AwsArnUtils.parse(provisioning.roleArn()).resource();
+        String roleName = resource.substring(resource.lastIndexOf('/') + 1);
+        return iam.findRole(provisioning.accountId(), roleName).orElse(null);
+    }
+
+    private static boolean ownsRole(PermissionSetProvisioning provisioning, IamRole role) {
+        return role.getArn().equals(provisioning.roleArn()) && role.getRoleId().equals(provisioning.roleId());
     }
 
     public IamRole forPortal(PermissionSetProvisioning provisioning, String region) {
@@ -122,8 +133,8 @@ public class SsoPermissionSetRoleProvisioner {
             return;
         }
         RequestScopes.runAs(provisioning.accountId(), region, () -> {
-            IamRole role = trackedRole(provisioning);
-            if (role != null) {
+            IamRole role = findRole(provisioning);
+            if (role != null && ownsRole(provisioning, role)) {
                 iam.replaceRolePolicies(role.getRoleName(), role.getRoleId(), List.of(), Map.of(), null, 0);
                 iam.deleteRole(role.getRoleName(), role.getRoleId());
             }

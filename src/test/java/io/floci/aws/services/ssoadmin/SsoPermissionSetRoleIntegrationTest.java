@@ -285,6 +285,43 @@ class SsoPermissionSetRoleIntegrationTest {
         assertNotEquals(first.roleId(), recreated.roleId());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingSsoRecordsPreservesAnExternallyRecreatedRole(boolean deletePermissionSet) {
+        String name = "ForeignRole" + suffix();
+        String permissionSet = permissionSet(name);
+        IamClient target = iam(TARGET);
+        trackRoles(target, name);
+        ObjectNode assignment = assignment(permissionSet, UUID.randomUUID().toString());
+        sso("CreateAccountAssignment", assignment).then().statusCode(200)
+                .body("AccountAssignmentCreationStatus.Status", equalTo("SUCCEEDED"));
+        Role original = provisionedRole(target, name);
+        target.deleteRole(r -> r.roleName(original.roleName()));
+        Role replacement = target.createRole(r -> r.roleName(original.roleName()).path(original.path())
+                .assumeRolePolicyDocument(URLDecoder.decode(original.assumeRolePolicyDocument(), StandardCharsets.UTF_8)))
+                .role();
+        target.attachRolePolicy(r -> r.roleName(replacement.roleName()).policyArn(AWS_POLICY));
+        assertEquals(original.arn(), replacement.arn());
+        assertNotEquals(original.roleId(), replacement.roleId());
+
+        if (deletePermissionSet) {
+            successful("DeletePermissionSet", request(permissionSet));
+            sso("DescribePermissionSet", request(permissionSet)).then().statusCode(400)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+        } else {
+            sso("DeleteAccountAssignment", assignment).then().statusCode(200)
+                    .body("AccountAssignmentDeletionStatus.Status", equalTo("SUCCEEDED"));
+            sso("ListAccountAssignments", request(permissionSet).put("AccountId", TARGET)).then().statusCode(200)
+                    .body("AccountAssignments.size()", equalTo(0));
+        }
+
+        Role retained = target.getRole(r -> r.roleName(replacement.roleName())).role();
+        assertEquals(replacement.roleId(), retained.roleId());
+        assertEquals(replacement.arn(), retained.arn());
+        assertEquals(replacement.path(), retained.path());
+        assertEquals(Set.of(AWS_POLICY), attachedPolicies(target, retained));
+    }
+
     @Test
     void stalePermissionSetRemainsUsableInPortalWithItsPreviouslyProvisionedSessionDuration() {
         String name = "StalePortal" + suffix();
@@ -378,7 +415,14 @@ class SsoPermissionSetRoleIntegrationTest {
         ObjectNode create = mapper.createObjectNode().put("InstanceArn", admin.getInstanceArn()).put("Name", name);
         String arn = sso("CreatePermissionSet", create).then().statusCode(200)
                 .extract().path("PermissionSet.PermissionSetArn");
-        cleanup.register(() -> successful("DeletePermissionSet", request(arn)));
+        cleanup.register(() -> {
+            Response deleted = sso("DeletePermissionSet", request(arn));
+            if (deleted.statusCode() == 400) {
+                deleted.then().body("__type", equalTo("ResourceNotFoundException"));
+            } else {
+                deleted.then().statusCode(200);
+            }
+        });
         return arn;
     }
 

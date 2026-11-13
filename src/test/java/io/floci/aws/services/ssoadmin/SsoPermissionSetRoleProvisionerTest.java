@@ -12,16 +12,21 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -84,10 +89,24 @@ class SsoPermissionSetRoleProvisionerTest {
                 () -> provisioner.provision(permissionSet(), instance("us-east-1"), ACCOUNT, original)).getErrorCode());
         assertEquals("ConflictException", assertThrows(AwsException.class,
                 () -> provisioner.forPortal(original, "us-east-1")).getErrorCode());
-        assertEquals("ConflictException", assertThrows(AwsException.class,
-                () -> provisioner.remove(original, "us-east-1")).getErrorCode());
+        assertDoesNotThrow(() -> provisioner.remove(original, "us-east-1"));
         verify(iam, times(3)).findRole(ACCOUNT, NAME);
         verifyNoMoreInteractions(iam);
+    }
+
+    @Test
+    void cleanupFailureDoesNotReplaceTheOriginalProvisioningFailure() {
+        stubCreate("aws");
+        AwsException policyFailure = new AwsException("MalformedPolicyDocument", "Invalid policy", 400);
+        AwsException cleanupFailure = new AwsException("DeleteConflict", "Cannot remove role", 409);
+        doThrow(policyFailure).when(iam).replaceRolePolicies(anyString(), anyString(), any(), any(), isNull(), anyInt());
+        doThrow(cleanupFailure).when(iam).deleteRole(anyString(), anyString());
+
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> provisioner.provision(permissionSet(), instance("us-east-1"), ACCOUNT, null));
+
+        assertSame(policyFailure, thrown);
+        assertEquals(List.of(cleanupFailure), List.of(thrown.getSuppressed()));
     }
 
     @Test
