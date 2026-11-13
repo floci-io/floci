@@ -59,6 +59,7 @@ import java.util.zip.ZipOutputStream;
 
 import static io.floci.aws.services.emrserverless.SparkJobRunner.Engine.HIVE;
 import static io.floci.aws.services.emrserverless.SparkJobRunner.Engine.SPARK;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -545,6 +546,56 @@ class EmrServerlessSparkRunnerTest {
         runner.leaveCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a", first);
         runner.leaveCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a", first);
         assertNotSame(first, runner.joinCapacity("arn:aws:emr-serverless:eu-west-1:123456789012:/app/a"));
+    }
+
+    @Test
+    void aDriverWhoseAddressLookupFailsLeavesItsApplicationsCapacity() {
+        String application = "arn:aws:emr-serverless:eu-west-1:123456789012:/app/failed-driver";
+        String unrelated = "arn:aws:emr-serverless:eu-west-1:123456789012:/app/unrelated";
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveDockerNetwork(Optional.of("floci-network"))).thenReturn(Optional.of("floci-network"));
+        EmrServerlessSparkRunner runner = runner(builder);
+        SparkExecutors.Capacity unrelatedFirst = runner.joinCapacity(unrelated);
+        runner.leaveCapacity(unrelated, unrelatedFirst);
+        SparkExecutors.Capacity unrelatedSecond = runner.joinCapacity(unrelated);
+        runner.leaveCapacity(unrelated, unrelatedSecond);
+        assertNotSame(unrelatedFirst, unrelatedSecond);
+
+        List<SparkExecutors.Capacity> joinedDuringFailure = new ArrayList<>();
+        NotFoundException addressFailure = new NotFoundException("driver disappeared during address lookup");
+        when(lifecycle.resolveContainerNetworkIp("driver", "floci-network")).thenAnswer(lookup -> {
+            SparkExecutors.Capacity joined = runner.joinCapacity(application);
+            joinedDuringFailure.add(joined);
+            runner.leaveCapacity(application, joined);
+            throw addressFailure;
+        });
+        SparkJobRunner.Job job = executorsJob(Map.of()).withExecutors(
+                new SparkJobRunner.Executors(2, null, 0, 0, 0, application));
+        SparkJobRunner.Outcome outcome = runner.run(job, progress);
+        SparkExecutors.Capacity firstAfterFailure = runner.joinCapacity(application);
+        runner.leaveCapacity(application, firstAfterFailure);
+        SparkExecutors.Capacity secondAfterFailure = runner.joinCapacity(application);
+        try {
+            assertEquals(1, joinedDuringFailure.size());
+            SparkExecutors.Capacity failedMembership = joinedDuringFailure.getFirst();
+            assertEquals(SparkJobRunner.Outcome.couldNotStart(addressFailure.getMessage()), outcome);
+            verify(progress).started();
+            verify(lifecycle).stopAndRemove("driver", null, 0);
+            verify(lifecycle, never()).createAndStart(any());
+            assertEquals(SparkExecutors.Amount.NONE, failedMembership.held());
+            assertAll(
+                    () -> assertNotSame(failedMembership, firstAfterFailure,
+                            "the failed run must leave its actual shared capacity membership"),
+                    () -> assertNotSame(firstAfterFailure, secondAfterFailure,
+                            "a balanced subsequent membership must retire its capacity object"));
+        } finally {
+            runner.leaveCapacity(application, secondAfterFailure);
+            if (!joinedDuringFailure.isEmpty()) {
+                runner.leaveCapacity(application, joinedDuringFailure.getFirst());
+            }
+        }
     }
 
     @Test
