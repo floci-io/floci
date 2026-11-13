@@ -565,6 +565,68 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void anArm64RunsDriverAndExecutorsImageAreThoseForArm64() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        when(lifecycle.create(any(), eq("linux/arm64"))).thenReturn("driver");
+        when(lifecycle.resolveImageForLaunch(anyString(), eq(ImagePullBehavior.PREFER_CACHED), eq("linux/arm64")))
+                .thenAnswer(pull -> new LaunchImage(pull.getArgument(0), null));
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(executorsJob(Map.of()).withPlatform("linux/arm64"), progress);
+
+        // The release's image is published for both architectures, so the driver's is created for arm64, and the
+        // executors' pulled for it.
+        verify(lifecycle).create(any(), eq("linux/arm64"));
+        verify(lifecycle, never()).create(any());
+        verify(lifecycle).resolveImageForLaunch("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                ImagePullBehavior.PREFER_CACHED, "linux/arm64");
+    }
+
+    @Test
+    void anArm64RunsCustomImageIsPulledForArm64() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        String custom = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0";
+        String inFlocisRegistry = "localhost:5100/123456789012/eu-west-1/spark/custom:7.5.0";
+        String pulled = "sha256:" + "6".repeat(64);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(inFlocisRegistry)).thenReturn(inFlocisRegistry);
+        when(ecr.rewriteImageUri(custom)).thenReturn(inFlocisRegistry);
+        when(lifecycle.resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, "linux/arm64"))
+                .thenReturn(new LaunchImage(pulled, null));
+        EmrServerlessSparkRunner runner = runner(builder);
+        when(lifecycle.create(any(), eq("linux/arm64"))).thenReturn("driver");
+
+        // The executors' worker type naming the same custom image.
+        runner.run(customImageJob(custom).withExecutors(new SparkJobRunner.Executors(2, custom, 0, 0, 0, null))
+                .withPlatform("linux/arm64"), progress);
+
+        verify(lifecycle, times(2)).resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, "linux/arm64");
+        verify(builder).newContainer(pulled);
+    }
+
+    @Test
+    void anArm64RunsExecutorsContainerStartsForArm64() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(lifecycle.createAndStart(any(), eq("linux/arm64")))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("executor", Map.of()));
+        when(lifecycle.resolveContainerNetworkIp("executor", "floci-network")).thenReturn("172.18.0.9");
+        SparkExecutors.Containers containers = runner(builder).executorContainers(
+                executorsJob(Map.of()).withPlatform("linux/arm64"), "sha256:image", "floci-network", "172.18.0.4",
+                "secret", AWS_ENVIRONMENT, Map.of());
+
+        containers.start(1, FOUR_CORE_EXECUTOR);
+
+        verify(lifecycle).createAndStart(any(), eq("linux/arm64"));
+        verify(lifecycle, never()).createAndStart(any());
+    }
+
+    @Test
     void anApplicationsImageForItsExecutorsIsPulledBeforeTheDriverStarts() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);

@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs.model;
 
+import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 /**
@@ -20,13 +21,6 @@ public record RuntimePlatform(String cpuArchitecture, String operatingSystemFami
      * architecture is named and the task runs on the Docker host's own.
      */
     public String dockerPlatform() {
-        if (cpuArchitecture == null) {
-            return null;
-        }
-        return switch (cpuArchitecture) {
-            case "X86_64" -> "linux/amd64";
-            case "ARM64" -> "linux/arm64";
-            default -> null;
-        };
+        return DockerPlatforms.forArchitecture(cpuArchitecture);
     }
 }

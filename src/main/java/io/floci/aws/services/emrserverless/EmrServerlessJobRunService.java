@@ -15,6 +15,7 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
@@ -165,6 +166,8 @@ public class EmrServerlessJobRunService implements Resettable {
     private final String dockerNetwork;
     // How many executor containers a Spark run may have at once: executor-containers, 0 for Spark's local mode.
     private final int executorContainers;
+    // Whether a container run runs for its application's architecture: honour-architectures, off by default.
+    private final boolean honourArchitectures;
     // Container runs a thread is running; one not here that has not ended was left by a restart.
     private final Set<String> executing = new HashSet<>();
     // Raised by each reset, so a run's thread from before it writes nothing back after the wipe.
@@ -183,7 +186,8 @@ public class EmrServerlessJobRunService implements Resettable {
                 config.services().emrserverless().imageTemplate().orElse(null),
                 config.services().emrserverless().hiveImageTemplate().orElse(null),
                 config.services().emrserverless().dockerNetwork().orElse(null),
-                config.services().emrserverless().executorContainers());
+                config.services().emrserverless().executorContainers(),
+                config.services().emrserverless().honourArchitectures());
         // Before any run of this process starts: a driver an earlier one left belongs to a run read as FAILED.
         if (this.sparkRunner != null && config.services().emrserverless().reconcileContainersOnStartup()) {
             sparkRunner.removeLeftoverDrivers(SERVICE);
@@ -220,6 +224,16 @@ public class EmrServerlessJobRunService implements Resettable {
                                SparkJobRunner sparkRunner, Executor runExecutor,
                                String imageTemplate, String hiveImageTemplate, String dockerNetwork,
                                int executorContainers) {
+        this(store, applications, iamService, regionResolver, requestContext, objectMapper, runDurationSeconds, clock,
+                sparkRunner, runExecutor, imageTemplate, hiveImageTemplate, dockerNetwork, executorContainers, false);
+    }
+
+    EmrServerlessJobRunService(AccountAwareStorageBackend<JobRunRecord> store, EmrServerlessService applications,
+                               IamService iamService, RegionResolver regionResolver, RequestContext requestContext,
+                               ObjectMapper objectMapper, int runDurationSeconds, Clock clock,
+                               SparkJobRunner sparkRunner, Executor runExecutor,
+                               String imageTemplate, String hiveImageTemplate, String dockerNetwork,
+                               int executorContainers, boolean honourArchitectures) {
         if (runDurationSeconds < 0) {
             throw new IllegalArgumentException(
                     "floci.services.emrserverless.job-run-duration-seconds must not be negative: " + runDurationSeconds);
@@ -238,6 +252,7 @@ public class EmrServerlessJobRunService implements Resettable {
         this.hiveImageTemplate = hiveImageTemplate;
         this.dockerNetwork = dockerNetwork;
         this.executorContainers = executorContainers;
+        this.honourArchitectures = honourArchitectures;
     }
 
     @PreDestroy
@@ -557,9 +572,13 @@ public class EmrServerlessJobRunService implements Resettable {
                     archives(sparkProperties), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
                     executors(app, executorContainers));
         }
+        // With honour-architectures on, its containers run for the application's architecture, "x86_64 is the default
+        // option" on EMR Serverless; with it off, or where the application names none, for the Docker host's own.
+        SparkJobRunner.Job onPlatform = job.withPlatform(
+                honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null);
         executing.add(run.getJobRunId());
         long launchedIn = generation;
-        runExecutor.execute(() -> execute(job, launchedIn));
+        runExecutor.execute(() -> execute(onPlatform, launchedIn));
     }
 
     private void execute(SparkJobRunner.Job job, long launchedIn) {

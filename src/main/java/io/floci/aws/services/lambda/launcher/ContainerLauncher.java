@@ -13,6 +13,7 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
+import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -568,11 +569,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         if (architectures.size() != 1) {
             return Optional.empty();
         }
-        return switch (architectures.getFirst()) {
-            case "arm64" -> Optional.of("linux/arm64");
-            case "x86_64" -> Optional.of("linux/amd64");
-            default -> Optional.empty();
-        };
+        return Optional.ofNullable(DockerPlatforms.forArchitecture(architectures.getFirst()));
     }
 
     private Optional<String> requestedDockerPlatform(LambdaFunction fn, LambdaDockerFlags dockerFlags) {

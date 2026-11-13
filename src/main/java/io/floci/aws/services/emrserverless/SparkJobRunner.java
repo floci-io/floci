@@ -80,8 +80,10 @@ public interface SparkJobRunner {
      * {@code log4j2.properties} lines its Spark gets after those of its configuration, which they replace where
      * a key is the same (empty for none); on a cluster, the {@code mapred-site.xml} properties its
      * MapReduce gets, the {@code log4j.properties} lines and the {@code hadoop-env.sh} exports its {@code hadoop}
-     * command gets (each empty for none); and, for an EMR Serverless Spark run, where its executors run, in
-     * containers of their own (null for Spark's local mode, in the driver's container).
+     * command gets (each empty for none); for an EMR Serverless Spark run, where its executors run, in
+     * containers of their own (null for Spark's local mode, in the driver's container); and the Docker platform
+     * its containers run, as its application's architecture names it with {@code honour-architectures} on,
+     * {@code linux/amd64} or {@code linux/arm64} (null for the Docker host's own).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel, Engine engine,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
@@ -89,21 +91,36 @@ public interface SparkJobRunner {
                String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
                List<String> archives, Storage storage, Map<String, String> coreSite,
                Map<String, String> sparkLog4j2, Map<String, String> mapredSite, Map<String, String> hadoopLog4j,
-               Map<String, String> hadoopEnvironment, Executors executors) {
+               Map<String, String> hadoopEnvironment, Executors executors, String platform) {
+
+        /** A job on the Docker host's own platform. */
+        public Job(String service, String runId, String accountId, String region, String releaseLabel, Engine engine,
+                   String imageTemplate, String customImage, String dockerNetwork, String executionRole,
+                   Map<String, String> sparkDefaults, List<String> application, List<String> command,
+                   Duration timeout, String logFolder, CloudWatchLogs cloudWatchLogs,
+                   Map<String, String> environment, List<String> archives, Storage storage,
+                   Map<String, String> coreSite, Map<String, String> sparkLog4j2, Map<String, String> mapredSite,
+                   Map<String, String> hadoopLog4j, Map<String, String> hadoopEnvironment, Executors executors) {
+            this(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage, dockerNetwork,
+                    executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs,
+                    environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
+                    hadoopEnvironment, executors, null);
+        }
 
         /** This job, on {@code storage}. */
         public Job onStorage(Storage storage) {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors);
+                    hadoopEnvironment, executors, platform);
         }
 
         /** This job, run in {@code image}. */
         public Job inImage(String image) {
             return new Job(service, runId, accountId, region, releaseLabel, engine, image, customImage, dockerNetwork,
                     executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs, environment,
-                    archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment, executors);
+                    archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment, executors,
+                    platform);
         }
 
         /** This job, its executors where {@code executors} has them. */
@@ -111,7 +128,15 @@ public interface SparkJobRunner {
             return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
                     dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
                     cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
-                    hadoopEnvironment, executors);
+                    hadoopEnvironment, executors, platform);
+        }
+
+        /** This job, its containers run for {@code platform} (null for the Docker host's own). */
+        public Job withPlatform(String platform) {
+            return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
+                    dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
+                    cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
+                    hadoopEnvironment, executors, platform);
         }
     }
 
