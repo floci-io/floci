@@ -613,7 +613,9 @@ def validate(document: dict) -> list[str]:
 
 
 def _member_problems(operation: str, member: object) -> list[str]:
-    path = member.get("member") if isinstance(member, dict) else None
+    if not isinstance(member, dict):
+        return [f"{operation} reads {member!r}, which is no path to a tag list or map"]
+    path = member.get("member")
     if not isinstance(path, str) or not MEMBER_PATH_RE.match(path) or not re.search(r"(\[\w*]|\{})$", path):
         return [f"{operation} reads {member!r}, which is no path to a tag list or map"]
     problems = []
