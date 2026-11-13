@@ -2,6 +2,7 @@ package io.floci.aws.services.redshift;
 
 import io.floci.aws.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
+import org.jboss.logging.Logger;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -19,9 +20,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @ApplicationScoped
 public class TempGroupGrantTracker implements Resettable {
 
+    private static final Logger LOG = Logger.getLogger(TempGroupGrantTracker.class);
+
     @FunctionalInterface
     public interface GroupAction {
         void execute(String group) throws SQLException;
+    }
+
+    @FunctionalInterface
+    public interface MembershipCheck {
+        boolean isMember(String group) throws SQLException;
     }
 
     public static final class Lease {
@@ -49,15 +57,22 @@ public class TempGroupGrantTracker implements Resettable {
     private record Key(String backendKey, String roleName, String groupName) { }
 
     private final ConcurrentHashMap<Key, Integer> activeCounts = new ConcurrentHashMap<>();
+    private final Set<Key> pendingRevokes = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<Key, Object> keyLocks = new ConcurrentHashMap<>();
 
     public Lease acquire(String backendKey, String roleName, List<String> groupsToGrant,
                          GroupAction grantAction) throws SQLException {
-        return acquire(backendKey, roleName, groupsToGrant, grantAction, null);
+        return acquire(backendKey, roleName, groupsToGrant, grantAction, null, null);
     }
 
     public Lease acquire(String backendKey, String roleName, List<String> groupsToGrant,
                          GroupAction grantAction, GroupAction rollbackRevokeAction) throws SQLException {
+        return acquire(backendKey, roleName, groupsToGrant, grantAction, rollbackRevokeAction, null);
+    }
+
+    public Lease acquire(String backendKey, String roleName, List<String> groupsToGrant,
+                         GroupAction grantAction, GroupAction rollbackRevokeAction,
+                         MembershipCheck alreadyMemberCheck) throws SQLException {
         if (groupsToGrant == null || groupsToGrant.isEmpty()) {
             return new Lease(this, backendKey, roleName, List.of());
         }
@@ -68,8 +83,14 @@ public class TempGroupGrantTracker implements Resettable {
                 Key key = new Key(backendKey, roleName, group);
                 synchronized (lockFor(key)) {
                     int current = activeCounts.getOrDefault(key, 0);
-                    if (current == 0) {
+                    boolean hasPendingRevoke = pendingRevokes.contains(key);
+                    if (current == 0 && !hasPendingRevoke) {
+                        if (alreadyMemberCheck != null && alreadyMemberCheck.isMember(group)) {
+                            continue;
+                        }
                         grantAction.execute(group);
+                    } else if (hasPendingRevoke) {
+                        pendingRevokes.remove(key);
                     }
                     activeCounts.put(key, current + 1);
                     acquired.add(group);
@@ -94,8 +115,12 @@ public class TempGroupGrantTracker implements Resettable {
                     if (rollbackRevokeAction != null) {
                         try {
                             rollbackRevokeAction.execute(group);
-                        } catch (SQLException ignored) {
-                            // Best-effort rollback on failed session setup; caller receives original failure.
+                            pendingRevokes.remove(key);
+                        } catch (SQLException | RuntimeException failure) {
+                            pendingRevokes.add(key);
+                            LOG.warnv(failure,
+                                    "Failed to revoke temporary DbGroup {0} for role {1} during rollback",
+                                    group, roleName);
                         }
                     }
                 } else {
@@ -113,17 +138,27 @@ public class TempGroupGrantTracker implements Resettable {
             synchronized (lockFor(key)) {
                 int current = activeCounts.getOrDefault(key, 0);
                 if (current <= 1) {
-                    activeCounts.remove(key);
                     if (current == 1 && revokeAction != null) {
                         try {
                             revokeAction.execute(group);
+                            activeCounts.remove(key);
+                            pendingRevokes.remove(key);
                         } catch (SQLException failure) {
+                            activeCounts.remove(key);
+                            pendingRevokes.add(key);
                             if (firstFailure == null) {
                                 firstFailure = failure;
                             } else {
                                 firstFailure.addSuppressed(failure);
                             }
+                        } catch (RuntimeException failure) {
+                            activeCounts.remove(key);
+                            pendingRevokes.add(key);
+                            throw failure;
                         }
+                    } else {
+                        activeCounts.remove(key);
+                        pendingRevokes.remove(key);
                     }
                 } else {
                     activeCounts.put(key, current - 1);
@@ -141,12 +176,14 @@ public class TempGroupGrantTracker implements Resettable {
 
     public void revokeBackend(String backendKey) {
         activeCounts.keySet().removeIf(k -> k.backendKey().equals(backendKey));
+        pendingRevokes.removeIf(k -> k.backendKey().equals(backendKey));
         keyLocks.keySet().removeIf(k -> k.backendKey().equals(backendKey));
     }
 
     @Override
     public void clear() {
         activeCounts.clear();
+        pendingRevokes.clear();
         keyLocks.clear();
     }
 }

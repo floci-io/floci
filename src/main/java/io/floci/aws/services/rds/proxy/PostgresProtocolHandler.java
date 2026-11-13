@@ -526,58 +526,67 @@ public class PostgresProtocolHandler {
                     closeQuietly(backend);
                     return null;
                 }
-                if (outcome != null) {
-                    String targetRole = outcome.databaseRole();
-                    Runnable onClose = outcome.onClose() == null ? () -> { } : outcome.onClose();
-                    List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, targetRole);
-                    if (endsWithErrorResponse(roleSwitch)) {
+                if (outcome == null || outcome.databaseRole() == null || outcome.databaseRole().isBlank()) {
+                    if (outcome != null && outcome.onClose() != null) {
+                        outcome.onClose().run();
+                    }
+                    sendErrorResponse(clientOut, "FATAL", "28000",
+                            "password authentication failed for user \"" + clientUsername + "\"");
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
+                    return null;
+                }
+                String targetRole = outcome.databaseRole();
+                Runnable onClose = outcome.onClose() == null ? () -> { } : outcome.onClose();
+                List<byte[]> roleSwitch = assumeSessionRole(backendIn, backendOut, targetRole);
+                if (endsWithErrorResponse(roleSwitch)) {
+                    onClose.run();
+                    sendErrorResponse(clientOut, "FATAL", "28000",
+                            errorMessage(roleSwitch.get(roleSwitch.size() - 1),
+                                    "role \"" + targetRole + "\" does not exist"));
+                    clientOut.flush();
+                    closeQuietly(client);
+                    closeQuietly(backend);
+                    return null;
+                }
+                bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
+                iamRole = targetRole;
+                if (forwardStartupParameters) {
+                    List<SessionSetting> settings;
+                    try {
+                        settings = sessionSettings(startup.parameters());
+                        refuseSessionAuthorizationChange(settings, targetRole);
+                    } catch (StartupParameterException e) {
                         onClose.run();
-                        sendErrorResponse(clientOut, "FATAL", "28000",
-                                errorMessage(roleSwitch.get(roleSwitch.size() - 1),
-                                        "role \"" + targetRole + "\" does not exist"));
+                        sendErrorResponse(clientOut, "FATAL", e.sqlState(), e.getMessage());
                         clientOut.flush();
                         closeQuietly(client);
                         closeQuietly(backend);
                         return null;
                     }
-                    bufferedMessages = applyParameterStatusUpdates(bufferedMessages, roleSwitch);
-                    iamRole = targetRole;
-                    if (forwardStartupParameters) {
-                        List<SessionSetting> settings;
-                        try {
-                            settings = sessionSettings(startup.parameters());
-                            refuseSessionAuthorizationChange(settings, targetRole);
-                        } catch (StartupParameterException e) {
+                    if (!settings.isEmpty()) {
+                        List<byte[]> applied = applySessionSettings(backendIn, backendOut, settings);
+                        if (endsWithErrorResponse(applied)) {
                             onClose.run();
-                            sendErrorResponse(clientOut, "FATAL", e.sqlState(), e.getMessage());
+                            byte[] refusal = applied.get(applied.size() - 1);
+                            sendErrorResponse(clientOut, "FATAL", errorField(refusal, 'C', "42601"),
+                                    errorField(refusal, 'M', "invalid startup parameter"));
                             clientOut.flush();
                             closeQuietly(client);
                             closeQuietly(backend);
                             return null;
                         }
-                        if (!settings.isEmpty()) {
-                            List<byte[]> applied = applySessionSettings(backendIn, backendOut, settings);
-                            if (endsWithErrorResponse(applied)) {
-                                onClose.run();
-                                byte[] refusal = applied.get(applied.size() - 1);
-                                sendErrorResponse(clientOut, "FATAL", errorField(refusal, 'C', "42601"),
-                                        errorField(refusal, 'M', "invalid startup parameter"));
-                                clientOut.flush();
-                                closeQuietly(client);
-                                closeQuietly(backend);
-                                return null;
-                            }
-                            if (reportsAnotherSessionAuthorization(applied, targetRole)) {
-                                onClose.run();
-                                sendErrorResponse(clientOut, "FATAL", "42501",
-                                        "permission denied to set session authorization");
-                                clientOut.flush();
-                                closeQuietly(client);
-                                closeQuietly(backend);
-                                return null;
-                            }
-                            bufferedMessages = applyParameterStatusUpdates(bufferedMessages, applied);
+                        if (reportsAnotherSessionAuthorization(applied, targetRole)) {
+                            onClose.run();
+                            sendErrorResponse(clientOut, "FATAL", "42501",
+                                    "permission denied to set session authorization");
+                            clientOut.flush();
+                            closeQuietly(client);
+                            closeQuietly(backend);
+                            return null;
                         }
+                        bufferedMessages = applyParameterStatusUpdates(bufferedMessages, applied);
                     }
                 }
             }

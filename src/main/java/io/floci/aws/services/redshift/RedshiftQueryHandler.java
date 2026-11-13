@@ -1077,10 +1077,9 @@ public class RedshiftQueryHandler {
             service.describeClusters(clusterId);
             String dbUser = iamDbUserResolver.resolveDbUser(authorizationHeader);
             int duration = resolveDurationSeconds(params);
-            List<String> dbGroups = memberList(params, "DbGroups");
 
             TempCredential credential = credentialBroker.issue(
-                    regionResolver.getAccountId(), clusterId, dbUser, dbGroups, duration,
+                    regionResolver.getAccountId(), clusterId, dbUser, List.of(), duration,
                     dbUser, true);
             return Response.ok(getClusterCredentialsXml("GetClusterCredentialsWithIAM", credential))
                     .type(MediaType.APPLICATION_XML).build();

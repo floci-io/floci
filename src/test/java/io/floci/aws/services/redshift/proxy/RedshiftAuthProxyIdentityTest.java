@@ -32,8 +32,92 @@ class RedshiftAuthProxyIdentityTest {
         assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SET LOCAL SESSION AUTHORIZATION 'admin'"));
         assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("DISCARD ALL"));
         assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("RESET ALL"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("RESET/**/SESSION AUTHORIZATION"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SET/*x*/SESSION/*y*/AUTHORIZATION 'admin'"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SET session_authorization = 'admin'"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SET LOCAL session_authorization TO DEFAULT"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SET \"session_authorization\" = 'admin'"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization(
+                "SELECT set_config('session_authorization', 'admin', false)"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization(
+                "SELECT pg_catalog.set_config('session_authorization', 'admin', false)"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization(
+                "SELECT set_config(chr(115), 'admin', false)"));
+        assertTrue(RedshiftInterceptingBridge.isRestrictedSessionAuthorization(
+                "DO $$ BEGIN EXECUTE 'RESET ALL'; END $$;"));
         assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SET search_path TO public"));
         assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SELECT current_user"));
+        assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SELECT 'RESET ALL'"));
+        assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SELECT 'SET SESSION AUTHORIZATION admin'"));
+        assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SELECT 1 -- RESET SESSION AUTHORIZATION"));
+        assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SELECT /* DISCARD ALL */ 1"));
+        assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization("SELECT $$RESET ALL$$"));
+        assertFalse(RedshiftInterceptingBridge.isRestrictedSessionAuthorization(
+                "SELECT set_config('search_path', 'public', false)"));
+    }
+
+    @Test
+    void nullRoleHandoverOutcomeRejectsClientInsteadOfMasterFallback() throws Exception {
+        try (ServerSocket clientListener = new ServerSocket(0);
+             ServerSocket backendListener = new ServerSocket(0)) {
+
+            AtomicReference<String> clientError = new AtomicReference<>();
+            CountDownLatch clientDone = new CountDownLatch(1);
+            Thread clientThread = Thread.ofVirtual().start(() -> {
+                try (Socket client = new Socket("127.0.0.1", clientListener.getLocalPort())) {
+                    OutputStream out = client.getOutputStream();
+                    InputStream in = client.getInputStream();
+                    sendStartup(out, "IAM:analyst", "dev");
+                    expectAuthCleartext(in);
+                    sendPassword(out, "temp-pw");
+                    clientError.set(readErrorText(in));
+                } catch (IOException ignored) {
+                    // Client socket closes when test finishes.
+                } finally {
+                    clientDone.countDown();
+                }
+            });
+
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try (Socket backend = backendListener.accept()) {
+                    InputStream in = backend.getInputStream();
+                    OutputStream out = backend.getOutputStream();
+                    readStartup(in);
+                    writeFrame(out, 'R', int32Bytes(3));
+                    out.flush();
+                    readFrontendMessage(in);
+                    writeFrame(out, 'R', int32Bytes(0));
+                    writeFrame(out, 'Z', new byte[]{'I'});
+                    out.flush();
+                } catch (IOException ignored) {
+                    // Backend socket closes on rejection.
+                }
+            });
+
+            try (Socket acceptedClient = clientListener.accept()) {
+                PostgresProtocolHandler.BackendConnector connector = () -> {
+                    Socket s = new Socket();
+                    s.connect(new InetSocketAddress("127.0.0.1", backendListener.getLocalPort()), 2000);
+                    return s;
+                };
+                PasswordValidator validator = (u, p) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+                PostgresProtocolHandler.SessionRoleHandover handover = (user, pass, db) -> null;
+
+                PostgresProtocolHandler.AuthenticatedSession session = PostgresProtocolHandler.authenticate(
+                        acceptedClient, connector, "admin", "master-pw", "dev",
+                        false, null, null, null, validator,
+                        5000, false, true, (u, d, params) -> { }, handover);
+
+                assertNull(session);
+            }
+
+            assertTrue(clientDone.await(5, TimeUnit.SECONDS));
+            clientThread.join(1000);
+            backendThread.join(1000);
+            assertTrue(clientError.get() != null
+                            && clientError.get().contains("password authentication failed for user \"IAM:analyst\""),
+                    () -> "Expected auth failure error, got: " + clientError.get());
+        }
     }
 
     @Test

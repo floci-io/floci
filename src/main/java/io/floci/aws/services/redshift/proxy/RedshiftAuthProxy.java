@@ -352,14 +352,16 @@ public class RedshiftAuthProxy {
         }
         int colon = clusterKey.indexOf(':');
         if (colon <= 0 || colon >= clusterKey.length() - 1) {
-            return null;
+            return (user, password, database) -> {
+                throw new SQLException("password authentication failed for user \"" + user + "\"", "28000");
+            };
         }
         String accountId = clusterKey.substring(0, colon);
         String clusterId = clusterKey.substring(colon + 1);
         return (user, password, database) -> {
             Optional<TempCredential> credential = credentialBroker.authenticate(accountId, clusterId, user, password);
             if (credential.isEmpty()) {
-                return null;
+                throw new SQLException("password authentication failed for user \"" + user + "\"", "28P01");
             }
             TempCredential cred = credential.get();
             try (Connection admin = openAdminConnection(database)) {
