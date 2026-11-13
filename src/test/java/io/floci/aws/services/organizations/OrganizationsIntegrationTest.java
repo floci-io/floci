@@ -869,6 +869,14 @@ class OrganizationsIntegrationTest {
         .then()
             .statusCode(200);
 
+        organizations("PutResourcePolicy",
+                "{\"Content\":" + quote(content) + ",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidInputException"));
+
         organizations("ListTagsForResource", "{\"ResourceId\":\"" + resourcePolicyId + "\"}")
         .when()
             .post("/")
