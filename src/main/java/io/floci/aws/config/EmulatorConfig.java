@@ -1191,6 +1191,18 @@ public interface EmulatorConfig {
         int executorContainers();
 
         /**
+         * When true, a {@code docker} job run's driver and executors run for its application's architecture,
+         * {@code X86_64} on linux/amd64 and {@code ARM64} on linux/arm64; when false, the default, or for an
+         * application that names none, on the Docker host's own platform. Off by default, as Lambda's
+         * {@code honour-architectures}: tools such as Terraform name {@code X86_64} unless told otherwise, and a
+         * foreign platform needs the Docker host to emulate it (Docker Desktop, or {@code binfmt_misc} with QEMU).
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_HONOUR_ARCHITECTURES
+         */
+        @WithDefault("false")
+        boolean honourArchitectures();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
          * previous run of <em>this same</em> Floci left on the daemon (matched by the
          * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci

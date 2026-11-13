@@ -1051,6 +1051,7 @@ floci:
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs
       executor-containers: 0        # a docker Spark run's executors at once, each in a container; 0 = local mode
+      honour-architectures: false   # true = run a docker job run for its application's architecture
       # Remove the drivers and executors a previous run of this deployment left on the daemon before
       # the first job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true
