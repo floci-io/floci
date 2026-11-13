@@ -34,6 +34,18 @@ public final class CfnRequests {
         CfnStackWaits.awaitStatus(stackName, expectedStatus, authorization);
     }
 
+    /**
+     * Sends one stack action ({@code CreateStack}, {@code UpdateStack}, {@code DeleteStack}) and asserts it was
+     * accepted, without waiting for a status; a null {@code template} leaves {@code TemplateBody} out.
+     */
+    public static void submit(String action, String stackName, String template, String authorization) {
+        RequestSpecification request = cfn(action, stackName).header("Authorization", authorization);
+        if (template != null) {
+            request.formParam("TemplateBody", template);
+        }
+        request.when().post("/").then().statusCode(200);
+    }
+
     public static String physicalIdUnauthenticated(String stackName, String logicalId) {
         return physicalId(stackName, logicalId, null);
     }

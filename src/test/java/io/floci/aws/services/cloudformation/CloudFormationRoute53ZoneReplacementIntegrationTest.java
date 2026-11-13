@@ -3,11 +3,11 @@ package io.floci.aws.services.cloudformation;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.parameterValue;
+import static io.floci.aws.testing.CfnRequests.submit;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -33,13 +33,13 @@ class CloudFormationRoute53ZoneReplacementIntegrationTest {
         String stackName = "r53-zone-repl-" + suffix;
         String zoneParam = "/r53-zone-repl/" + suffix + "/zone";
 
-        stack("CreateStack", stackName, template(suffix, "a"));
+        submit("CreateStack", stackName, template(suffix, "a"), CFN_AUTH);
         CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         try {
             String oldZone = parameterValue(zoneParam);
             assertTrue(records(oldZone, 200).contains("www.a." + suffix));
 
-            stack("UpdateStack", stackName, template(suffix, "b"));
+            submit("UpdateStack", stackName, template(suffix, "b"), CFN_AUTH);
             CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
 
             String newZone = parameterValue(zoneParam);
@@ -50,7 +50,7 @@ class CloudFormationRoute53ZoneReplacementIntegrationTest {
                     .when().get("/2013-04-01/hostedzone/" + oldZone).statusCode(),
                     "the old zone was empty and is deleted");
         } finally {
-            stack("DeleteStack", stackName, null);
+            submit("DeleteStack", stackName, null, CFN_AUTH);
             CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
@@ -68,18 +68,6 @@ class CloudFormationRoute53ZoneReplacementIntegrationTest {
                                                "Value": {"Ref": "Zone"}}}
                 }}
                 """.formatted(suffix, label);
-    }
-
-    private static void stack(String action, String stackName, String template) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", action)
-                .formParam("StackName", stackName);
-        if (template != null) {
-            request = request.formParam("TemplateBody", template);
-        }
-        request.when().post("/").then().statusCode(200);
     }
 
     private static String records(String zoneId, int status) {

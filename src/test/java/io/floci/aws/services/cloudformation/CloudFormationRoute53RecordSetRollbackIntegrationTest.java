@@ -4,12 +4,12 @@ import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.parameterValue;
+import static io.floci.aws.testing.CfnRequests.submit;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -41,12 +41,12 @@ class CloudFormationRoute53RecordSetRollbackIntegrationTest {
         String foreign = "/r53-record-rb/" + suffix + "/foreign";
         putParameter(foreign);
 
-        stack("CreateStack", stackName, template(suffix, "300", null));
+        submit("CreateStack", stackName, template(suffix, "300", null), CFN_AUTH);
         CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         try {
             String zone = parameterValue("/r53-record-rb/" + suffix + "/zone");
 
-            stack("UpdateStack", stackName, template(suffix, "60", foreign));
+            submit("UpdateStack", stackName, template(suffix, "60", foreign), CFN_AUTH);
             CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE", CFN_AUTH);
 
             String records = given().header("Authorization", ROUTE53_AUTH)
@@ -56,7 +56,7 @@ class CloudFormationRoute53RecordSetRollbackIntegrationTest {
                     "the record has the TTL it had before the update: " + records);
             assertEquals(zone, parameterValue("/r53-record-rb/" + suffix + "/zone"));
         } finally {
-            stack("DeleteStack", stackName, null);
+            submit("DeleteStack", stackName, null, CFN_AUTH);
             CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
@@ -66,16 +66,16 @@ class CloudFormationRoute53RecordSetRollbackIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "r53-record-commit-" + suffix;
 
-        stack("CreateStack", stackName, template(suffix, "300", null));
+        submit("CreateStack", stackName, template(suffix, "300", null), CFN_AUTH);
         CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         try {
-            stack("UpdateStack", stackName, template(suffix, "60", null));
+            submit("UpdateStack", stackName, template(suffix, "60", null), CFN_AUTH);
             CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
 
             assertFalse(cloudFormationService.describeStacks(stackName, "us-east-1").get(0).getResources()
                     .get("Www").getAttributes().containsKey(CfnRollback.ROUTE53_RECORD_UPDATE_SNAPSHOT_ATTR));
         } finally {
-            stack("DeleteStack", stackName, null);
+            submit("DeleteStack", stackName, null, CFN_AUTH);
             CfnStackWaits.awaitStackDeleted(stackName);
         }
     }
@@ -97,18 +97,6 @@ class CloudFormationRoute53RecordSetRollbackIntegrationTest {
                   %3$s
                 }}
                 """.formatted(suffix, ttl, failing);
-    }
-
-    private static void stack(String action, String stackName, String template) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", action)
-                .formParam("StackName", stackName);
-        if (template != null) {
-            request = request.formParam("TemplateBody", template);
-        }
-        request.when().post("/").then().statusCode(200);
     }
 
     private static void putParameter(String name) {
