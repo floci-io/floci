@@ -1,13 +1,11 @@
 package io.floci.aws.services.rds;
 
 import io.quarkus.test.junit.QuarkusTest;
-import org.jboss.logging.Logger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBInstance;
-import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.RdsException;
 
 import java.sql.Connection;
@@ -18,6 +16,7 @@ import java.sql.Statement;
 import java.time.Duration;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
+import static io.floci.aws.testing.RdsRequests.cleanupDockerInstance;
 import static io.floci.aws.testing.RdsRequests.rdsDockerClient;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Tag("docker")
 class RdsEngineVersionDockerIntegrationTest {
 
-    private static final Logger LOG = Logger.getLogger(RdsEngineVersionDockerIntegrationTest.class);
     private static final String PASSWORD = "Passw0rd12345";
 
     @BeforeEach
@@ -40,10 +38,16 @@ class RdsEngineVersionDockerIntegrationTest {
     void minorUpgradePreservesDataAndMajorUpgradeIsRefused() throws SQLException {
         String id = "engine-version-" + Long.toString(System.nanoTime(), 36);
         try (RdsClient client = rdsDockerClient("us-east-1", "000000000000")) {
+            RuntimeException createFailure = null;
             try {
-                client.createDBInstance(b -> b.dbInstanceIdentifier(id).engine("postgres").engineVersion("16.4")
-                        .dbInstanceClass("db.t3.micro").allocatedStorage(20).dbName("appdb")
-                        .masterUsername("admin").masterUserPassword(PASSWORD));
+                try {
+                    client.createDBInstance(b -> b.dbInstanceIdentifier(id).engine("postgres").engineVersion("16.4")
+                            .dbInstanceClass("db.t3.micro").allocatedStorage(20).dbName("appdb")
+                            .masterUsername("admin").masterUserPassword(PASSWORD));
+                } catch (RuntimeException failure) {
+                    createFailure = failure;
+                    throw failure;
+                }
                 DBInstance original = describe(client, id);
                 int port = original.endpoint().port();
                 await().atMost(Duration.ofSeconds(60)).untilAsserted(() ->
@@ -90,12 +94,7 @@ class RdsEngineVersionDockerIntegrationTest {
                 assertTrue(query(port, "SHOW server_version").startsWith("16.5"));
                 assertEquals("preserved", query(port, "SELECT value FROM upgrade_probe"));
             } finally {
-                try {
-                    client.deleteDBInstance(b -> b.dbInstanceIdentifier(id).skipFinalSnapshot(true));
-                } catch (DbInstanceNotFoundException expected) {
-                    // A rejected create may never have installed this test-owned instance.
-                    LOG.debugv("RDS test instance {0} was not created", id);
-                }
+                cleanupDockerInstance(client, id, createFailure, Duration.ofSeconds(90));
             }
         }
     }

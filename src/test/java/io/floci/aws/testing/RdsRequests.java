@@ -2,6 +2,7 @@ package io.floci.aws.testing;
 
 import io.restassured.RestAssured;
 import io.restassured.specification.RequestSpecification;
+import org.jboss.logging.Logger;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -9,15 +10,20 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.retries.StandardRetryStrategy;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.RdsClientBuilder;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
+import software.amazon.awssdk.services.rds.model.RdsException;
 
 import java.net.URI;
 import java.time.Duration;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public final class RdsRequests {
+    private static final Logger LOG = Logger.getLogger(RdsRequests.class);
+
     private RdsRequests() {}
 
     public static RequestSpecification rds(String action) {
@@ -38,6 +44,33 @@ public final class RdsRequests {
                 .overrideConfiguration(c -> c.apiCallTimeout(requestBudget)
                         .retryStrategy(StandardRetryStrategy.builder().maxAttempts(1).build()))
                 .build();
+    }
+
+    /** A client failure does not establish that server-side creation finished. */
+    public static void cleanupDockerInstance(RdsClient client, String id,
+                                             RuntimeException createFailure, Duration budget) {
+        try {
+            if (createFailure instanceof RdsException) {
+                try {
+                    client.deleteDBInstance(b -> b.dbInstanceIdentifier(id).skipFinalSnapshot(true));
+                } catch (DbInstanceNotFoundException expected) {
+                    // The server rejected creation and completed its rollback.
+                    LOG.debugv("Rejected RDS test instance {0} is absent", id);
+                }
+            } else {
+                long deadline = System.nanoTime() + budget.toNanos();
+                await().pollDelay(Duration.ZERO).atMost(budget)
+                        .ignoreExceptionsMatching(DbInstanceNotFoundException.class::isInstance)
+                        .untilAsserted(() -> client.deleteDBInstance(b -> b.dbInstanceIdentifier(id)
+                                .skipFinalSnapshot(true).overrideConfiguration(c -> c.apiCallTimeout(
+                                        Duration.ofNanos(Math.max(1, deadline - System.nanoTime()))))));
+            }
+        } catch (RuntimeException cleanupFailure) {
+            if (createFailure == null) {
+                throw cleanupFailure;
+            }
+            createFailure.addSuppressed(cleanupFailure);
+        }
     }
 
     private static RdsClientBuilder rdsClientBuilder(String region, String account) {
