@@ -544,8 +544,14 @@ A function whose code is hot-reloaded publishes a version for every new id.
 Like SAM, floci gives the version the function's `DeletionPolicy`, else its `VersionDeletionPolicy`
 (`Delete` or `Retain`), else `Delete` for a function with a `CapacityProviderConfig` and `Retain`
 for any other. So by default the version a new id replaces stays published, and the update reports
-it `DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
-it, where AWS does. A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
+it `DELETE_SKIPPED`. With `Delete`, physical version deletion uses Lambda's qualified
+`DeleteFunction`: that version is removed while `$LATEST` and other versions remain. An alias
+whose primary target is the version makes deletion fail; removing that alias permits a retry.
+This uses the native service's existing primary-target check; weighted alias references are not covered.
+The same deletion applies to a raw `AWS::Lambda::Version`, template removal and create rollback,
+including `RetainExceptOnCreate`. A version whose parent is already absent can be deleted again.
+This does not add replacement updates for a version that retains the same logical id.
+A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
 a parameter, is copied onto the version unresolved, as SAM copies it. CloudFormation takes
 intrinsic functions only in resource properties, outputs, metadata attributes and update policy
 attributes, unless a transform such as `AWS::LanguageExtensions` resolves them first, and floci
