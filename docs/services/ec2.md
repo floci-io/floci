@@ -2,6 +2,16 @@
 
 **Protocol:** EC2 Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+## Instance IAM authorization
+
+With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.
+Policies can scope access to an exact instance ARN or use stored tags through `ec2:ResourceTag/<key>` and `aws:ResourceTag/<key>`.
+A batch containing an unauthorized instance is denied in full, including when another instance in that batch is allowed.
+These checks also apply in EC2 mock mode.
+Target members and resource-tag condition keys come from generated AWS model and Service Reference data.
+Malformed percent escapes in a form body are rejected with a client error before authorization uses any partially decoded parameters.
+See the [AWS EC2 authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html) for supported resource types and condition keys.
+
 ## Instance Execution Model
 
 `RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest. Those guests also get the Docker host's `/lib/modules/<KernelVersion>` (the running kernel's directory only, so the guest's own package manager keeps a writable `/lib/modules`) read-only, so `modprobe` finds modules the shared kernel already has (for example `br_netfilter`, which Kubernetes node setup loads). The mount is read-only, but it is not a boundary for a privileged guest: one can remount that directory read-write and load any module built for the shared kernel (see the warning below). On Docker Desktop or OrbStack, that directory is the Linux VM's, which may not hold modules matching the kernel that VM is running. If `/lib/modules/<KernelVersion>` does not exist on the Docker daemon's host, Docker creates an empty root-owned directory there and `modprobe` still fails. The bind is read-only, so a guest that installs the `linux-modules` package for the host's exact kernel version cannot write into it.

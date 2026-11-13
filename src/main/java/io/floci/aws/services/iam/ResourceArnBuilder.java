@@ -2253,16 +2253,11 @@ public class ResourceArnBuilder {
      * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
      * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never
      * sees the URL query, so authorizing a URL value would check one resource and act on another.
-     * A value with an invalid percent escape is read as absent, so the resource stays the default
-     * and the request goes on to be answered as it is without enforcement.
+     * An invalid percent escape is rejected by the shared form decoder before authorization.
      */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
         if (RequestBodyReader.isForm(ctx)) {
-            try {
-                return RequestBodyReader.formField(ctx, name);
-            } catch (IllegalArgumentException malformed) {
-                return null;
-            }
+            return RequestBodyReader.formField(ctx, name);
         }
         return ctx.getUriInfo().getQueryParameters().getFirst(name);
     }
