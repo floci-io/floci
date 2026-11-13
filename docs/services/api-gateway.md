@@ -905,7 +905,8 @@ expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<n
 `requestId`, `identity.sourceIp`, `authorizer.<key>` and `authorizer.claims.<claim>`. `requestId`
 and `domainName` are the values the rest of the gateway reports for the request,
 `extendedRequestId` is the same value as `requestId`, as AWS documents for HTTP APIs and as
-`HTTP_PROXY` mappings also resolve it, and `path` starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
+`HTTP_PROXY` mappings also resolve it (an `HTTP_PROXY` response returns that id as `x-amzn-RequestId`,
+in place of any the backend sent, and a valid UUID sent in `x-amzn-RequestId` replaces it), and `path` starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
 with any other source is rejected with `400 BadRequestException` on create, update and import,
 including one embedded as `${...}` or inside a JSON parameter's string values. A `$` inside static
 text without braces, as in `price $5`, stays literal. A `$context` variable outside the list
