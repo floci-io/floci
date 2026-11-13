@@ -769,17 +769,26 @@ final class PaymentCryptographyKeyExchange {
      * @param key the key under export
      * @return the header, sixteen characters
      */
-    private static String tr31Header(PaymentCryptographyKey key) {
+    private static String tr31Header(PaymentCryptographyKey key, Map<String, Object> headers) {
         // The usage code and the exportability are the ones the TR-31 block carries, so a
         // key that leaves under a TR-34 block is named the same way as one that leaves
         // under a TR-31 block. The usage code of a key, and not of its usage name, is what
         // the initial derivation key has a code of its own for.
         String usage = PaymentCryptographyService.usageCode(key);
-        String mode = PaymentCryptographyService.modeCode(key);
         String algorithm = PaymentCryptographyService.algorithmByte(key);
-        String exportability = ownExportability(key);
-        // The protection of a TR-34 block is the ephemeral Triple DES key, so the type is B.
-        return "B9999" + usage + algorithm + mode + "00" + exportability + "0000";
+        // The modes of use and the exportability the request names may only narrow the ones
+        // the key has, the same as they do in a TR-31 block.
+        String mode = modeCode(key, headers);
+        String exportability = exportabilityCode(key, headers);
+        String version = versionCode(headers);
+        // The type names the cipher that protects the key, and the cipher is the one the
+        // key needs, so a Triple DES key is protected with Triple DES and an AES key with
+        // AES.
+        String type = "A".equals(algorithm) ? "D" : "B";
+        // The length field is the placeholder the reference writes, because the field is
+        // ignored in a TR-34 block: what the block carries is the key, not a block of a
+        // length that the receiver would have to compute.
+        return type + "9999" + usage + algorithm + mode + version + exportability + "0000";
     }
 
     /** The modes of use the attributes name, as the service reads them. */
@@ -1079,7 +1088,7 @@ final class PaymentCryptographyKeyExchange {
     Map<String, Object> parametersForImport(String materialType, String algorithm, boolean reuse) {
         if (!IMPORT_PARAMETER_TYPES.contains(materialType)) {
             throw validation("KeyMaterialType '" + materialType + "' does not take import "
-                    + "parameters here (KEY_CRYPTOGRAM)");
+                    + "parameters here (" + String.join(", ", IMPORT_PARAMETER_TYPES) + ")");
         }
         String wrappingAlgorithm = algorithm.isEmpty() ? "RSA_2048" : algorithm;
         Integer bits = RSA_BITS.get(wrappingAlgorithm);
@@ -1232,20 +1241,37 @@ final class PaymentCryptographyKeyExchange {
             throw validation(tooWeak);
         }
         String token = text(material, "ExportToken");
+        if (token.isEmpty()) {
+            // The service signs the block with the key the export parameters issued, so the
+            // request has to name the token they issued. A request that names its own
+            // signing key is refused rather than answered with a key that is not found.
+            throw validation("a TR-34 key block is signed with the key the export parameters "
+                    + "issued, so the request must name the export token they issued; this "
+                    + "service does not sign a block with a key the request names");
+        }
         Issued signing = take(exportTokens, token, EXPORT_MATERIAL_TYPE);
         if (signing == null) {
-            throw notFound(token.isEmpty() ? "(missing)" : token);
+            throw notFound(token);
         }
         String nonce = text(material, "RandomNonce");
         if (!nonce.isEmpty() && !isHex(nonce)) {
             throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
         }
-        String header = tr31Header(key);
+        // The headers the request names are the ones the block carries, and the optional
+        // blocks are not among them: a TR-34 block's header names the key and carries
+        // nothing else.
+        Map<String, Object> headers = object(material, "KeyBlockHeaders");
+        if (!optionalBlocks(headers).isEmpty()) {
+            throw validation("a TR-34 key block's header carries no optional blocks");
+        }
+        String header = tr31Header(key, headers);
         // The block names its recipient: the receiver's certificate identifier is the
-        // issuer and serial number of the certificate the request brought.
+        // issuer and serial number of the certificate the request brought. And the key
+        // block is enciphered with the cipher the key needs, so that the key is not
+        // protected by something weaker than itself.
         byte[] block = Tr34.build(clear, header, nonce.isEmpty() ? null : HEX.parseHex(nonce),
                 signing.privateKey, wrappingKey, Certificates.toDer(receiver),
-                signing.certificateDer);
+                signing.certificateDer, PaymentCryptographyService.isAes(key));
         return new Exported(HEX_UPPER.formatHex(block), "TR34_KEY_BLOCK", null);
     }
 
@@ -1273,19 +1299,16 @@ final class PaymentCryptographyKeyExchange {
         }
         requireVerify(caKey, "verifying a certificate");
         // The nonce is what binds the block to this exchange: the importer chooses it and
-        // the exporter signs it. An import without one is an import whose freshness is not
-        // checked, and that is refused rather than quietly accepted.
+        // the exporter signs it. It is optional in the model, and a block without one is
+        // read without the freshness it carries.
         String nonce = text(material, "RandomNonce");
-        if (nonce.isEmpty()) {
-            throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce is required");
-        }
-        if (!isHex(nonce)) {
+        if (!nonce.isEmpty() && !isHex(nonce)) {
             throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
         }
         Tr34.Recovered recovered;
         try {
             recovered = Tr34.recoverAndVerify(block, issued.privateKey, signingCertificate,
-                    caPublicKey, nonce);
+                    caPublicKey, nonce.isEmpty() ? null : nonce);
         } catch (RuntimeException e) {
             throw validation("the TR-34 key block did not open: " + e.getMessage());
         }
@@ -1295,9 +1318,25 @@ final class PaymentCryptographyKeyExchange {
         String usageCode = PaymentCryptographyTr31.usageOf(recovered.header);
         String mode = PaymentCryptographyTr31.modeOf(recovered.header);
         String exportability = PaymentCryptographyTr31.exportabilityOf(recovered.header);
+        if (!"E".equals(exportability) && !"N".equals(exportability) && !"S".equals(exportability)) {
+            // The exportability is one of three characters, and a header that carries any
+            // other one says nothing the service can read.
+            throw validation("the TR-34 key block's header carries the exportability '"
+                    + exportability + "', which is not one of E, N or S");
+        }
         String usage = PaymentCryptographyService.usageName(usageCode);
         byte[] clear = HEX.parseHex(recovered.keyHex);
         String algorithm = PaymentCryptographyService.algorithmOf(recovered.header, clear.length);
+        // The import token's own key protects the key that comes in, so it has to be at
+        // least as strong as it, the same rule the export enforces.
+        Integer bits = RSA_BITS.get(issued.algorithm);
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(
+                PaymentCryptographyKeyStrength.rsaBitsOf(bits == null ? 0 : bits),
+                PaymentCryptographyKeyStrength.bitsOf(algorithm),
+                "RSA_" + bits, algorithm);
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
         return new Imported(algorithm, usage,
                 PaymentCryptographyService.modesFor(mode),
                 exportableOnImport(exportability), clear, null, null, null, "SYMMETRIC_KEY");

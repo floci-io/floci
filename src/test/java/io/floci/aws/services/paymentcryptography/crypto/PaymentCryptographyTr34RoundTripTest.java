@@ -202,6 +202,33 @@ public class PaymentCryptographyTr34RoundTripTest {
     }
 
     @Test
+    void anAesKeyIsEncipheredWithAes() throws Exception {
+        // The key block is enciphered with the cipher the key needs, so an AES key is not
+        // protected by something weaker than itself.
+        KeyPair krd = rsaKeyPair();
+        KeyPair kdh = rsaKeyPair();
+        Certificates.Minted kdhCertificate = CertificatesTest.mint(kdh.getPublic(), "kdh",
+                kdh.getPrivate(), "kdh");
+
+        byte[] clear = HEX.parseHex("000102030405060708090A0B0C0D0E0F");
+        String header = "D9999D0AB00E0000";
+        byte[] nonce = HEX.parseHex("0102030405060708");
+
+        byte[] block = Tr34.build(clear, header, nonce, kdh.getPrivate(), krd.getPublic(),
+                null, kdhCertificate.der(), true);
+
+        // The content encryption is the AES one: 2.16.840.1.101.3.4.1.2.
+        assertTrue(HEX_UPPER.formatHex(block).contains("608648016503040102"),
+                "the block does not name the AES content encryption");
+
+        Tr34.Recovered recovered = Tr34.recoverAndVerify(HEX_UPPER.formatHex(block),
+                krd.getPrivate(), kdhCertificate.pem(), null, HEX_UPPER.formatHex(nonce));
+
+        assertEquals(HEX_UPPER.formatHex(clear), recovered.keyHex);
+        assertEquals(header, recovered.header);
+    }
+
+    @Test
     void refusesATamperedBlock() throws Exception {
         KeyPair krd = rsaKeyPair();
         KeyPair kdh = rsaKeyPair();

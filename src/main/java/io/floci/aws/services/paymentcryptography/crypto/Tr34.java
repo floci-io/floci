@@ -101,6 +101,10 @@ public final class Tr34 {
     private static final ASN1ObjectIdentifier OID_DES_EDE3_CBC =
             new ASN1ObjectIdentifier("1.2.840.113549.3.7");
 
+    /** The AES-128 in CBC mode content encryption: 2.16.840.1.101.3.4.1.2. */
+    private static final ASN1ObjectIdentifier OID_AES_128_CBC =
+            new ASN1ObjectIdentifier("2.16.840.1.101.3.4.1.2");
+
     /**
      * The order the signed attributes are written in.
      *
@@ -117,11 +121,17 @@ public final class Tr34 {
     /** The hexadecimal the block is written in, in the capitals the reference uses. */
     private static final HexFormat HEX_UPPER = HexFormat.of().withUpperCase();
 
-    /** The block size of the cipher the key block is encrypted under. */
-    private static final int BLOCK_SIZE = 8;
+    /** The block size of the Triple DES cipher the key block may be encrypted under. */
+    private static final int TDES_BLOCK_SIZE = 8;
+
+    /** The block size of the AES cipher the key block may be encrypted under. */
+    private static final int AES_BLOCK_SIZE = 16;
 
     /** The size of the ephemeral Triple DES key. */
-    private static final int EPHEMERAL_KEY_SIZE = 24;
+    private static final int EPHEMERAL_TDES_KEY_SIZE = 24;
+
+    /** The size of the ephemeral AES-128 key. */
+    private static final int EPHEMERAL_AES_KEY_SIZE = 16;
 
     /** The length of the TR-31 header a block carries, in characters. */
     private static final int HEADER_LENGTH = 16;
@@ -191,6 +201,31 @@ public final class Tr34 {
     public static byte[] build(byte[] clearKey, String tr31Header, byte[] nonce,
                                 PrivateKey signingKey, PublicKey wrappingKey,
                                 byte[] receiverCertDer, byte[] signerCertDer) {
+        return build(clearKey, tr31Header, nonce, signingKey, wrappingKey, receiverCertDer,
+                signerCertDer, false);
+    }
+
+    /**
+     * Build a TR-34 key block, whose key block is enciphered with the key's own cipher.
+     *
+     * <p>The content encryption follows the key the block carries, as the reference does: a
+     * Triple DES key is enciphered with Triple DES and an AES key with AES-128, so that the
+     * key is never protected by a cipher weaker than itself.
+     *
+     * @param clearKey the key the block carries
+     * @param tr31Header the TR-31 header that names the key
+     * @param nonce the two-pass nonce
+     * @param signingKey the signing key of the host
+     * @param wrappingKey the receiver's public key
+     * @param receiverCertDer the receiver's certificate in DER, or null to leave the recipient
+     *     unnamed
+     * @param signerCertDer the signing certificate in DER, or null to leave the signer unnamed
+     * @param aes whether the key the block carries is an AES one
+     * @return the block
+     */
+    public static byte[] build(byte[] clearKey, String tr31Header, byte[] nonce,
+                                PrivateKey signingKey, PublicKey wrappingKey,
+                                byte[] receiverCertDer, byte[] signerCertDer, boolean aes) {
         byte[] header = tr31Header.getBytes(StandardCharsets.US_ASCII);
 
         // The key block: [version, the host's identifier, the key, the header attribute].
@@ -200,15 +235,18 @@ public final class Tr34 {
         keyBlock.add(new DEROctetString(clearKey));
         keyBlock.add(attribute(OID_DATA, new DEROctetString(header)));
 
-        // An ephemeral Triple DES key enciphers the block, and the receiver's public key
-        // wraps the ephemeral key.
+        // An ephemeral key enciphers the block, and the receiver's public key wraps the
+        // ephemeral key. The cipher is the one the key the block carries needs, so that the
+        // key is not protected by something weaker than itself.
         SecureRandom random = new SecureRandom();
-        byte[] ephemeral = new byte[EPHEMERAL_KEY_SIZE];
+        byte[] ephemeral = new byte[aes ? EPHEMERAL_AES_KEY_SIZE : EPHEMERAL_TDES_KEY_SIZE];
         random.nextBytes(ephemeral);
-        byte[] iv = new byte[BLOCK_SIZE];
+        byte[] iv = new byte[aes ? AES_BLOCK_SIZE : TDES_BLOCK_SIZE];
         random.nextBytes(iv);
-        byte[] encryptedBlock = Ciphers.tdesCbcEncrypt(pad(encoded(new DERSequence(keyBlock))),
-                Ciphers.widenTdesKey(ephemeral), iv);
+        byte[] padded = pad(encoded(new DERSequence(keyBlock)), aes ? AES_BLOCK_SIZE : TDES_BLOCK_SIZE);
+        byte[] encryptedBlock = aes
+                ? Ciphers.aesCbcEncrypt(padded, ephemeral, iv)
+                : Ciphers.tdesCbcEncrypt(padded, Ciphers.widenTdesKey(ephemeral), iv);
         byte[] encryptedEphemeral = RsaOaep.encrypt(wrappingKey, ephemeral, "SHA-256");
 
         // The recipient information: the receiver's certificate identifier, the algorithm the
@@ -222,7 +260,7 @@ public final class Tr34 {
         // The encrypted content: the algorithm, the vector it was encrypted under, and the
         // encrypted block.
         ASN1EncodableVector contentEncryption = new ASN1EncodableVector();
-        contentEncryption.add(OID_DES_EDE3_CBC);
+        contentEncryption.add(aes ? OID_AES_128_CBC : OID_DES_EDE3_CBC);
         contentEncryption.add(new DEROctetString(iv));
         contentEncryption.add(new DERTaggedObject(false, 0, new DEROctetString(encryptedBlock)));
 
@@ -350,9 +388,10 @@ public final class Tr34 {
         ASN1Sequence contentEncryption = ASN1Sequence.getInstance(encryptedContentInfo.getObjectAt(1));
         ASN1ObjectIdentifier encryption = ASN1ObjectIdentifier.getInstance(
                 contentEncryption.getObjectAt(0));
-        if (!OID_DES_EDE3_CBC.equals(encryption)) {
-            throw new IllegalArgumentException("content encryption is not 3DES-CBC "
-                    + "(this service imports TDES key blocks only)");
+        boolean aes = OID_AES_128_CBC.equals(encryption);
+        if (!aes && !OID_DES_EDE3_CBC.equals(encryption)) {
+            throw new IllegalArgumentException("content encryption is neither 3DES-CBC nor "
+                    + "AES-128-CBC (this service imports the two the reference writes)");
         }
         byte[] iv = ASN1OctetString.getInstance(contentEncryption.getObjectAt(1)).getOctets();
         byte[] encryptedBlock = ASN1OctetString.getInstance(
@@ -409,8 +448,9 @@ public final class Tr34 {
             throw new IllegalArgumentException("ephemeral key did not unwrap under the import-token "
                     + "key (wrong token)", e);
         }
-        byte[] clearBlock = stripPadding(Ciphers.tdesCbcDecrypt(encryptedBlock,
-                Ciphers.widenTdesKey(ephemeral), iv));
+        byte[] clearBlock = stripPadding(aes
+                ? Ciphers.aesCbcDecrypt(encryptedBlock, ephemeral, iv)
+                : Ciphers.tdesCbcDecrypt(encryptedBlock, Ciphers.widenTdesKey(ephemeral), iv));
 
         Recovered recovered = readKeyBlock(clearBlock);
 
@@ -428,16 +468,6 @@ public final class Tr34 {
         return recovered;
     }
 
-    /**
-     * Whether the signature verifies over the signed attributes.
-     *
-     * <p>The attributes are a set, and a set has no order, but the bytes a signature covers
-     * do. BouncyCastle sorts a set when it reads one, so the order the signer used is gone
-     * by the time the attributes are parsed. The signature is therefore tried over both
-     * orders the set can be written in: the one the reference writes, and the sorted one a
-     * strictly DER encoder would write. Both carry the same attributes, so a block that
-     * verifies under either is authentic.
-     */
     /**
      * The bytes a PKCS#7 signature covers: the signed attributes as a DER set.
      *
@@ -457,6 +487,16 @@ public final class Tr34 {
         return encoded;
     }
 
+    /**
+     * Whether the signature verifies over the signed attributes.
+     *
+     * <p>The attributes are a set, and a set has no order, but the bytes a signature covers
+     * do. BouncyCastle sorts a set when it reads one, so the order the signer used is gone
+     * by the time the attributes are parsed. The signature is therefore tried over both
+     * orders the set can be written in: the one the reference writes, and the sorted one a
+     * strictly DER encoder would write. Both carry the same attributes, so a block that
+     * verifies under either is authentic.
+     */
     private static boolean verifies(ASN1Set signedAttributes, byte[] signature, PublicKey key) {
         for (ASN1EncodableVector ordering : orderings(signedAttributes)) {
             if (verifySignature(signedAttributes(ordering), signature, key)) {
@@ -624,8 +664,8 @@ public final class Tr34 {
     }
 
     /** The PKCS#7 padding of a block, the counterpart of {@link #stripPadding}. */
-    private static byte[] pad(byte[] buffer) {
-        int pad = BLOCK_SIZE - (buffer.length % BLOCK_SIZE);
+    private static byte[] pad(byte[] buffer, int blockSize) {
+        int pad = blockSize - (buffer.length % blockSize);
         byte[] out = Arrays.copyOf(buffer, buffer.length + pad);
         for (int i = buffer.length; i < out.length; i++) {
             out[i] = (byte) pad;
