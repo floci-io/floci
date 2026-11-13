@@ -173,16 +173,15 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         String description = optionalText(PROFILE, props, "Description", DESCRIPTION_MAX_LENGTH, ctx);
         allowed(PROFILE, "DeletionProtectionCheck", text(props, "DeletionProtectionCheck", ctx),
                 DELETION_PROTECTION_CHECKS);
-        ObjectNode createOnly = MAPPER.createObjectNode()
-                .put("ApplicationId", applicationId)
-                .put("LocationUri", locationUri)
-                .put("Type", type);
-        if (updating && madeFrom(r, createOnly)) {
+        // The engine's change decides: ApplicationId and LocationUri are create-only in the registry,
+        // Type updates without interruption.
+        if (updating && !ctx.changes(PROFILE, props).requiresReplacement()) {
             ConfigurationProfile current = service.findConfigurationProfile(ctx.priorPhysicalId())
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "Configuration profile not found", 404));
             snapshotBeforeUpdate(r, current);
-            service.updateConfigurationProfile(current.getApplicationId(), current.getId(), name, description);
+            service.updateConfigurationProfile(current.getApplicationId(), current.getId(), name, description,
+                    type);
             return;
         }
         Map<String, Object> request = new HashMap<>();
@@ -194,7 +193,6 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(profile.getId());
         r.getAttributes().put("ConfigurationProfileId", profile.getId());
         r.getAttributes().put(APPLICATION_ATTR, profile.getApplicationId());
-        r.getAttributes().put(CREATE_ONLY_ATTR, createOnly.toString());
     }
 
     /**
@@ -478,7 +476,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
             case PROFILE -> {
                 ConfigurationProfile prior = MAPPER.treeToValue(snapshot, ConfigurationProfile.class);
                 service.updateConfigurationProfile(prior.getApplicationId(), prior.getId(), prior.getName(),
-                        prior.getDescription());
+                        prior.getDescription(), prior.getType());
             }
             case STRATEGY -> {
                 DeploymentStrategy prior = MAPPER.treeToValue(snapshot, DeploymentStrategy.class);

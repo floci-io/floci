@@ -108,6 +108,21 @@ public record PropertyChanges(Map<String, PropertyChange> byName) {
         return before.equals(now);
     }
 
+    /**
+     * True when a create-only property changed or was dropped: the rule the change set applies for
+     * {@code Replacement} (a property added where the previous template had none is not a change,
+     * as in {@code CfnCreateOnlyProperties.createOnlyValueChanged}). A provisioner that replaces
+     * its entity reads this, so the action never differs from the preview.
+     */
+    public boolean requiresReplacement() {
+        for (PropertyChange found : byName.values()) {
+            if (found.createOnly() && (found.kind() == Kind.CHANGED || found.kind() == Kind.DROPPED)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The kind of {@code name}, or null when it is in neither template. */
     public Kind kindOf(String name) {
         PropertyChange found = byName.get(name);
