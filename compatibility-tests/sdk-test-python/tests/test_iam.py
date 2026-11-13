@@ -348,7 +348,7 @@ class TestIAMPolicy:
             iam_client.put_role_policy(
                 RoleName=role_name,
                 PolicyName=inline_policy_name,
-                PolicyDocument='{"Version":"2012-10-17"}',
+                PolicyDocument=POLICY_DOC,
             )
 
             response = iam_client.get_role_policy(

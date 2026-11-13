@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -93,7 +94,7 @@ class EksPodIdentityAccountIntegrationTest {
 
     private void createPodIdentityResources(String account, Cluster cluster, String roleName) {
         String roleArn = RequestScopes.callAs(account,
-                () -> iamService.createRole(roleName, "/", "{}", null, 3600, null).getArn());
+                () -> iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getArn());
         createPodIdentityResourcesForRole(account, cluster, roleArn);
     }
 

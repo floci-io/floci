@@ -16,6 +16,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.HashMap;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -459,7 +460,7 @@ class IamPolicyQuotaRollbackTest {
         switch (kind) {
             case "User" -> iam.createUser(name, "/");
             case "Group" -> iam.createGroup(name, "/");
-            case "Role" -> iam.createRole(name, "/", "{}", null, 3600, null);
+            case "Role" -> iam.createRole(name, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
             default -> throw new IllegalArgumentException(kind);
         }
     }

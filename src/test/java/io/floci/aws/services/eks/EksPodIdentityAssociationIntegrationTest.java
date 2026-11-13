@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -278,7 +279,7 @@ class EksPodIdentityAssociationIntegrationTest {
                 .formParam("Action", "CreateRole")
                 .formParam("RoleName", roleName)
                 .formParam("Path", "/")
-                .formParam("AssumeRolePolicyDocument", "{}")
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT)
                 .post("/").then().statusCode(200);
     }
 

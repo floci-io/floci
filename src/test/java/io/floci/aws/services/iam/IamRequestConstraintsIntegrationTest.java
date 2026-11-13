@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -233,7 +234,7 @@ class IamRequestConstraintsIntegrationTest {
     void aBooleanOutsideTrueAndFalseIsLeftToTheOperation() {
         iam("CreatePolicyVersion")
             .formParam("PolicyArn", SHORTEST_ARN)
-            .formParam("PolicyDocument", "{}")
+            .formParam("PolicyDocument", EMPTY_POLICY_DOCUMENT)
             .formParam("SetAsDefault", "maybe")
         .when().post("/").then().statusCode(404)
             .body(CODE, equalTo("NoSuchEntity"));

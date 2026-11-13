@@ -17,6 +17,7 @@ import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -43,7 +44,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String roleName = "LambdaRuntimeRole" + suffix;
         String roleArn = "arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName;
-        iamService.createRole(roleName, "/", "{}", null, 0, null);
+        iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy(roleName, "RuntimePolicy", """
                 {
                   "Version": "2012-10-17",
@@ -95,7 +96,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String roleName = "LambdaVersionRole" + suffix;
         String functionName = "version-account-" + suffix;
-        iamService.createRole(roleName, "/", "{}", null, 0, null);
+        iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy(roleName, "RuntimePolicy",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
                         + "\"Action\":\"s3:*\",\"Resource\":\"*\"}]}");

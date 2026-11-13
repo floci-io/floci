@@ -488,6 +488,40 @@ instead of the previous document with the same policy name; exceeding the limit 
 `LimitExceeded` (HTTP 409) and preserves the stored policies. These limits match the
 [AWS IAM quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html).
 
+Every write that takes a policy document holds it to being one, which nothing here did before. All
+of them model `MalformedPolicyDocument` and none of them answered it, so a document that was no
+policy was stored and told apart only later, when something tried to decide with it. A role's trust
+policy was the sharpest case: the evaluator reads a document it cannot parse as matching nothing, so
+a role written that way could no longer be assumed.
+
+Which reading an operation applies follows what the document is. A trust policy, on `CreateRole` and
+`UpdateAssumeRolePolicy`, is held to the grammar alone and under the wording IAM's trust-policy
+validator uses: `This policy contains invalid Json` for a text that is not, in its entirety, a JSON object,
+and `Policy has no statements` for an object carrying no `Statement`, "the main element for a policy.
+This element is required." Its statements name a principal and the actions it may take rather than
+resources, so the elements an identity statement must carry are not asked of one. An inline policy,
+on `PutUserPolicy`, `PutGroupPolicy` and `PutRolePolicy`, is held to that grammar under the identity
+validator's one sentence for both cases, `Syntax errors in policy.`, and to the values the policy
+language defines: a `Version` outside `2012-10-17` and `2008-10-17` answers that same sentence, a
+statement whose `Effect` is not literally `Allow` or `Deny` answers `The policy failed legacy
+parsing`, and a resource named neither by ARN nor by `*` answers `Resource <value> must be in ARN
+format or "*".` A managed policy, on `CreatePolicy` and `CreatePolicyVersion`, is held to those and
+to its statements' own elements besides, `Policy statement must contain actions.` and `Policy
+statement must contain resources.`, where a statement that is no object at all is the syntax case
+rather than a missing element.
+
+A document carrying `Statement` with nothing in it is still a policy, one that grants nothing, and a
+member the request leaves out is still answered as absent by the constraints ahead of the operation.
+None of these sentences is published and none is captured: they are the ones AWS's own emulator
+answers, a first-party implementation rather than a recording, and the split between the two
+validators' wordings is its reading too. The reading sits in the service rather than at the protocol edge, so what CloudFormation
+provisions is held to it as well: those provisioners write through the same methods. Putting a
+document back is not a new write, though. A failed update restores the trust policy, inline policy
+or policy version it captured before the attempt without holding it to this reading, because a
+document an earlier version accepted must not be refused on the way back, which would leave the
+role or the policy without what the rollback removed. A document already stored is likewise read
+exactly as it was: what an earlier version accepted still decides what it decided.
+
 When CloudFormation renames an inline policy, Floci releases its tracked old name on
 retained principals before writing the replacement. Failed updates restore the captured
 previous policies, including historical documents saved before these limits were enforced.

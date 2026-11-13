@@ -1422,31 +1422,10 @@ public class IamQueryHandler {
 
     private Response handleUpdateAssumeRolePolicy(MultivaluedMap<String, String> params) {
         iamService.updateAssumeRolePolicy(requireParam(params, "RoleName"),
-                requireTrustPolicyDocument(params));
+                requireParam(params, "PolicyDocument"));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
     }
 
-    /**
-     * The trust policy this operation writes, which a blank is not. {@code policyDocumentType}
-     * declares a minimum of 1 beside a pattern that admits the space, tab, line feed and carriage
-     * return characters, so the shape does not exclude a blank, and this write replaces the policy
-     * a role is already assumed under: the trust evaluator reads a blank document as matching
-     * nothing, which would leave a role that could be assumed unassumable.
-     *
-     * <p>So the one value the shape lets through here is answered with the modelled
-     * {@code MalformedPolicyDocument}, worded as IAM's trust-policy validator words a document that
-     * does not parse, which is what that validator answers rather than the sentence an identity
-     * policy's gets. Nothing further is read: every other document that is no policy is taken by
-     * this operation and by every other write, which is one gap of its own rather than this
-     * member's.
-     */
-    private String requireTrustPolicyDocument(MultivaluedMap<String, String> params) {
-        String document = requireParam(params, "PolicyDocument");
-        if (document.isBlank()) {
-            throw new AwsException("MalformedPolicyDocument", "This policy contains invalid Json", 400);
-        }
-        return document;
-    }
 
     private Response handleTagRole(MultivaluedMap<String, String> params) {
         iamService.tagRole(getParam(params, "RoleName"), extractTags(params, true));

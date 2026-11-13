@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -137,7 +138,7 @@ class IamSessionRetirementStorageTest {
         try {
             IamService iam = spy(new IamService(factory, config,
                     new RegionResolver("us-east-1", DEFAULT_ACCOUNT), Clock.fixed(now, ZoneOffset.UTC)));
-            String roleArn = iam.createRole("retirement", "/", "{}", null, 3600, null).getArn();
+            String roleArn = iam.createRole("retirement", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getArn();
             EcsTaskRoleCredentials credentials = new EcsTaskRoleCredentials(iam, config);
             String path = credentials.issue(taskArn, roleArn, DEFAULT_ACCOUNT, now).orElseThrow();
             SessionCredential first = credentials.resolveByPath(path, now).orElseThrow();
