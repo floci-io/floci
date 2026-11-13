@@ -9,6 +9,9 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -16,6 +19,8 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -222,6 +227,49 @@ class MemoryDbContainerManagerTest {
                     "io.floci.resource-id", "cluster1",
                     "io.floci.account", "000000000000",
                     "io.floci.region", "us-east-1"));
+            responder.get(5, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * In host-path mode the bind source names a directory on the Docker host: Floci creates it only
+     * when it runs there, and inside a container leaves it to the daemon, as the other data planes do.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void hostPathModeCreatesTheBindSourceOnlyOnTheDockerHost(boolean inContainer, @TempDir Path directory)
+            throws Exception {
+        Path bindSource = directory.resolve("floci-data").resolve("memorydb").resolve("vol-1");
+        try (ServerSocket serverSocket = new ServerSocket(0)) {
+            CompletableFuture<Void> responder = startPongResponder(serverSocket, 1);
+
+            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+            when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                    "container-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
+                            "127.0.0.1", serverSocket.getLocalPort()))));
+            ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+            EmulatorConfig config = mock(EmulatorConfig.class);
+            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+            EmulatorConfig.MemoryDbServiceConfig memorydb = mock(EmulatorConfig.MemoryDbServiceConfig.class);
+            EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+            when(config.services()).thenReturn(services);
+            when(services.memorydb()).thenReturn(memorydb);
+            when(memorydb.dockerNetwork()).thenReturn(Optional.empty());
+            when(config.storage()).thenReturn(storage);
+            when(storage.hostPersistentPath()).thenReturn(directory.resolve("floci-data").toString());
+            ContainerDetector containerDetector = mock(ContainerDetector.class);
+            when(containerDetector.isRunningInContainer()).thenReturn(inContainer);
+            MemoryDbContainerManager manager = new MemoryDbContainerManager(containerBuilder, lifecycleManager,
+                    mock(ContainerLogStreamer.class), containerDetector, config,
+                    new RegionResolver("us-east-1", "000000000000"));
+
+            manager.start("cluster1", "valkey/valkey:8", "vol-1", "000000000000", "us-east-1");
+
+            verify(builder).withBind(bindSource.toString(), "/data");
+            assertEquals(!inContainer, Files.isDirectory(bindSource));
             responder.get(5, TimeUnit.SECONDS);
         }
     }
