@@ -96,6 +96,13 @@ class HttpProxyRequestSourceMappingIntegrationTest {
     }
 
     @Test
+    void indexedBodyValueFillsAnEmbeddedPath() {
+        configureApi(Map.of("overwrite:path", "/orders/$request.body.items[1].id/lines"));
+        invoke("{\"items\":[{\"id\":\"i-1\"},{\"id\":\"i-2\"}]}");
+        assertEquals("/orders/i-2/lines", received.get().path("path").asText());
+    }
+
+    @Test
     void wholeBodyCarryingALineBreakIsRejectedBeforeTheBackend() {
         configureApi(Map.of("overwrite:header.x-order", "$request.body"));
         invokeExpectingRejectedHeader("o-1\r\nX-Injected: 1", "x-order");
