@@ -46,6 +46,7 @@ order:
   - AWS::CodeBuild
   - AWS::Batch
   - AWS::Cognito
+  - AWS::VerifiedPermissions
   - AWS::CertificateManager
   - AWS::Events
   - AWS::EventsV2
@@ -90,6 +91,7 @@ type_order:
   AWS::IAM: [Role, User, AccessKey, Policy, ManagedPolicy, InstanceProfile]
   AWS::Organizations: [Organization, OrganizationalUnit, Account, Policy, ResourcePolicy]
   AWS::KMS: [Key, Alias]
+  AWS::VerifiedPermissions: [PolicyStore, PolicyTemplate, Policy]
   AWS::SecretsManager: [Secret, SecretTargetAttachment]
   AWS::ECS: [Cluster, TaskDefinition, Service]
   AWS::EKS: [Cluster, Nodegroup]
@@ -179,6 +181,7 @@ service_labels:
   AWS::Signer: Signer
   AWS::StepFunctions: Step Functions
   AWS::Transfer: Transfer Family
+  AWS::VerifiedPermissions: Verified Permissions
   AWS::WAFv2: WAFv2
   Custom: CloudFormation
 

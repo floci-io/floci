@@ -201,6 +201,9 @@ AWS::Signer::SigningProfile	SignerCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::Transfer::Server	TransferCfnProvisioner
 AWS::Transfer::User	TransferCfnProvisioner
+AWS::VerifiedPermissions::Policy	VerifiedPermissionsCfnProvisioner
+AWS::VerifiedPermissions::PolicyStore	VerifiedPermissionsCfnProvisioner
+AWS::VerifiedPermissions::PolicyTemplate	VerifiedPermissionsCfnProvisioner
 AWS::WAFv2::IPSet	WafV2CfnProvisioner
 AWS::WAFv2::LoggingConfiguration	WafV2CfnProvisioner
 AWS::WAFv2::WebACL	WafV2CfnProvisioner

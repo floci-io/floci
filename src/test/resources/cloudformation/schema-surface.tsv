@@ -200,6 +200,9 @@ AWS::Signer::SigningProfile	Arn,ProfileName,ProfileVersion,ProfileVersionArn	Pla
 AWS::StepFunctions::StateMachine	Arn,Name,StateMachineRevisionId	Definition,DefinitionS3Location,DefinitionString,DefinitionSubstitutions,EncryptionConfiguration,LoggingConfiguration,RoleArn,StateMachineName,StateMachineType,Tags,TracingConfiguration
 AWS::Transfer::Server	Arn,As2ServiceManagedEgressIpAddresses,ServerId,State	Certificate,CreateWithHostKey,Domain,EndpointDetails,EndpointType,IdentityProviderDetails,IdentityProviderType,IpAddressType,LoggingRole,PostAuthenticationLoginBanner,PreAuthenticationLoginBanner,ProtocolDetails,Protocols,S3StorageOptions,SecurityPolicyName,StructuredLogDestinations,Tags,WorkflowDetails
 AWS::Transfer::User	Arn	HomeDirectory,HomeDirectoryMappings,HomeDirectoryType,Policy,PosixProfile,Role,ServerId,SshPublicKeys,Tags,UserName
+AWS::VerifiedPermissions::Policy	PolicyId,PolicyType	Definition,Name,PolicyStoreId
+AWS::VerifiedPermissions::PolicyStore	Arn,EncryptionState,PolicyStoreId	DeletionProtection,Description,EncryptionSettings,Schema,Tags,ValidationSettings
+AWS::VerifiedPermissions::PolicyTemplate	PolicyTemplateId	Description,Name,PolicyStoreId,Statement
 AWS::WAFv2::IPSet	Arn,Id	Addresses,Description,IPAddressVersion,Name,Scope,Tags
 AWS::WAFv2::LoggingConfiguration	ManagedByFirewallManager	LogDestinationConfigs,LoggingFilter,RedactedFields,ResourceArn
 AWS::WAFv2::WebACL	Arn,Capacity,Id,LabelNamespace	ApplicationConfig,AssociationConfig,CaptchaConfig,ChallengeConfig,CustomResponseBodies,DataProtectionConfig,DefaultAction,Description,MonetizationConfig,Name,OnSourceDDoSProtectionConfig,Rules,Scope,Tags,TokenDomains,VisibilityConfig
