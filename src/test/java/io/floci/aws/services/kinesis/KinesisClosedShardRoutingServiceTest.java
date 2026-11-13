@@ -12,6 +12,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -42,6 +44,169 @@ class KinesisClosedShardRoutingServiceTest {
     }
 
     @Test
+    void splitMigratesLegacyRangesBeforeDerivingChildRanges() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        BigInteger half = BigInteger.ONE.shiftLeft(127);
+        BigInteger quarter = BigInteger.ONE.shiftLeft(126);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        stream.getShards().forEach(shard ->
+                shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", max)));
+
+        service.splitShard(STREAM, stream.getShards().getFirst().getShardId(), quarter.toString(), REGION);
+
+        assertEquals(new KinesisShard.HashKeyRange("0", half.subtract(BigInteger.ONE).toString()),
+                stream.getShards().get(0).getHashKeyRange());
+        assertEquals(new KinesisShard.HashKeyRange(half.toString(), max),
+                stream.getShards().get(1).getHashKeyRange());
+        assertEquals(new KinesisShard.HashKeyRange("0", quarter.subtract(BigInteger.ONE).toString()),
+                stream.getShards().get(2).getHashKeyRange());
+        assertEquals(new KinesisShard.HashKeyRange(quarter.toString(), half.subtract(BigInteger.ONE).toString()),
+                stream.getShards().get(3).getHashKeyRange());
+        assertOpenDestinationAndUnchangedClosedRecords(stream, "c", stream.getShards().get(3));
+    }
+
+    @Test
+    void invalidLegacySplitDoesNotChangeShardRanges() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        String outsideNormalizedParent = BigInteger.ONE.shiftLeft(127)
+                .add(BigInteger.ONE.shiftLeft(126)).toString();
+        stream.getShards().forEach(shard ->
+                shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", max)));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.splitShard(STREAM, stream.getShards().getFirst().getShardId(),
+                        outsideNormalizedParent, REGION));
+
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(2, stream.getShards().size());
+        assertTrue(stream.getShards().stream().allMatch(shard ->
+                new KinesisShard.HashKeyRange("0", max).equals(shard.getHashKeyRange())));
+    }
+
+    @Test
+    void mergeMigratesLegacyRangesBeforeDerivingChildRange() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        BigInteger half = BigInteger.ONE.shiftLeft(127);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        stream.getShards().forEach(shard ->
+                shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", max)));
+
+        service.mergeShards(STREAM, stream.getShards().get(0).getShardId(),
+                stream.getShards().get(1).getShardId(), REGION);
+
+        assertEquals(new KinesisShard.HashKeyRange("0", half.subtract(BigInteger.ONE).toString()),
+                stream.getShards().get(0).getHashKeyRange());
+        assertEquals(new KinesisShard.HashKeyRange(half.toString(), max),
+                stream.getShards().get(1).getHashKeyRange());
+        assertEquals(new KinesisShard.HashKeyRange("0", max), stream.getShards().get(2).getHashKeyRange());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nonAdjacentMergeDoesNotChangeShardTopology(boolean legacyRanges) {
+        KinesisStream stream = service.createStream(STREAM, 3, REGION);
+        if (legacyRanges) {
+            String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+            stream.getShards().forEach(shard ->
+                    shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", max)));
+        }
+        List<KinesisShard.HashKeyRange> before = stream.getShards().stream()
+                .map(KinesisShard::getHashKeyRange).toList();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.mergeShards(STREAM, stream.getShards().get(0).getShardId(),
+                        stream.getShards().get(2).getShardId(), REGION));
+
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(3, stream.getShards().size());
+        assertTrue(stream.getShards().stream().noneMatch(KinesisShard::isClosed));
+        assertEquals(before, stream.getShards().stream().map(KinesisShard::getHashKeyRange).toList());
+        service.putRecordWithShardId(STREAM, DATA, "c", REGION);
+    }
+
+    @Test
+    void updateShardCountMigratesLegacyRangesBeforeChoosingSplits() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        stream.getShards().forEach(shard ->
+                shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", max)));
+
+        service.updateShardCount(STREAM, 4, "UNIFORM_SCALING", REGION);
+
+        List<KinesisShard> open = stream.getShards().stream().filter(shard -> !shard.isClosed())
+                .sorted((left, right) -> new BigInteger(left.getHashKeyRange().startingHashKey())
+                        .compareTo(new BigInteger(right.getHashKeyRange().startingHashKey())))
+                .toList();
+        assertEquals(4, open.size());
+        assertEquals("0", open.getFirst().getHashKeyRange().startingHashKey());
+        assertEquals(max, open.getLast().getHashKeyRange().endingHashKey());
+        for (int i = 1; i < open.size(); i++) {
+            assertEquals(new BigInteger(open.get(i - 1).getHashKeyRange().endingHashKey()).add(BigInteger.ONE),
+                    new BigInteger(open.get(i).getHashKeyRange().startingHashKey()));
+        }
+    }
+
+    @Test
+    void updateShardCountLimitDoesNotNormalizeLegacyRanges() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        stream.getShards().forEach(shard ->
+                shard.setHashKeyRange(new KinesisShard.HashKeyRange("0", max)));
+        List<Instant> history = Collections.nCopies(10, Instant.now());
+        stream.setShardCountUpdateTimestamps(history);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateShardCount(STREAM, 4, "UNIFORM_SCALING", REGION));
+
+        assertEquals("LimitExceededException", error.getErrorCode());
+        assertTrue(stream.getShards().stream().allMatch(shard ->
+                new KinesisShard.HashKeyRange("0", max).equals(shard.getHashKeyRange())));
+        assertEquals(history, stream.getShardCountUpdateTimestamps());
+    }
+
+    @Test
+    void alreadyReshardedLegacyOverlapDoesNotRewriteChildRanges() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        String quarter = BigInteger.ONE.shiftLeft(126).toString();
+        service.splitShard(STREAM, stream.getShards().getFirst().getShardId(), quarter, REGION);
+        stream.getShards().get(0).setHashKeyRange(new KinesisShard.HashKeyRange("0", max));
+        stream.getShards().get(1).setHashKeyRange(new KinesisShard.HashKeyRange("0", max));
+        stream.getShards().get(3).setHashKeyRange(new KinesisShard.HashKeyRange(quarter, max));
+        List<KinesisShard.HashKeyRange> before = stream.getShards().stream()
+                .map(KinesisShard::getHashKeyRange).toList();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putRecordWithShardId(STREAM, DATA, "c", REGION));
+
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(before, stream.getShards().stream().map(KinesisShard::getHashKeyRange).toList());
+        assertTrue(stream.getShards().stream().allMatch(shard -> shard.recordCount() == 0));
+
+        AwsException scalingError = assertThrows(AwsException.class,
+                () -> service.updateShardCount(STREAM, 4, "UNIFORM_SCALING", REGION));
+        assertEquals("InvalidArgumentException", scalingError.getErrorCode());
+        assertTrue(stream.getShardCountUpdateTimestamps().isEmpty());
+    }
+
+    @Test
+    void partiallyOverlappingRootRangesAreNotRepartitioned() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        String max = BigInteger.ONE.shiftLeft(128).subtract(BigInteger.ONE).toString();
+        stream.getShards().get(1).setHashKeyRange(new KinesisShard.HashKeyRange("0", max));
+        List<KinesisShard.HashKeyRange> before = stream.getShards().stream()
+                .map(KinesisShard::getHashKeyRange).toList();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putRecordWithShardId(STREAM, DATA, "c", REGION));
+
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(before, stream.getShards().stream().map(KinesisShard::getHashKeyRange).toList());
+        assertTrue(stream.getShards().stream().allMatch(shard -> shard.recordCount() == 0));
+    }
+
+    @Test
     void putRecordRoutesToOpenRangeAfterRepeatedSplits() {
         KinesisStream stream = splitTwoGenerations();
 
@@ -69,6 +234,20 @@ class KinesisClosedShardRoutingServiceTest {
 
         KinesisShard expected = stream.getShards().get("a".equals(partitionKey) ? 3 : 4);
         assertOpenDestinationAndUnchangedClosedRecords(stream, partitionKey, expected);
+    }
+
+    @Test
+    void cachedRoutingRebuildsAfterMerge() {
+        KinesisStream stream = service.createStream(STREAM, 2, REGION);
+        service.putRecordWithShardId(STREAM, DATA, "a", "0", REGION);
+        service.mergeShards(STREAM, stream.getShards().get(0).getShardId(),
+                stream.getShards().get(1).getShardId(), REGION);
+
+        KinesisService.PutRecordResult result = service.putRecordWithShardId(STREAM, DATA, "b", "0", REGION);
+
+        assertEquals(stream.getShards().get(2).getShardId(), result.shardId());
+        assertEquals(1, stream.getShards().get(0).recordCount());
+        assertEquals(1, stream.getShards().get(2).recordCount());
     }
 
     @Test

@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -1054,6 +1055,37 @@ class KinesisJsonHandlerTest {
                 responseEntity(handler.handle("PutRecord", put, REGION)).get("ShardId").asText());
         assertEquals(MIN_HASH_KEY, stream.getShards().getFirst().getHashKeyRange().startingHashKey());
         assertEquals(MAX_HASH_KEY, stream.getShards().get(1).getHashKeyRange().endingHashKey());
+    }
+
+    @Test
+    void putRecordsDoesNotRescanEveryShardForEachEntry() {
+        KinesisStream stream = service.createStream("indexed-routing", 256, REGION);
+        AtomicInteger rangeReads = new AtomicInteger();
+        List<KinesisShard> counted = new ArrayList<>();
+        for (KinesisShard shard : stream.getShards()) {
+            counted.add(new KinesisShard(shard.getShardId(),
+                    shard.getHashKeyRange().startingHashKey(), shard.getHashKeyRange().endingHashKey(),
+                    shard.getSequenceNumberRange().startingSequenceNumber()) {
+                @Override
+                public HashKeyRange getHashKeyRange() {
+                    rangeReads.incrementAndGet();
+                    return super.getHashKeyRange();
+                }
+            });
+        }
+        stream.setShards(counted);
+
+        ObjectNode batch = MAPPER.createObjectNode().put("StreamName", "indexed-routing");
+        ArrayNode records = batch.putArray("Records");
+        for (int i = 0; i < 100; i++) {
+            records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk-" + i);
+        }
+
+        ObjectNode result = responseEntity(handler.handle("PutRecords", batch, REGION));
+
+        assertEquals(0, result.path("FailedRecordCount").asInt());
+        assertEquals(100, result.path("Records").size());
+        assertTrue(rangeReads.get() < 8_000, () -> "Shard range reads: " + rangeReads.get());
     }
 
     private static String shardForMd5Hash(ArrayNode shards, String md5Hex) {

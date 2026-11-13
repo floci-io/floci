@@ -110,8 +110,10 @@ written to the open shard whose `HashKeyRange` contains that value.
 Without `ExplicitHashKey`, Kinesis takes the MD5 digest of the partition key's
 UTF-8 bytes as an unsigned 128-bit integer. Floci writes to the open shard whose
 `HashKeyRange` contains that value, including after a split or merge. Closed
-historical shards are never selected. Legacy streams with overlapping stored
-open-shard ranges are normalized before selection.
+historical shards are never selected. Untouched legacy streams whose open root
+shards all persisted the full hash span are repartitioned before selection.
+Other overlapping stored ranges are rejected rather than rewriting existing
+child ranges or records.
 
 ## Shard Scaling (UpdateShardCount)
 
