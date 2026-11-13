@@ -17,6 +17,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.ResteasyRequests;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
@@ -1199,26 +1200,8 @@ public class S3Controller {
     /** Streams {@code body}, opened together with {@code obj} by {@link S3Service#openObject}, and closes it. */
     private Response fullObjectResponse(S3Object obj, InputStream body, ResponseHeaderOverrides overrides,
                                         boolean includeChecksum) {
-        return streamingResponse(body,
+        return StreamingResponses.streamingResponse(body,
                 stream -> objectResponseHeaders(Response.ok(stream), obj, overrides, includeChecksum).build());
-    }
-
-    /**
-     * Builds a response whose entity streams {@code body} and then closes it. If building the
-     * response fails, the entity is never written, so {@code body} is closed here instead.
-     */
-    static Response streamingResponse(InputStream body, Function<StreamingOutput, Response> build) {
-        StreamingOutput stream = output -> {
-            try (InputStream in = body) {
-                in.transferTo(output);
-            }
-        };
-        try {
-            return build.apply(stream);
-        } catch (RuntimeException e) {
-            closeQuietly(body);
-            throw e;
-        }
     }
 
     /** Applies the standard GetObject response headers derived from {@code obj} to {@code resp}. */
@@ -1308,7 +1291,7 @@ public class S3Controller {
             }
             return resp.build();
         };
-        return body == null ? build.apply(null) : streamingResponse(part.slice(body), build);
+        return body == null ? build.apply(null) : StreamingResponses.streamingResponse(part.slice(body), build);
     }
 
     /**

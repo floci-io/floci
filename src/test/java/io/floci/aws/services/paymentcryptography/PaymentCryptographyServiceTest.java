@@ -175,6 +175,22 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyPairCarriesTheUsageItsDerivedKeysHave() {
+        // The usage a derived key is for is named when the key pair is made, as the export
+        // guide's key agreement flow does.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "ECC_NIST_P256");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
+        attributes.put("DeriveKeyUsage", "TR31_K1_KEY_BLOCK_PROTECTION_KEY");
+
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes,
+                Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
+
+        assertEquals("TR31_K1_KEY_BLOCK_PROTECTION_KEY", key.getDeriveKeyUsage());
+    }
+
+    @Test
     void everyAsymmetricUsageTakesAKeyPair() {
         // The usages the model names for a key pair, each of which is made.
         for (String usage : List.of("TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",

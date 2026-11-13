@@ -5,6 +5,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -115,35 +119,61 @@ public class CodeArtifactNuGetExternalConnectionImporter {
                         packageId, version).filter(externalConnectionName::equals).isPresent();
                 return imported;
             }
-            Optional<NuGetExternalConnectionClient.FetchedAsset> fetched;
+            Path staged;
             try {
-                fetched = externalConnectionClient.fetchPackage(externalConnectionName, packageId, version);
-            } catch (RuntimeException e) {
-                LOG.warnv(e, "Could not fetch {0} {1} from {2} while retaining a NuGet package through an "
-                        + "external connection.", packageId, version, externalConnectionName);
-                return false;
+                staged = Files.createTempFile("codeartifact-nuget-import-", ".bin");
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to create a staging file for a NuGet external-connection "
+                        + "import", e);
             }
-            if (fetched.isEmpty()) {
-                return false;
+            try {
+                Optional<NuGetExternalConnectionClient.FetchedFile> fetched;
+                try {
+                    fetched = externalConnectionClient.fetchPackage(externalConnectionName, packageId, version,
+                            staged);
+                } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+                    // The same 5 GB AWS quota CodeArtifactNuGetController#push already enforces on
+                    // a direct publish, now checked by fetchPackage(Path) itself during the
+                    // download rather than in a second pass over the staged file afterward: a
+                    // .nupkg this large is rejected before it is ever fully pulled across the
+                    // network and written to local disk.
+                    LOG.warnv("Skipping {0} {1}: the real registry''s own file is larger than this emulator''s "
+                            + "{2}-byte asset quota.", packageId, version,
+                            CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+                    return false;
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not fetch {0} {1} from {2} while retaining a NuGet package through an "
+                            + "external connection.", packageId, version, externalConnectionName);
+                    return false;
+                }
+                if (fetched.isEmpty()) {
+                    return false;
+                }
+                long contentLength = fetched.get().size();
+                String assetName = packageId.toLowerCase(Locale.ROOT) + "." + version.toLowerCase(Locale.ROOT)
+                        + ".nupkg";
+                // The fence check and the real write happen inside the very same synchronized call
+                // DeletePackageVersions/DeletePackage/DeleteRepository/DisposePackageVersions already
+                // hold across their own entire operation, so a write here and one of those four
+                // operations can never interleave. See retainAssetUnderVersionFence's own javadoc for
+                // why this has to be a method on the service itself rather than a block synchronized on
+                // an injected reference here: only a lock actually taken inside that class's own
+                // synchronized method is guaranteed to be the exact same lock its other synchronized
+                // methods already hold.
+                CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
+                        domain, owner, repository, "nuget", null, packageId, version, versionFenceSnapshot,
+                        packageFenceSnapshot, claim.episodeId(), repoId, assetName, contentLength,
+                        () -> bagetter.storePackageVersionAsset(repoId, domain, repository, null, packageId, version,
+                                assetName, staged, contentLength));
+                imported = result.fenceMatched() && result.wroteNewContent();
+                return imported;
+            } finally {
+                try {
+                    Files.deleteIfExists(staged);
+                } catch (IOException e) {
+                    LOG.warnv(e, "Could not delete a staged NuGet external-connection import file at {0}", staged);
+                }
             }
-            byte[] content = fetched.get().content();
-            String assetName = packageId.toLowerCase(Locale.ROOT) + "." + version.toLowerCase(Locale.ROOT)
-                    + ".nupkg";
-            // The fence check and the real write happen inside the very same synchronized call
-            // DeletePackageVersions/DeletePackage/DeleteRepository/DisposePackageVersions already
-            // hold across their own entire operation, so a write here and one of those four
-            // operations can never interleave. See retainAssetUnderVersionFence's own javadoc for
-            // why this has to be a method on the service itself rather than a block synchronized on
-            // an injected reference here: only a lock actually taken inside that class's own
-            // synchronized method is guaranteed to be the exact same lock its other synchronized
-            // methods already hold.
-            CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
-                    domain, owner, repository, "nuget", null, packageId, version, versionFenceSnapshot,
-                    packageFenceSnapshot, claim.episodeId(), repoId, assetName, content,
-                    () -> bagetter.storePackageVersionAsset(repoId, domain, repository, null, packageId, version,
-                            assetName, content));
-            imported = result.fenceMatched() && result.wroteNewContent();
-            return imported;
         } finally {
             // Finalized here, not just after a clean return, so an unexpected exception still lets
             // this bookkeeping run instead of leaving the claim held (or released) without ever

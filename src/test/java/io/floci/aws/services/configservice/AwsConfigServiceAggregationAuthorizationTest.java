@@ -12,23 +12,19 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
-import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -240,24 +236,9 @@ class AwsConfigServiceAggregationAuthorizationTest {
         service.tagResource(REGION, arn, List.of(Map.of("Key", "env", "Value", "prod")));
 
         packs.parkNextWrite();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> put = pool.submit(() -> service.putConformancePack(REGION, "pack", "s3://bucket/v2.yaml", null));
-            assertTrue(packs.awaitParked(), "the update must reach its persist");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> delete = pool.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                service.deleteConformancePack(REGION, "pack");
-            });
-            awaitBlockedOrDone(deleteThread, delete);
-            assertFalse(delete.isDone(), "the delete ran while an update of the same pack was mid-write");
-
-            packs.release();
-            put.get(2, TimeUnit.SECONDS);
-            delete.get(2, TimeUnit.SECONDS);
-        } finally {
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(packs,
+                () -> service.putConformancePack(REGION, "pack", "s3://bucket/v2.yaml", null),
+                () -> service.deleteConformancePack(REGION, "pack"));
 
         assertTrue(service.describeConformancePacks(REGION, null).isEmpty(),
                 "a Delete that succeeded left the pack it deleted in the store");

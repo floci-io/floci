@@ -34,6 +34,11 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
   or the member is a bare `Name`, `Id` or `Identifier`, the variable is named after the type and the
   operation is about the type, its name past the verb the type's (`DescribeTargetGroups`, but not
   `StartExecution` for a state machine, whose `name` is the execution's), and no member holds its ARN.
+  Of several members that could fill a variable, one naming the type before the variable wins over a
+  bare one: the snapshot `RestoreFromClusterSnapshot` restores has the cluster its
+  `SnapshotClusterIdentifier` names, not the `ClusterIdentifier` of the cluster it creates, and the
+  tenant `GetInvalidationForDistributionTenant` reads has its `DistributionTenantId`, not the
+  invalidation's `Id`.
   The variables nothing fills are left open as `*`: a resource the request creates has the id its
   service mints, so `CreateTargetGroup` names `targetgroup/<Name>/*`.
 - names neither, but the type is the one the operation is named after (`CreateCapacityReservation`
@@ -44,7 +49,10 @@ the types the request names by their variables: ECR's `registryId` selects the r
 acts in, so `repository/<name>` is that account's. On a non-create, a bare string member also takes
 that role when the same service types that member as an account id in another request. Redshift
 Serverless's `ownerAccount` names the snapshot's owner this way, but on a create it names the account
-of a resource the new one is made in. A member whose shape's pattern takes an ARN before
+of a resource the new one is made in. A top-level member whose name ends in `Account` gives the account
+of each type whose botocore structure has a member of that same name: Redshift's `Snapshot` has an
+`OwnerAccount` and its `Cluster` has none, so `RestoreFromClusterSnapshot`'s names the snapshot's
+owner, while the restored cluster stays the caller's. A member whose shape's pattern takes an ARN before
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
 variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
 field of each element of a list of structures, each element's resource in the account and Region of
@@ -559,14 +567,6 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
        "policy must allow access to the resource dbname for the specified database name'), and the Management "
        "Guide's policy granting the action on a dbuser alone allows it; the rule names the database by "
        "ClusterIdentifier alone when DbName is absent"),
-    "redshift:RestoreFromClusterSnapshot": ([
-        {"type": "cluster", "fill": {"ClusterName": "ClusterIdentifier"}},
-        {"type": "snapshot", "fill": {"ClusterName": "SnapshotClusterIdentifier", "SnapshotName": "SnapshotIdentifier"}},
-        {"types": ["snapshot"], "arn": "SnapshotArn"},
-    ], "the snapshot's cluster is SnapshotClusterIdentifier ('The name of the cluster the source snapshot was created "
-       "from'), not ClusterIdentifier, the cluster 'that will be created from restoring the snapshot'; its "
-       "DefaultIamRoleArn is an IAM role's ARN and its RedshiftIdcApplicationArn an IAM Identity Center "
-       "application's, never a cluster's or a snapshot's"),
     **{f"redshift:{operation}": ([{"types": ["cluster", "eventsubscription", "hsmclientcertificate", "hsmconfiguration",
                                              "integration", "parametergroup", "securitygroup",
                                              "securitygroupingress-cidr", "securitygroupingress-ec2securitygroup",
@@ -1131,6 +1131,34 @@ def with_account(resources: list[dict], formats: dict[str, str], accounts: list[
             and resource.get("when", {}).get(accounts[0]) != [None] else resource for resource in resources]
 
 
+def structure_account_members(models: dict[str, dict], operation: str, types: list[str]) -> dict[str, str]:
+    """The top-level members of the operation's request whose name ends in `Account`, by the type whose botocore
+    structure (the one named after the type, `Snapshot` for `snapshot`) has a member of that same name; a type
+    whose structure has two of them, or none, is left out."""
+    found: dict[str, set[str]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        accounts = [name for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items()
+                    if member.get("location") in BODY_LOCATIONS and re.search(r"account$", name, re.IGNORECASE)
+                    and model["shapes"][member["shape"]]["type"] == "string"]
+        for kind in types:
+            structures = [shape for name, shape in model["shapes"].items()
+                          if shape.get("type") == "structure" and stem(name) == stem(kind)]
+            for shape in structures:
+                found.setdefault(kind, set()).update(name for name in accounts if name in shape.get("members", {}))
+    return {kind: next(iter(names)) for kind, names in sorted(found.items()) if len(names) == 1}
+
+
+def with_structure_account(resources: list[dict], formats: dict[str, str], accounts: dict[str, str]) -> list[dict]:
+    """The resources, each a type named by its variables and given no account yet taking the one the request's
+    member of its structure's name gives, when the type's format has an account."""
+    return [dict(resource, account=accounts[resource["type"]]) if "fill" in resource and "account" not in resource
+            and resource["type"] in accounts and "${Account}" in formats.get(resource["type"], "") else resource
+            for resource in resources]
+
+
 def _kinds(resource: dict) -> list[str]:
     """The resource types a resource names, as the strings they are: the types it acts on, or the one it names."""
     named: list = list(resource.get("types") or [resource.get("type")])
@@ -1326,7 +1354,10 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
                                                  or (qualified and names_type(member, kind_stem)))))]
     if not candidates:
         return None
-    return min(candidates, key=lambda member: (stem(member) != variable_stem, names[member].endswith("[]"), len(member), member))
+    # A member naming the type before the variable (`SnapshotClusterIdentifier` for the snapshot's `ClusterName`,
+    # `DistributionTenantId` for the tenant's `Id`) wins over a bare one, which names something else.
+    return min(candidates, key=lambda member: (stem(member) != kind_stem + variable_stem, stem(member) != variable_stem,
+                                               names[member].endswith("[]"), len(member), member))
 
 
 def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dict[str, str]],
@@ -1434,6 +1465,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                                         optional)
         resources = with_map_fields(resources, types, formats, map_fields(models, operation.split(":", 1)[1]))
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
+    resources = with_structure_account(resources, formats,
+                                       structure_account_members(models, operation.split(":", 1)[1], types))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
     entry = {"action": upstream["action"], "types": types, "resources": resources}

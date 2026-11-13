@@ -2,6 +2,7 @@ package io.floci.aws.services.codeartifact;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.MultipartFormParser;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -17,16 +18,21 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.file.Files;
 import java.time.Duration;
-import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Serves the real NuGet V3 wire protocol behind the URL {@code GetRepositoryEndpoint} returns for
@@ -148,15 +154,23 @@ public class CodeArtifactNuGetController {
                                     @PathParam("repository") String repository, @PathParam("id") String id,
                                     @PathParam("version") String version, @PathParam("filename") String filename) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
+        // The .nupkg branch below hands back a Response whose body is only drained later, when
+        // JAX-RS writes the deferred StreamingOutput: this flag lets that branch defer releasing
+        // the lease until that real drain happens (via StreamingResponses.closingWith), instead of
+        // this method's own return letting a concurrent DeleteRepository stop the BaGetter
+        // container mid-download.
+        AtomicBoolean leaseTransferred = new AtomicBoolean();
         try {
-            return packageContentWithLease(handle, domain, repository, id, version, filename);
+            return packageContentWithLease(handle, domain, repository, id, version, filename, leaseTransferred);
         } finally {
-            endUse(handle.repoId());
+            if (!leaseTransferred.get()) {
+                endUse(handle.repoId());
+            }
         }
     }
 
     private Response packageContentWithLease(RepositoryHandle handle, String domain, String repository, String id,
-            String version, String filename) {
+            String version, String filename, AtomicBoolean leaseTransferred) {
         try {
             service.requireContainerBackedVersionDownloadable(handle.owner(), handle.region(), domain, repository,
                     "nuget", null, id, version, handle.repoId());
@@ -185,9 +199,9 @@ public class CodeArtifactNuGetController {
                 externalConnectionImporter.tryImport(handle.region(), domain, handle.owner(), repository,
                         handle.repoId(), id, version);
             }
-            return proxyGet(baseUrl, "/v3/package/" + lowerId + "/" + encodedVersion + "/"
+            return proxyGetStreamed(baseUrl, "/v3/package/" + lowerId + "/" + encodedVersion + "/"
                     + lowerId + "." + SidecarUriUtils.encodeSegment(version.toLowerCase(Locale.ROOT)) + ".nupkg",
-                    MediaType.APPLICATION_OCTET_STREAM);
+                    MediaType.APPLICATION_OCTET_STREAM, leaseTransferred, () -> endUse(handle.repoId()));
         }
         return Response.status(404).build();
     }
@@ -208,40 +222,91 @@ public class CodeArtifactNuGetController {
     @Path("api/v2/package")
     @Consumes(MediaType.WILDCARD)
     public Response push(@Context HttpHeaders headers, @PathParam("domain") String domain,
-                          @PathParam("repository") String repository, byte[] body) {
-        byte[] content = body != null ? body : new byte[0];
-        // Same 5 GB AWS quota PublishPackageVersion enforces, and just as nominal: RESTEasy
-        // Reactive has already buffered the full body into this byte[] before this method runs,
-        // so this rejects anything that made it this far rather than bounding memory use upfront.
-        if (content.length > CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES) {
-            return Response.status(413).build();
-        }
+                          @PathParam("repository") String repository, InputStream body) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
 
         try {
-            return pushWithLease(headers, domain, repository, content, handle);
+            return pushWithLease(headers, domain, repository, body, handle);
         } finally {
             endUse(handle.repoId());
         }
     }
 
-    private Response pushWithLease(HttpHeaders headers, String domain, String repository, byte[] content,
+    /**
+     * Stages the whole raw multipart body to disk before anything else touches it, the same
+     * reason {@code CodeArtifactPypiController#uploadWithLease} does: {@link #forwardPush} can
+     * then send this exact file straight to BaGetter with no multipart rebuild at all, since it
+     * already re-sends the entire inbound body verbatim, not a reconstructed one. Capped at
+     * {@code CodeArtifactService.MAX_MULTIPART_ENVELOPE_BYTES} during the staging copy itself: the
+     * envelope has no exact size semantics of its own against the 5 GB asset quota yet, but
+     * leaving this particular copy fully uncapped would let a client force an arbitrarily large
+     * file onto disk before the real per-asset check downstream ever runs.
+     */
+    private Response pushWithLease(HttpHeaders headers, String domain, String repository, InputStream body,
             RepositoryHandle handle) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String boundary = MultipartFormParser.extractBoundary(contentType).orElse(null);
         if (boundary == null) {
             return Response.status(400).entity("Could not determine multipart boundary from Content-Type.").build();
         }
-        MultipartFormParser.ParsedForm form = MultipartFormParser.parse(content, boundary);
-        Optional<MultipartFormParser.FilePart> file = form.file();
+        java.nio.file.Path stagedWholeBody;
+        try {
+            stagedWholeBody = service.stageAssetBody(
+                    new AssetDigestingInputStream(body, CodeArtifactService.MAX_MULTIPART_ENVELOPE_BYTES));
+        } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+            return Response.status(413).build();
+        }
+        try {
+            return pushStagedBody(domain, repository, contentType, boundary, stagedWholeBody, handle);
+        } finally {
+            service.deleteStagedAssetBody(stagedWholeBody);
+        }
+    }
+
+    /**
+     * {@code stagedWholeBody}'s own file part is extracted into a second, clean staged file
+     * (never the whole multipart envelope nor that one part held in a single array), the same
+     * shape {@code CodeArtifactPypiController} uses.
+     */
+    private Response pushStagedBody(String domain, String repository, String contentType, String boundary,
+            java.nio.file.Path stagedWholeBody, RepositoryHandle handle) {
+        java.nio.file.Path stagedNupkg = stagedWholeBody.resolveSibling(stagedWholeBody.getFileName() + ".nupkg");
+        try {
+            MultipartFormParser.ExtractedForm form;
+            try {
+                form = MultipartFormParser.extractFilePart(stagedWholeBody, boundary, stagedNupkg);
+            } catch (IOException e) {
+                return Response.status(400).entity("Could not parse the uploaded multipart body.").build();
+            }
+            return pushExtractedForm(domain, repository, contentType, form, stagedWholeBody, stagedNupkg, handle);
+        } finally {
+            service.deleteStagedAssetBody(stagedNupkg);
+        }
+    }
+
+    private Response pushExtractedForm(String domain, String repository, String contentType,
+            MultipartFormParser.ExtractedForm form, java.nio.file.Path stagedWholeBody,
+            java.nio.file.Path stagedNupkg, RepositoryHandle handle) {
+        Optional<MultipartFormParser.ExtractedFile> file = form.file();
         if (file.isEmpty()) {
             return Response.status(400).entity("Upload must include the package file.").build();
         }
-        byte[] nupkgBytes = file.get().content();
+        long nupkgSize;
+        try {
+            nupkgSize = Files.size(stagedNupkg);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        // Same 5 GB AWS quota PublishPackageVersion enforces: checked against the real asset
+        // bytes alone (never the surrounding multipart envelope), once they are known, rather
+        // than before anything was read at all the way a non-multipart format's own cap can be.
+        if (nupkgSize > CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES) {
+            return Response.status(413).build();
+        }
 
         NuspecXml.Metadata nuspec;
         try {
-            nuspec = NuspecXml.extractFromNupkg(nupkgBytes);
+            nuspec = NuspecXml.extractFromNupkg(stagedNupkg);
         } catch (RuntimeException e) {
             return Response.status(400).entity("Could not read the uploaded package: " + e.getMessage()).build();
         }
@@ -298,66 +363,106 @@ public class CodeArtifactNuGetController {
         // its versions before this push lands and miss it, the one case a private lock here
         // could never close no matter how it synchronized with itself.
         synchronized (bagetter.lockFor(handle.repoId())) {
-            Optional<byte[]> existing = existingNupkgContent(handle.baseUrl(), packageName, version);
-            if (existing.isPresent()) {
-                if (Arrays.equals(existing.get(), nupkgBytes)) {
-                    return Response.status(200).build();
-                }
+            ExistingNupkgComparison existing = compareExistingNupkg(handle.baseUrl(), packageName, version,
+                    stagedNupkg);
+            if (existing == ExistingNupkgComparison.MATCHES) {
+                return Response.status(200).build();
+            }
+            if (existing == ExistingNupkgComparison.DIFFERS) {
                 return Response.status(409)
                         .entity("A package with this id and version already exists.")
                         .build();
             }
-            response = forwardPush(handle.baseUrl(), contentType, content);
+            // The entire original raw multipart body is re-sent verbatim, boundary and all,
+            // exactly as the byte[]-based version of this call always has: BaGetter parses its
+            // own multipart form the same way dotnet nuget push built it, so there was never a
+            // need to rebuild one here, only to stream the one already staged instead of a
+            // resident array.
+            response = forwardPush(handle.baseUrl(), contentType, stagedWholeBody);
             pushSucceeded = response.getStatus() == 200 || response.getStatus() == 201
                     || response.getStatus() == 202;
         }
         if (pushSucceeded) {
             service.completeContainerBackedPublishIfCurrentRepository(handle.region(), domain, handle.owner(),
-                    repository, handle.repoId(), "nuget", packageName, version, nupkgBytes.length, fenceSnapshot,
+                    repository, handle.repoId(), "nuget", packageName, version, nupkgSize, fenceSnapshot,
                     beforeRevision, null, 0L);
         }
         return response;
     }
 
+    private enum ExistingNupkgComparison { NOT_LISTED, MATCHES, DIFFERS }
+
     /**
-     * {@code empty()} when {@code packageName}/{@code version} isn't published on BaGetter yet, its
-     * actual bytes otherwise. A connectivity failure here throws rather than returning {@code
-     * empty()}, the same fail-safe reasoning as {@code CodeArtifactPypiController
-     * #existingFileContent}: letting a push with different content through to BaGetter during
-     * exactly the moment this check is unavailable would be the opposite of fail-safe, and BaGetter's
-     * own {@code AllowPackageOverwrites: false} would reject it anyway, just with a response this
-     * proxy no longer controls.
+     * {@code existingNupkgContent}'s own streamed sibling: compares BaGetter's own stored package
+     * against {@code localNupkg} chunk by chunk from each side, rather than buffering the remote
+     * file into a {@code byte[]} first (capped at ~2 GiB) just to compare it against another
+     * array, the same technique {@code CodeArtifactPypiController#compareExistingFile} and {@code
+     * ReposiliteSidecarClient}'s own streamed idempotent-match check both use. A connectivity
+     * failure here throws rather than returning {@code NOT_LISTED}, the same fail-safe reasoning
+     * the original method documented: letting a push with different content through to BaGetter
+     * during exactly the moment this check is unavailable would be the opposite of fail-safe, and
+     * BaGetter's own {@code AllowPackageOverwrites: false} would reject it anyway, just with a
+     * response this proxy no longer controls.
      */
-    private Optional<byte[]> existingNupkgContent(String baseUrl, String packageName, String version) {
+    private ExistingNupkgComparison compareExistingNupkg(String baseUrl, String packageName, String version,
+            java.nio.file.Path localNupkg) {
         URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/v3/package/"
                 + SidecarUriUtils.encodeSegment(packageName) + "/" + SidecarUriUtils.encodeSegment(version) + "/"
                 + SidecarUriUtils.encodeSegment(packageName) + "." + SidecarUriUtils.encodeSegment(version)
                 + ".nupkg");
         HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
-        HttpResponse<byte[]> response;
+        HttpResponse<InputStream> response;
         try {
-            response = httpClient.send(request, BodyHandlers.ofByteArray());
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
         } catch (Exception e) {
             throw new IllegalStateException(
                     "Could not check nuget package " + packageName + " " + version + " for an existing push", e);
         }
         if (response.statusCode() == 404) {
-            return Optional.empty();
+            // Raised by Copilot's review of this PR: a brand-new package (the common case for a
+            // first-time push) answers 404 here every time, so leaving its body unclosed leaked
+            // the underlying response/connection on every such push, not just an edge case.
+            StreamingResponses.closeQuietly(response.body());
+            return ExistingNupkgComparison.NOT_LISTED;
         }
         if (response.statusCode() != 200) {
+            try {
+                response.body().close();
+            } catch (IOException ignored) {
+                // Closing an unread stream best-effort only; the exception thrown right below is
+                // the one that actually matters here.
+            }
             throw new IllegalStateException(
                     "Could not check nuget package " + packageName + " " + version + ": upstream returned "
                             + response.statusCode());
         }
-        return Optional.of(response.body());
+        try (InputStream remote = response.body(); InputStream local = Files.newInputStream(localNupkg)) {
+            return StreamEquality.contentsMatch(remote, local) ? ExistingNupkgComparison.MATCHES
+                    : ExistingNupkgComparison.DIFFERS;
+        } catch (IOException e) {
+            throw new UncheckedIOException(
+                    "Could not compare the existing nuget package " + packageName + " " + version
+                            + " against the uploaded content", e);
+        }
     }
 
-    private Response forwardPush(String baseUrl, String contentType, byte[] content) {
-        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), "/api/v2/package"))
-                .timeout(Duration.ofSeconds(30))
-                .header("Content-Type", contentType)
-                .PUT(BodyPublishers.ofByteArray(content))
-                .build();
+    private Response forwardPush(String baseUrl, String contentType, java.nio.file.Path stagedWholeBody) {
+        long stagedSize;
+        try {
+            stagedSize = Files.size(stagedWholeBody);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
+                        "/api/v2/package"))
+                .timeout(SidecarUriUtils.transferTimeout(stagedSize))
+                .header("Content-Type", contentType);
+        try {
+            requestBuilder.PUT(BodyPublishers.ofFile(stagedWholeBody));
+        } catch (FileNotFoundException e) {
+            throw new UncheckedIOException(e);
+        }
+        HttpRequest request = requestBuilder.build();
         HttpResponse<Void> response;
         try {
             response = httpClient.send(request, BodyHandlers.discarding());
@@ -385,6 +490,44 @@ public class CodeArtifactNuGetController {
         }
         String contentType = response.headers().firstValue("Content-Type").orElse(fallbackContentType);
         return Response.status(response.statusCode()).entity(response.body()).type(contentType).build();
+    }
+
+    /**
+     * {@link #proxyGet}'s streamed sibling, for the {@code .nupkg} branch of {@link
+     * #packageContentWithLease}: that method's own {@code byte[]} is fine for a readme or
+     * {@code .nuspec}, but a downloaded package itself can be gigabytes.
+     *
+     * <p>{@code afterClose} is the caller's lease release: on an immediate failure (the sidecar
+     * unreachable, or a 404) it runs right here, synchronously, since nothing is left streaming.
+     * On a real 200, it runs only once the entity stream this method returns is actually closed
+     * (via {@code leaseTransferred} and {@link StreamingResponses#closingWith}), so the sidecar
+     * container this is downloading from stays leased for as long as the real transfer takes,
+     * not just until this method itself returns.
+     *
+     * <p>Uses the worst-case download timeout, not {@link #proxyGet}'s flat 10 seconds: the real
+     * {@code .nupkg} this fetches can be gigabytes, and its real size isn't known until the
+     * response itself arrives.
+     */
+    private Response proxyGetStreamed(String baseUrl, String encodedPath, String fallbackContentType,
+            AtomicBoolean leaseTransferred, Runnable afterClose) {
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), encodedPath))
+                .timeout(SidecarUriUtils.maxTransferTimeout()).GET().build();
+        HttpResponse<InputStream> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the BaGetter sidecar at " + encodedPath, e);
+        }
+        if (response.statusCode() == 404) {
+            StreamingResponses.closeQuietly(response.body());
+            return Response.status(404).build();
+        }
+        String contentType = response.headers().firstValue("Content-Type").orElse(fallbackContentType);
+        Response.ResponseBuilder builder = Response.status(response.statusCode()).type(contentType);
+        response.headers().firstValueAsLong("Content-Length").ifPresent(len -> builder.header("Content-Length", len));
+        leaseTransferred.set(true);
+        InputStream body = StreamingResponses.closingWith(response.body(), afterClose);
+        return StreamingResponses.streamingResponse(body, stream -> builder.entity(stream).build());
     }
 
     private RepositoryHandle requireRepository(HttpHeaders headers, String domain, String repository) {

@@ -10,10 +10,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -73,6 +76,63 @@ class PypiserverSidecarClientTest {
 
         assertTrue(result.isPresent());
         assertEquals("sdist bytes", new String(result.get(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * {@link #fetchPackageVersionAssetGetsTheFlatPackagesPath}'s own streamed sibling: same wire
+     * behavior, but the caller gets an open {@link InputStream} plus the real {@code
+     * Content-Length} instead of an already-resident {@code byte[]}.
+     */
+    @Test
+    void fetchPackageVersionAssetStreamedGetsTheFlatPackagesPath() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        respondWithSimpleIndex("demo-pkg", "demo_pkg-1.0.0.tar.gz");
+        backend.createContext("/packages/demo_pkg-1.0.0.tar.gz", exchange -> {
+            byte[] body = "sdist bytes".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        Optional<RepositorySidecarManager.StreamedAsset> result = client(manager).fetchPackageVersionAssetStreamed(
+                "pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0", "demo_pkg-1.0.0.tar.gz");
+
+        assertTrue(result.isPresent());
+        try (InputStream in = result.get().content()) {
+            assertEquals("sdist bytes", new String(in.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        assertEquals(11, result.get().contentLength());
+    }
+
+    /**
+     * {@link PypiserverSidecarClient#storePackageVersionAsset(String, String, String, String,
+     * String, String, String, Path, long)}'s own wire contract: the staged file's real content
+     * ends up in the multipart body's {@code content} part, not just some bytes of the right
+     * length, built via {@code BodyPublishers.concat} rather than one combined array.
+     */
+    @Test
+    void storePackageVersionAssetStreamedSendsTheStagedFilesRealContent() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", backendUrl);
+        Path staged = Files.createTempFile("pypiserver-client-test-", ".tmp");
+        Files.writeString(staged, "staged sdist bytes");
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        backend.createContext("/", exchange -> {
+            received.set(exchange.getRequestBody().readAllBytes());
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+
+        try {
+            client(manager).storePackageVersionAsset("pypi-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0",
+                    "demo_pkg-1.0.0.tar.gz", staged, Files.size(staged));
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+
+        String body = new String(received.get(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("staged sdist bytes"));
     }
 
     /**

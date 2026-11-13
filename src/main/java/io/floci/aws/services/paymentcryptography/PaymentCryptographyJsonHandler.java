@@ -146,7 +146,7 @@ public class PaymentCryptographyJsonHandler {
                 Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
         List<Map<String, Object>> keys = new ArrayList<>();
         for (PaymentCryptographyKey key : page.items()) {
-            keys.add(keyObject(key));
+            keys.add(keySummary(key));
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("Keys", keys);
@@ -345,14 +345,28 @@ public class PaymentCryptographyJsonHandler {
         return request.path("AliasName").asText();
     }
 
+    /**
+     * A key as a list answers it.
+     *
+     * <p>A list carries the key's summary and not the whole key: its identifier, its state,
+     * its attributes, its check value and the two flags, which is what the model says a
+     * summary holds.
+     */
+    private static Map<String, Object> keySummary(PaymentCryptographyKey key) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("KeyArn", key.getArn());
+        out.put("KeyState", key.getKeyState());
+        out.put("KeyAttributes", keyAttributes(key));
+        out.put("KeyCheckValue", key.getKeyCheckValue());
+        out.put("Enabled", key.isEnabled());
+        out.put("Exportable", key.isExportable());
+        return out;
+    }
+
     private static Map<String, Object> keyObject(PaymentCryptographyKey key) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("KeyArn", key.getArn());
-        Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", key.getKeyAlgorithm());
-        attributes.put("KeyClass", key.getKeyClass());
-        attributes.put("KeyUsage", key.getKeyUsage());
-        attributes.put("KeyModesOfUse", answeredModes(key));
+        Map<String, Object> attributes = keyAttributes(key);
         out.put("KeyAttributes", attributes);
         if (key.getDeriveKeyUsage() != null && !key.getDeriveKeyUsage().isEmpty()) {
             out.put("DeriveKeyUsage", key.getDeriveKeyUsage());
@@ -372,6 +386,16 @@ public class PaymentCryptographyJsonHandler {
             out.put("DeleteTimestamp", key.getDeleteTimestamp());
         }
         return out;
+    }
+
+    /** The attributes of a key, as the answers carry them. */
+    private static Map<String, Object> keyAttributes(PaymentCryptographyKey key) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", key.getKeyAlgorithm());
+        attributes.put("KeyClass", key.getKeyClass());
+        attributes.put("KeyUsage", key.getKeyUsage());
+        attributes.put("KeyModesOfUse", answeredModes(key));
+        return attributes;
     }
 
     private static Map<String, Object> aliasObject(PaymentCryptographyAlias alias) {

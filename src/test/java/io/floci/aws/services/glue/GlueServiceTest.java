@@ -1226,6 +1226,59 @@ class GlueServiceTest {
         assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {101, 1000})
+    void batchDeleteTablesRejectsOversizedRequestsBeforeDeletingTables(int size) {
+        createVersions("table_0", 1);
+        List<String> names = IntStream.range(0, size).mapToObj(index -> "table_" + index).toList();
+
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> glueService.batchDeleteTables("db1", names));
+
+        assertEquals("InvalidInputException", invalid.getErrorCode());
+        assertEquals(400, invalid.getHttpStatus());
+        assertTrue(invalid.getMessage().contains("TablesToDelete"));
+        assertEquals("table_0", glueService.getTable("db1", "table_0").getName());
+        assertFalse(tableVersionStore.keys().isEmpty());
+    }
+
+    @Test
+    void batchDeleteTablesRequiresNames() {
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> glueService.batchDeleteTables("db1", null));
+
+        assertEquals("InvalidInputException", invalid.getErrorCode());
+        assertEquals(400, invalid.getHttpStatus());
+        assertTrue(invalid.getMessage().contains("TablesToDelete"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 100})
+    void batchDeleteTablesAcceptsApiBoundarySizes(int size) {
+        List<String> names = IntStream.range(0, size).mapToObj(index -> "missing_" + index).toList();
+
+        List<GlueService.BatchDeleteTableError> errors = glueService.batchDeleteTables("db1", names);
+
+        assertEquals(names, errors.stream().map(GlueService.BatchDeleteTableError::tableName).toList());
+        assertTrue(errors.stream().allMatch(error -> "EntityNotFoundException".equals(error.errorDetail().errorCode())));
+    }
+
+    @Test
+    void oversizedTableDeletionDoesNotWaitForTheCatalogMonitor() throws Exception {
+        List<String> names = IntStream.range(0, 101).mapToObj(index -> "table_" + index).toList();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            synchronized (glueService) {
+                Future<AwsException> rejected = executor.submit(() -> assertThrows(AwsException.class,
+                        () -> glueService.batchDeleteTables("db1", names)));
+                assertEquals("InvalidInputException", rejected.get(5, TimeUnit.SECONDS).getErrorCode());
+            }
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
     void getTableVersionsReturnsCurrentAndArchivedVersions() {
         Table table = new Table();
@@ -2445,6 +2498,89 @@ class GlueServiceTest {
         assertTrue(glueService.getTables("db1").isEmpty());
         glueService.createTable("db1", paginationTable("new"));
         assertEquals("new", glueService.getTable("db1", "new").getName());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tableDeletionWaitsForAnUpdateAndRemovesItsPublishedVersion(boolean batch) throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        createVersions("table", 1);
+        glueService.createTable("db1", paginationTable("neighbor"));
+        tables.parkNextWrite();
+        assertOperationWaitsForParkedStore(tables,
+                () -> glueService.updateTable("db1", paginationTable("table"), "1", false),
+                () -> deleteExistingTable(batch));
+
+        assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                () -> glueService.getTable("db1", "table")).getErrorCode());
+        assertTrue(tableVersionStore.keys().isEmpty());
+        assertEquals(List.of("neighbor"), glueService.getTables("db1").stream().map(Table::getName).toList());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tableUpdateWaitsForDeletionAndRejectsTheMissingTable(boolean batch) throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        createVersions("table", 1);
+        tables.parkNextRead();
+        assertOperationWaitsForParkedStore(tables, () -> deleteExistingTable(batch), () -> {
+            AwsException missing = assertThrows(AwsException.class,
+                    () -> glueService.updateTable("db1", paginationTable("table"), null, false));
+            assertEquals("EntityNotFoundException", missing.getErrorCode());
+        });
+
+        assertTrue(glueService.getTables("db1").isEmpty());
+        assertTrue(tableVersionStore.keys().isEmpty());
+        glueService.createTable("db1", paginationTable("table"));
+        assertEquals("0", glueService.getTable("db1", "table").getVersionId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tableDeletionWaitsForDatabaseDeletionWithoutInterruptingItsCascade(boolean batch) throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        createVersions("table", 1);
+        glueService.createTable("db1", paginationTable("neighbor"));
+        tables.parkNextRead();
+        assertOperationWaitsForParkedStore(tables, () -> glueService.deleteDatabase("db1"), () -> {
+            AwsException missing = assertThrows(AwsException.class, () -> deleteExistingTable(batch));
+            assertEquals("EntityNotFoundException", missing.getErrorCode());
+        });
+
+        assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                () -> glueService.getDatabase("db1")).getErrorCode());
+        assertTrue(tableStore.keys().isEmpty());
+        assertTrue(tableVersionStore.keys().isEmpty());
+    }
+
+    @Test
+    void batchDeletionHoldsItsTableCheckUntilDeletionCompletes() throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        glueService.createTable("db1", paginationTable("table"));
+        tables.parkNextRead();
+        assertOperationWaitsForParkedStore(tables, () -> {
+            List<GlueService.BatchDeleteTableError> errors =
+                    glueService.batchDeleteTables("db1", List.of("table", "missing"));
+            assertEquals(List.of("missing"), errors.stream().map(GlueService.BatchDeleteTableError::tableName).toList());
+            assertEquals("EntityNotFoundException", errors.getFirst().errorDetail().errorCode());
+        }, () -> {
+            AwsException missing = assertThrows(AwsException.class, () -> glueService.deleteTable("db1", "table"));
+            assertEquals("EntityNotFoundException", missing.getErrorCode());
+        });
+
+        assertTrue(glueService.getTables("db1").isEmpty());
+    }
+
+    private void deleteExistingTable(boolean batch) {
+        if (batch) {
+            assertTrue(glueService.batchDeleteTables("db1", List.of("table")).isEmpty());
+        } else {
+            glueService.deleteTable("db1", "table");
+        }
     }
 
     private static UserDefinedFunction function(String database, String name) {

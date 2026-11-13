@@ -8,8 +8,11 @@ import org.w3c.dom.NodeList;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.zip.ZipEntry;
@@ -77,7 +80,24 @@ final class NuspecXml {
      * crafted upload could otherwise plant inside a subdirectory.
      */
     static Metadata extractFromNupkg(byte[] nupkgBytes) {
-        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(nupkgBytes))) {
+        return extractFromNupkg(new ByteArrayInputStream(nupkgBytes));
+    }
+
+    /**
+     * {@code extractFromNupkg(byte[])}'s own streamed sibling, for an upload too large to ever
+     * hold as one array: {@link ZipInputStream} reads entries sequentially, the same way for a
+     * file as for a resident array, so this never needed random/seekable access to begin with.
+     */
+    static Metadata extractFromNupkg(Path nupkgFile) {
+        try (InputStream in = Files.newInputStream(nupkgFile)) {
+            return extractFromNupkg(in);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Could not read the uploaded package as a .nupkg archive.", e);
+        }
+    }
+
+    private static Metadata extractFromNupkg(InputStream nupkgStream) {
+        try (ZipInputStream zip = new ZipInputStream(nupkgStream)) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
                 String name = entry.getName();
