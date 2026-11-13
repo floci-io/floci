@@ -31,6 +31,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 @TestProfile(S3RestoreStateIntegrationTest.DelayedRestoreProfile.class)
 class S3RestoreStateIntegrationTest {
     private static final String RESTORE_REQUEST = "<RestoreRequest><Days>1</Days></RestoreRequest>";
+    private static final String ARCHIVED_OBJECT_ERROR_MESSAGE =
+            "The operation is not valid for the object's storage class";
     private static final String COMPLETED_RESTORE_HEADER =
             "ongoing-request=\"false\", expiry-date=\"Sat, 03 Jan 2026 00:00:00 GMT\"";
 
@@ -63,7 +65,9 @@ class S3RestoreStateIntegrationTest {
             given().when().head(olderPath).then().statusCode(200).header("x-amz-restore", nullValue());
             given().when().head(currentPath).then().statusCode(200).header("x-amz-restore", nullValue());
             given().when().get(olderPath).then().statusCode(403)
-                    .body("Error.Code", equalTo("InvalidObjectState"));
+                    .body("Error.Code", equalTo("InvalidObjectState"))
+                    .body("Error.Message", equalTo(ARCHIVED_OBJECT_ERROR_MESSAGE))
+                    .body("Error.StorageClass", equalTo("GLACIER"));
             given().when().get(currentPath).then().statusCode(403)
                     .body("Error.Code", equalTo("InvalidObjectState"));
             given().when().get(fixture.path()).then().statusCode(403)
@@ -148,7 +152,9 @@ class S3RestoreStateIntegrationTest {
             try {
                 given().when().head(versionedPath).then().statusCode(200);
                 given().when().get(versionedPath).then().statusCode(403)
-                        .body("Error.Code", equalTo("InvalidObjectState"));
+                        .body("Error.Code", equalTo("InvalidObjectState"))
+                        .body("Error.Message", equalTo(ARCHIVED_OBJECT_ERROR_MESSAGE))
+                        .body("Error.StorageClass", equalTo("DEEP_ARCHIVE"));
 
                 given().body(RESTORE_REQUEST).when().post(versionedPath + "&restore").then().statusCode(202);
                 given().when().get(versionedPath).then().statusCode(403)

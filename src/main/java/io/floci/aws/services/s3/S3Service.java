@@ -6860,7 +6860,8 @@ public class S3Service implements Resettable, ResourceProvider {
             RestoreStatus restore = restoreStatus(object);
             if (restore == null || restore.inProgress()) {
                 throw new AwsException("InvalidObjectState",
-                        "The action is not valid for the object's storage class", 403);
+                        "The operation is not valid for the object's storage class", 403,
+                        Map.of("StorageClass", object.getStorageClass()));
             }
         }
     }
