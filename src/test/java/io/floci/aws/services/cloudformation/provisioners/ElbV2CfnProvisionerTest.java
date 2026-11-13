@@ -14,20 +14,24 @@ import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
 import io.floci.aws.services.elbv2.model.RuleCondition;
+import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
+import org.mockito.stubbing.Stubber;
 
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -65,10 +69,19 @@ class ElbV2CfnProvisionerTest {
     private static final String RULE_ARN = LISTENER_ARN.replace(":listener/", ":listener-rule/") + "/9683b2d02a6cabee";
 
     private static final List<String> TWO_SUBNETS = List.of("subnet-1", "subnet-2");
+    private static final String DECLARED_TARGETS = "__FlociTargetGroupTargets";
+    private static final String DECLARED_TARGETS_PRIOR = "__FlociTargetGroupTargetsPrior";
+    private static final String TARGETS_SNAPSHOT = CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR;
 
     private final ElbV2Service elb = mock(ElbV2Service.class);
     private final ElbV2CfnProvisioner provisioner = new ElbV2CfnProvisioner(elb);
     private final ObjectMapper mapper = new ObjectMapper();
+    /** The target group the Targets tests provision: on port 80, nothing registered until a test registers targets. */
+    private final TargetGroup group = targetGroupOnPort80();
+    /** The stack resource the target group tests provision. */
+    private final StackResource tgResource = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
+    /** The previous resource the engine restores when a target group update fails. */
+    private final StackResource restored = new StackResource();
 
     @BeforeEach
     void defaultListenerLoadBalancer() {
@@ -267,14 +280,13 @@ class ElbV2CfnProvisionerTest {
                 .put("HealthCheckTimeoutSeconds", "5").put("HealthyThresholdCount", "2").put("UnhealthyThresholdCount", "3");
         props.putObject("Matcher").put("HttpCode", "200-299");
 
-        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(tgResource, props, ctx());
 
-        assertEquals(TG_ARN, r.getPhysicalId());
-        assertEquals(Set.of("TargetGroupArn", "TargetGroupName", "TargetGroupFullName", "LoadBalancerArns"),
-                r.getAttributes().keySet());
-        assertEquals("targetgroup/web-tg/73e2d6bc24d8a067", r.getAttributes().get("TargetGroupFullName"));
-        assertEquals(LB_ARN, r.getAttributes().get("LoadBalancerArns"));
+        assertEquals(TG_ARN, tgResource.getPhysicalId());
+        assertEquals(Set.of("TargetGroupArn", "TargetGroupName", "TargetGroupFullName", "LoadBalancerArns",
+                DECLARED_TARGETS), tgResource.getAttributes().keySet());
+        assertEquals("targetgroup/web-tg/73e2d6bc24d8a067", tgResource.getAttributes().get("TargetGroupFullName"));
+        assertEquals(LB_ARN, tgResource.getAttributes().get("LoadBalancerArns"));
     }
 
     @Test
@@ -1007,43 +1019,389 @@ class ElbV2CfnProvisionerTest {
     }
 
     private void assertRejected(String property, String value) {
-        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
         ObjectNode props = mapper.createObjectNode().put("Name", "web-tg").put(property, value);
 
-        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(tgResource, props, ctx()));
 
         assertEquals("ValidationError", e.getErrorCode());
         assertEquals("Value of property " + property + " must be an integer.", e.getMessage());
-        assertNull(r.getPhysicalId());
-        verify(elb, never()).createTargetGroup(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any());
+        assertNull(tgResource.getPhysicalId());
+        anyCreateTargetGroup(verify(elb, never()));
     }
 
     @Test
     void anIntegerAnIntrinsicResolvesToNothingReachesTheServiceUnset() {
         // Fn::If [cond, 30, AWS::NoValue] drops the property; the engine resolves AWS::NoValue to blank.
-        when(elb.createTargetGroup(eq(REGION), eq("fn-tg"), isNull(), isNull(), isNull(), isNull(), eq("lambda"),
-                isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(),
-                eq(Map.of()))).thenReturn(targetGroup("fn-tg"));
-        ObjectNode props = mapper.createObjectNode().put("Name", "fn-tg").put("TargetType", "lambda");
+        ObjectNode props = lambdaGroup();
         props.putObject("HealthCheckIntervalSeconds").put("Ref", "AWS::NoValue");
-        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
 
-        provisioner.provision(r, props, ctx());
-
-        assertEquals(TG_ARN, r.getPhysicalId());
+        assertCreatedWithEveryOptionalUnset(props);
     }
 
     @Test
     void absentTargetGroupIntegersReachTheServiceUnset() {
+        assertCreatedWithEveryOptionalUnset(lambdaGroup());
+    }
+
+    /** Properties of a Lambda target group that name only the group and its type. */
+    private ObjectNode lambdaGroup() {
+        return mapper.createObjectNode().put("Name", "fn-tg").put("TargetType", "lambda");
+    }
+
+    /**
+     * Provisions {@code props}, a Lambda group named fn-tg, and asserts the group was created, which the
+     * stub allows only when CreateTargetGroup got every optional argument unset.
+     */
+    private void assertCreatedWithEveryOptionalUnset(ObjectNode props) {
         when(elb.createTargetGroup(eq(REGION), eq("fn-tg"), isNull(), isNull(), isNull(), isNull(), eq("lambda"),
                 isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), isNull(),
                 eq(Map.of()))).thenReturn(targetGroup("fn-tg"));
-        StackResource r = resource("AWS::ElasticLoadBalancingV2::TargetGroup", "Tg");
 
-        provisioner.provision(r, mapper.createObjectNode().put("Name", "fn-tg").put("TargetType", "lambda"), ctx());
+        provisioner.provision(tgResource, props, ctx());
 
-        assertEquals(TG_ARN, r.getPhysicalId());
+        assertEquals(TG_ARN, tgResource.getPhysicalId());
+    }
+
+    /** A target as the group and the record carry it: its Id, port and zone, the last two null when unset. */
+    private TargetDescription target(String id, Integer port, String zone) {
+        return mapper.convertValue(mapper.createObjectNode().put("id", id).put("port", port)
+                .put("availabilityZone", zone), TargetDescription.class);
+    }
+
+    private TargetDescription target(String id) {
+        return target(id, null, null);
+    }
+
+    private static List<String> described(List<TargetDescription> targets) {
+        return targets.stream().map(t -> t.getId() + ":" + t.getPort() + ":" + t.getAvailabilityZone()).toList();
+    }
+
+    private String recordOf(TargetDescription... targets) {
+        return mapper.valueToTree(List.of(targets)).toString();
+    }
+
+    /** Target group properties declaring {@code targets}, or no Targets when there are none. */
+    private ObjectNode declaring(TargetDescription... targets) {
+        ObjectNode props = mapper.createObjectNode().put("Name", "web-tg").put("Port", "80");
+        if (targets.length > 0) {
+            ArrayNode list = props.putArray("Targets");
+            for (TargetDescription target : targets) {
+                ObjectNode item = list.addObject().put("Id", target.getId());
+                if (target.getPort() != null) {
+                    item.put("Port", String.valueOf(target.getPort()));
+                }
+                if (target.getAvailabilityZone() != null) {
+                    item.put("AvailabilityZone", target.getAvailabilityZone());
+                }
+            }
+        }
+        return props;
+    }
+
+    private TargetGroup targetGroupOnPort80() {
+        TargetGroup tg = targetGroup("web-tg");
+        tg.setPort(80);
+        return tg;
+    }
+
+    /** Replaces what is registered on {@link #group}. */
+    private void registered(List<TargetDescription> targets) {
+        group.getTargets().clear();
+        group.getTargets().addAll(targets);
+    }
+
+    /** CreateTargetGroup with any arguments, called on {@code service}: the mock, or a verification of it. */
+    private static TargetGroup anyCreateTargetGroup(ElbV2Service service) {
+        return service.createTargetGroup(any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /** Provisions {@link #tgResource} as {@link #group}, which the provision creates, declaring {@code targets}. */
+    private void createdTargetGroupDeclaring(ProvisionContext ctx, TargetDescription... targets) {
+        when(anyCreateTargetGroup(elb)).thenReturn(group);
+        provisioner.provision(tgResource, declaring(targets), ctx);
+    }
+
+    /**
+     * Provisions an update of {@link #tgResource}, whose group the stack keeps with {@code onTheGroup}
+     * registered, to {@code props}, with {@code record} as the targets the last template declared, or
+     * none recorded when it is null.
+     */
+    private void keptTargetGroupUpdatedTo(List<TargetDescription> onTheGroup, ObjectNode props, String record) {
+        registered(onTheGroup);
+        when(anyCreateTargetGroup(elb)).thenThrow(new AwsException("DuplicateTargetGroupName", "exists", 400));
+        when(elb.describeTargetGroups(REGION, null, null, List.of("web-tg"))).thenReturn(List.of(group));
+        tgResource.setPhysicalId(TG_ARN);
+        tgResource.getAttributes().put("TargetGroupName", "web-tg");
+        if (record != null) {
+            tgResource.getAttributes().put(DECLARED_TARGETS, record);
+        }
+        provisioner.provision(tgResource, props, ctx(TG_ARN));
+    }
+
+    /**
+     * An update of the kept group from a template declaring 10.0.0.1 to one declaring 10.0.0.2, with
+     * 10.0.0.1 and 10.0.0.9, registered outside the stack, on the group.
+     */
+    private void keptGroupSwitchedToASecondTarget() {
+        keptTargetGroupUpdatedTo(List.of(target("10.0.0.1", 80, null), target("10.0.0.9", 80, null)),
+                declaring(target("10.0.0.2")), recordOf(target("10.0.0.1")));
+    }
+
+    /** {@link #keptGroupSwitchedToASecondTarget}, checked to leave the snapshot and prior record for a later step. */
+    private void keptGroupSwitchedLeavingItsRecords() {
+        keptGroupSwitchedToASecondTarget();
+        assertTrue(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT));
+        assertTrue(tgResource.getAttributes().containsKey(DECLARED_TARGETS_PRIOR));
+    }
+
+    /** Asserts that 10.0.0.2 was registered and deregistered again, and 10.0.0.1 deregistered and registered again. */
+    private void assertSecondTargetSwappedBack() {
+        assertEquals(List.of("10.0.0.2:null:null", "10.0.0.1:80:null"), registeredBy(2));
+        assertEquals(List.of("10.0.0.1:80:null", "10.0.0.2:null:null"), deregisteredBy(2));
+    }
+
+    private static AwsException internalFailure() {
+        return new AwsException("InternalFailure", "storage failed", 500);
+    }
+
+    /** Makes deleting {@link #group} fail, and returns the failure. */
+    private AwsException failingGroupDelete() {
+        AwsException deleteFailure = internalFailure();
+        doThrow(deleteFailure).when(elb).deleteTargetGroup(REGION, TG_ARN);
+        return deleteFailure;
+    }
+
+    /** Makes the first RegisterTargets call refuse its targets, as it refuses a port out of range, and returns it. */
+    private AwsException refusingRegistration() {
+        AwsException refusal = new AwsException("ValidationError", "port out of range", 400);
+        doThrow(refusal).doNothing().when(elb).registerTargets(eq(REGION), eq(TG_ARN), anyList());
+        return refusal;
+    }
+
+    /** Makes DeregisterTargets throw {@code failure} on its first {@code calls} calls, and returns it. */
+    private AwsException failingDeregistration(AwsException failure, int calls) {
+        Stubber stub = doThrow(failure);
+        for (int i = 1; i < calls; i++) {
+            stub = stub.doThrow(failure);
+        }
+        stub.doNothing().when(elb).deregisterTargets(eq(REGION), eq(TG_ARN), anyList());
+        return failure;
+    }
+
+    private List<String> registeredBy(int calls) {
+        return targetsSentBy(calls,
+                (service, sent) -> service.registerTargets(eq(REGION), eq(TG_ARN), sent.capture()));
+    }
+
+    private List<String> deregisteredBy(int calls) {
+        return targetsSentBy(calls,
+                (service, sent) -> service.deregisterTargets(eq(REGION), eq(TG_ARN), sent.capture()));
+    }
+
+    /** The targets handed to {@code call}, made on a verification of the mock, over its {@code calls} calls. */
+    @SuppressWarnings("unchecked")
+    private List<String> targetsSentBy(int calls,
+                                       BiConsumer<ElbV2Service, ArgumentCaptor<List<TargetDescription>>> call) {
+        ArgumentCaptor<List<TargetDescription>> sent = ArgumentCaptor.forClass(List.class);
+        call.accept(verify(elb, times(calls)), sent);
+        return sent.getAllValues().stream().flatMap(targets -> described(targets).stream()).toList();
+    }
+
+    @Test
+    void aCreatedTargetGroupRegistersTheDeclaredTargetsAndRecordsThem() {
+        createdTargetGroupDeclaring(ctx(), target("i-1"), target("i-1", 8080, null));
+
+        assertEquals(List.of("i-1:null:null", "i-1:8080:null"), registeredBy(1));
+        verify(elb, never()).deregisterTargets(any(), any(), any());
+        assertEquals(recordOf(target("i-1"), target("i-1", 8080, null)),
+                tgResource.getAttributes().get(DECLARED_TARGETS));
+        assertFalse(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT), "a create has nothing to roll back");
+    }
+
+    @Test
+    void aTargetWithoutAnIdFailsBeforeTheGroupIsCreated() {
+        ObjectNode props = declaring();
+        props.putArray("Targets").addObject().put("Port", "80");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(tgResource, props, ctx()));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        assertEquals("Model validation failed (#/Targets/0: required key [Id] not found)", e.getMessage());
+        anyCreateTargetGroup(verify(elb, never()));
+    }
+
+    @Test
+    void refusedTargetsDeleteTheGroupThisProvisionCreated() {
+        AwsException refusal = refusingRegistration();
+        AwsException deleteFailure = failingGroupDelete();
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> createdTargetGroupDeclaring(ctx(), target("10.0.0.5", 70000, null)));
+
+        assertEquals(refusal, e);
+        assertEquals(List.of(deleteFailure), List.of(e.getSuppressed()));
+        verify(elb).deleteTargetGroup(REGION, TG_ARN);
+        // A group whose delete failed stays marked as the stack's, so the stack's rollback deletes it.
+        assertEquals(TG_ARN, tgResource.getPhysicalId());
+        assertEquals("true", tgResource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void aTargetRefusedOnAKeptGroupIsNotDeregisteredOnTheWayBack() {
+        AwsException refusal = refusingRegistration();
+
+        assertEquals(refusal, assertThrows(AwsException.class, this::keptGroupSwitchedToASecondTarget));
+
+        // RegisterTargets registered nothing, so the way back has nothing to deregister.
+        verify(elb, never()).deregisterTargets(any(), any(), any());
+        verify(elb, never()).deleteTargetGroup(any(), any());
+        assertFalse(tgResource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aFailedDeregistrationPutsAKeptGroupBack() {
+        AwsException failure = failingDeregistration(internalFailure(), 1);
+
+        assertEquals(failure, assertThrows(AwsException.class, this::keptGroupSwitchedToASecondTarget));
+
+        assertSecondTargetSwappedBack();
+        verify(elb, never()).deleteTargetGroup(any(), any());
+        assertFalse(tgResource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void anUndoThatFailsLeavesItsSnapshotForTheRestoredResource() {
+        failingDeregistration(internalFailure(), 2);
+        assertThrows(AwsException.class, this::keptGroupSwitchedToASecondTarget);
+
+        provisioner.mergeFailedUpdateResourceTracking(restored, tgResource);
+
+        assertTrue(tgResource.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertTrue(restored.getAttributes().containsKey(TARGETS_SNAPSHOT));
+        assertEquals(tgResource.getAttributes().get(TARGETS_SNAPSHOT), restored.getAttributes().get(TARGETS_SNAPSHOT));
+    }
+
+    @Test
+    void aSnapshotWithoutAFailedUndoStaysWithTheFailedAttempt() {
+        tgResource.getAttributes().put(TARGETS_SNAPSHOT, "{\"added\":[],\"removed\":[]}");
+
+        provisioner.mergeFailedUpdateResourceTracking(restored, tgResource);
+
+        assertFalse(restored.getAttributes().containsKey(TARGETS_SNAPSHOT));
+    }
+
+    @Test
+    void aReplacementRegistersOnTheNewGroupAndItsRollbackRestoresTheRecordEvenWhenTheDeleteFails() {
+        String priorArn = TG_ARN.replace("web-tg/73e2d6bc24d8a067", "old-tg/0123456789abcdef");
+        tgResource.setPhysicalId(priorArn);
+        tgResource.getAttributes().put(DECLARED_TARGETS, recordOf(target("10.0.0.1")));
+
+        createdTargetGroupDeclaring(ctx(priorArn), target("10.0.0.2"));
+
+        assertEquals(TG_ARN, tgResource.getPhysicalId());
+        assertEquals(List.of("10.0.0.2:null:null"), registeredBy(1));
+        verify(elb, never()).deregisterTargets(any(), any(), any());
+        assertFalse(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT), "the new group has nothing to put back");
+        failingGroupDelete();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(tgResource));
+
+        assertEquals("InternalFailure", e.getErrorCode(), "the replacement's delete failed");
+        assertEquals(priorArn, tgResource.getPhysicalId());
+        assertEquals(recordOf(target("10.0.0.1")), tgResource.getAttributes().get(DECLARED_TARGETS));
+        assertFalse(tgResource.getAttributes().containsKey(DECLARED_TARGETS_PRIOR));
+    }
+
+    @Test
+    void anUpdateSwapsTheDeclaredTargetsAndARollbackSwapsThemBack() {
+        keptGroupSwitchedToASecondTarget();
+
+        assertEquals(List.of("10.0.0.2:null:null"), registeredBy(1));
+        assertEquals(List.of("10.0.0.1:80:null"), deregisteredBy(1), "the target registered outside the stack stays");
+        InOrder order = inOrder(elb);
+        order.verify(elb).registerTargets(eq(REGION), eq(TG_ARN), anyList());
+        order.verify(elb).deregisterTargets(eq(REGION), eq(TG_ARN), anyList());
+        assertEquals(recordOf(target("10.0.0.2")), tgResource.getAttributes().get(DECLARED_TARGETS));
+
+        assertTrue(provisioner.rollbackUpdate(tgResource));
+
+        assertSecondTargetSwappedBack();
+        assertEquals(recordOf(target("10.0.0.1")), tgResource.getAttributes().get(DECLARED_TARGETS));
+        assertFalse(tgResource.getAttributes().containsKey(DECLARED_TARGETS_PRIOR));
+        assertFalse(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT));
+    }
+
+    @Test
+    void aTargetDeclaredInAnotherZoneIsRegisteredOverAndARollbackPutsTheZoneBack() {
+        keptTargetGroupUpdatedTo(List.of(target("10.0.0.1", 80, null)), declaring(target("10.0.0.1", null, "all")),
+                recordOf(target("10.0.0.1")));
+
+        assertEquals(List.of("10.0.0.1:null:all"), registeredBy(1));
+        verify(elb, never()).deregisterTargets(any(), any(), any());
+
+        assertTrue(provisioner.rollbackUpdate(tgResource));
+
+        assertEquals(List.of("10.0.0.1:null:all", "10.0.0.1:80:null"), registeredBy(2));
+        verify(elb, never()).deregisterTargets(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "not json")
+    void aGroupWithNoReadableRecordRegistersItsTargetsAndDeregistersNothing(String record) {
+        // Provisioned before Floci registered targets, or with a record that cannot be read, so nothing
+        // registered is known to be the stack's.
+        keptTargetGroupUpdatedTo(List.of(target("10.0.0.1", 80, null)), declaring(target("10.0.0.2")), record);
+
+        assertEquals(List.of("10.0.0.2:null:null"), registeredBy(1));
+        verify(elb, never()).deregisterTargets(any(), any(), any());
+        assertEquals(recordOf(target("10.0.0.2")), tgResource.getAttributes().get(DECLARED_TARGETS));
+    }
+
+    @Test
+    void droppingTargetsDeregistersOnlyTheDeclaredOnes() {
+        keptTargetGroupUpdatedTo(List.of(target("i-1", 80, null), target("i-1", 8080, null), target("i-2", 80, null)),
+                declaring(), recordOf(target("i-1"), target("i-2", 80, null)));
+
+        assertEquals(List.of("i-1:80:null", "i-2:80:null"), deregisteredBy(1));
+        verify(elb, never()).registerTargets(any(), any(), any());
+        assertEquals("[]", tgResource.getAttributes().get(DECLARED_TARGETS));
+    }
+
+    @Test
+    void anUpdateThatChangesNoRegistrationDropsAnEarlierSnapshotAndHasNothingToRollBack() {
+        keptGroupSwitchedLeavingItsRecords();
+        registered(List.of(target("10.0.0.2", 80, null), target("10.0.0.9", 80, null)));
+
+        provisioner.provision(tgResource, declaring(target("10.0.0.2", 80, null)), ctx(TG_ARN));
+
+        assertFalse(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT));
+        assertTrue(provisioner.rollbackUpdate(tgResource));
+        assertEquals(List.of("10.0.0.2:null:null"), registeredBy(1));
+        assertEquals(List.of("10.0.0.1:80:null"), deregisteredBy(1));
+    }
+
+    @Test
+    void aRollbackOfAGroupGoneSinceTheUpdateFailsAndKeepsTheSnapshot() {
+        keptGroupSwitchedToASecondTarget();
+        failingDeregistration(new AwsException("TargetGroupNotFound", "gone", 400), 1);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(tgResource));
+
+        assertEquals("TargetGroupNotFound", e.getErrorCode());
+        assertTrue(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT), "a retried rollback tries again");
+    }
+
+    @Test
+    void aCommittedUpdateSpendsTheTargetSnapshotAndPriorRecord() {
+        keptGroupSwitchedLeavingItsRecords();
+
+        provisioner.completeUpdate(tgResource);
+
+        assertFalse(tgResource.getAttributes().containsKey(TARGETS_SNAPSHOT));
+        assertFalse(tgResource.getAttributes().containsKey(DECLARED_TARGETS_PRIOR));
+        assertEquals(recordOf(target("10.0.0.2")), tgResource.getAttributes().get(DECLARED_TARGETS));
     }
 
     @Test

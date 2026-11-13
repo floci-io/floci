@@ -395,6 +395,7 @@ final class DurableCheckpointApplier {
             DurableOperation operation = create(update);
             operation.setChainedFunctionName(update.chainedFunctionName());
             operation.setChainedTenantId(update.chainedTenantId());
+            operation.setChainedTraceHeader(update.chainedTraceHeader());
             operation.setInputPayload(update.payload());
             AwsException unreachable = unreachableTarget.apply(update.chainedFunctionName());
             if (unreachable == null) {

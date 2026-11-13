@@ -287,7 +287,8 @@ public final class DurableWire {
                 integer(callbackOptions, "HeartbeatTimeoutSeconds", path + "callbackOptions", 0,
                         MAX_CALLBACK_TIMEOUT_SECONDS),
                 chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "FunctionName"),
-                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "TenantId"));
+                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "TenantId"),
+                chainedInvokeOptions == null ? null : string(chainedInvokeOptions, "XAmznTraceId"));
     }
 
     private static <E extends Enum<E>> E enumMember(Map<?, ?> map, String member, Class<E> type) {

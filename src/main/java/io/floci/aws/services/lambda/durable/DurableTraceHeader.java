@@ -37,6 +37,22 @@ final class DurableTraceHeader {
         return format(root, parent, sampled);
     }
 
+    /**
+     * Unlike Invoke, the Parent sent is kept as is, and an Active target gets none when none was sent.
+     */
+    static String forChainedChild(String requested, String callerHeader, boolean activeTracing) {
+        Fields fields = parse(requested);
+        if (fields.root() == null) {
+            return callerHeader;
+        }
+        String sampled = fields.sampled() != null ? fields.sampled() : activeTracing ? "1" : "0";
+        String parent = fields.parent();
+        if (parent == null && !activeTracing && fields.sampled() == null) {
+            parent = XRayTraceIds.segmentId();
+        }
+        return format(fields.root(), parent, sampled);
+    }
+
     static String forInvocation(String executionHeader, boolean activeTracing) {
         if (executionHeader == null) {
             return null;
@@ -47,6 +63,9 @@ final class DurableTraceHeader {
         }
         if (fields.parent() != null) {
             return executionHeader;
+        }
+        if ("0".equals(fields.sampled())) {
+            return format(fields.root(), XRayTraceIds.segmentId(), "0");
         }
         return "Root=" + fields.root();
     }
