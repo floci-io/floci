@@ -14,6 +14,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
@@ -87,13 +88,39 @@ class HttpProxyRequestSourceMappingIntegrationTest {
     }
 
     @Test
-    void extendedRequestIdMatchesRequestId() {
+    void extendedRequestIdMatchesRequestIdAndResponseRequestId() {
         configureApi();
-        invoke("{}");
+        String responseRequestId = invoke("{}");
         JsonNode request = received.get();
         String requestId = request.path("x-request-id").asText();
         assertFalse(requestId.isEmpty());
         assertEquals(requestId, request.path("x-extended-request-id").asText());
+        assertEquals(requestId, responseRequestId);
+    }
+
+    @Test
+    void requestIdOverrideReachesMappingsAndResponse() {
+        configureApi();
+        String override = UUID.randomUUID().toString();
+        String responseRequestId = given().contentType(ContentType.JSON).header("x-amzn-RequestId", override)
+                .body("{}").post("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200).extract().header("x-amzn-RequestId");
+        JsonNode request = received.get();
+        assertEquals(override, request.path("x-request-id").asText());
+        assertEquals(override, request.path("x-extended-request-id").asText());
+        assertEquals(override, responseRequestId);
+    }
+
+    @Test
+    void invalidRequestIdOverrideIsReplacedInMappingsAndResponse() {
+        configureApi();
+        String responseRequestId = given().contentType(ContentType.JSON).header("x-amzn-RequestId", "not-a-uuid")
+                .body("{}").post("/execute-api/" + apiId + "/test/orders")
+                .then().statusCode(200).extract().header("x-amzn-RequestId");
+        JsonNode request = received.get();
+        assertTrue(responseRequestId.endsWith("_REPLACED_INVALID_REQUEST_ID"));
+        assertEquals(responseRequestId, request.path("x-request-id").asText());
+        assertEquals(responseRequestId, request.path("x-extended-request-id").asText());
     }
 
     @Test
@@ -162,9 +189,10 @@ class HttpProxyRequestSourceMappingIntegrationTest {
                 .post(apiPath + "/routes").then().statusCode(201);
     }
 
-    private void invoke(String body) {
-        given().contentType(ContentType.JSON).body(body)
-                .post("/execute-api/" + apiId + "/test/orders").then().statusCode(200);
+    private String invoke(String body) {
+        return given().contentType(ContentType.JSON).body(body)
+                .post("/execute-api/" + apiId + "/test/orders").then().statusCode(200)
+                .extract().header("x-amzn-RequestId");
     }
 
     private void invokeExpectingRejectedHeader(String body, String header) {

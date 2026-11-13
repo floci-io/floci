@@ -3189,7 +3189,7 @@ public class ApiGatewayExecuteController {
         // $request.header.* mappings keep the caller's values; only what reaches the backend changes.
         Map<String, List<String>> backendHeaders = HttpApiForwardedHeaders.apply(multiValueHeaders, sourceIp,
                 routeContext.localIp(), headers.getHeaderString("Host"), isSecureTransport(uriInfo) ? "https" : "http");
-        String requestId = UUID.randomUUID().toString();
+        String requestId = routeContext.requestId(headers);
         io.floci.aws.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.floci.aws.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path,
@@ -3211,12 +3211,15 @@ public class ApiGatewayExecuteController {
         if (result.body() != null) rb.entity(result.body());
         if (result.headers() != null) {
             for (Map.Entry<String, List<String>> e : result.headers().entrySet()) {
+                if ("x-amzn-RequestId".equalsIgnoreCase(e.getKey())) {
+                    continue;
+                }
                 for (String value : e.getValue()) {
                     rb.header(e.getKey(), value);
                 }
             }
         }
-        return rb.build();
+        return rb.header("x-amzn-RequestId", requestId).build();
     }
 
     private static boolean isCloudMapIntegration(
