@@ -145,8 +145,20 @@ class DurableTraceHeaderTest {
     }
 
     @Test
-    void passThroughInvocationWithoutAParentGetsTheRootOnly() {
-        assertEquals("Root=" + ROOT, DurableTraceHeader.forInvocation("Root=" + ROOT + ";Sampled=0", false));
+    void passThroughInvocationOfASampledHeaderWithoutAParentGetsTheRootOnly() {
+        assertEquals("Root=" + ROOT, DurableTraceHeader.forInvocation("Root=" + ROOT + ";Sampled=1", false));
+    }
+
+    @Test
+    void passThroughInvocationsOfAnUnsampledHeaderWithoutAParentGetANewParentEach() {
+        String stored = "Root=" + ROOT + ";Sampled=0";
+
+        String first = DurableTraceHeader.forInvocation(stored, false);
+        String second = DurableTraceHeader.forInvocation(stored, false);
+
+        assertTrue(first.matches("Root=" + ROOT + ";Parent=" + NEW_ID + ";Sampled=0"));
+        assertTrue(second.matches("Root=" + ROOT + ";Parent=" + NEW_ID + ";Sampled=0"));
+        assertNotEquals(first, second);
     }
 
     @Test

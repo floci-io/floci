@@ -64,6 +64,9 @@ final class DurableTraceHeader {
         if (fields.parent() != null) {
             return executionHeader;
         }
+        if ("0".equals(fields.sampled())) {
+            return format(fields.root(), XRayTraceIds.segmentId(), "0");
+        }
         return "Root=" + fields.root();
     }
 

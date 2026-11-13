@@ -794,6 +794,26 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aPlainPassThroughTargetGetsANewParentOnlyForAnUnsampledHeaderWithoutOne() {
+        invoker.plainFunctions.put("sampled-fn", event -> handlerResponse("{}"));
+        invoker.plainFunctions.put("unsampled-fn", event -> handlerResponse("{}"));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(
+                    chainedStart("s", "sampled-fn", null, "Root=1-6af70000-0000000000000000000000a1;Sampled=1"),
+                    chainedStart("u", "unsampled-fn", null, "Root=1-6af70000-0000000000000000000000a2;Sampled=0")));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        start("exec-1", "{}", false);
+
+        assertEquals(List.of("Root=1-6af70000-0000000000000000000000a1"), invoker.otherTraceIds.get("sampled-fn"));
+        assertEquals(1, invoker.otherTraceIds.get("unsampled-fn").size());
+        assertTrue(invoker.otherTraceIds.get("unsampled-fn").get(0)
+                .matches("Root=1-6af70000-0000000000000000000000a2;Parent=[0-9a-f]{16};Sampled=0"));
+    }
+
+    @Test
     void aChainedInvokeOfAPlainFunctionFailsWithItsErrorOrAnOversizedOutput() {
         invoker.plainFunctions.put("raising-fn",
                 event -> functionError("{\"errorMessage\":\"child exploded\",\"errorType\":\"ValueError\"}"));

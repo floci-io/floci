@@ -255,7 +255,9 @@ Stopping the parent leaves the child running, as on AWS.
 Each durable execution gets an X-Ray trace header. It is built from the `X-Amzn-Trace-Id` header of
 Invoke when the request carries one. `GetDurableExecution` returns it as `TraceHeader`. Every
 invocation of the execution gets the same `Root` in `_X_AMZN_TRACE_ID`. A `PassThrough` function
-gets the `Parent` of the execution. An `Active` function gets a new `Parent` on each invocation.
+gets the `Parent` of the execution. When the header has none, the function gets only the `Root` if
+`Sampled=1`, and a new `Parent` on each invocation if `Sampled=0`. An `Active` function gets a new
+`Parent` on each invocation.
 A durable execution started by a chained invoke takes its header from
 `ChainedInvokeOptions.XAmznTraceId`, or from the calling execution when that is absent. A plain
 function invoked this way gets the same header.
