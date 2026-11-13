@@ -1212,6 +1212,24 @@ class SqsIntegrationTest {
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("BatchRequestTooLong"));
 
+            String fittingBody = "x".repeat(300_000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", fittingBody)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", fittingBody)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", fittingBody)
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Name", "big")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.StringValue",
+                        "y".repeat(200_000))
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("BatchRequestTooLong"));
+
             assertEquals("1", allQueueAttributes(attributeQueueUrl).get("ApproximateNumberOfMessages"));
         } finally {
             given()

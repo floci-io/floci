@@ -1196,6 +1196,19 @@ class SqsJsonProtocolTest {
                 .statusCode(400)
                 .body("__type", equalTo("BatchRequestTooLong"));
 
+            String fittingBody = "x".repeat(300_000);
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
+                        + "{\"Id\":\"a\",\"MessageBody\":\"" + fittingBody + "\"},"
+                        + "{\"Id\":\"b\",\"MessageBody\":\"" + fittingBody + "\"},"
+                        + "{\"Id\":\"c\",\"MessageBody\":\"" + fittingBody + "\",\"MessageAttributes\":"
+                        + "{\"big\":{\"StringValue\":\"" + "y".repeat(200_000) + "\"}}}]}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("BatchRequestTooLong"));
+
             assertMessageCounts(attributeQueueUrl, "2", "0");
         } finally {
             given()
