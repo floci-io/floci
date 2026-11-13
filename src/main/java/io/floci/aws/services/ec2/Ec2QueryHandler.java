@@ -6818,9 +6818,8 @@ public class Ec2QueryHandler {
         Boolean multiAttachEnabled = p.getFirst("MultiAttachEnabled") != null
                 ? Boolean.parseBoolean(p.getFirst("MultiAttachEnabled"))
                 : null;
-        boolean dryRun = dryRun(p);
         VolumeModification mod = service.modifyVolume(region, volumeId, size, volumeType,
-                iops, throughput, multiAttachEnabled, dryRun);
+                iops, throughput, multiAttachEnabled, dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyVolumeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
