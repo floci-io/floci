@@ -64,6 +64,13 @@ class ElastiCacheCfnProvisionerTest {
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
+    /** An update context that carries the previous template's properties, as the stack engine's does. */
+    private ProvisionContext ctx(String priorPhysicalId, String priorProperties) throws Exception {
+        ProvisionContext base = ctx(priorPhysicalId);
+        return new ProvisionContext(base.engine(), "us-east-1", "000000000000", "my-stack", priorPhysicalId,
+                event -> { }, mapper.readTree(priorProperties));
+    }
+
     private StackResource resource(String type, String logicalId) {
         StackResource r = new StackResource();
         r.setLogicalId(logicalId);
@@ -215,6 +222,60 @@ class ElastiCacheCfnProvisionerTest {
 
         assertNotEquals("old-id", r.getPhysicalId());
         assertEquals("6401", r.getAttributes().get("RedisEndpoint.Port"));
+    }
+
+    private static final String REDIS_CLUSTER = "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\","
+            + "\"NumCacheNodes\":1%s}";
+
+    private void existingRedisCluster(String id) {
+        CacheCluster existing = new CacheCluster(id, CacheClusterStatus.AVAILABLE, "redis", "7.1",
+                new Endpoint("localhost", 6400), Instant.now());
+        when(cache.findCacheClusters(id)).thenReturn(List.of(existing));
+        when(cache.createCacheCluster(any())).thenAnswer(inv -> {
+            ElastiCacheService.CreateCacheClusterRequest req = inv.getArgument(0);
+            return new CacheCluster(req.cacheClusterId(), CacheClusterStatus.AVAILABLE, "redis", "7.1",
+                    new Endpoint("localhost", 6401), Instant.now());
+        });
+    }
+
+    @Test
+    void unnamedClusterWithChangedPortIsReplacedAndTheOldOneDeletedWhenTheUpdateCompletes() throws Exception {
+        existingRedisCluster("old-id");
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+
+        provisioner.provision(r, props(REDIS_CLUSTER.formatted(",\"Port\":6380")),
+                ctx("old-id", REDIS_CLUSTER.formatted(",\"Port\":6379")));
+
+        assertNotEquals("old-id", r.getPhysicalId());
+        verify(cache).createCacheCluster(any());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("old-id", provisioner.updateCleanupPhysicalId(r));
+        verify(cache, never()).deleteCacheCluster("old-id");
+        provisioner.completeUpdate(r);
+        verify(cache).deleteCacheCluster("old-id");
+    }
+
+    @Test
+    void clusterWithChangedSnapshotNameIsReplaced() throws Exception {
+        existingRedisCluster("old-id");
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+
+        provisioner.provision(r, props(REDIS_CLUSTER.formatted(",\"SnapshotName\":\"snap-2\"")),
+                ctx("old-id", REDIS_CLUSTER.formatted(",\"SnapshotName\":\"snap-1\"")));
+
+        assertNotEquals("old-id", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void explicitClusterNameWithChangedPortIsRejectedOnUpdate() throws Exception {
+        existingRedisCluster("app-cache");
+        StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r,
+                props(REDIS_CLUSTER.formatted(",\"ClusterName\":\"app-cache\",\"Port\":6380")),
+                ctx("app-cache", REDIS_CLUSTER.formatted(",\"ClusterName\":\"app-cache\",\"Port\":6379"))));
+        verify(cache, never()).createCacheCluster(any());
     }
 
     @Test
