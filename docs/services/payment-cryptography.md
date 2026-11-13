@@ -60,7 +60,8 @@
   refused, and the permission check reads the same member the request does.
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
   that state alone, and with every key when it names none. Each key in the list is the
-  whole key rather than the summary the model names, which a client reads as the summary.
+  summary the model names: its identifier, its state, its attributes, its check value
+  and its two flags.
 - **The members a request may name that the service does not read:** `CreateKey` and
   `ImportKey` take `ReplicationRegions`, and `ImportKey` takes `RequesterComment`, and the
   service reads none of them. No replica is made and no approval is recorded, because the
