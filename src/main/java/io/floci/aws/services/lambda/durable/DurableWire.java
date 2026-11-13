@@ -139,6 +139,9 @@ public final class DurableWire {
         node.put("DurableExecutionName", execution.getName());
         node.put("FunctionArn", execution.getFunctionArn());
         node.put("Version", execution.getVersion());
+        if (execution.getTraceHeader() != null) {
+            node.putObject("TraceHeader").put("XAmznTraceId", execution.getTraceHeader());
+        }
         node.put("Status", execution.getStatus().name());
         putTimestamp(node, "StartTimestamp", execution.getStartTimestamp(), false);
         if (execution.getEndTimestamp() != null) {
