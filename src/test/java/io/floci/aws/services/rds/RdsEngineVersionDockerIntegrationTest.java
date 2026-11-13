@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.RdsException;
@@ -14,6 +15,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.concurrent.TimeUnit;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
 import static io.floci.aws.testing.RdsRequests.cleanupDockerInstance;
@@ -35,6 +37,7 @@ class RdsEngineVersionDockerIntegrationTest {
     }
 
     @Test
+    @Timeout(value = 5, unit = TimeUnit.MINUTES)
     void minorUpgradePreservesDataAndMajorUpgradeIsRefused() throws SQLException {
         String id = "engine-version-" + Long.toString(System.nanoTime(), 36);
         try (RdsClient client = rdsDockerClient("us-east-1", "000000000000")) {
