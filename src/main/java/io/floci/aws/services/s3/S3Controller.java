@@ -1128,6 +1128,13 @@ public class S3Controller {
             S3Object obj = read.object();
             boolean bodyHandedOff = false;
             try {
+                if ("GLACIER".equals(obj.getStorageClass()) || "DEEP_ARCHIVE".equals(obj.getStorageClass())) {
+                    S3Service.RestoreStatus restore = s3Service.restoreStatus(obj);
+                    if (restore == null || restore.inProgress()) {
+                        throw new AwsException("InvalidObjectState",
+                                "The action is not valid for the object's storage class", 403);
+                    }
+                }
                 if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
                     // Evaluate preconditions against the same snapshot that is served: a separate
                     // metadata fetch could approve one version (e.g. If-Match for a CAS read) while a

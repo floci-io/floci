@@ -61,17 +61,27 @@ class S3RestoreStateIntegrationTest {
 
             given().when().head(olderPath).then().statusCode(200).header("x-amz-restore", nullValue());
             given().when().head(currentPath).then().statusCode(200).header("x-amz-restore", nullValue());
+            given().when().get(olderPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(fixture.path()).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
 
             given().body(RESTORE_REQUEST).when().post(olderPath + "&restore").then().statusCode(202);
             given().when().head(olderPath).then().statusCode(200)
                     .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
-            given().when().get(olderPath).then().statusCode(200)
-                    .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
+            given().when().get(olderPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
             given().when().head(currentPath).then().statusCode(200).header("x-amz-restore", nullValue());
 
             given().body(RESTORE_REQUEST).when().post(currentPath + "&restore").then().statusCode(202);
             given().when().head(currentPath).then().statusCode(200)
                     .header("x-amz-restore", equalTo("ongoing-request=\"true\""));
+            given().header("Range", "bytes=0-1").when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(currentPath + "&partNumber=1").then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
             given().header("x-amz-optional-object-attributes", "RestoreStatus")
                     .queryParam("list-type", "2").when().get(fixture.bucketPath()).then().statusCode(200)
                     .body(containsString("<IsRestoreInProgress>true</IsRestoreInProgress>"));
@@ -92,12 +102,81 @@ class S3RestoreStateIntegrationTest {
             given().when().get(olderPath).then().statusCode(200)
                     .header("x-amz-restore", equalTo(COMPLETED_RESTORE_HEADER))
                     .body(equalTo("older"));
+            given().header("Range", "bytes=0-1").when().get(currentPath).then().statusCode(206)
+                    .body(equalTo("cu"));
             given().header("x-amz-optional-object-attributes", "RestoreStatus")
                     .queryParam("list-type", "2").when().get(fixture.bucketPath()).then().statusCode(200)
                     .body(containsString("<IsRestoreInProgress>false</IsRestoreInProgress>"))
                     .body(containsString("<RestoreExpiryDate>2026-01-03T00:00:00Z</RestoreExpiryDate>"));
             given().body(RESTORE_REQUEST).when().post(olderPath + "&restore").then().statusCode(200);
             given().body(RESTORE_REQUEST).when().post(currentPath + "&restore").then().statusCode(200);
+
+            clock.advance(Duration.ofDays(2));
+            given().when().head(olderPath).then().statusCode(200).header("x-amz-restore", nullValue());
+            given().when().get(olderPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+        }
+    }
+
+    @Test
+    void restoringOneVersionDoesNotUnlockAnother() {
+        try (Fixture fixture = new Fixture()) {
+            String olderPath = fixture.path() + "?versionId=" + fixture.olderVersion();
+            String currentPath = fixture.path() + "?versionId=" + fixture.currentVersion();
+
+            given().body(RESTORE_REQUEST).when().post(olderPath + "&restore").then().statusCode(202);
+            clock.advance(Duration.ofSeconds(61));
+
+            given().when().get(olderPath).then().statusCode(200).body(equalTo("older"));
+            given().when().get(currentPath).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+            given().when().get(fixture.path()).then().statusCode(403)
+                    .body("Error.Code", equalTo("InvalidObjectState"));
+        }
+    }
+
+    @Test
+    void deepArchiveGetObjectRequiresCompletedRestore() {
+        try (Fixture fixture = new Fixture()) {
+            String path = fixture.bucketPath() + "/deep.txt";
+            String version = given().header("x-amz-storage-class", "DEEP_ARCHIVE").body("deep")
+                    .when().put(path).then().statusCode(200).extract().header("x-amz-version-id");
+            String versionedPath = path + "?versionId=" + version;
+            try {
+                given().when().head(versionedPath).then().statusCode(200);
+                given().when().get(versionedPath).then().statusCode(403)
+                        .body("Error.Code", equalTo("InvalidObjectState"));
+
+                given().body(RESTORE_REQUEST).when().post(versionedPath + "&restore").then().statusCode(202);
+                given().when().get(versionedPath).then().statusCode(403)
+                        .body("Error.Code", equalTo("InvalidObjectState"));
+
+                clock.advance(Duration.ofSeconds(61));
+                given().when().get(versionedPath).then().statusCode(200).body(equalTo("deep"));
+
+                clock.advance(Duration.ofDays(2));
+                given().when().get(versionedPath).then().statusCode(403)
+                        .body("Error.Code", equalTo("InvalidObjectState"));
+            } finally {
+                given().when().delete(versionedPath).then().statusCode(204);
+            }
+        }
+    }
+
+    @Test
+    void glacierInstantRetrievalDoesNotRequireRestore() {
+        try (Fixture fixture = new Fixture()) {
+            String path = fixture.bucketPath() + "/instant.txt";
+            String version = given().header("x-amz-storage-class", "GLACIER_IR").body("instant")
+                    .when().put(path).then().statusCode(200).extract().header("x-amz-version-id");
+            try {
+                given().when().get(path + "?versionId=" + version)
+                        .then().statusCode(200).body(equalTo("instant"));
+            } finally {
+                given().when().delete(path + "?versionId=" + version).then().statusCode(204);
+            }
         }
     }
 
@@ -252,6 +331,8 @@ class S3RestoreStateIntegrationTest {
                     .then().statusCode(403).body("Error.Code", equalTo("ObjectAlreadyInActiveTierError"));
             given().when().head(fixture.bucketPath() + "/ordinary.txt").then().statusCode(200)
                     .header("x-amz-restore", nullValue());
+            given().when().get(fixture.bucketPath() + "/ordinary.txt")
+                    .then().statusCode(200).body(equalTo("ordinary"));
             given().when().delete(fixture.bucketPath() + "/ordinary.txt?versionId=" + ordinaryVersion)
                     .then().statusCode(204);
         }
