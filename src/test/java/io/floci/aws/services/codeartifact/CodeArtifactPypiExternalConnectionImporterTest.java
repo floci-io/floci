@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -25,6 +26,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -569,10 +571,14 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         try {
             assertTrue(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, sdist));
             assertTrue(firstWheelWrite.await(5, TimeUnit.SECONDS), "background wheel write never started");
-            Future<Boolean> requestedWheel = pool.submit(
-                    () -> importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, wheel));
-            assertThrows(TimeoutException.class, () -> requestedWheel.get(500, TimeUnit.MILLISECONDS),
-                    "the wheel request must share the background sibling's canonical package lock");
+            AtomicReference<Thread> requestThread = new AtomicReference<>();
+            Future<Boolean> requestedWheel = pool.submit(() -> {
+                requestThread.set(Thread.currentThread());
+                return importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, wheel);
+            });
+            ThreadStates.awaitBlockedOrDone(requestThread, requestedWheel);
+            assertFalse(requestedWheel.isDone(), "the wheel request must wait for the background sibling");
+            assertEquals(Thread.State.BLOCKED, requestThread.get().getState());
             releaseWheelWrite.countDown();
             assertTrue(requestedWheel.get(5, TimeUnit.SECONDS));
             assertEquals(1, wheelWrites.get());
