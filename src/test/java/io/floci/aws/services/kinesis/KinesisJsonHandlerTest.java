@@ -313,12 +313,11 @@ class KinesisJsonHandlerTest {
     @Test
     void tagResourceUpdatesLegacyStreamBeyondCapacityWithoutAddingKeys() {
         createStream("test-stream");
-        ObjectNode add = MAPPER.createObjectNode().put("StreamName", "test-stream");
-        ObjectNode legacyTags = add.putObject("Tags");
+        // A stream persisted before AddTagsToStream enforced the limit can already have 51 tags.
+        Map<String, String> legacyTags = service.describeStream("test-stream", REGION).getTags();
         for (int i = 0; i < 51; i++) {
             legacyTags.put("key" + i, "old");
         }
-        assertEquals(200, handler.handle("AddTagsToStream", add, REGION).getStatus());
 
         ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
         request.putObject("Tags").put("key0", "updated");
@@ -333,6 +332,35 @@ class KinesisJsonHandlerTest {
         assertEquals(51, tags.size());
         assertEquals("updated", tagValue(tags, "key0"));
         assertEquals("old", tagValue(tags, "key1"));
+    }
+
+    @Test
+    void addTagsToStreamRejectsNewKeysBeyondFiftyWithoutChangingExistingValues() {
+        createStream("test-stream");
+        for (int batch = 0; batch < 5; batch++) {
+            ObjectNode add = MAPPER.createObjectNode().put("StreamName", "test-stream");
+            ObjectNode tags = add.putObject("Tags");
+            for (int i = batch * 10; i < (batch + 1) * 10; i++) {
+                tags.put("key" + i, "old");
+            }
+            assertEquals(200, handler.handle("AddTagsToStream", add, REGION).getStatus());
+        }
+
+        ObjectNode update = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        update.putObject("Tags").put("key0", "updated");
+        assertEquals(200, handler.handle("AddTagsToStream", update, REGION).getStatus());
+
+        ObjectNode overflow = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        overflow.putObject("Tags").put("key1", "would-change").put("key50", "new");
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("AddTagsToStream", overflow, REGION));
+        assertEquals("LimitExceededException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        Map<String, String> stored = service.listTagsForStream("test-stream", REGION);
+        assertEquals(50, stored.size());
+        assertEquals("updated", stored.get("key0"));
+        assertEquals("old", stored.get("key1"));
+        assertFalse(stored.containsKey("key50"));
     }
 
     private static Stream<Arguments> rejectedRegistrationTags() {
