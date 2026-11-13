@@ -22,6 +22,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -116,6 +117,22 @@ class EcsLoadBalancerRegistrarTest {
         registrar.registerTask(task, both, REGION);
         assertEquals(Duration.ofSeconds(300), registrar.deregisterTask(task, both, REGION));
         assertEquals(Duration.ZERO, registrar.deregisterTask(task, both, REGION), "nothing left to deregister");
+    }
+
+    @Test
+    void targetsHealthyIsFalseUntilEveryRecordedTargetPassesItsHealthCheck() {
+        String tgArn = createTargetGroup("reg-tg-health");
+        EcsTask task = taskWithContainer("web", 8080, 34700);
+        EcsTask unregistered = taskWithContainer("web", 8080, 34701);
+        registrar.registerTask(task, serviceWithLb(tgArn, "web", 8080), REGION);
+
+        assertTrue(registrar.targetsHealthy(unregistered), "a task that registered nothing has nothing to wait for");
+        assertFalse(registrar.targetsHealthy(task), "a freshly registered target is still in initial health");
+
+        TargetHealth healthy = new TargetHealth();
+        healthy.setState("healthy");
+        doReturn(List.of(healthy)).when(elbV2Service).describeTargetHealth(eq(REGION), eq(tgArn), any());
+        assertTrue(registrar.targetsHealthy(task));
     }
 
     @Test

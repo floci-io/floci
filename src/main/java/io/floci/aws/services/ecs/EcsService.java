@@ -224,6 +224,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final int MAX_LIST_RESULTS = 100;
     /** How long a CloudFormation-provisioned service may take to reach a steady state. */
     private static final Duration SERVICE_STABLE_TIMEOUT = Duration.ofMinutes(5);
+    /** How long a rolling deployment waits for a replacement's targets to turn healthy without a grace period. */
+    private static final Duration TARGET_HEALTH_WAIT = Duration.ofMinutes(1);
     private static final long SERVICE_STABLE_POLL_MILLIS = 50;
     /**
      * Reconcile passes a steady-state wait runs at once instead of waiting for ticks. A pass
@@ -2893,6 +2895,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (task) {
             return isTaskProtected(task, clock.instant());
         }
+    }
+
+    /**
+     * Whether a task's load balancer targets pass their health checks, as ECS waits for before it
+     * stops the task a rolling deployment replaces. The wait is bounded by the service's
+     * {@code healthCheckGracePeriodSeconds}, or {@link #TARGET_HEALTH_WAIT} without one, so a target
+     * that never turns healthy, or a target group with health checks off, does not hold the
+     * deployment for good.
+     */
+    private boolean loadBalancerTargetsHealthy(EcsTask task, EcsServiceModel svc) {
+        if (!dockerMode || lbRegistrar == null || svc.getLoadBalancers().isEmpty()) {
+            return true;
+        }
+        Integer gracePeriod = svc.getHealthCheckGracePeriodSeconds();
+        Duration wait = gracePeriod != null && gracePeriod > 0
+                ? Duration.ofSeconds(gracePeriod) : TARGET_HEALTH_WAIT;
+        if (task.getStartedAt() != null && !Instant.now().isBefore(task.getStartedAt().plus(wait))) {
+            return true;
+        }
+        return lbRegistrar.targetsHealthy(task);
     }
 
     private boolean eligibleForServiceStop(EcsTask task) {
@@ -5961,11 +5983,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
         } else if (running > svc.getDesiredCount()) {
-            // Drain stale tasks first: once their replacements are RUNNING this is the second
-            // half of the rolling deployment. Protected stale tasks cannot displace the
-            // desired number of current-revision tasks.
+            // Drain stale tasks first: once their replacements are RUNNING, and healthy behind
+            // the service's load balancers, this is the second half of the rolling deployment.
+            // Protected stale tasks cannot displace the desired number of current-revision tasks.
             int currentToStop = Math.max(0, (int) current - svc.getDesiredCount());
-            Stream.concat(staleTasks.stream().filter(this::eligibleForServiceStop),
+            boolean replacementsHealthy = runningTasks.stream()
+                    .filter(t -> !staleTasks.contains(t))
+                    .allMatch(t -> loadBalancerTargetsHealthy(t, svc));
+            Stream.concat(staleTasks.stream()
+                                    .filter(t -> replacementsHealthy)
+                                    .filter(this::eligibleForServiceStop),
                             runningTasks.stream()
                                     .filter(t -> !staleTasks.contains(t))
                                     .filter(this::eligibleForServiceStop)

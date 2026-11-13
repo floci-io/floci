@@ -122,6 +122,30 @@ public class EcsLoadBalancerRegistrar {
     }
 
     /**
+     * Whether every target {@link #registerTask} recorded for the task reports {@code healthy}.
+     * A task that registered nothing, or whose target group is gone, has nothing to wait for.
+     */
+    public boolean targetsHealthy(EcsTask task) {
+        Optional<EcsRegisteredTargets> recorded = task.getTaskArn() == null
+                ? Optional.empty() : ledger.get(task.getTaskArn());
+        if (recorded.isEmpty() || recorded.get().targets() == null) {
+            return true;
+        }
+        for (EcsRegisteredTargets.Target target : recorded.get().targets()) {
+            try {
+                List<TargetHealth> health = elbV2Service.describeTargetHealth(recorded.get().region(),
+                        target.targetGroupArn(), List.of(target.toDescription()));
+                if (health.stream().anyMatch(th -> !"healthy".equals(th.getState()))) {
+                    return false;
+                }
+            } catch (Exception e) {
+                LOG.debugv("Could not read the health of {0}: {1}", target.targetGroupArn(), e.getMessage());
+            }
+        }
+        return true;
+    }
+
+    /**
      * Deregisters every target ECS recorded for a task, in every account. Only for startup, when
      * ECS holds no task at all: task state is memory-only, so each recorded target belongs to a
      * task of a previous run whose container is gone or is being removed, and Docker is free to
