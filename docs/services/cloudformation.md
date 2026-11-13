@@ -825,7 +825,8 @@ a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s 
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
 their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
 `NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
-`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`ServiceRegistries` are kept, and so is its `DesiredCount`: an update that leaves it out does not send it,
+so the stored count stays, while a new service without one starts at 1. A service's dropped
 `DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
 template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
 the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. A `Route`'s

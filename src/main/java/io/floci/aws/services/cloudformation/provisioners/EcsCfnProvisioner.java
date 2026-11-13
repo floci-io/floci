@@ -291,7 +291,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private void provisionService(StackResource r, JsonNode props, ProvisionContext ctx) {
         String clusterRef = ctx.resolveOptional(props, "Cluster");
         String taskDefinition = ctx.resolveOptional(props, "TaskDefinition");
-        int desiredCount = parseDesiredCount(ctx.resolveOptional(props, "DesiredCount"));
+        Integer desiredCount = parseDesiredCount(ctx.resolveOptional(props, "DesiredCount"));
         LaunchType launchType = parseEnum(LaunchType.class, ctx.resolveOptional(props, "LaunchType"));
         List<EcsLoadBalancer> loadBalancers =
                 parseLoadBalancers(props != null ? props.get("LoadBalancers") : null, ctx);
@@ -326,6 +326,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             update.setCluster(clusterRef);
             update.setService(serviceName);
             update.setTaskDefinition(taskDefinition);
+            // A missing count is left out of the update, as AWS omits it, so the stored count stays.
             update.setDesiredCount(desiredCount);
             update.setNetworkConfiguration(networkConfiguration);
             update.setDeploymentConfiguration(deploymentConfiguration);
@@ -346,7 +347,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             create.setCluster(clusterRef);
             create.setServiceName(serviceName);
             create.setTaskDefinition(taskDefinition);
-            create.setDesiredCount(desiredCount);
+            create.setDesiredCount(desiredCount != null ? desiredCount : 1);
             create.setLaunchType(launchType);
             create.setLoadBalancers(loadBalancers);
             create.setNetworkConfiguration(networkConfiguration);
@@ -405,7 +406,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             return restore;
         }
         restore.setTaskDefinition(prior.getTaskDefinition());
-        restore.setDesiredCount(prior.getDesiredCount());
+        if (update.getDesiredCount() != null) {
+            restore.setDesiredCount(prior.getDesiredCount());
+        }
         restore.setNetworkConfiguration(prior.getNetworkConfiguration());
         if (update.getCapacityProviderStrategy() != null) {
             restore.setCapacityProviderStrategy(Objects.requireNonNullElse(prior.getCapacityProviderStrategy(), List.of()));
@@ -868,10 +871,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /** DesiredCount defaults to 1 when absent; anything present has to be an integer. */
-    private static int parseDesiredCount(String value) {
+    /** An absent DesiredCount is null (1 at create, left out at update); anything present has to be an integer. */
+    private static Integer parseDesiredCount(String value) {
         if (value == null || value.isBlank()) {
-            return 1;
+            return null;
         }
         try {
             return Integer.parseInt(value.trim());
