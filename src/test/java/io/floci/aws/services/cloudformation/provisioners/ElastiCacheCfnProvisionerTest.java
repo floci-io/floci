@@ -203,7 +203,8 @@ class ElastiCacheCfnProvisionerTest {
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
         assertThrows(AwsException.class, () -> provisioner.provision(r,
-                props("{\"ClusterName\":\"app-cache\",\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("app-cache")));
+                props("{\"ClusterName\":\"app-cache\",\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
+                ctx("app-cache", "{\"ClusterName\":\"app-cache\",\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}")));
     }
 
     @Test
@@ -218,7 +219,8 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("old-id"));
+        provisioner.provision(r, props("{\"Engine\":\"valkey\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
+                ctx("old-id", "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"));
 
         assertNotEquals("old-id", r.getPhysicalId());
         assertEquals("6401", r.getAttributes().get("RedisEndpoint.Port"));
@@ -265,6 +267,13 @@ class ElastiCacheCfnProvisionerTest {
 
         assertNotEquals("old-id", r.getPhysicalId());
         assertTrue(provisioner.hasReplacementUpdate(r));
+
+        StackResource arns = resource("AWS::ElastiCache::CacheCluster", "Cluster");
+        provisioner.provision(arns, props(REDIS_CLUSTER.formatted(",\"SnapshotArns\":[\"arn:aws:s3:::b/2.rdb\"]")),
+                ctx("old-id", REDIS_CLUSTER.formatted(",\"SnapshotArns\":[\"arn:aws:s3:::b/1.rdb\"]")));
+
+        assertNotEquals("old-id", arns.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(arns));
     }
 
     @Test
@@ -294,7 +303,7 @@ class ElastiCacheCfnProvisionerTest {
 
         provisioner.provision(r, props("""
                 {"Engine":"memcached","CacheNodeType":"cache.t3.micro","NumCacheNodes":1}
-                """), ctx("cluster-1"));
+                """), ctx("cluster-1", "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"));
 
         assertEquals("6410", r.getAttributes().get("ConfigurationEndpoint.Port"));
         assertEquals("localhost", r.getAttributes().get("ConfigurationEndpoint.Address"));
@@ -574,7 +583,9 @@ class ElastiCacheCfnProvisionerTest {
         });
         StackResource r = resource("AWS::ElastiCache::CacheCluster", "Cluster");
 
-        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"), ctx("old-id"));
+        provisioner.provision(r, props("{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1}"),
+                ctx("old-id", "{\"Engine\":\"redis\",\"CacheNodeType\":\"cache.t3.micro\",\"NumCacheNodes\":1,"
+                        + "\"NetworkType\":\"dual_stack\"}"));
 
         assertNotEquals("old-id", r.getPhysicalId());
         verify(cache).createCacheCluster(any());
