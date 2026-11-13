@@ -56,7 +56,11 @@ public class RedshiftCredentialBroker implements Resettable {
     }
 
     public Optional<TempCredential> resolve(String accountId, String clusterId, String dbUser) {
-        return liveCredentials(key(accountId, clusterId, dbUser)).stream().findFirst();
+        List<TempCredential> live = liveCredentials(key(accountId, clusterId, dbUser));
+        if (live.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(live.get(live.size() - 1));
     }
 
     public Optional<TempCredential> authenticate(String accountId, String clusterId,

@@ -63,6 +63,9 @@ class RedshiftCredentialBrokerTest {
                 broker.classify("acc", "clus", "analyst", first.password()));
         assertEquals(RedshiftCredentialBroker.Match.MASTER_EQUIVALENT,
                 broker.classify("acc", "clus", "analyst", second.password()));
+        // Passwordless resolution (e.g. Data API DbUser) picks the most recently issued credential.
+        assertEquals(second.password(),
+                broker.resolve("acc", "clus", "analyst").orElseThrow().password());
     }
 
     @Test

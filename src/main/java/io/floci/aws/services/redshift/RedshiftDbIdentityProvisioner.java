@@ -126,10 +126,14 @@ public class RedshiftDbIdentityProvisioner {
     }
 
     private void createLoginRole(Connection connection, String roleName) throws SQLException {
-        String sql = "CREATE ROLE " + quoteIdentifier(roleName)
+        String quotedRole = quoteIdentifier(roleName);
+        String sql = "CREATE ROLE " + quotedRole
                 + " WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE";
         try {
             executeSql(connection, sql);
+            // PostgreSQL 15+ revokes CREATE on schema public from PUBLIC, whereas Redshift
+            // allows newly auto-created users to create tables in the default public schema.
+            executeSql(connection, "GRANT USAGE, CREATE ON SCHEMA public TO " + quotedRole);
         } catch (SQLException failure) {
             // Two concurrent logins with AutoCreate=true may race on CREATE ROLE.
             String state = failure.getSQLState();
