@@ -3654,27 +3654,9 @@ public class DynamoDbService {
                             "The parameter cannot be converted to a numeric value", 400);
                 }
             } else if (startsWithFunctionCall(valuePart, "if_not_exists")) {
-                // if_not_exists(attrRef, fallbackExpr) evaluates to:
-                //   attrRef's current value  — when attrRef exists in the item
-                //   fallbackExpr             — otherwise
-                // The result is always assigned to attrPath.
-                String[] args = extractFunctionArgs(valuePart);
-                if (args.length == 2) {
-                    String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
-                    String fallbackExpr = args[1].trim();
-                    JsonNode resolved;
-                    if (hasValueAtPath(snapshot, checkAttr, exprAttrNames)) {
-                        // attrRef exists — evaluate to its current value
-                        resolved = getValueAtPath(snapshot, checkAttr, exprAttrNames);
-                    } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
-                        resolved = exprAttrValues.get(fallbackExpr);
-                    } else {
-                        // fallback is itself an attribute reference
-                        resolved = getValueAtPath(snapshot, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
-                    }
-                    if (resolved != null) {
-                        setValueAtPath(item, attrPath, resolved, exprAttrNames);
-                    }
+                JsonNode resolved = evaluateSetExpr(snapshot, valuePart, exprAttrNames, exprAttrValues);
+                if (resolved != null) {
+                    setValueAtPath(item, attrPath, resolved, exprAttrNames);
                 }
             } else if (startsWithFunctionCall(valuePart.toLowerCase(), "list_append")) {
                 int open = valuePart.indexOf('(');
@@ -3729,13 +3711,7 @@ public class DynamoDbService {
         return clause;
     }
 
-    /**
-     * Strip balanced outer parentheses from a SET-action RHS expression, repeatedly,
-     * so that producers wrapping arithmetic or function calls in parens (e.g.
-     * "(c - :v)" or "((if_not_exists(c, :d) - :v))") parse identically to the
-     * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
-     * not actually enclose the whole expression.
-     */
+    /** Removes parentheses around the whole operand, so "(c - :v)" reads as "c - :v" and "(a) - (b)" stays. */
     static String stripOuterParens(String expr) {
         String s = expr.trim();
         while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
@@ -3752,20 +3728,17 @@ public class DynamoDbService {
         return s;
     }
 
-    private JsonNode evaluateSetExpr(ObjectNode item, String expr,
+    private JsonNode evaluateSetExpr(ObjectNode item, String operand,
                                      JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        String expr = stripOuterParens(operand);
         if (startsWithFunctionCall(expr.toLowerCase(), "if_not_exists")) {
             String[] args = extractFunctionArgs(expr);
             if (args.length == 2) {
-                String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
-                String fallbackExpr = args[1].trim();
+                String checkAttr = resolveAttributeName(stripOuterParens(args[0]), exprAttrNames);
                 if (hasValueAtPath(item, checkAttr, exprAttrNames)) {
                     return getValueAtPath(item, checkAttr, exprAttrNames);
-                } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
-                    return exprAttrValues.get(fallbackExpr);
-                } else {
-                    return getValueAtPath(item, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
                 }
+                return evaluateSetExpr(item, args[1], exprAttrNames, exprAttrValues);
             }
             return null;
         } else if (expr.startsWith(":") && exprAttrValues != null) {
