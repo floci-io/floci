@@ -145,7 +145,7 @@ class DurableExecutionServicePersistenceTest {
         before.script((service, event) -> {
             service.checkpoint(arn(event), token(event), null, List.of(new DurableOperationUpdate("i1", null, null,
                     DurableOperationType.CHAINED_INVOKE, "ChainedInvoke", DurableOperationAction.START, "{\"n\":1}",
-                    null, null, null, null, null, null, "plain-fn", null)));
+                    null, null, null, null, null, null, "plain-fn", null, null)));
             return "{\"Status\":\"PENDING\"}";
         });
         String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
@@ -180,7 +180,7 @@ class DurableExecutionServicePersistenceTest {
         before.script((service, event) -> {
             service.checkpoint(arn(event), token(event), null, List.of(new DurableOperationUpdate("i1", null, null,
                     DurableOperationType.CHAINED_INVOKE, "ChainedInvoke", DurableOperationAction.START, null,
-                    null, null, null, null, null, null, "child-fn:1", null)));
+                    null, null, null, null, null, null, "child-fn:1", null, null)));
             return "{\"Status\":\"PENDING\"}";
         });
         String executionArn = first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}",
@@ -264,7 +264,7 @@ class DurableExecutionServicePersistenceTest {
             service.checkpoint(arn(event), token(event), null, List.of(chainedStart("i1", "plain-fn", "{\"n\":1}"),
                     new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
                             DurableOperationAction.SUCCEED, "\"closed\"", null, null, null, null, null, null, null,
-                            null)));
+                            null, null)));
             return "{\"Status\":\"SUCCEEDED\",\"Result\":\"\"}";
         });
         first.start(new StartRequest(ACCOUNT, "us-east-1", "durable-fn", "1", "exec-1", "{}", false, null));
@@ -298,7 +298,7 @@ class DurableExecutionServicePersistenceTest {
 
     private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
-                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null, null);
     }
 
     private DurableExecutionService newService(StorageFactory storage, ScriptedInvoker invoker) {
@@ -314,12 +314,12 @@ class DurableExecutionServicePersistenceTest {
 
     private static DurableOperationUpdate update(String id, DurableOperationType type, DurableOperationAction action,
                                                  String payload, Integer waitSeconds) {
-        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null, null, null, null, null);
+        return new DurableOperationUpdate(id, null, null, type, null, action, payload, null, null, waitSeconds, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
-                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, null, null, null);
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, null, null, null, null);
     }
 
     private static String arn(JsonNode event) {

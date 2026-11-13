@@ -37,6 +37,7 @@ public class DurableOperation {
     /** The FunctionName of a chained invoke, as the function sent it. */
     private String chainedFunctionName;
     private String chainedTenantId;
+    private String chainedTraceHeader;
     /** Set when a chained invoke runs a durable function. Unset, the function runs as a plain invocation. */
     private String childExecutionArn;
     /** Position in the execution's change log. The handler is only shown operations newer than it has seen. */
@@ -68,6 +69,7 @@ public class DurableOperation {
         copy.heartbeatDeadline = heartbeatDeadline;
         copy.chainedFunctionName = chainedFunctionName;
         copy.chainedTenantId = chainedTenantId;
+        copy.chainedTraceHeader = chainedTraceHeader;
         copy.childExecutionArn = childExecutionArn;
         copy.changeSequence = changeSequence;
         return copy;
@@ -137,6 +139,9 @@ public class DurableOperation {
 
     public String getChainedTenantId() { return chainedTenantId; }
     public void setChainedTenantId(String chainedTenantId) { this.chainedTenantId = chainedTenantId; }
+
+    public String getChainedTraceHeader() { return chainedTraceHeader; }
+    public void setChainedTraceHeader(String chainedTraceHeader) { this.chainedTraceHeader = chainedTraceHeader; }
 
     public String getChildExecutionArn() { return childExecutionArn; }
     public void setChildExecutionArn(String childExecutionArn) { this.childExecutionArn = childExecutionArn; }

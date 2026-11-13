@@ -2,6 +2,9 @@ package io.floci.aws.services.emr.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /** An EMR instance fleet (MASTER | CORE | TASK). */
 @RegisterForReflection
 public class EmrInstanceFleet {
@@ -9,6 +12,7 @@ public class EmrInstanceFleet {
     private String id;
     private String name;
     private String instanceFleetType;
+    private List<String> instanceTypes = new ArrayList<>();
     private int targetOnDemandCapacity;
     private int targetSpotCapacity;
     private int provisionedOnDemandCapacity;
@@ -25,6 +29,10 @@ public class EmrInstanceFleet {
 
     public String getInstanceFleetType() { return instanceFleetType; }
     public void setInstanceFleetType(String instanceFleetType) { this.instanceFleetType = instanceFleetType; }
+
+    /** The instance types of its InstanceTypeConfigs, in their order. */
+    public List<String> getInstanceTypes() { return instanceTypes; }
+    public void setInstanceTypes(List<String> instanceTypes) { this.instanceTypes = instanceTypes; }
 
     public int getTargetOnDemandCapacity() { return targetOnDemandCapacity; }
     public void setTargetOnDemandCapacity(int targetOnDemandCapacity) {

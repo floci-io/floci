@@ -26,6 +26,7 @@ import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 
@@ -63,6 +64,14 @@ public class ElbV2HealthChecker implements Resettable {
             return tg.getPort();
         }
         return 80;
+    }
+
+    /**
+     * Whether {@code a} and {@code b} are the same registration in {@code tg}: the same Id on the same
+     * effective port, which is how RegisterTargets and DeregisterTargets tell registrations apart.
+     */
+    public static boolean sameTarget(TargetDescription a, TargetDescription b, TargetGroup tg) {
+        return Objects.equals(a.getId(), b.getId()) && effectivePort(a, tg) == effectivePort(b, tg);
     }
 
     public void startMonitoring(TargetGroup tg) {
