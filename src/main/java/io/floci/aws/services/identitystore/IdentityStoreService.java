@@ -413,8 +413,7 @@ public class IdentityStoreService implements Resettable {
     }
 
     private User requireUser(String storeId, String userId) {
-        return users.getForAccount(GLOBAL_PARTITION, userKey(storeId, userId))
-                .orElseThrow(() -> notFound("User not found: " + userId));
+        return findUser(storeId, userId).orElseThrow(() -> notFound("User not found: " + userId));
     }
 
     private Membership requireMembership(String storeId, String membershipId) {
