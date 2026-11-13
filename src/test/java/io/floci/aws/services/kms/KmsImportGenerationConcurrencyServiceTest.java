@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class KmsImportGenerationConcurrencyTest {
+class KmsImportGenerationConcurrencyServiceTest {
     private static final String REGION = "us-east-1";
 
     @Test

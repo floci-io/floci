@@ -9,6 +9,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.SignedMarkers;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -71,7 +72,7 @@ public class KmsService implements ResourceProvider {
     // Hold from resolving a stored key through publishing its changes. Rotation publishes a
     // copy, so a writer holding an older live storage value must never put that value back.
     // Replica registration uses the same lock so rotation cannot miss a new replica.
-    private final Object backingKeyMaterialLock = new Object();
+    private final StripedLocks backingKeyMaterialLocks = new StripedLocks(256);
     // Guards the scan-and-mint sequence in ensureAwsManagedKeys so two concurrent first reads of
     // a region's alias namespace cannot each mint a key for the same alias/aws/* name.
     private final Object awsManagedKeyLock = new Object();
@@ -238,7 +239,7 @@ public class KmsService implements ResourceProvider {
         }
         if (EXTERNAL_ORIGIN.equals(key.getOrigin())) {
             if (!hasBackingKeyMaterialSafely(key) && key.getPrivateKeyEncoded() != null) {
-                synchronized (backingKeyMaterialLock) {
+                synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
                     if (!hasBackingKeyMaterial(key)) {
                         byte[] material = decodeBackingMaterial(key.getPrivateKeyEncoded());
                         String materialId = key.getKeyMaterialId() == null
@@ -253,7 +254,7 @@ public class KmsService implements ResourceProvider {
         if (hasBackingKeyMaterialSafely(key)) {
             return key;
         }
-        synchronized (backingKeyMaterialLock) {
+        synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
             KmsKey current = keyStore.get(region + "::" + key.getKeyId()).orElse(key);
             if (hasBackingKeyMaterial(current)) {
                 return current;
@@ -271,7 +272,7 @@ public class KmsService implements ResourceProvider {
     }
 
     private boolean hasBackingKeyMaterialSafely(KmsKey key) {
-        synchronized (backingKeyMaterialLock) {
+        synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
             return hasBackingKeyMaterial(key);
         }
     }
@@ -311,12 +312,12 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey replicateKey(String keyId, String description, String policy,
                                Map<String, String> tags, String replicaRegion, String primaryRegion) {
-        synchronized (backingKeyMaterialLock) {
-            if (replicaRegion == null || replicaRegion.isBlank()) {
-                throw new AwsException("ValidationException", "ReplicaRegion is required.", 400);
-            }
-
-            KmsKey primary = resolveKey(keyId, primaryRegion);
+        if (replicaRegion == null || replicaRegion.isBlank()) {
+            throw new AwsException("ValidationException", "ReplicaRegion is required.", 400);
+        }
+        String storedKeyId = resolveStoredKeyId(keyId, primaryRegion);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey primary = resolveKey(keyId, storedKeyId, primaryRegion);
             if (!primary.isMultiRegion() || !MULTI_REGION_PRIMARY.equals(primary.getMultiRegionKeyType())) {
                 throw new AwsException("UnsupportedOperationException",
                         primary.getArn() + " is not a multi-Region primary key.", 400);
@@ -758,8 +759,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void scheduleKeyDeletion(String keyId, int pendingWindowInDays, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:ScheduleKeyDeletion");
             requireNotPendingDeletion(key);
             key.setKeyState("PendingDeletion");
@@ -774,8 +776,9 @@ public class KmsService implements ResourceProvider {
      * state that no cryptographic operation could actually serve.
      */
     public void cancelKeyDeletion(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:CancelKeyDeletion");
             if (lacksImportedKeyMaterial(key)) {
                 key.setKeyState(PENDING_IMPORT);
@@ -801,8 +804,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void putKeyPolicy(String keyId, String policy, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:PutKeyPolicy");
             key.setPolicy(policy);
             keyStore.put(region + "::" + key.getKeyId(), key);
@@ -832,8 +836,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void updateKeyDescription(String keyId, String description, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:UpdateKeyDescription");
             requireNotPendingDeletion(key);
             key.setDescription(description);
@@ -862,8 +867,9 @@ public class KmsService implements ResourceProvider {
         if (limit != null && (limit < 1 || limit > MAX_LIST_KEYS_LIMIT)) {
             throw SmithyValidationErrors.validationException("Limit must be between 1 and 1000.");
         }
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             if (includeKeyMaterial != null) {
                 validateRotationKeySpec(key);
             }
@@ -902,8 +908,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void enableKeyRotation(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:EnableKeyRotation");
             validateRotationOrigin(key);
             validateKeyIsUsableForCryptoOperations(key);
@@ -915,8 +922,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void disableKeyRotation(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:DisableKeyRotation");
             validateRotationOrigin(key);
             validateKeyIsUsableForCryptoOperations(key);
@@ -927,8 +935,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void enableKey(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:EnableKey");
             requireNotPendingDeletion(key);
             requireImportedKeyMaterial(key);
@@ -940,8 +949,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void disableKey(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:DisableKey");
             requireNotPendingDeletion(key);
             requireImportedKeyMaterial(key);
@@ -954,8 +964,9 @@ public class KmsService implements ResourceProvider {
 
     private static final int ON_DEMAND_ROTATION_LIMIT = 25;
     public String rotateKeyOnDemand(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:RotateKeyOnDemand");
             validateKeyIsUsableForCryptoOperations(key);
             if (MULTI_REGION_REPLICA.equals(key.getMultiRegionKeyType())) {
@@ -1025,8 +1036,9 @@ public class KmsService implements ResourceProvider {
     public ImportParameters getParametersForImport(String keyId, String wrappingAlgorithm,
                                                    String wrappingKeySpec, String region) {
         String keyArn;
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireExternalOrigin(key);
             requireNotPendingDeletion(key);
             KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm, wrappingKeySpec);
@@ -1039,8 +1051,8 @@ public class KmsService implements ResourceProvider {
         parameters.setWrappingAlgorithm(wrappingAlgorithm);
         parameters.setImportToken(newImportToken());
         parameters.setParametersValidTo(Instant.now().plus(IMPORT_PARAMETERS_VALIDITY).getEpochSecond());
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyArn, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyArn, storedKeyId, region);
             requireExternalOrigin(key);
             requireNotPendingDeletion(key);
             KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm, wrappingKeySpec);
@@ -1064,8 +1076,9 @@ public class KmsService implements ResourceProvider {
      */
     public KmsKey importKeyMaterial(String keyId, String importToken, byte[] encryptedKeyMaterial,
                                     String expirationModel, Long validTo, String importType, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireExternalOrigin(key);
             requireNotPendingDeletion(key);
             validateImportType(importType, key);
@@ -1108,7 +1121,7 @@ public class KmsService implements ResourceProvider {
      * material after a delete or expiry reinstates the id that earlier ciphertext names.
      */
     private void installImportedBackingKey(KmsKey key, String keyMaterialId, byte[] material) {
-        synchronized (backingKeyMaterialLock) {
+        synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
             Map<String, String> backingKeys = new HashMap<>();
             backingKeys.put(keyMaterialId, Base64.getEncoder().encodeToString(material));
             key.setBackingKeys(backingKeys);
@@ -1121,8 +1134,9 @@ public class KmsService implements ResourceProvider {
      * as it does on AWS: PendingDeletion outranks the PendingImport this would otherwise set.
      */
     public KmsKey deleteImportedKeyMaterial(String keyId, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireExternalOrigin(key);
             clearImportedKeyMaterial(key);
             keyStore.put(region + "::" + key.getKeyId(), key);
@@ -1157,7 +1171,7 @@ public class KmsService implements ResourceProvider {
      * a later re-import, so what the key was originally given has to outlive the material itself.
      */
     private void clearImportedKeyMaterial(KmsKey key) {
-        synchronized (backingKeyMaterialLock) {
+        synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
             key.setPrivateKeyEncoded(null);
             key.setBackingKeys(new HashMap<>());
             key.setCurrentBackingKeyId(null);
@@ -1838,7 +1852,7 @@ public class KmsService implements ResourceProvider {
     private byte[] encryptEnvelope(KmsKey key, byte[] plaintext, Map<String, String> encryptionContext) {
         String backingKeyId;
         byte[] dek;
-        synchronized (backingKeyMaterialLock) {
+        synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
             backingKeyId = key.getCurrentBackingKeyId();
             String materialB64 = key.getBackingKeys() == null ? null : key.getBackingKeys().get(backingKeyId);
             if (materialB64 == null) {
@@ -1885,7 +1899,7 @@ public class KmsService implements ResourceProvider {
      */
     private byte[] decryptEnvelopeV3(EnvelopeV3 envelope, KmsKey key, Map<String, String> encryptionContext) {
         String materialB64;
-        synchronized (backingKeyMaterialLock) {
+        synchronized (backingKeyMaterialLocks.lockFor(key.getKeyId())) {
             materialB64 = key.getBackingKeys() == null ? null : key.getBackingKeys().get(envelope.backingKeyId());
         }
         if (materialB64 == null) {
@@ -2262,8 +2276,9 @@ public class KmsService implements ResourceProvider {
     // ──────────────────────────── Tags ────────────────────────────
 
     public void tagResource(String keyId, Map<String, String> tags, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:TagResource");
             requireNotPendingDeletion(key);
             ReservedTags.rejectReservedTagsOnUpdate(tags);
@@ -2273,8 +2288,9 @@ public class KmsService implements ResourceProvider {
     }
 
     public void untagResource(String keyId, List<String> tagKeys, String region) {
-        synchronized (backingKeyMaterialLock) {
-            KmsKey key = resolveKey(keyId, region);
+        String storedKeyId = resolveStoredKeyId(keyId, region);
+        synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
+            KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:UntagResource");
             requireNotPendingDeletion(key);
             tagKeys.forEach(key.getTags()::remove);
@@ -2285,8 +2301,11 @@ public class KmsService implements ResourceProvider {
     // ──────────────────────────── Helpers ────────────────────────────
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {
-        synchronized (backingKeyMaterialLock) {
-            String keyId = resolveStoredKeyId(keyIdOrArn, region);
+        return resolveKey(keyIdOrArn, resolveStoredKeyId(keyIdOrArn, region), region);
+    }
+
+    private KmsKey resolveKey(String keyIdOrArn, String keyId, String region) {
+        synchronized (backingKeyMaterialLocks.lockFor(keyId)) {
             KmsKey key = keyStore.get(region + "::" + keyId)
                     .orElseThrow(() -> keyNotFound(keyIdOrArn, keyId, region));
             key = expireImportedKeyMaterialIfDue(key, region);

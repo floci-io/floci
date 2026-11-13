@@ -1,5 +1,6 @@
 package io.floci.aws.services.kms;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -8,10 +9,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.InvalidMarkerException;
@@ -113,8 +111,6 @@ class KmsKeyRotationsIntegrationTest {
     }
 
     private KmsClient client() {
-        return KmsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).build();
+        return AwsTestClients.create(KmsClient.builder(), "test", Region.US_EAST_1, endpoint);
     }
 }

@@ -1,14 +1,15 @@
 package io.floci.aws.services.kms;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.kms.model.KmsKey;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
-import java.lang.management.ManagementFactory;
-import java.lang.management.ThreadInfo;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -40,7 +41,7 @@ class KmsRotationConcurrencyServiceTest {
             return service.encrypt(key.getKeyId(), PLAINTEXT, REGION);
         });
         try {
-            rotation.awaitBlockedOrFinished(metadata.thread());
+            ThreadStates.awaitBlockedOrDone(rotation.thread());
         } finally {
             keys.resume();
         }
@@ -68,7 +69,7 @@ class KmsRotationConcurrencyServiceTest {
             return null;
         });
         try {
-            deletion.awaitBlockedOrFinished(rotation.thread());
+            ThreadStates.awaitBlockedOrDone(deletion.thread());
         } finally {
             keys.resume();
         }
@@ -98,7 +99,7 @@ class KmsRotationConcurrencyServiceTest {
             return service.encrypt(primary.getKeyId(), PLAINTEXT, REGION);
         });
         try {
-            rotation.awaitBlockedOrFinished(replication.thread());
+            ThreadStates.awaitBlockedOrDone(rotation.thread());
         } finally {
             keys.resume();
         }
@@ -112,6 +113,55 @@ class KmsRotationConcurrencyServiceTest {
         assertEquals(service.listKeyRotations(primary.getKeyId(), null, REGION, null, null).items(),
                 service.listKeyRotations(primary.getKeyId(), null, REPLICA_REGION, null, null).items());
         assertArrayEquals(PLAINTEXT, service.decrypt(ciphertext, REPLICA_REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void anUnrelatedKeyRemainsUsableWhileAnotherKeyIsPublishing(boolean rotate) throws Exception {
+        PausingKeys keys = new PausingKeys();
+        KmsService service = service(keys);
+        KmsKey blocked = service.createKey("blocked", REGION);
+        KmsKey other = service.createKey("unrelated", REGION);
+        while (Math.floorMod(blocked.getKeyId().hashCode(), 256)
+                == Math.floorMod(other.getKeyId().hashCode(), 256)) {
+            other = service.createKey("unrelated", REGION);
+        }
+        String otherId = other.getKeyId();
+        keys.pauseWhen((name, value) -> name.equals(REGION + "::" + blocked.getKeyId()));
+        Worker<Void> writer = start(() -> {
+            if (rotate) {
+                service.rotateKeyOnDemand(blocked.getKeyId(), REGION);
+            } else {
+                service.updateKeyDescription(blocked.getKeyId(), "after", REGION);
+            }
+            return null;
+        });
+        keys.awaitPaused();
+        Worker<byte[]> independent = start(() -> {
+            assertEquals(otherId, service.describeKey(otherId, REGION).getKeyId());
+            service.updateKeyDescription(otherId, "still usable", REGION);
+            byte[] encrypted = service.encrypt(otherId, PLAINTEXT, REGION);
+            return service.decrypt(encrypted, REGION);
+        });
+        try {
+            assertArrayEquals(PLAINTEXT, independent.future().get(2, TimeUnit.SECONDS));
+        } finally {
+            keys.resume();
+            writer.result();
+            independent.result();
+        }
+        assertEquals("still usable", service.describeKey(otherId, REGION).getDescription());
+    }
+
+    @Test
+    void writersPreserveMalformedKeyArnErrors() {
+        KmsService service = service(new PausingKeys());
+        String arn = "arn:aws:kms:" + REGION + ":000000000000:key/invalid-id";
+        AwsException rotation = assertThrows(AwsException.class, () -> service.rotateKeyOnDemand(arn, REGION));
+        AwsException metadata = assertThrows(AwsException.class,
+                () -> service.updateKeyDescription(arn, "updated", REGION));
+        assertEquals("Invalid keyId invalid-id", rotation.getMessage());
+        assertEquals(rotation.getMessage(), metadata.getMessage());
     }
 
     private static KmsService service(PausingKeys keys) {
@@ -132,26 +182,6 @@ class KmsRotationConcurrencyServiceTest {
     }
 
     private record Worker<T>(Thread thread, CompletableFuture<T> future) {
-        /**
-         * The fixed writer blocks on the key lock. The old implementation instead finishes
-         * while the first put is paused, forcing the lost-update interleaving. Both paths
-         * release the storage gate before assertions, so this tests persisted behavior.
-         */
-        private void awaitBlockedOrFinished(Thread owner) {
-            assertTimeoutPreemptively(Duration.ofSeconds(5), () -> {
-                while (!future.isDone()) {
-                    if (Thread.currentThread().isInterrupted()) {
-                        throw new InterruptedException("publication wait interrupted");
-                    }
-                    ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(thread.threadId());
-                    if (info != null && info.getLockOwnerId() == owner.threadId()) {
-                        return;
-                    }
-                    Thread.onSpinWait();
-                }
-            });
-        }
-
         private T result() throws Exception {
             return future.get(5, TimeUnit.SECONDS);
         }
