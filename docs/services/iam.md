@@ -1900,6 +1900,8 @@ Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS r
 
 The startup banner reports the effective state (`IAM: policy enforcement enabled` / `disabled`). If requests you expect to be denied keep succeeding, check that line first: the flag is only read under the name below, and any other spelling (for example `FLOCI_IAM_STRICT_VALIDATION`, which does not exist) is silently ignored, leaving the permissive default in place.
 
+With enforcement off, the first request signed with an IAM identity's credentials logs one warning: an IAM user's access key, or a session Floci issued (an assumed role, a Lambda function's execution role). The warning names the account, the access key id and the flag, since Floci allowed the request without evaluating its policies. The `test` key and bare account-id keys are the account root's and never trigger it.
+
 Direct calls include `aws:ViaAWSService=false` in the shared authorization context,
 including calls made with service-role credentials or directly by service principals.
 This makes Boolean conditions distinguish direct access from forward access sessions.

@@ -217,6 +217,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private final Clock clock;
     private final ResourceInfo resourceInfo;
     private final Instance<S3Service> s3ServiceProvider;
+    private final UnenforcedIamCredentialNotice unenforcedCredentialNotice;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -257,6 +258,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.clock = clock;
         this.resourceInfo = resourceInfo;
         this.s3ServiceProvider = s3ServiceProvider;
+        this.unenforcedCredentialNotice = new UnenforcedIamCredentialNotice(iamService);
     }
 
     /** Package-private constructor for callers predating s3ServiceProvider. */
@@ -350,6 +352,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     @Override
     public void filter(ContainerRequestContext ctx) {
         if (!config.services().iam().enforcementEnabled()) {
+            // AccountContextFilter has already read the request's access key id and account.
+            unenforcedCredentialNotice.observe(requestContext.getAccessKeyId(), requestContext.getAccountId());
             return;
         }
         ProtocolClaim rpcV2Route = rpcV2RouteClaim(ctx);

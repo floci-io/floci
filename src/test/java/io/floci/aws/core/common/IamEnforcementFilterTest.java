@@ -20,6 +20,7 @@ import io.floci.aws.services.s3.S3Controller;
 import io.floci.aws.services.s3.S3ScratchSpace;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.scheduler.SchedulerController;
+import io.floci.aws.testutil.LogCapture;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -45,6 +46,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -175,6 +178,24 @@ class IamEnforcementFilterTest {
         newFilter().filter(request);
 
         verify(arnBuilder).buildResources("route53", action, request, "future-1", "222233334444", partition);
+    }
+
+    @Test
+    void withEnforcementOffARequestSignedByAnIamUsersKeyIsAllowedAndWarnedAbout() {
+        when(iamConfig.enforcementEnabled()).thenReturn(false);
+        when(iamService.isKnownAccessKey("AKIAUSERKEY")).thenReturn(true);
+        requestContext.setAccessKeyId("AKIAUSERKEY");
+        requestContext.setAccountId("123456789012");
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        IamEnforcementFilter filter = newFilter();
+
+        List<LogRecord> records = LogCapture.capture(UnenforcedIamCredentialNotice.class, () -> {
+            filter.filter(request);
+            filter.filter(request);
+        });
+
+        verify(request, never()).abortWith(any());
+        assertEquals(List.of(Level.WARNING), records.stream().map(LogRecord::getLevel).toList());
     }
 
     @Test
