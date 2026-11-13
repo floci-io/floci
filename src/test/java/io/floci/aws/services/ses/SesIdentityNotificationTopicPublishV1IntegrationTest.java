@@ -87,16 +87,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                 .extract().jsonPath().getString("Attributes.QueueArn");
         assertNotNull(queueArn);
 
-        topicArn = given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH)
-                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
-                .body("{\"Name\":\"ses-id-notif-topic\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().jsonPath().getString("TopicArn");
+        topicArn = createSnsTopic(SNS_AUTH, "ses-id-notif-topic");
         assertNotNull(topicArn);
 
         given()
@@ -258,16 +249,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     void aDeletedBounceTopicIsTakenOutOfTheIdentityAndForwardingTurnsBackOn() {
         String gone = "id-notif-gone@floci.test";
         verifyEmailIdentity(gone);
-        String goneTopic = given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH)
-                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
-                .body("{\"Name\":\"ses-id-notif-gone-topic\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().jsonPath().getString("TopicArn");
+        String goneTopic = createSnsTopic(SNS_AUTH, "ses-id-notif-gone-topic");
         setIdentityNotificationTopic(gone, "Bounce", goneTopic);
         setIdentityNotificationTopic(gone, "Complaint", goneTopic);
         given()
@@ -280,15 +262,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                 .post("/")
         .then()
                 .statusCode(200);
-        given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH)
-                .header("X-Amz-Target", "SNS_20100331.DeleteTopic")
-                .body("{\"TopicArn\":\"" + goneTopic + "\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200);
+        deleteSnsTopic(SNS_AUTH, goneTopic);
 
         sendEmail(gone, "bounce@simulator.amazonses.com", "id-notif-gone");
 
@@ -325,16 +299,8 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
     @Test
     @Order(12)
     void aTopicOfAnotherRegionIsRefused() {
-        String elsewhere = given()
-                .contentType(JSON_10)
-                .header("Authorization", SNS_AUTH.replace("us-east-1", "us-west-2"))
-                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
-                .body("{\"Name\":\"ses-id-notif-elsewhere-topic\"}")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().jsonPath().getString("TopicArn");
+        String elsewhereAuth = SNS_AUTH.replace("us-east-1", "us-west-2");
+        String elsewhere = createSnsTopic(elsewhereAuth, "ses-id-notif-elsewhere-topic");
 
         try {
             setIdentityNotificationTopicRaw(SENDER, "Delivery",
@@ -342,15 +308,7 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                     .statusCode(400)
                     .body(containsString("<Message>SNS topic " + elsewhere + " is invalid.</Message>"));
         } finally {
-            given()
-                    .contentType(JSON_10)
-                    .header("Authorization", SNS_AUTH.replace("us-east-1", "us-west-2"))
-                    .header("X-Amz-Target", "SNS_20100331.DeleteTopic")
-                    .body("{\"TopicArn\":\"" + elsewhere + "\"}")
-            .when()
-                    .post("/")
-            .then()
-                    .statusCode(200);
+            deleteSnsTopic(elsewhereAuth, elsewhere);
         }
     }
 
@@ -415,6 +373,31 @@ class SesIdentityNotificationTopicPublishV1IntegrationTest {
                         + "failed to satisfy constraint: Member must not be null; "
                         + "Value at &apos;notificationType&apos; failed to satisfy constraint: "
                         + "Member must not be null</Message>"));
+    }
+
+    private static String createSnsTopic(String auth, String name) {
+        return given()
+                .contentType(JSON_10)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", "SNS_20100331.CreateTopic")
+                .body("{\"Name\":\"" + name + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .extract().jsonPath().getString("TopicArn");
+    }
+
+    private static void deleteSnsTopic(String auth, String topicArn) {
+        given()
+                .contentType(JSON_10)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", "SNS_20100331.DeleteTopic")
+                .body("{\"TopicArn\":\"" + topicArn + "\"}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
     }
 
     private ValidatableResponse setIdentityNotificationTopicRaw(String identity, String notificationType,
