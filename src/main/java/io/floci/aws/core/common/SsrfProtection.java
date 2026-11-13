@@ -19,7 +19,8 @@ public final class SsrfProtection {
     /**
      * Narrower than {@link #isBlockedAddress}: only the addresses cloud instance-metadata
      * services listen on, i.e. IPv4 and IPv6 link-local ({@code 169.254.0.0/16}, {@code fe80::/10})
-     * and the AWS IPv6 metadata address {@code fd00:ec2::254}. For callers that must still reach
+     * and the AWS IPv6 ({@code fd00:ec2::254}) and Alibaba ({@code 100.100.100.200}) metadata addresses.
+     * For callers that must still reach
      * loopback and private networks, such as a local emulator proxying to a neighbouring container.
      */
     public static boolean isMetadataAddress(InetAddress address) {
@@ -29,11 +30,19 @@ public final class SsrfProtection {
         byte[] bytes = address.getAddress();
         if (bytes.length == 16) {
             if (isIpv4MappedAddress(bytes)) {
-                return Byte.toUnsignedInt(bytes[12]) == 169 && Byte.toUnsignedInt(bytes[13]) == 254;
+                return isMetadataIpv4Address(bytes, 12);
             }
             return isAwsIpv6Metadata(bytes);
         }
-        return false;
+        return bytes.length == 4 && isMetadataIpv4Address(bytes, 0);
+    }
+
+    private static boolean isMetadataIpv4Address(byte[] bytes, int offset) {
+        int first = Byte.toUnsignedInt(bytes[offset]);
+        int second = Byte.toUnsignedInt(bytes[offset + 1]);
+        return (first == 169 && second == 254)
+                || (first == 100 && second == 100 && Byte.toUnsignedInt(bytes[offset + 2]) == 100
+                && Byte.toUnsignedInt(bytes[offset + 3]) == 200);
     }
 
     /**

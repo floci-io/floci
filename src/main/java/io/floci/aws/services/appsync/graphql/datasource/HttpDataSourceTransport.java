@@ -24,7 +24,6 @@ import org.jboss.logging.Logger;
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -39,7 +38,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-/** Bounded HTTP transport for unsigned public data-source endpoints. */
+/** Bounded HTTP transport for unsigned data-source endpoints, including local development services. */
 @ApplicationScoped
 class HttpDataSourceTransport implements AutoCloseable {
 
@@ -91,10 +90,12 @@ class HttpDataSourceTransport implements AutoCloseable {
 
     static DnsResolver checkedResolver(DnsResolver delegate) {
         return new ValidatingDnsResolver(delegate, (host, addresses) -> {
-            for (InetAddress address : addresses) {
-                if (SsrfProtection.isBlockedAddress(address)) {
-                    throw new UnknownHostException("HTTP data source endpoint resolves to a private or reserved address");
-                }
+            try {
+                SsrfProtection.rejectMetadataAddresses(addresses, host);
+            } catch (IOException e) {
+                UnknownHostException failure = new UnknownHostException("HTTP data source endpoint resolves to a metadata address");
+                failure.initCause(e);
+                throw failure;
             }
         });
     }

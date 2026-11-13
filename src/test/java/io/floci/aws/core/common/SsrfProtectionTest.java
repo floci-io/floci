@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import org.junit.jupiter.api.Test;
 
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 
@@ -25,6 +26,21 @@ class SsrfProtectionTest {
     @Test
     void metadataAddressCoversIpv4MappedLinkLocal() throws UnknownHostException {
         assertTrue(SsrfProtection.isMetadataAddress(InetAddress.getByName("::ffff:169.254.169.254")));
+    }
+
+    @Test
+    void metadataAddressCoversAlibabaIncludingMappedIpv6() throws UnknownHostException {
+        assertTrue(SsrfProtection.isMetadataAddress(InetAddress.getByName("100.100.100.200")));
+        byte[] mapped = new byte[16];
+        mapped[10] = (byte) 0xff;
+        mapped[11] = (byte) 0xff;
+        mapped[12] = 100;
+        mapped[13] = 100;
+        mapped[14] = 100;
+        mapped[15] = (byte) 200;
+        assertTrue(SsrfProtection.isMetadataAddress(Inet6Address.getByAddress(null, mapped, -1)));
+        assertFalse(SsrfProtection.isMetadataAddress(InetAddress.getByName("100.100.100.199")));
+        assertFalse(SsrfProtection.isMetadataAddress(InetAddress.getByName("100.100.100.201")));
     }
 
     @Test

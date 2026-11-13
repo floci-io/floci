@@ -1,7 +1,6 @@
 package io.floci.aws.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceRegistry;
@@ -39,8 +38,6 @@ class AwsIamHttpDataSourceInvokerTest {
     private final IamService iam = mock(IamService.class);
     private final ServiceRoleAuthorizer authorizer = mock(ServiceRoleAuthorizer.class);
     private final ServiceRegistry services = mock(ServiceRegistry.class);
-    private final EmulatorConfig config = mock(EmulatorConfig.class);
-    private final EmulatorConfig.IamServiceConfig iamConfig = mock(EmulatorConfig.IamServiceConfig.class);
     private final HttpServer server = mock(HttpServer.class);
     private final HttpDataSourceTransport transport = mock(HttpDataSourceTransport.class);
     private DataSource source;
@@ -49,10 +46,6 @@ class AwsIamHttpDataSourceInvokerTest {
 
     @BeforeEach
     void setUp() {
-        EmulatorConfig.ServicesConfig serviceConfig = mock(EmulatorConfig.ServicesConfig.class);
-        when(config.services()).thenReturn(serviceConfig);
-        when(serviceConfig.iam()).thenReturn(iamConfig);
-        when(iamConfig.enforcementEnabled()).thenReturn(true);
         when(services.isServiceEnabled("scheduler")).thenReturn(true);
         when(server.getLocalBaseUri()).thenReturn(URI.create("http://localhost:4566"));
         when(authorizer.refusal(any(), any(), any(), any(), any())).thenReturn(Optional.empty());
@@ -65,7 +58,7 @@ class AwsIamHttpDataSourceInvokerTest {
         request = HttpDataSourceRequest.parse(source, Map.of("method", "GET", "resourcePath", "/schedules/example"),
                 new ObjectMapper());
         invoker = new AwsIamHttpDataSourceInvoker(iam, authorizer, services, new RegionResolver(REGION, ACCOUNT),
-                config, server, transport);
+                server, transport);
     }
 
     @ParameterizedTest
@@ -83,10 +76,16 @@ class AwsIamHttpDataSourceInvokerTest {
     }
 
     @Test
-    void permissiveIamModeCannotIssueSignedHttpCredentials() {
-        when(iamConfig.enforcementEnabled()).thenReturn(false);
-        assertRefusedBeforeCredentials("AccessDeniedException");
-        verifyNoInteractions(authorizer);
+    void signedRequestUsesTheNativeListenerAndRevokesItsCredentials() {
+        when(transport.send(any())).thenReturn(Map.of("statusCode", 200, "headers", Map.of(), "body", "ok"));
+        assertEquals(200, invoker.invoke(source, request, REGION).get("statusCode"));
+        ArgumentCaptor<String> key = ArgumentCaptor.forClass(String.class);
+        verify(iam).registerSessionForAccount(eq(ACCOUNT), key.capture(), anyString(), anyString(),
+                eq(source.getServiceRoleArn()), any(Instant.class), isNull());
+        verify(iam).unregisterSession(ACCOUNT, key.getValue());
+        ArgumentCaptor<HttpDataSourceRequest> outgoing = ArgumentCaptor.forClass(HttpDataSourceRequest.class);
+        verify(transport).send(outgoing.capture());
+        assertEquals(URI.create("http://localhost:4566/schedules/example"), outgoing.getValue().uri());
     }
 
     @Test

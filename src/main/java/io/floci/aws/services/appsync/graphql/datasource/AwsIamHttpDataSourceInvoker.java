@@ -1,6 +1,5 @@
 package io.floci.aws.services.appsync.graphql.datasource;
 
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
@@ -30,38 +29,31 @@ public class AwsIamHttpDataSourceInvoker {
     private final ServiceRoleAuthorizer authorizer;
     private final ServiceRegistry services;
     private final RegionResolver regions;
-    private final EmulatorConfig config;
     private final HttpServer server;
-    // This transport has no public-DNS filter: its URL is exclusively the runtime-owned listener.
+    // Its URL is exclusively the runtime-owned listener.
     private final HttpDataSourceTransport local;
 
     @Inject
     public AwsIamHttpDataSourceInvoker(IamService iam, ServiceRoleAuthorizer authorizer,
                                        ServiceRegistry services, RegionResolver regions,
-                                       EmulatorConfig config, HttpServer server) {
-        this(iam, authorizer, services, regions, config, server,
+                                       HttpServer server) {
+        this(iam, authorizer, services, regions, server,
                 new HttpDataSourceTransport(HttpDataSourceTransport.client(SystemDefaultDnsResolver.INSTANCE)));
     }
 
     AwsIamHttpDataSourceInvoker(IamService iam, ServiceRoleAuthorizer authorizer,
                                 ServiceRegistry services, RegionResolver regions,
-                                EmulatorConfig config, HttpServer server, HttpDataSourceTransport local) {
+                                HttpServer server, HttpDataSourceTransport local) {
         this.iam = iam;
         this.authorizer = authorizer;
         this.services = services;
         this.regions = regions;
-        this.config = config;
         this.server = server;
         this.local = local;
     }
 
     public Map<String, Object> invoke(DataSource source, HttpDataSourceRequest request, String apiRegion) {
         HttpDataSourceAwsTarget target = HttpDataSourceAwsTarget.parse(source, request, apiRegion, regions);
-        // A late request after cleanup must be rejected as an unknown credential, even when the
-        // originating HTTP call timed out. Permissive IAM mode cannot give that guarantee.
-        if (!config.services().iam().enforcementEnabled()) {
-            throw new AwsException("AccessDeniedException", "Signed HTTP data sources require IAM enforcement enabled", 403);
-        }
         String serviceId = "states".equals(target.service()) ? "stepfunctions" : "scheduler";
         if (!services.isServiceEnabled(serviceId)) {
             throw new AwsException("ServiceNotAvailableException", "Service " + serviceId + " is not enabled", 400);

@@ -486,8 +486,9 @@ falls back to UTF-8. HTTPS keeps certificate and hostname verification enabled.
 HTTP resolver callbacks use separate batches so independent query fields can run concurrently;
 root mutation fields retain their selection order.
 
-Unsigned requests support public HTTP(S) endpoints. Floci rejects private, loopback,
-link-local, and other reserved destinations, including a hostname that resolves to any such address.
+Unsigned requests support public HTTP(S) endpoints and local development services on localhost
+or private container networks. Floci rejects link-local and cloud metadata addresses, including
+a hostname with any such DNS answer, and connects using the validated DNS snapshot.
 Unsigned HTTP data sources do not require a service role. Transport capacity is bounded to
 four active requests and sixteen queued requests. The caller deadline also covers DNS lookup,
 but system DNS can ignore cancellation: a stuck lookup retains its worker until it returns.
@@ -505,11 +506,15 @@ data source's `serviceRoleArn`:
 
 The endpoint must be the service's standard regional HTTPS hostname, for example
 `https://scheduler.us-west-2.amazonaws.com`. The signing region must be a canonical published region
-in the API's partition. The target region may differ from the API's region. The role must exist in
-the API's account and partition and trust `appsync.amazonaws.com`, including any source conditions.
-These signed requests require `floci.services.iam.enforcement-enabled=true` and the target service
-to be enabled. They go to Floci's own listener with temporary role credentials; the native service
-applies IAM authorization and preserves its error response. Step Functions tokens remain bound to
+in the API's partition. The target region may differ from the API's region. The role ARN must belong
+to the API's account and partition, and the target service must be enabled. Requests go to Floci's
+own listener with temporary role credentials that are removed on completion or failure. With
+`floci.services.iam.enforcement-enabled=true`, the role must exist and trust `appsync.amazonaws.com`,
+including any source conditions, and the native service applies its IAM policies. With enforcement
+off (the default), role existence, trust and permission checks are permissive, as for other local
+data sources. Removing temporary credentials does not make permissive IAM mode enforce revocation
+against a delayed or replayed request. Enable IAM enforcement when that check is required.
+The native service's response is preserved in either mode. Step Functions tokens remain bound to
 their owning account and region. Other signing services, operations, endpoint forms, and authorization
 types are unsupported and fail before credentials or a request are sent.
 

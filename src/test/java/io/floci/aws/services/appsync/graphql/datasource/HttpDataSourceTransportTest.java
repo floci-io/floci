@@ -230,20 +230,32 @@ class HttpDataSourceTransportTest {
     }
 
     @Test
-    void defaultTransportRefusesPrivateDestinationBeforeConnecting() {
+    void defaultTransportCanReachALocalMock() {
         try (HttpDataSourceTransport production = new HttpDataSourceTransport()) {
             HttpDataSourceRequest request = new HttpDataSourceRequest(
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/"), "GET", Map.of(), new byte[0]);
-            assertThrows(AwsException.class, () -> production.send(request));
-            assertEquals(0, calls.get());
+            assertEquals(200, production.send(request).get("statusCode"));
+            assertEquals(1, calls.get());
         }
     }
 
     @Test
-    void dnsValidationRejectsMixedPublicAndPrivateAnswers() throws Exception {
+    void dnsValidationAllowsPrivateContainerAddresses() throws Exception {
         DnsResolver delegate = mock(DnsResolver.class);
-        InetAddress publicIp = InetAddress.getByAddress(new byte[]{8, 8, 8, 8});
-        when(delegate.resolve("mixed.example")).thenReturn(new InetAddress[]{publicIp, InetAddress.getLoopbackAddress()});
+        InetAddress[] addresses = {InetAddress.getByName("10.0.0.25"), InetAddress.getByName("172.18.0.2"),
+                InetAddress.getByName("192.168.1.2"), InetAddress.getByName("fd00::1"),
+                InetAddress.getByName("127.0.0.1"), InetAddress.getByName("::1")};
+        when(delegate.resolve("compose-service")).thenReturn(addresses);
+        assertEquals(List.of(addresses), List.of(HttpDataSourceTransport.checkedResolver(delegate).resolve("compose-service")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"169.254.169.254", "169.254.0.1", "fe80::1", "fd00:ec2::254", "::ffff:169.254.169.254",
+            "100.100.100.200", "::ffff:100.100.100.200"})
+    void dnsValidationRejectsMixedLocalAndMetadataAnswers(String address) throws Exception {
+        DnsResolver delegate = mock(DnsResolver.class);
+        when(delegate.resolve("mixed.example")).thenReturn(new InetAddress[]{InetAddress.getLoopbackAddress(),
+                InetAddress.getByName(address)});
         assertThrows(UnknownHostException.class,
                 () -> HttpDataSourceTransport.checkedResolver(delegate).resolve("mixed.example"));
     }
