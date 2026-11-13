@@ -587,8 +587,10 @@ class CustomResourceProvisionerTest {
 
         assertTrue(provisioner.hasReplacementUpdate(updated));
         assertNull(provisioner.updateCleanupPhysicalId(updated));
-        assertTrue(provisioner.completeUpdate(updated).complete());
+        UpdateCleanupResult result = provisioner.completeUpdate(updated);
 
+        assertTrue(result.applicable());
+        assertTrue(result.complete());
         capturedEvents(2);
     }
 
@@ -601,6 +603,7 @@ class CustomResourceProvisionerTest {
         assertNull(provisioner.updateCleanupPhysicalId(updated));
         UpdateCleanupResult result = provisioner.completeUpdate(updated);
 
+        assertTrue(result.applicable());
         assertTrue(result.complete());
         assertNull(result.previousPhysicalId());
         capturedEvents(2);
