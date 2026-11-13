@@ -995,6 +995,20 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * The deleter for a displaced entity or a rolled-back replacement. A zone that is already gone
+     * counts as deleted, as AWS's cleanup of a replaced resource does; the stack delete keeps
+     * {@link #delete(String, String, String)}, which reports it.
+     */
+    private void deleteDisplaced(String resourceType, String physicalId, String region) {
+        if (HOSTED_ZONE.equals(resourceType)) {
+            CfnDeletes.safeDelete("Route53 hosted zone", physicalId,
+                    () -> route53Service.deleteHostedZone(physicalId), "NoSuchHostedZone");
+        } else {
+            delete(resourceType, physicalId, region);
+        }
+    }
+
     /** The types whose replacing update is cleaned up through {@link ReplacementCleanup}. */
     private static boolean replacesWithCleanup(StackResource resource) {
         return HEALTH_CHECK.equals(resource.getResourceType()) || HOSTED_ZONE.equals(resource.getResourceType());
@@ -1023,7 +1037,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             return completeGroupCleanup(resource, false);
         }
         return replacesWithCleanup(resource)
-                ? ReplacementCleanup.complete(resource, this::delete) : UpdateCleanupResult.notApplicable();
+                ? ReplacementCleanup.complete(resource, this::deleteDisplaced) : UpdateCleanupResult.notApplicable();
     }
 
     /**
@@ -1068,7 +1082,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             return rollbackGroupUpdate(resource);
         }
         if (HOSTED_ZONE.equals(resource.getResourceType())) {
-            return ReplacementCleanup.rollback(resource, this::delete);
+            return ReplacementCleanup.rollback(resource, this::deleteDisplaced);
         }
         if (!HEALTH_CHECK.equals(resource.getResourceType())) {
             return false;
