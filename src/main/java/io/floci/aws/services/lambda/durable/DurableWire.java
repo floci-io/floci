@@ -63,7 +63,6 @@ public final class DurableWire {
         for (DurableOperation operation : execution.getOperations().values()) {
             operations.add(operation(operation, true));
         }
-        state.put("NextMarker", "");
         ArrayNode updated = event.putArray("UpdatedOperationIds");
         updatedOperationIds.forEach(updated::add);
         return event;

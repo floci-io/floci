@@ -87,9 +87,33 @@ class DurableExecutionServiceTest {
         assertEquals("EXECUTION", root.get("Type").asText());
         assertEquals("STARTED", root.get("Status").asText());
         assertEquals("{\"a\":1}", root.get("ExecutionDetails").get("InputPayload").asText());
-        assertEquals("", event.get("InitialExecutionState").get("NextMarker").asText());
+        assertFalse(event.get("InitialExecutionState").has("NextMarker"));
+        assertEquals(1, event.get("InitialExecutionState").size());
         assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(execution.getExecutionArn()).getStatus());
         assertEquals("\"done\"", service.get(execution.getExecutionArn()).getResult());
+    }
+
+    @Test
+    void getStateCarriesAMarkerOnlyWhenOperationsRemain() {
+        invoker.script(event -> {
+            String arn = event.get("DurableExecutionArn").asText();
+            String current = checkpoint(event, token(event), List.of(
+                    step("s1", DurableOperationAction.START, null, null),
+                    step("s2", DurableOperationAction.START, null, null))).checkpointToken();
+
+            assertNull(service.getState(arn, current, null, null).nextMarker());
+            assertNull(service.getState(arn, current, null, 4).nextMarker());
+            assertNull(service.getState(arn, current, null, 3).nextMarker());
+            DurableExecutionService.StatePage first = service.getState(arn, current, null, 1);
+            assertEquals(1, first.operations().size());
+            assertNotNull(first.nextMarker());
+            DurableExecutionService.StatePage second = service.getState(arn, current, first.nextMarker(), 2);
+            assertEquals(2, second.operations().size());
+            assertNull(second.nextMarker());
+            return pending();
+        });
+
+        start("exec-1", "{}", false);
     }
 
     @Test
