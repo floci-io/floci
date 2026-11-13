@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.costandusagereport.model.CompressionForma
 import software.amazon.awssdk.services.costandusagereport.model.ReportFormat;
 import software.amazon.awssdk.services.costandusagereport.model.SchemaElement;
 import software.amazon.awssdk.services.costandusagereport.model.TimeUnit;
+import software.amazon.awssdk.services.costandusagereport.model.ValidationException;
 
 import java.util.UUID;
 
@@ -20,6 +21,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** Every CUR request is checked against the constraints of the botocore model. */
 @QuarkusTest
@@ -51,16 +53,20 @@ class CurRequestConstraintsIntegrationTest {
     }
 
     @Test
-    void aReportNameTheModelAllowsIsAccepted() {
-        reportName = "report.v1(" + UUID.randomUUID().toString().substring(0, 8) + ")";
+    void aReportNameWithADotIsAccepted() {
+        reportName = "report.v1." + UUID.randomUUID().toString().substring(0, 8);
 
-        cur.putReportDefinition(r -> r.reportDefinition(d -> d.reportName(reportName).timeUnit(TimeUnit.DAILY)
-                .format(ReportFormat.PARQUET).compression(CompressionFormat.PARQUET)
-                .additionalSchemaElements(SchemaElement.RESOURCES).s3Bucket("constraints-bucket")
-                .s3Prefix("reports").s3Region("us-east-1")));
+        putReport();
 
-        assertEquals(1, cur.describeReportDefinitions(r -> { }).reportDefinitions().stream()
-                .filter(definition -> definition.reportName().equals(reportName)).count());
+        assertEquals(1, storedReports());
+    }
+
+    @Test
+    void aReportNameFlociCannotWriteToS3IsRefusedAndNotStored() {
+        reportName = "report(" + UUID.randomUUID().toString().substring(0, 8) + ")";
+
+        assertThrows(ValidationException.class, this::putReport);
+        assertEquals(0, storedReports());
     }
 
     @Test
@@ -80,10 +86,13 @@ class CurRequestConstraintsIntegrationTest {
                 .statusCode(400)
                 .body("__type", containsString("ValidationException"))
                 .body("message", containsString("S3Prefix"));
+        assertEquals(0, storedReports());
     }
 
     @Test
-    void aReportNameThatIsNotAStringIsRefused() {
+    void aReportNameThatIsNotAStringIsRefusedAndDeletesNothing() {
+        putReport();
+
         given()
                 .contentType("application/x-amz-json-1.1")
                 .header("X-Amz-Target", "AWSOrigamiServiceGatewayService.DeleteReportDefinition")
@@ -95,5 +104,18 @@ class CurRequestConstraintsIntegrationTest {
         .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
+        assertEquals(1, storedReports());
+    }
+
+    private void putReport() {
+        cur.putReportDefinition(r -> r.reportDefinition(d -> d.reportName(reportName).timeUnit(TimeUnit.DAILY)
+                .format(ReportFormat.PARQUET).compression(CompressionFormat.PARQUET)
+                .additionalSchemaElements(SchemaElement.RESOURCES).s3Bucket("constraints-bucket")
+                .s3Prefix("reports").s3Region("us-east-1")));
+    }
+
+    private long storedReports() {
+        return cur.describeReportDefinitions(r -> { }).reportDefinitions().stream()
+                .filter(definition -> definition.reportName().equals(reportName)).count();
     }
 }

@@ -36,6 +36,9 @@ Floci also enforces:
   more fails with `ValidationException`. The limit is documented in the model's prose only.
 - `Format`: `Parquet` (CSV emission not yet implemented; `textORcsv` returns `ValidationException`)
 - `Compression`: `Parquet` (`ZIP` / `GZIP` not yet implemented)
+- `ReportName` and `S3Prefix`: letters, digits, `-`, `_` and `.` (and `/` in a prefix), the characters of the
+  S3 key the report is written to. A name or prefix with `!`, `*`, `'`, `(` or `)`, which the model allows,
+  returns `ValidationException`
 
 ## Storage keys
 

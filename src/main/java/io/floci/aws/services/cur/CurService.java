@@ -271,6 +271,8 @@ public class CurService {
     private void validateReportDefinition(ReportDefinition d) {
         requireOneOf(d.getFormat(), ALLOWED_FORMATS, "Format");
         requireOneOf(d.getCompression(), ALLOWED_COMPRESSIONS, "Compression");
+        // The report name is a segment of the key ParquetEmitter writes, which takes fewer characters than the model.
+        S3DestinationValidation.requireSafeKeySegment(d.getReportName(), "ReportName");
         S3DestinationValidation.requireValidBucketName(d.getS3Bucket(), "S3Bucket");
         S3DestinationValidation.requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
     }
