@@ -228,7 +228,8 @@ public class IamPolicyEvaluator {
      * Evaluates exactly as {@link #evaluateResolvedResourcePolicy} does and names what decided it:
      * the outcome, the policy family and, for an explicit deny or an identity allow, the statement.
      * An explicit deny names the first one in the order SCP levels, identity, resource, session,
-     * boundary.
+     * boundary. An implicit deny names the first layer that stops the request: SCP levels,
+     * identity (or resource), boundary, session.
      */
     public DecisionRecord explain(
             CallerContext caller,
@@ -296,15 +297,11 @@ public class IamPolicyEvaluator {
             return implicitDeny(PolicyLayer.IDENTITY);
         }
 
-        // 4. Session policy (if present) must also allow (intersection)
-        if (sessionDocs != null
-                && firstMatch(PolicyLayer.SESSION, -1, sessionDocs, false, loweredAction, resource, ctx) == null) {
-            return implicitDeny(PolicyLayer.SESSION);
-        }
-
-        // 5. A same-account resource policy that names an IAM user ARN grants directly to that
+        // 4. A same-account resource policy that names an IAM user ARN grants directly to that
         //    user. Its boundary's implicit deny does not cap the grant; explicit denies were
         //    already handled above. Other grants remain limited by the boundary intersection.
+        //    AWS checks the boundary ahead of the session policy, so a request both lack is
+        //    stopped at the boundary.
         boolean directSameAccountUserGrant = directIamUserResourceAllow
                 && relationship == ResourceAccountRelationship.SAME_ACCOUNT;
         boolean boundaryAllows = boundaryDocs == null
@@ -312,6 +309,12 @@ public class IamPolicyEvaluator {
                         loweredAction, resource, ctx) != null;
         if (!directSameAccountUserGrant && !boundaryAllows) {
             return implicitDeny(PolicyLayer.PERMISSIONS_BOUNDARY);
+        }
+
+        // 5. Session policy (if present) must also allow (intersection)
+        if (sessionDocs != null
+                && firstMatch(PolicyLayer.SESSION, -1, sessionDocs, false, loweredAction, resource, ctx) == null) {
+            return implicitDeny(PolicyLayer.SESSION);
         }
 
         // 6. Allowed: the identity statement that granted it, or the resource policy alone. A direct
@@ -836,8 +839,8 @@ public class IamPolicyEvaluator {
         }
         boolean allows = true;
         for (int level = 0; level < scpLevels.size(); level++) {
-            List<CachedDocument> documents = parseEach(scpLevels.get(level));
-            DecidingStatement deny = firstMatch(PolicyLayer.SERVICE_CONTROL, level, documents, true,
+            ParsedDocuments parsed = parseAllTracked(scpLevels.get(level));
+            DecidingStatement deny = firstMatch(PolicyLayer.SERVICE_CONTROL, level, parsed.documents(), true,
                     action, resource, ctx);
             if (deny != null) {
                 return new ScpWalk(deny, false);
@@ -845,13 +848,9 @@ public class IamPolicyEvaluator {
             if (!allows) {
                 continue;
             }
-            List<PolicyStatement> levelStmts = new ArrayList<>();
-            boolean anyFailed = false;
-            for (CachedDocument document : documents) {
-                levelStmts.addAll(document.statements());
-                anyFailed |= document.failed();
-            }
-            if (anyFailed || (!levelStmts.isEmpty() && !anyExplicitAllow(levelStmts, action, resource, ctx))) {
+            List<PolicyStatement> levelStmts = parsed.statements();
+            if (parsed.anyFailed()
+                    || (!levelStmts.isEmpty() && !anyExplicitAllow(levelStmts, action, resource, ctx))) {
                 allows = false;
             }
         }
@@ -891,41 +890,45 @@ public class IamPolicyEvaluator {
 
     /**
      * The first statement, in document then statement order, whose Effect is Deny (or Allow) and
-     * which matches the request, or null. Same matching as {@link #anyExplicitDeny}.
+     * which matches the request, or null. The matching loop is {@link #indexOfMatch}.
      */
     private DecidingStatement firstMatch(PolicyLayer layer, int level, List<CachedDocument> documents,
                                          boolean deny, String action, String resource,
                                          Map<String, List<String>> ctx) {
         for (int d = 0; d < documents.size(); d++) {
             List<PolicyStatement> stmts = documents.get(d).statements();
-            for (int s = 0; s < stmts.size(); s++) {
-                PolicyStatement stmt = stmts.get(s);
-                if ((deny ? stmt.isDeny() : stmt.isAllow()) && matchesStatement(stmt, action, resource, ctx)) {
-                    return new DecidingStatement(layer, level, d, s, stmt.getSid());
-                }
+            int s = indexOfMatch(stmts, deny, action, resource, ctx);
+            if (s >= 0) {
+                return new DecidingStatement(layer, level, d, s, stmts.get(s).getSid());
             }
         }
         return null;
     }
 
-    private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
-                                     Map<String, List<String>> ctx) {
-        for (PolicyStatement stmt : stmts) {
-            if (stmt.isDeny() && matchesStatement(stmt, action, resource, ctx)) {
-                return true;
+    /**
+     * The index of the first statement whose Effect is Deny (or Allow) and which matches the
+     * request, or -1. The one loop behind {@link #firstMatch}, {@link #anyExplicitDeny} and
+     * {@link #anyExplicitAllow}.
+     */
+    private int indexOfMatch(List<PolicyStatement> stmts, boolean deny, String action, String resource,
+                             Map<String, List<String>> ctx) {
+        for (int i = 0; i < stmts.size(); i++) {
+            PolicyStatement stmt = stmts.get(i);
+            if ((deny ? stmt.isDeny() : stmt.isAllow()) && matchesStatement(stmt, action, resource, ctx)) {
+                return i;
             }
         }
-        return false;
+        return -1;
+    }
+
+    private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
+                                     Map<String, List<String>> ctx) {
+        return indexOfMatch(stmts, true, action, resource, ctx) >= 0;
     }
 
     private boolean anyExplicitAllow(List<PolicyStatement> stmts, String action, String resource,
                                       Map<String, List<String>> ctx) {
-        for (PolicyStatement stmt : stmts) {
-            if (stmt.isAllow() && matchesStatement(stmt, action, resource, ctx)) {
-                return true;
-            }
-        }
-        return false;
+        return indexOfMatch(stmts, false, action, resource, ctx) >= 0;
     }
 
     private boolean anyResourceExplicitDeny(List<PolicyStatement> stmts, RequestPrincipal principal,
@@ -1806,25 +1809,24 @@ public class IamPolicyEvaluator {
     }
 
     /**
-     * Parses every document, skipping (and logging) any that fails, and reports whether
-     * any did. Callers that can safely ignore a broken document use {@link #parseAll};
-     * SCP evaluation reads {@code anyFailed} so the ceiling can fail closed.
+     * Parses every document through {@link #parseEach} and flattens the statements, skipping (and
+     * logging) any that fails, and reports whether any did. Callers that can safely ignore a
+     * broken document use {@link #parseAll}; SCP evaluation reads {@code anyFailed} so the ceiling
+     * can fail closed, and keeps the documents so a statement can be located.
      */
     private ParsedDocuments parseAllTracked(List<String> documents) {
-        List<PolicyStatement> result = new ArrayList<>();
-        if (documents == null) {
-            return new ParsedDocuments(result, false);
-        }
+        List<CachedDocument> parsed = parseEach(documents);
+        List<PolicyStatement> statements = new ArrayList<>();
         boolean anyFailed = false;
-        for (String doc : documents) {
-            CachedDocument parsed = parseDocument(doc);
-            result.addAll(parsed.statements());
-            anyFailed |= parsed.failed();
+        for (CachedDocument document : parsed) {
+            statements.addAll(document.statements());
+            anyFailed |= document.failed();
         }
-        return new ParsedDocuments(result, anyFailed);
+        return new ParsedDocuments(parsed, statements, anyFailed);
     }
 
-    private record ParsedDocuments(List<PolicyStatement> statements, boolean anyFailed) {
+    private record ParsedDocuments(List<CachedDocument> documents, List<PolicyStatement> statements,
+                                   boolean anyFailed) {
     }
 
     private CachedDocument parseDocument(String document) {
