@@ -14,6 +14,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.identitystore.IdentityStoreService;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.ssoadmin.model.AccessControlAttribute;
@@ -147,11 +148,12 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     private final String bootstrapInstanceArn;
     /** Source of permission-set creation times; the @Inject constructor passes the system clock. */
     private final Clock clock;
+    private final SsoPermissionSetRoleProvisioner roleProvisioner;
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
                            OrganizationsService organizationsService, SsoAdminRequestContext requestContext,
-                           EmulatorConfig config) {
+                           EmulatorConfig config, SsoPermissionSetRoleProvisioner roleProvisioner) {
         this(
                 storageFactory.create("ssoadmin", "ssoadmin-permission-sets.json", new TypeReference<Map<String, PermissionSet>>() {}),
                 storageFactory.create("ssoadmin", "ssoadmin-assignments.json", new TypeReference<Map<String, Assignment>>() {}),
@@ -183,7 +185,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                 requestContext,
                 config.defaultAccountId(),
                 config.defaultRegion(),
-                Clock.systemUTC());
+                Clock.systemUTC(), roleProvisioner);
     }
 
     SsoAdminService(StorageBackend<String, PermissionSet> permissionSets,
@@ -216,8 +218,9 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                     SsoAdminRequestContext requestContext,
                     String defaultAccountId,
                     String defaultRegion,
-                    Clock clock) {
+                    Clock clock, SsoPermissionSetRoleProvisioner roleProvisioner) {
         this.clock = clock;
+        this.roleProvisioner = roleProvisioner;
         this.permissionSets = permissionSets;
         this.assignments = assignments;
         this.assignmentOperations = assignmentOperations;
@@ -814,8 +817,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                 .filter(permissionSetArn -> instanceArn.equals(instanceArnForPermissionSet(permissionSetArn)))
                 .collect(Collectors.toSet());
         for (String permissionSetArn : instancePermissionSets) {
-            permissionSets.delete(permissionSetArn);
-            resourceTagOverrides.delete(permissionSetArn);
+            removePermissionSet(instance, permissionSetArn);
         }
         deleteByPermissionSet(assignments, Assignment::permissionSetArn, instancePermissionSets);
         deleteByPermissionSet(assignmentOperations, AssignmentOperation::permissionSetArn, instancePermissionSets);
@@ -1586,7 +1588,16 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         if (instance.accountInstance()) {
             throw accessDenied("Permission sets are only available from an organization instance.");
         }
-        getPermissionSet(instanceArn, permissionSetArn);
+        removePermissionSet(instance, permissionSetArn);
+    }
+
+    private void removePermissionSet(SsoInstance instance, String permissionSetArn) {
+        getPermissionSet(instance.instanceArn(), permissionSetArn);
+        for (PermissionSetProvisioning provisioning : permissionSetProvisionings.scan(key -> true)) {
+            if (permissionSetArn.equals(provisioning.permissionSetArn())) {
+                roleProvisioner.remove(provisioning, instance.primaryRegion());
+            }
+        }
         permissionSets.delete(permissionSetArn);
         resourceTagOverrides.delete(permissionSetArn);
         for (String key : new ArrayList<>(assignments.keys())) {
@@ -1852,6 +1863,12 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         return getPermissionSet(instance.instanceArn(), permissionSetArn);
     }
 
+    public IamRole provisionedRoleForPortal(String permissionSetArn, String accountId) {
+        SsoInstance instance = instanceForPermissionSetForPortal(permissionSetArn);
+        return roleProvisioner.forPortal(permissionSetProvisionings.get(permissionSetArn + "::" + accountId).orElse(null),
+                instance.primaryRegion());
+    }
+
     public PaginatedResult<Assignment> listAssignmentsForPrincipal(JsonNode request, String callerAccountId) {
         String instanceArn = required(request, "InstanceArn");
         SsoInstance instance = requireInstance(instanceArn);
@@ -1892,21 +1909,30 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         getPermissionSet(instanceArn, permissionSetArn);
         String targetType = required(request, "TargetType");
         String targetId = text(request, "TargetId");
+        List<String> accounts;
         if ("AWS_ACCOUNT".equals(targetType)) {
             targetId = validateAccountId(required(request, "TargetId"));
-            ensurePermissionSetProvisioned(permissionSetArn, targetId);
+            accounts = List.of(targetId);
         } else if ("ALL_PROVISIONED_ACCOUNTS".equals(targetType)) {
             if (targetId != null) {
                 throw validation("TargetId must not be provided when TargetType is ALL_PROVISIONED_ACCOUNTS.");
             }
-            provisionedAccounts(permissionSetArn)
-                    .forEach(accountId -> ensurePermissionSetProvisioned(permissionSetArn, accountId));
+            accounts = provisionedAccounts(permissionSetArn);
         } else {
             throw validation("TargetType must be AWS_ACCOUNT or ALL_PROVISIONED_ACCOUNTS.");
         }
+        String failureReason = null;
+        try {
+            for (String accountId : accounts) {
+                ensurePermissionSetProvisioned(permissionSetArn, accountId);
+            }
+        } catch (AwsException failure) {
+            failureReason = failure.getMessage();
+        }
         String requestId = UUID.randomUUID().toString();
         PermissionSetProvisioningOperation operation = new PermissionSetProvisioningOperation(
-                requestId, "SUCCEEDED", System.currentTimeMillis(), targetId, permissionSetArn, null);
+                requestId, failureReason == null ? "SUCCEEDED" : "FAILED", System.currentTimeMillis(),
+                targetId, permissionSetArn, failureReason);
         permissionSetProvisioningOperations.put(requestId, operation);
         return operation;
     }
@@ -1960,8 +1986,12 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
 
     private void ensurePermissionSetProvisioned(String permissionSetArn, String accountId) {
         String key = permissionSetArn + "::" + accountId;
+        PermissionSet permissionSet = permissionSetForPortal(permissionSetArn);
+        SsoInstance instance = instanceForPermissionSetForPortal(permissionSetArn);
+        IamRole role = roleProvisioner.provision(permissionSet, instance, accountId,
+                permissionSetProvisionings.get(key).orElse(null));
         permissionSetProvisionings.put(key, new PermissionSetProvisioning(
-                permissionSetArn, accountId, "LATEST_PERMISSION_SET_PROVISIONED"));
+                permissionSetArn, accountId, "LATEST_PERMISSION_SET_PROVISIONED", role.getArn(), role.getRoleId()));
     }
 
     public PaginatedResult<String> listPermissionSetsProvisionedToAccount(JsonNode request) {
@@ -2016,7 +2046,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
             if (permissionSetArn.equals(provisioning.permissionSetArn())) {
                 permissionSetProvisionings.put(permissionSetArn + "::" + provisioning.accountId(),
                         new PermissionSetProvisioning(permissionSetArn, provisioning.accountId(),
-                                "LATEST_PERMISSION_SET_NOT_PROVISIONED"));
+                                "LATEST_PERMISSION_SET_NOT_PROVISIONED", provisioning.roleArn(), provisioning.roleId()));
             }
         }
     }
@@ -2042,12 +2072,16 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         if (assignments.get(key).isPresent()) {
             throw conflict("The account assignment already exists.");
         }
-        Assignment assignment = new Assignment(account, permission, principal, principalType);
-        assignments.put(key, assignment);
-        ensurePermissionSetProvisioned(permission, account);
+        String failureReason = null;
+        try {
+            ensurePermissionSetProvisioned(permission, account);
+            assignments.put(key, new Assignment(account, permission, principal, principalType));
+        } catch (AwsException failure) {
+            failureReason = failure.getMessage();
+        }
         String requestId = UUID.randomUUID().toString();
-        AssignmentOperation operation = new AssignmentOperation(requestId, "SUCCEEDED", System.currentTimeMillis(),
-                account, permission, principal, principalType, null);
+        AssignmentOperation operation = new AssignmentOperation(requestId, failureReason == null ? "SUCCEEDED" : "FAILED",
+                System.currentTimeMillis(), account, permission, principal, principalType, failureReason);
         assignmentOperations.put(requestId, operation);
         return operation;
     }
@@ -2071,6 +2105,14 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                 .orElseThrow(() -> notFound("Account assignment not found."));
         if (!principalType.equals(existing.principalType())) {
             throw notFound("Account assignment not found.");
+        }
+        boolean lastAssignment = assignments.scan(candidate -> !candidate.equals(key)).stream()
+                .noneMatch(assignment -> account.equals(assignment.accountId()) && permission.equals(assignment.permissionSetArn()));
+        if (lastAssignment) {
+            String provisioningKey = permission + "::" + account;
+            permissionSetProvisionings.get(provisioningKey).ifPresent(provisioning ->
+                    roleProvisioner.remove(provisioning, instanceForPermissionSetForPortal(permission).primaryRegion()));
+            permissionSetProvisionings.delete(provisioningKey);
         }
         assignments.delete(key);
         String requestId = UUID.randomUUID().toString();

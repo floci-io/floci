@@ -1408,9 +1408,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRole(String roleName) {
+        deleteRole(roleName, null);
+    }
+
+    /** A service cleanup must not delete a different role that has since taken the name. */
+    public void deleteRole(String roleName, String expectedRoleId) {
         synchronized (resourceNameLock) {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
             if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
                 throw new AwsException("DeleteConflict",
@@ -2120,27 +2126,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void attachRolePolicy(String roleName, String policyArn) {
-        validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        IamPolicy policy = requirePolicy(policyArn);
-        if (!role.getAttachedPolicyArns().contains(policyArn)) {
-            role.getAttachedPolicyArns().add(policyArn);
-            roles.put(roleName, role);
-            incrementCustomerManagedPolicyAttachmentCount(policy);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            IamPolicy policy = requirePolicy(policyArn);
+            if (!role.getAttachedPolicyArns().contains(policyArn)) {
+                role.getAttachedPolicyArns().add(policyArn);
+                roles.put(roleName, role);
+                incrementCustomerManagedPolicyAttachmentCount(policy);
+            }
         }
     }
 
     public void detachRolePolicy(String roleName, String policyArn) {
-        validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        if (!role.getAttachedPolicyArns().remove(policyArn)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            if (!role.getAttachedPolicyArns().remove(policyArn)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
+            }
+            roles.put(roleName, role);
+            decrementCustomerManagedPolicyAttachmentCount(policyArn);
         }
-        roles.put(roleName, role);
-        decrementCustomerManagedPolicyAttachmentCount(policyArn);
     }
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
@@ -2149,6 +2159,51 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
+    }
+
+    /** Reprovisions a service-managed role only after the complete desired policy set validates. */
+    public void replaceRolePolicies(String roleName, String expectedRoleId, List<String> policyArns,
+                                    Map<String, String> inlinePolicies, String boundaryArn, int maxSessionDuration) {
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            requireNotServiceLinked(role, roleName);
+            List<String> desired = policyArns.stream().distinct().toList();
+            for (String arn : desired) {
+                requirePolicy(arn);
+            }
+            if (boundaryArn != null) {
+                requirePolicy(boundaryArn);
+            }
+            Map<String, String> checkedInline = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : inlinePolicies.entrySet()) {
+                IamPolicyDocuments.checkInlinePolicy(entry.getValue());
+                checkInlinePolicyQuota(checkedInline, entry.getKey(), entry.getValue(),
+                        ROLE_INLINE_POLICY_SIZE_LIMIT, "role " + roleName);
+                checkedInline.put(entry.getKey(), entry.getValue());
+            }
+            for (String arn : new ArrayList<>(role.getAttachedPolicyArns())) {
+                if (!desired.contains(arn)) {
+                    decrementCustomerManagedPolicyAttachmentCount(arn);
+                }
+            }
+            for (String arn : desired) {
+                if (!role.getAttachedPolicyArns().contains(arn)) {
+                    incrementCustomerManagedPolicyAttachmentCount(requirePolicy(arn));
+                }
+            }
+            Set<String> changedInline = new HashSet<>(role.getInlinePolicies().keySet());
+            changedInline.addAll(checkedInline.keySet());
+            changedInline.forEach(name -> invalidateInlinePolicyOwner("Role", role.getRoleId(), name));
+            role.setAttachedPolicyArns(desired);
+            role.setInlinePolicies(checkedInline);
+            role.setPermissionsBoundaryArn(boundaryArn);
+            if (maxSessionDuration > 0) {
+                role.setMaxSessionDuration(maxSessionDuration);
+            }
+            roles.put(roleName, role);
+        }
     }
 
     // =========================================================================
