@@ -1233,7 +1233,7 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "}"), "cur:PutReportDefinition");
         cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name, null) + "}").statusCode(200);
         cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "\",\"ReportDefinition\":"
-                + reportDefinition(name, arn + "-other") + "}").statusCode(200);
+                + reportDefinition(name, "arn:aws:billing::" + ACCOUNT + ":billingview/primary") + "}").statusCode(200);
         refusedJson(cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "-other\",\"ReportDefinition\":"
                 + reportDefinition(name + "-other", arn) + "}"), "cur:ModifyReportDefinition");
         cur(user, "DeleteReportDefinition", "{\"ReportName\":\"" + name + "\"}").statusCode(200);
