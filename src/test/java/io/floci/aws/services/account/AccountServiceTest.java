@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
+import static io.floci.aws.services.account.ContactInformationRequests.contactOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -181,6 +183,15 @@ class AccountServiceTest {
         assertEquals("SerializationException", error.getErrorCode());
     }
 
+    @Test
+    void putContactInformationWithANonStringMemberThrowsSerialization() {
+        ObjectNode request = contactInformationRequest();
+        contactOf(request).put("PostalCode", 98101);
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putContactInformation(ACCOUNT_ID, request));
+        assertEquals("SerializationException", error.getErrorCode());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"FullName", "AddressLine1", "City", "PostalCode", "CountryCode", "PhoneNumber"})
     void putContactInformationRejectsAMissingRequiredMember(String member) {
@@ -292,6 +303,19 @@ class AccountServiceTest {
     }
 
     @Test
+    void contactInformationRejectsAMalformedAccountId() {
+        ObjectNode request = contactInformationRequest();
+        request.put("AccountId", "1234");
+
+        AwsException putError = assertThrows(AwsException.class,
+                () -> service.putContactInformation(ACCOUNT_ID, request));
+        assertEquals("ValidationException", putError.getErrorCode());
+        AwsException getError = assertThrows(AwsException.class,
+                () -> service.getContactInformation(ACCOUNT_ID, request));
+        assertEquals("ValidationException", getError.getErrorCode());
+    }
+
+    @Test
     void managementAccountPutsContactInformationForAMemberAccount() {
         String member = "111122223333";
         Organization organization = new Organization();
@@ -331,24 +355,6 @@ class AccountServiceTest {
                 member + "=" + value);
         assertEquals("ValidationException", error.getErrorCode());
         assertTrue(error.getMessage().contains(member), error.getMessage());
-    }
-
-    private ObjectNode contactInformationRequest() {
-        ObjectNode contact = mapper.createObjectNode();
-        contact.put("FullName", "Jane Doe");
-        contact.put("AddressLine1", "1 Main St");
-        contact.put("City", "Seattle");
-        contact.put("StateOrRegion", "WA");
-        contact.put("PostalCode", "98101");
-        contact.put("CountryCode", "US");
-        contact.put("PhoneNumber", "+12065550100");
-        ObjectNode request = mapper.createObjectNode();
-        request.set("ContactInformation", contact);
-        return request;
-    }
-
-    private static ObjectNode contactOf(ObjectNode request) {
-        return (ObjectNode) request.get("ContactInformation");
     }
 
     private ObjectNode contactRequest() {

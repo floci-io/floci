@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
+import static io.floci.aws.services.account.ContactInformationRequests.contactOf;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -28,7 +30,7 @@ class AccountContactInformationIntegrationTest {
     @Test
     void putThenGetReturnsTheContactAndItsVerificationStatus() {
         String account = newAccount();
-        ObjectNode request = request();
+        ObjectNode request = contactInformationRequest();
         contactOf(request).put("CompanyName", "Example Corp");
 
         put(account, request).statusCode(200).body(equalTo(""));
@@ -50,11 +52,11 @@ class AccountContactInformationIntegrationTest {
     @Test
     void putReplacesTheStoredContact() {
         String account = newAccount();
-        ObjectNode first = request();
+        ObjectNode first = contactInformationRequest();
         contactOf(first).put("CompanyName", "Example Corp");
         put(account, first).statusCode(200);
 
-        ObjectNode second = request();
+        ObjectNode second = contactInformationRequest();
         contactOf(second).put("FullName", "John Roe");
         put(account, second).statusCode(200);
 
@@ -71,7 +73,7 @@ class AccountContactInformationIntegrationTest {
     @Test
     void contactsAreIsolatedByCallerAccount() {
         String owner = newAccount();
-        put(owner, request()).statusCode(200);
+        put(owner, contactInformationRequest()).statusCode(200);
 
         get(owner, "{}").statusCode(200);
         get(newAccount(), "{}").statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
@@ -94,7 +96,7 @@ class AccountContactInformationIntegrationTest {
     @Test
     void nonObjectRequestBodyReturnsSerializationException() {
         String account = newAccount();
-        put(account, request()).statusCode(200);
+        put(account, contactInformationRequest()).statusCode(200);
 
         get(account, "[]").statusCode(400).body("__type", equalTo("SerializationException"));
         post(account, "/putContactInformation", "[]")
@@ -104,8 +106,8 @@ class AccountContactInformationIntegrationTest {
     @Test
     void rejectedPutKeepsThePreviousContact() {
         String account = newAccount();
-        put(account, request()).statusCode(200);
-        ObjectNode invalid = request();
+        put(account, contactInformationRequest()).statusCode(200);
+        ObjectNode invalid = contactInformationRequest();
         contactOf(invalid).put("FullName", "John Roe");
         contactOf(invalid).put("PhoneNumber", "12065550100");
 
@@ -116,7 +118,7 @@ class AccountContactInformationIntegrationTest {
 
     @Test
     void putRequiresStateOrRegionForTheUnitedStates() {
-        ObjectNode request = request();
+        ObjectNode request = contactInformationRequest();
         contactOf(request).remove("StateOrRegion");
 
         put(newAccount(), request).statusCode(400).body("__type", equalTo("ValidationException"));
@@ -125,7 +127,7 @@ class AccountContactInformationIntegrationTest {
     @Test
     void nonStringAccountIdReturnsSerializationException() {
         String account = newAccount();
-        ObjectNode request = request();
+        ObjectNode request = contactInformationRequest();
         request.put("AccountId", 123456789012L);
 
         put(account, request).statusCode(400).body("__type", equalTo("SerializationException"));
@@ -136,7 +138,7 @@ class AccountContactInformationIntegrationTest {
     @Test
     void anotherAccountIsRefusedOutsideAnOrganization() {
         String account = newAccount();
-        ObjectNode request = request();
+        ObjectNode request = contactInformationRequest();
         request.put("AccountId", "111122223333");
 
         put(account, request).statusCode(403).body("__type", equalTo("AccessDeniedException"));
@@ -150,24 +152,6 @@ class AccountContactInformationIntegrationTest {
      */
     private static String newAccount() {
         return String.format("7310008259%02d", ACCOUNTS.incrementAndGet());
-    }
-
-    private static ObjectNode request() {
-        ObjectNode contact = MAPPER.createObjectNode();
-        contact.put("FullName", "Jane Doe");
-        contact.put("AddressLine1", "1 Main St");
-        contact.put("City", "Seattle");
-        contact.put("StateOrRegion", "WA");
-        contact.put("PostalCode", "98101");
-        contact.put("CountryCode", "US");
-        contact.put("PhoneNumber", "+12065550100");
-        ObjectNode request = MAPPER.createObjectNode();
-        request.set("ContactInformation", contact);
-        return request;
-    }
-
-    private static ObjectNode contactOf(ObjectNode request) {
-        return (ObjectNode) request.get("ContactInformation");
     }
 
     private static ValidatableResponse put(String account, ObjectNode request) {
