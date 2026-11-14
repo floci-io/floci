@@ -60,27 +60,13 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
     private static final int STOP_TIMEOUT_SECONDS = 0;
     // No source gives a bootstrap action a time limit: it runs until it ends, or its cluster does.
     private static final int NO_TIMEOUT = Integer.MAX_VALUE;
-    // The sudo an action finds first on its PATH: its options are dropped, as the action already runs as root,
-    // and its command, with any NAME=value before it, runs as it is.
-    static final String SUDO = String.join("\n",
-            "#!/bin/bash",
-            "while [ $# -gt 0 ]; do",
-            "  case \"$1\" in",
-            "    -u|-g|-C|-D|-p|-r|-t|-T|-U) shift 2 ;;",
-            "    --) shift; break ;;",
-            "    -*) shift ;;",
-            "    *) break ;;",
-            "  esac",
-            "done",
-            "exec env \"$@\"");
-    // What each action runs as root: $1 is its script, and the rest that script's arguments. The JVMs it starts
-    // trust Floci's CA once the container has its trust store.
+    // What each action runs as root, with the sudo a step has too (see EmrServerlessSparkRunner.SUDO), whose options
+    // the action, already root, has no need of: $1 is its script, and the rest that script's arguments. The JVMs it
+    // starts trust Floci's CA once the container has its trust store.
     private static final String ACTION_COMMAND = String.join("\n",
             ContainerCaBundle.JAVA_TRUST_SHELL_LINE,
             "mkdir -p /tmp/floci-bin",
-            "cat > /tmp/floci-bin/sudo <<'SUDO'",
-            SUDO,
-            "SUDO",
+            EmrServerlessSparkRunner.SUDO_FILE,
             "chmod 755 /tmp/floci-bin/sudo",
             "export PATH=\"/tmp/floci-bin:$PATH\" HOME=/home/hadoop",
             "cd /home/hadoop",

@@ -186,7 +186,12 @@ holding the driver and its executors, or a command or a script. The cluster itse
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
-  when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
+  when a file there has it, one a former step left there included. A step can run `sudo`, as the Release Guide's
+  "Using HBase snapshots" step does with `command-runner.jar` and `sudo -u hbase`, and the Management Guide's
+  Kerberos users step with a `script-runner.jar` script running `sudo kadmin.local`. The image has no `sudo`, so a
+  step finds Floci's first on its `PATH`, a Hive step's shell commands (Hive's `!`) too, the bootstrap actions' one: it
+  drops its options, with their values, and runs its command as it is, as the step's `hadoop` user. So
+  `sudo -u hadoop spark-submit ...` runs as on EMR, and a command that needs root fails, as it would for `hadoop`. `hadoop fs` and `hdfs dfs` reach the
   cluster's HDFS (see **Storage**) and Floci's S3. A `spark-submit` they start runs on the cluster's YARN, or in local
   mode where it runs none, on Floci's S3 with the
   cluster's `spark-defaults`, `core-site`, `spark-hive-site` and `spark-log4j2`, which Floci puts in a Spark
