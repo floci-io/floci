@@ -109,7 +109,8 @@ class Ec2NetworkInterfaceIamIntegrationTest {
                 policy(user, """
                         {"Effect":"Allow","Action":["ec2:CreateTags","ec2:DeleteTags"],
                          "Resource":"arn:aws:ec2:us-east-1:000000000000:network-interface/%s",
-                         "Condition":{"StringEquals":{"aws:ResourceTag/ManagedBy":"team-a"}}}
+                         "Condition":{"StringEquals":{"aws:ResourceTag/ManagedBy":"team-a",
+                         "ec2:ResourceTag/ManagedBy":"team-a"}}}
                         """.formatted(eni));
                 client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("fixture")));
                 assertEquals(2, admin.describeNetworkInterfaces(r -> r.networkInterfaceIds(eni))
