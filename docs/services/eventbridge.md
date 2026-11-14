@@ -434,6 +434,7 @@ refuses it. Across accounts the bus policy and the caller's identity policies bo
 ## Current Behavior
 
 - `PutRule` validates schedule expressions before creating or updating a rule, including disabled rules and rules with an event pattern. Rate values must be positive integers, with singular `minute`, `hour` or `day` for 1 and plural units for larger values. Invalid expressions return `ValidationException` without changing an existing rule or its timer.
+- An event pattern's `wildcard` filter matches a string value, each `*` covering any run of characters, an empty one included, with `\*` and `\\` standing for a literal `*` and `\`, as EventBridge's comparison operators page describes it. A `wildcard` inside `anything-but` is not evaluated and matches nothing.
 - `PutEvents` reports success once the source bus accepts an event. Target delivery failures are retried and dead-lettered as described above, and otherwise surface only as a `WARN` in the Floci logs.
 - A `PutEvents` entry for an event bus that does not exist is answered as AWS answers it: with an event id, not counted in `FailedEntryCount`, and dropped, as no rule matches it. Floci logs the drop at `INFO`. Floci's own deliveries to a bus, for a rule, a pipe or a schedule, are unchanged: an entry for a bus that does not exist fails there.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
