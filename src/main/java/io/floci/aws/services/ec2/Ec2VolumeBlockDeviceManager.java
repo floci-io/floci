@@ -495,13 +495,9 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                 String volumeName = ContainerStorageHelper.dockerName(config, "ec2-volumes");
                 ContainerStorageHelper.applyNamedVolume(builder, lifecycleManager, volumeName, "/volumes");
             } else {
-                // The host path names a directory on the Docker host. Inside a container Floci
-                // cannot reach it, so the daemon creates the missing bind source instead.
                 String hostPath = ContainerStorageHelper.hostResourcePath(config, "ec2", "volumes")
                         .toAbsolutePath().toString();
-                if (!containerDetector.isRunningInContainer()) {
-                    ContainerStorageHelper.ensureHostDir(hostPath);
-                }
+                ContainerStorageHelper.ensureHostDir(containerDetector, hostPath);
                 builder.withBind(hostPath, "/volumes");
             }
 
