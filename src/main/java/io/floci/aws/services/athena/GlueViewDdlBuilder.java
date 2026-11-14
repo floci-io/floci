@@ -2,6 +2,7 @@ package io.floci.aws.services.athena;
 
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.GlueTableResolver;
+import io.floci.aws.services.glue.PartitionProjection;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -92,6 +93,14 @@ public class GlueViewDdlBuilder {
                         || t.getStorageDescriptor().getLocation().isBlank()) {
                     continue;
                 }
+                // Athena fails every query on such a table, and only those (AthenaService checks
+                // for it). A view can't bind the key the template omits, and one view failing to
+                // bind fails the whole batch, so the table gets none.
+                if (PartitionProjection.hasIncompleteLocationTemplate(t)) {
+                    LOG.debugv("skip Glue table {0}.{1}: storage.location.template omits a partition key",
+                            schemaOrNull, t.getName());
+                    continue;
+                }
                 String location = t.getStorageDescriptor().getLocation();
                 String normalizedLocation = location.endsWith("/")
                         ? location.substring(0, location.length() - 1)
@@ -107,15 +116,19 @@ public class GlueViewDdlBuilder {
                 } else {
                     String readFn = GlueTableResolver.inferReadFunction(t);
                     String readPath = GlueTableResolver.readPath(t, normalizedLocation);
-                    fromClause = GlueTableResolver.readExpression(readFn, readPath);
+                    fromClause = GlueTableResolver.readExpression(t, readFn, readPath);
                 }
                 sb.append("CREATE OR REPLACE VIEW ")
                   .append(target)
                   .append(" AS SELECT ")
                   .append(GlueTableResolver.buildProjection(t))
                   .append(" FROM ")
-                  .append(fromClause)
-                  .append(";\n");
+                  .append(fromClause);
+                String pathFilter = GlueTableResolver.pathFilter(t);
+                if (pathFilter != null) {
+                    sb.append(" WHERE ").append(pathFilter);
+                }
+                sb.append(";\n");
             } catch (Exception e) {
                 LOG.debugv("skip Glue table {0}.{1}: {2}", schemaOrNull, t != null ? t.getName() : "unknown", e.getMessage());
             }

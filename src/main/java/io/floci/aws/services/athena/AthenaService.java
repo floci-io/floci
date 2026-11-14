@@ -186,9 +186,12 @@ public class AthenaService {
 
         // Submit async — caller gets the ID immediately while execution runs in background
         vertx.executeBlocking(() -> {
-            // Athena rejects a query that leaves an injected partition column unconstrained. It fails
-            // the query rather than the submission, which is what throwing here produces.
-            PartitionProjection.assertInjectedColumnsFiltered(query, tablesForProjectionCheck(database));
+            // Athena fails a query that reads a table with an incomplete location template, or that
+            // leaves an injected partition column unconstrained. It fails the query rather than the
+            // submission, which is what throwing here produces.
+            List<Table> projectionTables = tablesForProjectionCheck(database);
+            PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
+            PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
             String setupDdl = ddlBuilder.build(database);
             if (outputLocation != null) {
                 ensureOutputBucket(outputLocation);
