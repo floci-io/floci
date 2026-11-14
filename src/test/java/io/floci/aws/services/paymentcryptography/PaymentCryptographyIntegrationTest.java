@@ -231,15 +231,31 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
-    void aRequestNamingAFormTheServiceDoesNotServeIsRefused() {
-        // The TR-34 form is one the model has and this service does not make.
+    void theTr34FormIsServed() {
+        // The TR-34 form is one the service makes now, so a request that names one is
+        // refused for what it is missing and not for naming an unserved form.
         String arn = call("CreateKey", CREATE_KEY)
                 .then().statusCode(200)
                     .extract().path("Key.KeyArn");
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
-                + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn
-                + "\",\"WrappingKeyCertificate\":\"x\",\"KeyBlockFormat\":\"X9_TR34_2012\"}}}")
+                + "\"Tr34KeyBlock\":{\"WrappingKeyCertificate\":\"x\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("CertificateAuthorityPublicKeyIdentifier"));
+    }
+
+    @Test
+    void aRequestNamingAFormTheServiceDoesNotServeIsRefused() {
+        // The AS2805 form is one the model has and this service does not make yet.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"As2805KeyCryptogram\":{\"As2805KeyVariant\":"
+                + "\"PIN_ENCRYPTION_KEY_VARIANT_28\",\"WrappingKeyIdentifier\":\"" + arn + "\"}}}")
                 .then().statusCode(400)
                     .body("__type", equalTo("ValidationException"))
                     .body("message", containsString("not a form the service exports"));
@@ -370,6 +386,48 @@ class PaymentCryptographyIntegrationTest {
      * The refusal a caller sees when a request is missing a member the model requires: the
      * shape check's, because the shape check runs before the operation does.
      */
+    @Test
+    void theModelCheckRefusesATr34ExportWithoutItsWrappingKeyCertificate() {
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "WrappingKeyCertificate");
+    }
+
+    @Test
+    void theModelCheckRefusesATr34ExportWithoutItsCertificateAuthority() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"Tr34KeyBlock\":{\"WrappingKeyCertificate\":\"x\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "CertificateAuthorityPublicKeyIdentifier");
+    }
+
+    @Test
+    void theModelCheckRefusesATr34ImportWithoutItsSigningKeyCertificate() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"Tr34KeyBlock\":{"
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"WrappedKeyBlock\":\"" + "0".repeat(64) + "\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "SigningKeyCertificate");
+    }
+
+    @Test
+    void theModelCheckRefusesATr34ImportWithoutItsWrappedKeyBlock() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"Tr34KeyBlock\":{"
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"SigningKeyCertificate\":\"x\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "WrappedKeyBlock");
+    }
+
     private static void assertTheModelRefused(Response answer, String member) {
         answer.then().statusCode(400)
                 .body("__type", equalTo("ValidationException"))
