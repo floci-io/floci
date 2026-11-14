@@ -337,6 +337,15 @@ class SageMakerServiceTest {
     }
 
     @Test
+    void endpointWorkerFindsAConfigThatOnlyItsOwnAccountHas() {
+        WorkerFixture fixture = workerFixture();
+        EndpointResource endpoint = endpoint("Creating");
+        endpoint.endpointConfigName = "solo-cfg";
+        assertEquals("image-of-account-111",
+                fixture.service().modelForEndpoint(endpoint).primaryContainer.get("Image"));
+    }
+
+    @Test
     void endpointWorkerSavesItsOutcomeInTheEndpointsOwnAccount() {
         WorkerFixture fixture = workerFixture();
         assertTrue(fixture.service().finalizeEndpointStart(endpoint("InService")));
@@ -361,7 +370,7 @@ class SageMakerServiceTest {
      * #8373: the endpoint and training workers call back on their own threads, outside any request,
      * where an account-aware store reads the default account. Stores with no request context stand
      * in for that thread. Account 111 owns the resources; the default account holds a same-named
-     * endpoint config and model with a different image.
+     * endpoint config and model with a different image, and nothing named {@code solo-cfg}.
      */
     private WorkerFixture workerFixture() {
         AccountAwareStorageBackend<ModelResource> models =
@@ -380,6 +389,8 @@ class SageMakerServiceTest {
         configs.putForAccount(DEFAULT_ACCOUNT, "us-east-1::demo-cfg", endpointConfig("demo-cfg", "demo"));
         models.putForAccount(OTHER_ACCOUNT, "us-east-1::demo", model("demo", "image-of-account-111"));
         configs.putForAccount(OTHER_ACCOUNT, "us-east-1::demo-cfg", endpointConfig("demo-cfg", "demo"));
+        models.putForAccount(OTHER_ACCOUNT, "us-east-1::solo", model("solo", "image-of-account-111"));
+        configs.putForAccount(OTHER_ACCOUNT, "us-east-1::solo-cfg", endpointConfig("solo-cfg", "solo"));
         endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::demo-ep", endpoint("Creating"));
         jobs.putForAccount(OTHER_ACCOUNT, "us-east-1::demo-job", trainingJob("InProgress"));
         return new WorkerFixture(service, endpoints, jobs);
