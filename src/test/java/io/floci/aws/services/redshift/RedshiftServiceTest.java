@@ -2054,6 +2054,22 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void tableRestoreSourceRefusesASnapshotOfAnotherRegion() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setClusterStatus("available");
+        Snapshot snapshot = snapshotOf("snap-1", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotArn("arn:aws:redshift:eu-west-1:111111111111:snapshot:c1/snap-1");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.tableRestoreSource("c1", "snap-1"));
+
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+    }
+
+    @Test
     void authorizeSnapshotAccessRecordsTheAccountOnceAndRevokeRemovesIt() {
         Snapshot snapshot = snapshotOf("snap-1", "c1");
         snapshot.setStatus("available");

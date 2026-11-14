@@ -134,6 +134,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
 | `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-region `SnapshotArn`. `OwnerAccount`, or a `SnapshotArn` of another account, restores a snapshot that account has authorized the caller to restore, and is refused with `AccessToSnapshotDenied` otherwise; the dump is read from the owner's directory and the cluster is created in the caller's account |
+| `RestoreTableFromClusterSnapshot` | Create one table of a cluster snapshot in the cluster it was taken from, under `NewTableName` and in `TargetSchemaName` (default: the source schema, which defaults to `public`). See [Table restore](#table-restore) |
+| `DescribeTableRestoreStatus` | List the table restore requests of a cluster in the order they were made, or one by `TableRestoreRequestId`; `MaxRecords` (20 to 100) and `Marker` page the list |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
@@ -651,6 +653,16 @@ Warehouse:
 ```
 
 For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyClusterParameterGroup` on both create and update. `Description` and `ParameterGroupFamily` are replacement properties, matching AWS: changing either creates a new parameter group instead of reusing the prior one.
+
+### Table restore
+
+`RestoreTableFromClusterSnapshot` lifts the table's `CREATE TABLE` statement and its rows out of the snapshot's dump and replays them, renamed, in one transaction. The cluster must be `available` and the snapshot must be an available snapshot of it. Floci differs from AWS in these ways:
+
+- The restore runs inside the request. The response shows `PENDING`, and `DescribeTableRestoreStatus` already reports `SUCCEEDED` or `FAILED`, with the reason in `Message`. `InProgressTableRestoreQuotaExceededFault` is never returned.
+- A snapshot covers one database, `dev`. A `SourceDatabaseName` or table the snapshot does not hold is refused with `InvalidTableRestoreArgument`. A target table that already exists, or a target schema or database that does not, ends the request in `FAILED` and leaves nothing behind.
+- Only the definition and the rows are restored. Constraints, defaults that read a sequence and ownership are not. A partitioned table is refused with `InvalidTableRestoreArgument`, because its rows live in its partitions.
+- Names are matched ignoring case unless `EnableCaseSensitiveIdentifier` is `true`, and folded to lower case in the target otherwise.
+- The status of a deleted cluster's requests is dropped when they are next listed, so a cluster recreated under its name can inherit a request made against its predecessor if nothing listed them in between.
 
 ### Gaps and Limitations
 
