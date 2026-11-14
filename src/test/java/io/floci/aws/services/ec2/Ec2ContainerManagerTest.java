@@ -79,6 +79,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -592,19 +593,119 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
-    void startOfAProtectedInstanceDoesNotSetTheImdsEndpointUpAgain() throws Exception {
-        // The helper container kept its network namespace across the stop, and the address with it.
+    void startOfAProtectedInstanceMigratesTheImdsEndpointInItsHelper() throws Exception {
+        // The helper and its old TCP/80 listener survive a workload stop and an emulator upgrade.
         DockerClient dockerClient = mock(DockerClient.class);
-        List<String[]> execs = recordExecs(dockerClient);
+        List<String> events = new CopyOnWriteArrayList<>();
+        List<String[]> execs = recordExecs(dockerClient, "helper-1", () -> events.add("helper setup"));
         Instance instance = startProtectedInstance(mock(Ec2MetadataServer.class), Map.of(
                 "floci.security-group-helper", "true",
                 "io.floci.service", "ec2",
                 "io.floci.resource-id", "i-protected",
-                "floci_owner_port", "4566"), dockerClient);
+                "floci_owner_port", "4566"), dockerClient, () -> events.add("workload start"));
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(5));
-        assertTrue(execs.stream().noneMatch(cmd -> Arrays.equals(cmd,
-                Ec2ContainerManager.metadataProxyInstallCommand())), "no IMDS setup exec for a protected start");
+        awaitUntil(() -> execs.stream().anyMatch(cmd -> Arrays.equals(cmd,
+                Ec2ContainerManager.metadataProxyInstallCommand())), Duration.ofSeconds(5));
+        assertEquals(List.of("helper setup", "workload start"), events,
+                "the retained TCP/80 listener must be migrated before the workload can bind port 80");
+        verify(dockerClient, never()).execCreateCmd(TEST_CONTAINER_ID);
+    }
+
+    @Test
+    void failedProtectedStartRemovesNewMetadataRegistration() throws Exception {
+        Ec2MetadataServer metadataServer = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"), mock(DockerClient.class),
+                () -> {
+                    throw new IllegalStateException("Docker start failed");
+                });
+
+        awaitUntil(() -> "stopped".equals(instance.getState().getName())
+                && metadataServer.registeredContainer("172.17.0.7").isEmpty(), Duration.ofSeconds(5));
+        assertTrue(metadataServer.registeredContainer("172.17.0.7").isEmpty(),
+                "a failed Docker start must not leave a new IMDS mapping to a stopped workload");
+    }
+
+    @Test
+    void failedProtectedStartKeepsExistingMetadataRegistration() throws Exception {
+        Ec2MetadataServer metadataServer = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"), mock(DockerClient.class),
+                () -> {
+                    throw new IllegalStateException("Docker start failed");
+                },
+                existing -> metadataServer.registerContainer("172.17.0.7", "i-protected", existing));
+
+        awaitUntil(() -> "stopped".equals(instance.getState().getName()), Duration.ofSeconds(5));
+        assertEquals(instance, metadataServer.registeredContainer("172.17.0.7").orElseThrow(),
+                "a failed restart must retain the mapping left by an earlier successful run");
+    }
+
+    @Test
+    void failedProtectedStartDoesNotRestorePreviousInstanceAtReusedHelperAddress() throws Exception {
+        Ec2MetadataServer metadataServer = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        Instance previous = new Instance();
+        previous.setInstanceId("i-old-helper-owner");
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"), mock(DockerClient.class),
+                () -> {
+                    throw new IllegalStateException("Docker start failed");
+                },
+                ignored -> metadataServer.registerContainer("172.17.0.7", previous.getInstanceId(), previous));
+
+        awaitUntil(() -> "stopped".equals(instance.getState().getName())
+                && metadataServer.registeredContainer("172.17.0.7").isEmpty(), Duration.ofSeconds(5));
+        assertTrue(metadataServer.registeredContainer("172.17.0.7").isEmpty(),
+                "rollback must not resurrect a previous instance after Docker reuses its helper address");
+    }
+
+    @Test
+    void failedProtectedStartKeepsOtherMetadataAddressesForTheInstance() throws Exception {
+        Ec2MetadataServer metadataServer = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"), mock(DockerClient.class),
+                () -> {
+                    throw new IllegalStateException("Docker start failed");
+                },
+                existing -> metadataServer.registerContainer("172.17.0.8", "i-protected", existing));
+
+        awaitUntil(() -> "stopped".equals(instance.getState().getName())
+                && metadataServer.registeredContainer("172.17.0.7").isEmpty(), Duration.ofSeconds(5));
+        assertEquals(instance, metadataServer.registeredContainer("172.17.0.8").orElseThrow(),
+                "rolling back the new helper address must preserve other retained addresses");
+    }
+
+    @Test
+    void cancelledProtectedStartRemovesNewMetadataRegistration() throws Exception {
+        Ec2MetadataServer metadataServer = new Ec2MetadataServer(null, null, null, (InstanceConnectKeys) null);
+        AtomicReference<Instance> startingInstance = new AtomicReference<>();
+        CountDownLatch dockerStarted = new CountDownLatch(1);
+        Instance instance = startProtectedInstance(metadataServer, Map.of(
+                "floci.security-group-helper", "true",
+                "io.floci.service", "ec2",
+                "io.floci.resource-id", "i-protected",
+                "floci_owner_port", "4566"), mock(DockerClient.class),
+                () -> {
+                    startingInstance.get().setState(InstanceState.stopping());
+                    dockerStarted.countDown();
+                }, startingInstance::set);
+
+        assertTrue(dockerStarted.await(5, TimeUnit.SECONDS));
+        awaitUntil(() -> metadataServer.registeredContainer("172.17.0.7").isEmpty(), Duration.ofSeconds(5));
+        assertEquals("stopping", instance.getState().getName());
     }
 
     @Test
@@ -661,14 +762,22 @@ class Ec2ContainerManagerTest {
 
     /** Records every command exec'd in the test container; each exec then fails, which start tolerates. */
     private static List<String[]> recordExecs(DockerClient dockerClient) {
-        return recordExecs(dockerClient, () -> { });
+        return recordExecs(dockerClient, TEST_CONTAINER_ID, () -> { });
+    }
+
+    private static List<String[]> recordExecs(DockerClient dockerClient, String containerId) {
+        return recordExecs(dockerClient, containerId, () -> { });
     }
 
     /** As {@link #recordExecs(DockerClient)}, running {@code onExec} as each exec is created. */
     private static List<String[]> recordExecs(DockerClient dockerClient, Runnable onExec) {
+        return recordExecs(dockerClient, TEST_CONTAINER_ID, onExec);
+    }
+
+    private static List<String[]> recordExecs(DockerClient dockerClient, String containerId, Runnable onExec) {
         List<String[]> execs = new CopyOnWriteArrayList<>();
         ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
-        when(dockerClient.execCreateCmd(TEST_CONTAINER_ID)).thenReturn(execCreate);
+        when(dockerClient.execCreateCmd(containerId)).thenReturn(execCreate);
         when(execCreate.withCmd(any(String[].class))).thenAnswer(invocation -> {
             Object[] args = invocation.getArguments();
             execs.add(args.length == 1 && args[0] instanceof String[] cmd
@@ -780,11 +889,25 @@ class Ec2ContainerManagerTest {
 
     private Instance startProtectedInstance(Ec2MetadataServer metadataServer, Map<String, String> helperLabels,
                                             DockerClient dockerClient) {
+        return startProtectedInstance(metadataServer, helperLabels, dockerClient, () -> { });
+    }
+
+    private Instance startProtectedInstance(Ec2MetadataServer metadataServer, Map<String, String> helperLabels,
+                                            DockerClient dockerClient, Runnable onStart) {
+        return startProtectedInstance(metadataServer, helperLabels, dockerClient, onStart, ignored -> { });
+    }
+
+    private Instance startProtectedInstance(Ec2MetadataServer metadataServer, Map<String, String> helperLabels,
+                                            DockerClient dockerClient, Runnable onStart, Consumer<Instance> beforeStart) {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.isContainerRunning(TEST_CONTAINER_ID)).thenReturn(true);
 
-        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID))
-                .thenReturn(mock(StartContainerCmd.class, RETURNS_SELF));
+        StartContainerCmd start = mock(StartContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(start);
+        doAnswer(invocation -> {
+            onStart.run();
+            return null;
+        }).when(start).exec();
         // A workload in the helper's namespace has no Docker attachment of its own, so there is
         // no bridge address on it to rediscover after the restart.
         InspectContainerResponse workload = mock(InspectContainerResponse.class);
@@ -832,6 +955,7 @@ class Ec2ContainerManagerTest {
         instance.setInstanceId("i-protected");
         instance.setDockerContainerId(TEST_CONTAINER_ID);
 
+        beforeStart.accept(instance);
         manager.start(instance);
         return instance;
     }
@@ -1568,6 +1692,7 @@ class Ec2ContainerManagerTest {
         assertTrue(command[2].contains("iproute2"));
         assertTrue(command[2].contains("socat"));
         assertTrue(command[2].contains("curl"));
+        assertTrue(command[2].contains("iptables"));
     }
 
     @Test
@@ -1645,6 +1770,7 @@ class Ec2ContainerManagerTest {
 
         assertTrue(script.contains("command -v yum"), script);
         assertTrue(script.contains("yum install -y iproute socat curl ca-certificates"), script);
+        assertTrue(script.contains("yum install -y iptables >/dev/null || true"), script);
     }
 
     @Test
@@ -1659,17 +1785,21 @@ class Ec2ContainerManagerTest {
         // instance was left with no link-local IMDS endpoint.
         String script = Ec2ContainerManager.metadataProxyInstallCommand()[2];
 
-        assertTrue(script.contains("dnf install -y --allowerasing iproute socat curl ca-certificates"),
-                script);
+        assertTrue(script.contains("dnf install -y --allowerasing iproute socat curl ca-certificates"), script);
+        assertTrue(script.contains("dnf install -y --allowerasing iptables-nft >/dev/null || true"), script);
     }
 
     @Test
-    void metadataProxyStartCommandBindsAwsLinkLocalMetadataAddress() {
+    void metadataProxyStartCommandRoutesAwsLinkLocalMetadataWithoutReservingPort80() {
         String[] command = Ec2ContainerManager.metadataProxyStartCommand("floci", 9169);
 
         assertEquals("sh", command[0]);
         assertTrue(command[2].contains("169.254.169.254/32"));
-        assertTrue(command[2].contains("TCP-LISTEN:80,bind=169.254.169.254"));
+        assertTrue(command[2].contains("TCP-LISTEN:42169,bind=169.254.169.254"));
+        assertTrue(command[2].contains("-d 169.254.169.254/32 -p tcp --dport 80 -j DNAT"
+                + " --to-destination 169.254.169.254:42169"));
+        assertTrue(command[2].contains("if [ -z \"$rule_backend\" ]; then"));
+        assertTrue(command[2].contains("nohup socat TCP-LISTEN:80,bind=169.254.169.254"));
         assertTrue(command[2].contains("TCP:floci:9169"));
         assertTrue(command[2].contains("http://169.254.169.254/latest/meta-data/instance-id"));
     }

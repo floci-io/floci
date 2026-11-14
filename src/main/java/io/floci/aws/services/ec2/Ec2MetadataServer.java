@@ -112,6 +112,14 @@ public class Ec2MetadataServer {
         }
     }
 
+    void rollbackContainerRegistration(String containerIp, Instance instance) {
+        containerIpToInstance.remove(containerIp, instance);
+        if (!containerIpToInstance.containsValue(instance)) {
+            credentials.unregister(instance);
+            tokens.values().removeIf(token -> token.instance() == instance);
+        }
+    }
+
     /** Reconcile every Docker attachment without retaining stale addresses after restart. */
     public void reconcileContainerAddresses(Set<String> addresses, Instance instance) {
         for (String address : addresses) {

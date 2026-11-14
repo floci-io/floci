@@ -254,6 +254,12 @@ instance ID. The check bypasses any HTTP proxy the image configures, a failed or
 response does not fall back to a tokenless request, and the check passes on an instance that
 requires tokens.
 
+For EC2 guests, a working `iptables` or `nft` NAT backend routes link-local port `80` to the IMDS
+relay on port `42169`, leaving the guest's wildcard port `80` available. If no NAT backend works
+(for example, an offline image without firewall tools), Floci uses the older link-local port `80`
+listener to preserve IMDS access. That fallback can still conflict with a guest server binding
+`0.0.0.0:80`.
+
 `iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
 profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
 profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no
@@ -309,7 +315,7 @@ Guests with an instance profile receive endpoint and region settings without Flo
 
 ### IMDS and SSM managed instances
 
-IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record. A restarted container (`StopInstances` then `StartInstances`) has a new network namespace, so once the instance is `running` `StartInstances` sets the proxy up again; an instance under security-group enforcement keeps its helper container's namespace, and the proxy with it.
+IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record. A restarted container (`StopInstances` then `StartInstances`) has a new network namespace, so once the instance is `running` `StartInstances` sets the proxy up again. An instance under security-group enforcement keeps its helper container's namespace; `StartInstances` attempts to migrate an older TCP/80 listener before starting the workload.
 
 Registering a container with SSM is independent of this: an SSM agent that calls `UpdateInstanceInformation` becomes a managed instance, but that does not create an EC2 instance record, does not install the IMDS proxy, and does not register the container with IMDS. From such a container, `curl http://169.254.169.254/...` fails outright (no proxy), and a request sent straight to the host IMDS port returns `404` with a message explaining that no EC2 instance is registered for the source IP. Floci also logs a warning when an SSM agent registers from a container that is not backed by a Floci EC2 instance.
 
