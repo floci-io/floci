@@ -134,6 +134,16 @@ class RequestResourcesTest {
     }
 
     @Test
+    void anAssociationOnASharedDocumentGivenByItsArnIsCheckedOnThatArn() throws Exception {
+        String shared = "arn:aws:ssm:us-east-1:100000008230:document/shared";
+        List<String> arns = RequestResources.ofBody("ssm:CreateAssociation",
+                new ObjectMapper().readTree("{\"Name\":\"" + shared + "\"}"), "aws", "us-east-1", "000000000000",
+                null);
+        assertTrue(arns.contains(shared), arns.toString());
+        assertFalse(arns.stream().anyMatch(arn -> arn.contains("document/arn:")), arns.toString());
+    }
+
+    @Test
     void listTablesCorrectionReadsTheCollectionAndLeavesOtherDynamoOperationsHandBuilt() {
         assertTrue(RequestResources.reads("dynamodb:ListTables"));
         assertFalse(RequestResources.reads("dynamodb:BatchWriteItem"));
