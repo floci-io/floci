@@ -132,16 +132,39 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
         boolean includeLegacy = defaultRegion();
         Set<String> keys = new HashSet<>();
         for (String stored : delegate.keys()) {
-            if (stored.startsWith(prefix)) {
-                String key = stored.substring(prefix.length());
-                if (logicalKey(key)) {
-                    keys.add(key);
-                }
-            } else if (includeLegacy && !regionPrefixed(stored)) {
-                keys.add(stored);
+            String key = logicalKeyOf(stored, prefix, includeLegacy);
+            if (key != null) {
+                keys.add(key);
             }
         }
         return keys;
+    }
+
+    /**
+     * Deletes, in one commit, the request's Region's values that {@code valueFilter} accepts, among the
+     * logical keys {@code keyFilter} accepts. In the default Region the regionless keys go too, an account
+     * store's unprefixed ones included, as {@link StorageOperations#deleteMatchingAtomically} deletes them
+     * from the account store itself.
+     */
+    void deleteMatchingAtomically(Predicate<String> keyFilter, Predicate<V> valueFilter) {
+        String prefix = prefix();
+        boolean includeLegacy = defaultRegion();
+        StorageOperations.deleteMatchingAtomically(delegate, stored -> {
+            String key = logicalKeyOf(stored, prefix, includeLegacy);
+            return key != null && keyFilter.test(key);
+        }, valueFilter);
+    }
+
+    /**
+     * The logical key {@code stored} holds in the Region whose keys start with {@code prefix}, or null when
+     * it is another Region's. A regionless key is the default Region's, so it counts with {@code includeLegacy}.
+     */
+    private static String logicalKeyOf(String stored, String prefix, boolean includeLegacy) {
+        if (stored.startsWith(prefix)) {
+            String key = stored.substring(prefix.length());
+            return logicalKey(key) ? key : null;
+        }
+        return includeLegacy && !regionPrefixed(stored) ? stored : null;
     }
 
     @Override

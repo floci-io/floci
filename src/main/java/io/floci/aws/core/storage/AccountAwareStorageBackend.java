@@ -464,14 +464,24 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
      * keys only for the configured default account. Does not migrate or rewrite survivors.
      */
     public synchronized void deleteMatchingIncludingLegacyAtomically(Predicate<V> valueFilter) {
+        deleteMatchingIncludingLegacyAtomically(key -> true, valueFilter);
+    }
+
+    /**
+     * As above; with {@code keyFilter}, only among the keys it accepts: the account-relative key, or an
+     * unprefixed legacy key as it is stored.
+     */
+    public synchronized void deleteMatchingIncludingLegacyAtomically(Predicate<String> keyFilter,
+                                                                     Predicate<V> valueFilter) {
         String account = prefix();
         String accountPrefix = account + "/";
         Set<String> rawKeys = new LinkedHashSet<>();
         for (String rawKey : delegate.keys()) {
-            boolean owned = hasAccountPrefix(rawKey)
-                    ? rawKey.startsWith(accountPrefix) : defaultAccountId.equals(account);
+            boolean prefixed = hasAccountPrefix(rawKey);
+            boolean owned = prefixed ? rawKey.startsWith(accountPrefix) : defaultAccountId.equals(account);
             if (owned) {
-                if (delegate.get(rawKey).filter(valueFilter).isPresent()) {
+                String key = prefixed ? rawKey.substring(accountPrefix.length()) : rawKey;
+                if (keyFilter.test(key) && delegate.get(rawKey).filter(valueFilter).isPresent()) {
                     rawKeys.add(rawKey);
                 }
             }
