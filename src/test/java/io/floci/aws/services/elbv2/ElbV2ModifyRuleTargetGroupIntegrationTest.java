@@ -1,7 +1,8 @@
 package io.floci.aws.services.elbv2;
 
-import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.testing.AlbFixtures;
 import io.floci.aws.testing.QueryRequests;
+import io.floci.aws.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -22,27 +23,20 @@ class ElbV2ModifyRuleTargetGroupIntegrationTest {
     private static final String REGION = "us-east-1";
 
     @Test
-    void aRuleMovedToAnotherTargetGroupLeavesTheFirstUnused() {
+    void aRuleMovedToAnotherTargetGroupLeavesTheFirstUnused() throws Exception {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String lb = null;
+        String fallback = null;
         String first = null;
         String second = null;
         String listener = null;
-        String rule = null;
         try {
-            lb = send("CreateLoadBalancer", "Name", "modify-rule-" + suffix, "Type", "application",
-                    "Subnets.member.1", Ec2Service.defaultSubnetId(REGION, "a"),
-                    "Subnets.member.2", Ec2Service.defaultSubnetId(REGION, "b"))
-                    .then().statusCode(200).extract()
-                    .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
-            first = targetGroup("first-" + suffix);
-            second = targetGroup("second-" + suffix);
-            listener = send("CreateListener", "LoadBalancerArn", lb, "Protocol", "HTTP", "Port", "80",
-                    "DefaultActions.member.1.Type", "fixed-response",
-                    "DefaultActions.member.1.FixedResponseConfig.StatusCode", "404")
-                    .then().statusCode(200).extract()
-                    .path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
-            rule = send("CreateRule", "ListenerArn", listener, "Priority", "10",
+            lb = AlbFixtures.createLoadBalancer(ACCOUNT, "modify-rule-" + suffix);
+            fallback = AlbFixtures.createTargetGroup(ACCOUNT, "default-" + suffix, "ip", 80);
+            first = AlbFixtures.createTargetGroup(ACCOUNT, "first-" + suffix, "ip", 80);
+            second = AlbFixtures.createTargetGroup(ACCOUNT, "second-" + suffix, "ip", 80);
+            listener = AlbFixtures.createListener(ACCOUNT, lb, fallback, FreePorts.anyInterfacePort());
+            String rule = send("CreateRule", "ListenerArn", listener, "Priority", "10",
                     "Conditions.member.1.Field", "path-pattern", "Conditions.member.1.Values.member.1", "/app/*",
                     "Actions.member.1.Type", "forward", "Actions.member.1.TargetGroupArn", first)
                     .then().statusCode(200).extract()
@@ -52,34 +46,20 @@ class ElbV2ModifyRuleTargetGroupIntegrationTest {
                     "Actions.member.1.Type", "forward", "Actions.member.1.TargetGroupArn", second)
                     .then().statusCode(200);
 
+            assertEquals(List.of(lb), loadBalancersOf(fallback));
             assertEquals(List.of(), loadBalancersOf(first));
             assertEquals(List.of(lb), loadBalancersOf(second));
             send("DeleteTargetGroup", "TargetGroupArn", second).then().statusCode(400);
             send("DeleteTargetGroup", "TargetGroupArn", first).then().statusCode(200);
             first = null;
         } finally {
-            if (rule != null) {
-                send("DeleteRule", "RuleArn", rule);
-            }
-            if (listener != null) {
-                send("DeleteListener", "ListenerArn", listener);
-            }
-            if (lb != null) {
-                send("DeleteLoadBalancer", "LoadBalancerArn", lb);
-            }
-            for (String group : new String[] {first, second}) {
-                if (group != null) {
-                    send("DeleteTargetGroup", "TargetGroupArn", group);
-                }
+            // Deleting the listener deletes its rule too.
+            AlbFixtures.deleteListener(ACCOUNT, listener);
+            AlbFixtures.deleteLoadBalancer(ACCOUNT, lb);
+            for (String group : new String[] {fallback, first, second}) {
+                AlbFixtures.deleteTargetGroup(ACCOUNT, group);
             }
         }
-    }
-
-    private static String targetGroup(String name) {
-        return send("CreateTargetGroup", "Name", name, "Protocol", "HTTP", "Port", "80",
-                "VpcId", Ec2Service.defaultVpcId(REGION), "TargetType", "ip")
-                .then().statusCode(200).extract()
-                .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
     }
 
     private static List<String> loadBalancersOf(String targetGroup) {
