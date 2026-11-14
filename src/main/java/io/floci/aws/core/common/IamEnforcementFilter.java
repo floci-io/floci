@@ -615,6 +615,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
+        if (abortIfForwardedDenied(ctx, caller, principal, callerArns.orElse(null), action,
+                resolvedAuthorization.operation(), credentialScope, resources, region, accountId, akid)) {
+            return;
+        }
         if (tagOnCreate.isPresent() && abortIfTagOnCreateDenied(ctx, caller, principal, callerArns.orElse(null),
                 action, resolvedAuthorization.operation(), tagOnCreate.get(), credentialScope, resources, region,
                 accountId, akid)) {
@@ -1094,6 +1098,47 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
+     * A request whose service then asks another service, as the caller, to act on what a resource it is checked on
+     * holds (see {@link RequestResources#forwarded}) also needs that action on that resource, checked as the caller
+     * against the resource's own policy in its own account (a snapshot's KMS key, against its key policy), with
+     * {@code aws:ViaAWSService} true, as AWS's forward access sessions carry it, the action's {@code ViaService}
+     * key naming the service's endpoint in the request's Region and partition where it takes one, and the keys that
+     * say who is calling. One naming what the action's service does not hold (a key since deleted) is refused, as
+     * that service refuses it. Returns true when the request was aborted.
+     */
+    private boolean abortIfForwardedDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
+                                           CallerArns callerArns, String action, String operation,
+                                           String credentialScope, List<String> resources, String region,
+                                           String accountId, String akid) {
+        for (RequestResources.Forwarded forwarded : arnBuilder.forwarded(operation, resources, accountId)) {
+            if (!forwarded.held()) {
+                // The service would ask for what the action's service no longer holds (a deleted key), which that
+                // service refuses, failing the request whatever the policies say.
+                LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}, which its service does not hold",
+                        akid, forwarded.action(), forwarded.resource());
+                ctx.abortWith(accessDeniedForRequest(forwarded.action(), credentialScope, ctx, forwarded.resource()));
+                return true;
+            }
+            Map<String, List<String>> context = new HashMap<>();
+            if (callerArns != null) {
+                callerArns.putPrincipalKeys(context);
+            }
+            context.put("aws:ViaAWSService", List.of("true"));
+            if (forwarded.viaService() != null) {
+                // The endpoint in the request's partition, which a custom Region of a China or GovCloud deployment keeps.
+                AwsPartition partition = AwsPartitions.find(requestPartition())
+                        .orElseGet(() -> AwsPartitions.forRegionOrCommercial(region));
+                context.put(forwarded.viaService(), List.of(partition.regionalHostname(forwarded.endpoint(), region)));
+            }
+            if (abortIfDenied(ctx, caller, principal, forwarded.action(), action, credentialScope,
+                    List.of(forwarded.resource()), List.of(context), region, accountId, akid)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * The context once for each set of tags the request carries, with that set's keys where the context has
      * none of its own, so each resource's tags are checked apart; the context alone when it carries none.
      */
@@ -1287,8 +1332,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 }
             }
             for (Map<String, List<String>> targetContext : resourceContexts) {
+                Map<String, List<String>> taggedContext = targetContext;
+                if ("ec2".equals(credentialScope) && !RequestResources.hasIndividualTargets(operationAction)
+                        && AwsArnUtils.isArn(resource)) {
+                    taggedContext = conditionContextResolver.withEc2ResourceTags(
+                            credentialScope, operationAction, resource, region, accountId, targetContext);
+                }
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
-                        targetContext, resource, region, accountId, resourceOwnerAccountId, action);
+                        taggedContext, resource, region, accountId, resourceOwnerAccountId, action);
                 ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
                         effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(

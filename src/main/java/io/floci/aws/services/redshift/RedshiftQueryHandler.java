@@ -17,6 +17,7 @@ import io.floci.aws.services.redshift.model.EventSubscription;
 import io.floci.aws.services.redshift.model.Integration;
 import io.floci.aws.services.redshift.model.Parameter;
 import io.floci.aws.services.redshift.model.RedshiftEvent;
+import io.floci.aws.services.redshift.model.ScheduledAction;
 import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
@@ -64,6 +65,7 @@ public class RedshiftQueryHandler {
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
     private final IamEnforcementFilter iamEnforcementFilter;
     private final RedshiftResourcePolicies resourcePolicies;
+    private final RedshiftScheduledActionService scheduledActions;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
@@ -71,7 +73,8 @@ public class RedshiftQueryHandler {
                                 RegionResolver regionResolver,
                                 RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
                                 IamEnforcementFilter iamEnforcementFilter,
-                                RedshiftResourcePolicies resourcePolicies) {
+                                RedshiftResourcePolicies resourcePolicies,
+                                RedshiftScheduledActionService scheduledActions) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
@@ -80,12 +83,13 @@ public class RedshiftQueryHandler {
         this.zeroEtlConsumer = zeroEtlConsumer;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.resourcePolicies = resourcePolicies;
+        this.scheduledActions = scheduledActions;
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                          EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                          RegionResolver regionResolver) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null);
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -854,6 +858,22 @@ public class RedshiftQueryHandler {
                     intParam(params, "RetentionPeriod"), Boolean.parseBoolean(params.getFirst("Manual")));
             return clusterResponse(action, cluster);
         }
+        case "CreateScheduledAction" -> {
+            ScheduledAction request = scheduledActionRequest(params);
+            return scheduledActionResponse(action, scheduledActions.createScheduledAction(request));
+        }
+        case "ModifyScheduledAction" -> {
+            ScheduledAction changes = scheduledActionRequest(params);
+            Boolean enable = booleanParam(params, "Enable");
+            return scheduledActionResponse(action, scheduledActions.modifyScheduledAction(changes, enable));
+        }
+        case "DeleteScheduledAction" -> {
+            scheduledActions.deleteScheduledAction(requireParam(params, "ScheduledActionName"));
+            return emptyResponse(action);
+        }
+        case "DescribeScheduledActions" -> {
+            return describeScheduledActionsResponse(params);
+        }
         case "CreateSnapshotSchedule" -> {
             SnapshotSchedule schedule = service.createSnapshotSchedule(params.getFirst("ScheduleIdentifier"),
                     params.getFirst("ScheduleDescription"), memberList(params, "ScheduleDefinitions"),
@@ -1402,6 +1422,130 @@ public class RedshiftQueryHandler {
                 .end(operation + "Response")
                 .build();
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    /**
+     * The members a Create or ModifyScheduledAction request carries; a member left out stays null.
+     * TargetAction is a union of which exactly one member may be set.
+     */
+    private static ScheduledAction scheduledActionRequest(MultivaluedMap<String, String> params) {
+        ScheduledAction request = new ScheduledAction();
+        request.setScheduledActionName(requireParam(params, "ScheduledActionName"));
+        request.setIamRole(params.getFirst("IamRole"));
+        request.setSchedule(params.getFirst("Schedule"));
+        request.setDescription(params.getFirst("ScheduledActionDescription"));
+        request.setStartTime(timestampParam(params, "StartTime"));
+        request.setEndTime(timestampParam(params, "EndTime"));
+        Boolean enable = booleanParam(params, "Enable");
+        if (enable != null) {
+            request.setEnabled(enable);
+        }
+        List<String> targets = params.keySet().stream()
+                .filter(key -> key.startsWith("TargetAction."))
+                .map(key -> key.substring("TargetAction.".length()).split("\\.")[0])
+                .distinct()
+                .toList();
+        if (targets.size() > 1) {
+            throw new AwsException("InvalidScheduledAction", "TargetAction must set exactly one member.", 400);
+        }
+        if (!targets.isEmpty()) {
+            String type = targets.get(0);
+            if ("ResizeCluster".equals(type)) {
+                throw new AwsException("ScheduledActionTypeUnsupported",
+                        "Scheduled ResizeCluster actions are not supported.", 400);
+            }
+            if (!ScheduledAction.PAUSE_CLUSTER.equals(type) && !ScheduledAction.RESUME_CLUSTER.equals(type)) {
+                throw new AwsException("InvalidScheduledAction", "Unknown TargetAction member " + type + ".", 400);
+            }
+            request.setTargetActionType(type);
+            request.setClusterIdentifier(requireParam(params, "TargetAction." + type + ".ClusterIdentifier"));
+        }
+        return request;
+    }
+
+    private Response describeScheduledActionsResponse(MultivaluedMap<String, String> params) {
+        List<String> clusterIdentifiers = new ArrayList<>();
+        List<String> iamRoles = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember filter : AwsQueryLists.members(params, "Filters", "ScheduledActionFilter")) {
+            String name = params.getFirst(filter.prefix() + ".Name");
+            List<String> values = AwsQueryLists.values(params, filter.prefix() + ".Values", "item");
+            if ("cluster-identifier".equals(name)) {
+                clusterIdentifiers.addAll(values);
+            } else if ("iam-role".equals(name)) {
+                iamRoles.addAll(values);
+            } else {
+                throw new AwsException("InvalidParameterValue",
+                        "Filter name must be cluster-identifier or iam-role.", 400);
+            }
+        }
+        PaginatedResult<ScheduledAction> page = scheduledActions.describeScheduledActions(
+                params.getFirst("ScheduledActionName"), params.getFirst("TargetActionType"),
+                timestampParam(params, "StartTime"), timestampParam(params, "EndTime"),
+                booleanParam(params, "Active"),
+                clusterIdentifiers, iamRoles,
+                intParam(params, "MaxRecords"), params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeScheduledActionsResponse")
+                  .start("DescribeScheduledActionsResult")
+                    .start("ScheduledActions");
+        for (ScheduledAction scheduledAction : page.items()) {
+            xml.start("ScheduledAction").raw(buildScheduledActionFields(scheduledAction)).end("ScheduledAction");
+        }
+        xml.end("ScheduledActions");
+        if (page.nextToken() != null) {
+            xml.elem("Marker", page.nextToken());
+        }
+        String body = xml
+                  .end("DescribeScheduledActionsResult")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end("DescribeScheduledActionsResponse")
+                .build();
+        return Response.ok(body).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // Create/ModifyScheduledAction return the ScheduledAction members directly inside the Result.
+    private Response scheduledActionResponse(String operation, ScheduledAction scheduledAction) {
+        String xml = new XmlBuilder()
+                .start(operation + "Response")
+                  .start(operation + "Result")
+                    .raw(buildScheduledActionFields(scheduledAction))
+                  .end(operation + "Result")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end(operation + "Response")
+                .build();
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private String buildScheduledActionFields(ScheduledAction scheduledAction) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("ScheduledActionName", scheduledAction.getScheduledActionName())
+                .start("TargetAction")
+                  .start(scheduledAction.getTargetActionType())
+                    .elem("ClusterIdentifier", scheduledAction.getClusterIdentifier())
+                  .end(scheduledAction.getTargetActionType())
+                .end("TargetAction")
+                .elem("Schedule", scheduledAction.getSchedule())
+                .elem("IamRole", scheduledAction.getIamRole());
+        if (scheduledAction.getDescription() != null) {
+            xml.elem("ScheduledActionDescription", scheduledAction.getDescription());
+        }
+        xml.elem("State", scheduledAction.isEnabled() ? "ACTIVE" : "DISABLED");
+        xml.start("NextInvocations");
+        for (Instant invocation : scheduledActions.upcomingInvocations(scheduledAction, 5)) {
+            xml.elem("ScheduledActionTime", DateTimeFormatter.ISO_INSTANT.format(invocation));
+        }
+        xml.end("NextInvocations");
+        if (scheduledAction.getStartTime() != null) {
+            xml.elem("StartTime", DateTimeFormatter.ISO_INSTANT.format(scheduledAction.getStartTime()));
+        }
+        if (scheduledAction.getEndTime() != null) {
+            xml.elem("EndTime", DateTimeFormatter.ISO_INSTANT.format(scheduledAction.getEndTime()));
+        }
+        return xml.build();
     }
 
     private static Response emptyResponse(String operation) {

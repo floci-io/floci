@@ -6,11 +6,22 @@
 
 With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.
 Policies can scope access to an exact instance ARN or use stored tags through `ec2:ResourceTag/<key>` and `aws:ResourceTag/<key>`.
+Creation-time `CreateNetworkInterface` tags also populate the regional IAM tag index.
+Later `CreateTags` and `DeleteTags` keep the ENI response and authorization tags in sync,
+and deleting the interface removes its indexed tags.
 A batch containing an unauthorized instance is denied in full, including when another instance in that batch is allowed.
 These checks also apply in EC2 mock mode.
 Target members and resource-tag condition keys come from generated AWS model and Service Reference data.
 Malformed percent escapes in a form body are rejected with a client error before authorization uses any partially decoded parameters.
 See the [AWS EC2 authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html) for supported resource types and condition keys.
+
+## Elastic IP IAM authorization
+
+With IAM enforcement enabled, `AssociateAddress` authorizes the requested allocation and
+instance or network interface against their individual ARNs and stored ownership tags.
+Every supplied target needs a grant, and an explicit deny on any target rejects the request
+before association. `ReleaseAddress` also resolves the allocation named by `AllocationId`,
+so policies can scope release to that allocation or its stored tags.
 
 ## Instance Execution Model
 
@@ -401,7 +412,7 @@ private gateway lifecycles are not modelled.
 | RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
 | GetSecurityGroupsForVpc | Lists the security groups belonging to one VPC, with the same filters as the describe call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
-| ModifySecurityGroupRules | Updates supported fields on security group rules. |
+| ModifySecurityGroupRules | Applies only the nested `SecurityGroupRule.Description` field; other rule fields are ignored. Updates both rule and group views. Every rule must belong to the requested group before any update is applied. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
 | UpdateSecurityGroupRuleDescriptionsEgress | Updates descriptions on matching outbound security group rules. |
 
@@ -1403,13 +1414,13 @@ All three actions honor `DryRun`. A request that would otherwise succeed returns
 | DescribeIpams | Lists or returns stored IPAMs. |
 | ModifyIpam | Updates an IPAM's description, tier, metered account and operating regions. |
 | DeleteIpam | Deletes an IPAM and, leniently, the pools that belong to it. |
-| CreateIpamPool | Creates a pool under a scope, optionally sourced from a parent pool. |
+| CreateIpamPool | Creates a pool under a scope, optionally sourced from a parent pool. An `ipam-pool` `TagSpecification` tags it. |
 | DescribeIpamPools | Lists or returns stored pools. |
 | ModifyIpamPool | Updates a pool's description, auto-import flag and netmask-length bounds. |
 | DeleteIpamPool | Deletes a pool. |
 | ProvisionIpamPoolCidr | Provisions a CIDR onto a pool, validated against its source pool. |
 | GetIpamPoolCidrs | Returns a pool's provisioned CIDRs. |
-| AllocateIpamPoolCidr | Allocates a CIDR from a pool, by explicit CIDR or by netmask length. |
+| AllocateIpamPoolCidr | Allocates a CIDR from a pool, by explicit CIDR or by netmask length. An `ipam-pool-allocation` `TagSpecification` tags the allocation. |
 | ReleaseIpamPoolAllocation | Releases an allocation, returning its space to the pool. |
 | GetIpamPoolAllocations | Returns a pool's live allocations. |
 | AssociateIpamByoasn | Associates a BYOASN with a CIDR. |
@@ -1420,9 +1431,11 @@ This is what LZA needs end to end: the Organization stage delegates the IPAM adm
 
 Allocation is real rather than recorded. `AllocateIpamPoolCidr` by netmask length hands out the first free block that fits, skipping both live allocations and any space already provisioned onward to child pools, and reports `InsufficientCidrBlocks` when nothing fits. An explicit `Cidr` must fall inside a provisioned CIDR and must not overlap an existing allocation. `ProvisionIpamPoolCidr` on a pool with a source pool requires the CIDR to sit inside one of the parent's provisioned CIDRs. Releasing an allocation returns its space, so the next allocation of the same size reuses it.
 
+Pool and allocation tags are kept with the other EC2 tags, in the pool's own region even when an IPAM action is called from another region, so `CreateTags`, `DeleteTags` and `DescribeTags` in the pool's region work on them. `DescribeIpamPools` returns a pool's tags and its `tag:<key>` and `tag-key` filters match them; `AllocateIpamPoolCidr` and `GetIpamPoolAllocations` return an allocation's. Releasing an allocation removes its tags, and deleting a pool, directly or through `DeleteIpam`, removes the pool's tags and those of the allocations it still held. Tags are per account, as for every EC2 resource: the tags another account gives an allocation it makes from a shared pool stay in that account, so the owner's `GetIpamPoolAllocations` does not show them. The allocation records that account as its `resourceOwner`, and releasing the allocation or deleting its pool removes its tags both there and in the pool owner's account.
+
 `CreateIpam`, `CreateIpamPool`, `ProvisionIpamPoolCidr` and `AllocateIpamPoolCidr` honour `ClientToken` — the four IPAM operations that model it. A replay returns what the first call produced rather than creating a second resource: the same pool, the same provisioned CIDR, the same allocation id and CIDR, with pool consumption unchanged. This matters most on `AllocateIpamPoolCidr`, which LZA's `get-ipam-subnet-cidr` Lambda retries; without it each retry would burn another distinct CIDR out of the pool. Parameter differences on a replay are ignored rather than rejected as `IdempotentParameterMismatch`, and the token is not echoed in the response, matching the AWS output shapes. A token is scoped to the account that used it.
 
-Pool lookups deliberately fall back to an id-only scan across accounts, so a RAM-shared pool resolves from a workload account and region. That fallback covers reads and allocation only: `AllocateIpamPoolCidr` from an account that does not own the pool succeeds and writes the allocation back to the owner's partition rather than forking a copy into the caller's. Mutations of the pool itself — `ModifyIpamPool`, `DeleteIpamPool`, `ProvisionIpamPoolCidr` — are owner-only, as are `ModifyIpam` and `DeleteIpam`, and a non-owner gets `InvalidIpamPoolId.NotFound` or `InvalidIpamId.NotFound`, which is what AWS returns for a resource you cannot act on. `ReleaseIpamPoolAllocation` stays on the cross-account path, since no per-allocation caller is tracked to check ownership against.
+Pool lookups deliberately fall back to an id-only scan across accounts, so a RAM-shared pool resolves from a workload account and region. That fallback covers reads and allocation only: `AllocateIpamPoolCidr` from an account that does not own the pool succeeds and writes the allocation back to the owner's partition rather than forking a copy into the caller's. Mutations of the pool itself — `ModifyIpamPool`, `DeleteIpamPool`, `ProvisionIpamPoolCidr` — are owner-only, as are `ModifyIpam` and `DeleteIpam`, and a non-owner gets `InvalidIpamPoolId.NotFound` or `InvalidIpamId.NotFound`, which is what AWS returns for a resource you cannot act on. `ReleaseIpamPoolAllocation` stays on the cross-account path and does not check which account made the allocation.
 
 The delegated administrator is stored organization-wide rather than per account, so every member account reads the same value and delegating a second, different account conflicts with `InvalidParameterValue` no matter which account asks.
 

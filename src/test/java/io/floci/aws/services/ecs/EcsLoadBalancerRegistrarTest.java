@@ -16,17 +16,20 @@ import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * Component test for {@link EcsLoadBalancerRegistrar}: drives the register/deregister
@@ -94,6 +97,60 @@ class EcsLoadBalancerRegistrarTest {
         registrar.deregisterTask(task, svc, REGION);
         assertTrue(elbV2Service.describeTargetHealth(REGION, tgArn, null).isEmpty(),
                 "target should be deregistered");
+    }
+
+    @Test
+    void deregisterTaskReportsTheLongestDeregistrationDelayOfItsTargetGroups() {
+        String defaultTg = createTargetGroup("reg-tg-drain-default");
+        String shortTg = createTargetGroup("reg-tg-drain-short");
+        elbV2Service.modifyTargetGroupAttributes(REGION, shortTg, Map.of("deregistration_delay.timeout_seconds", "3"));
+        EcsTask task = taskWithContainer("web", 8080, 34600);
+
+        registrar.registerTask(task, serviceWithLb(shortTg, "web", 8080), REGION);
+        assertEquals(Duration.ofSeconds(3), registrar.deregisterTask(task, serviceWithLb(shortTg, "web", 8080), REGION));
+
+        EcsServiceModel both = serviceWithLb(shortTg, "web", 8080);
+        EcsLoadBalancer second = new EcsLoadBalancer();
+        second.setTargetGroupArn(defaultTg);
+        second.setContainerName("web");
+        second.setContainerPort(8080);
+        both.setLoadBalancers(List.of(both.getLoadBalancers().getFirst(), second));
+        registrar.registerTask(task, both, REGION);
+        assertEquals(Duration.ofSeconds(300), registrar.deregisterTask(task, both, REGION));
+        assertEquals(Duration.ZERO, registrar.deregisterTask(task, both, REGION), "nothing left to deregister");
+    }
+
+    @Test
+    void targetsHealthyIsFalseUntilEveryRecordedTargetPassesItsHealthCheck() {
+        String tgArn = createTargetGroup("reg-tg-health");
+        EcsTask task = taskWithContainer("web", 8080, 34700);
+        EcsTask unregistered = taskWithContainer("web", 8080, 34701);
+        registrar.registerTask(task, serviceWithLb(tgArn, "web", 8080), REGION);
+
+        assertTrue(registrar.targetsHealthy(unregistered), "a task that registered nothing has nothing to wait for");
+        assertFalse(registrar.targetsHealthy(task), "a freshly registered target is still in initial health");
+
+        TargetHealth healthy = new TargetHealth();
+        healthy.setState("healthy");
+        doReturn(List.of(healthy)).when(elbV2Service).describeTargetHealth(eq(REGION), eq(tgArn), any());
+        assertTrue(registrar.targetsHealthy(task));
+    }
+
+    @Test
+    void targetsHealthyIsFalseWhenTheTargetsFailedToRegisterOrTheirHealthCannotBeRead() {
+        String tgArn = createTargetGroup("reg-tg-health-unknown");
+        EcsTask failed = taskWithContainer("web", 8080, 34800);
+        doThrow(new IllegalStateException("registration refused"))
+                .when(elbV2Service).registerTargets(eq(REGION), eq(tgArn), any());
+        registrar.registerTask(failed, serviceWithLb(tgArn, "web", 8080), REGION);
+        assertFalse(registrar.targetsHealthy(failed), "a target that never registered never turns healthy");
+
+        String readTg = createTargetGroup("reg-tg-health-unread");
+        EcsTask unread = taskWithContainer("web", 8080, 34801);
+        registrar.registerTask(unread, serviceWithLb(readTg, "web", 8080), REGION);
+        doThrow(new IllegalStateException("health unavailable"))
+                .when(elbV2Service).describeTargetHealth(eq(REGION), eq(readTg), any());
+        assertFalse(registrar.targetsHealthy(unread));
     }
 
     @Test

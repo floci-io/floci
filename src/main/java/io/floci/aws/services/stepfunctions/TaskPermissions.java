@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RequestChecks;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
@@ -409,29 +410,22 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
     }
 
     /**
-     * The action of the API's own name on the application or job run it names, the ids read in either case as the
-     * integration reads them. A request missing one is refused by the integration. {@code CreateApplication} has no
-     * resource type in the service reference.
+     * The checks the request the integration sends EMR Serverless needs, as the same request made directly does
+     * ({@link RequestChecks}): its action on the application or job run it names, {@code CreateApplication} on no
+     * resource; {@code iam:PassRole} on a job run's execution role; and {@code emr-serverless:TagResource} on what a
+     * create or a job run tags, with the tags as condition keys of both. A request missing an id the integration
+     * requires is refused by it.
      */
     private static TaskPermissions emrServerless(String api, JsonNode input, StateMachine machine) {
-        String action = "emr-serverless:" + AslExecutor.capitalizeFirst(api);
-        if ("createApplication".equals(api)) {
-            return accessDenied(EMR_SERVERLESS_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
-        }
-        String application = text(EmrServerlessTaskInvoker.field(input, "ApplicationId"));
-        String jobRun = text(EmrServerlessTaskInvoker.field(input, "JobRunId"));
-        if (application == null || "cancelJobRun".equals(api) && jobRun == null) {
+        ObjectNode request = EmrServerlessTaskInvoker.apiRequest(api, input);
+        if (!"createApplication".equals(api) && !request.has("applicationId")
+                || "cancelJobRun".equals(api) && !request.has("jobRunId")) {
             return accessDenied(EMR_SERVERLESS_PREFIX, List.of());
         }
-        String resource = "/applications/" + application + ("cancelJobRun".equals(api) ? "/jobruns/" + jobRun : "");
-        return accessDenied(EMR_SERVERLESS_PREFIX,
-                List.of(new Permission(action, arn(machine, "emr-serverless", resource))));
-    }
-
-    /** The ARN of a resource of the state machine's partition, Region and account. */
-    private static String arn(StateMachine machine, String service, String resource) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        return new AwsArnUtils.Arn(owner.partition(), service, owner.region(), owner.accountId(), resource).toString();
+        return accessDenied(EMR_SERVERLESS_PREFIX, RequestChecks.of("emr-serverless:" + AslExecutor.capitalizeFirst(api),
+                        request, owner.partition(), owner.region(), owner.accountId(), null).stream()
+                .map(check -> new Permission(check.action(), check.resource(), check.context())).toList());
     }
 
     private static String regionOf(StateMachine machine) {

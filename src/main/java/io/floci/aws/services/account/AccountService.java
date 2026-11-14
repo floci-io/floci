@@ -22,15 +22,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class AccountService implements Resettable, StoredResourceArns {
     private static final String ACCOUNT_MANAGEMENT_SERVICE_PRINCIPAL = ServicePrincipals.of("account");
-    private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
-    private static final Pattern EMAIL = Pattern.compile("\\s*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+\\s*");
-    private static final Pattern PHONE = Pattern.compile("[\\s0-9()+-]+");
-    private static final Set<String> CONTACT_TYPES = Set.of("BILLING", "OPERATIONS", "SECURITY");
     private static final Set<String> COUNTRIES_REQUIRING_STATE_OR_REGION =
             Set.of("US", "CA", "GB", "DE", "JP", "IN", "BR");
     private static final String PRIMARY_CONTACT_KEY = "primary";
@@ -49,27 +44,30 @@ public class AccountService implements Resettable, StoredResourceArns {
     }
 
     public void putAlternateContact(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("PutAlternateContact", request);
         String targetAccountId = resolveTargetAccount(callerAccountId, request);
-        String type = requireContactType(request);
+        String type = text(request, "AlternateContactType");
         AlternateContact contact = new AlternateContact(
                 type,
-                requirePattern(request, "EmailAddress", 1, 254, EMAIL),
-                requireLength(request, "Name", 1, 64),
-                requirePattern(request, "PhoneNumber", 1, 25, PHONE),
-                requireLength(request, "Title", 1, 50));
+                text(request, "EmailAddress"),
+                text(request, "Name"),
+                text(request, "PhoneNumber"),
+                text(request, "Title"));
         contacts.putForAccount(targetAccountId, type, contact);
     }
 
     public AlternateContact getAlternateContact(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("GetAlternateContact", request);
         String targetAccountId = resolveTargetAccount(callerAccountId, request);
-        String type = requireContactType(request);
+        String type = text(request, "AlternateContactType");
         return contacts.getForAccount(targetAccountId, type)
                 .orElseThrow(AccountService::notFound);
     }
 
     public synchronized void deleteAlternateContact(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("DeleteAlternateContact", request);
         String targetAccountId = resolveTargetAccount(callerAccountId, request);
-        String type = requireContactType(request);
+        String type = text(request, "AlternateContactType");
         if (contacts.getForAccount(targetAccountId, type).isEmpty()) {
             throw notFound();
         }
@@ -110,17 +108,9 @@ public class AccountService implements Resettable, StoredResourceArns {
     }
 
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
-        JsonNode accountIdNode = request == null ? null : request.get("AccountId");
-        if (accountIdNode == null || accountIdNode.isNull()) {
+        String requestedAccountId = text(request, "AccountId");
+        if (requestedAccountId == null) {
             return callerAccountId;
-        }
-        if (!accountIdNode.isTextual()) {
-            throw new AwsException("SerializationException",
-                    "AccountId must be a string.", 400);
-        }
-        String requestedAccountId = accountIdNode.textValue();
-        if (!ACCOUNT_ID.matcher(requestedAccountId).matches()) {
-            throw validation("AccountId must be a 12 digit account ID.");
         }
 
         Organization organization;
@@ -191,30 +181,6 @@ public class AccountService implements Resettable, StoredResourceArns {
         return Optional.of(AwsArnUtils.Arn.global(AwsArnUtils.parse(organization.getArn()).partition(), "account",
                 organization.getMasterAccountId(), "account/" + organization.getId() + "/" + names.getFirst())
                 .toString());
-    }
-
-    private static String requireContactType(JsonNode request) {
-        String value = requireLength(request, "AlternateContactType", 1, 32);
-        if (!CONTACT_TYPES.contains(value)) {
-            throw validation("AlternateContactType must be BILLING, OPERATIONS, or SECURITY.");
-        }
-        return value;
-    }
-
-    private static String requirePattern(JsonNode request, String field, int min, int max, Pattern pattern) {
-        String value = requireLength(request, field, min, max);
-        if (!pattern.matcher(value).matches()) {
-            throw validation(field + " does not satisfy the required pattern.");
-        }
-        return value;
-    }
-
-    private static String requireLength(JsonNode request, String field, int min, int max) {
-        String value = text(request, field);
-        if (value == null || value.length() < min || value.length() > max) {
-            throw validation(field + " must be between " + min + " and " + max + " characters.");
-        }
-        return value;
     }
 
     private static String text(JsonNode request, String field) {

@@ -697,6 +697,35 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aRunIsToldTheManifestDigestEachWorkerTypesCustomImageResolvedToAndNoneForAnImageWithout() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        String driverImage = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/driver:7.5.0";
+        String executorImage = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/executor:7.5.0";
+        String builtLocally = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/local:7.5.0";
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(anyString())).thenAnswer(resolve -> resolve.getArgument(0));
+        when(ecr.rewriteImageUri(anyString())).thenAnswer(rewrite -> "localhost:5100/" + rewrite.getArgument(0));
+        when(lifecycle.resolveImageForLaunch("localhost:5100/" + driverImage, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "1".repeat(64), "sha256:" + "a".repeat(64)));
+        when(lifecycle.resolveImageForLaunch("localhost:5100/" + executorImage, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "2".repeat(64), "sha256:" + "b".repeat(64)));
+        when(lifecycle.resolveImageForLaunch("localhost:5100/" + builtLocally, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage("sha256:" + "3".repeat(64), null));
+        EmrServerlessSparkRunner runner = runner(builder);
+        ContainerExecStubs.completeEveryExec(docker, "driver", 7L, "", "");
+
+        runner.run(customImageJob(driverImage)
+                .withExecutors(new SparkJobRunner.Executors(2, executorImage, 0, 0, 0, null)), progress);
+        runner.run(customImageJob(builtLocally), progress);
+
+        // Each for the worker type that runs it.
+        verify(progress).imageResolved(SparkJobRunner.WorkerType.DRIVER, "sha256:" + "a".repeat(64));
+        verify(progress).imageResolved(SparkJobRunner.WorkerType.EXECUTOR, "sha256:" + "b".repeat(64));
+        verify(progress, times(2)).imageResolved(any(), any());
+    }
+
+    @Test
     void aCommandRunsThroughFlocisWrapperWithTheJobsSparkSettingsInItsEnvironment() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);

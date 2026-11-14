@@ -1833,6 +1833,16 @@ public interface EmulatorConfig {
 
         @WithDefault("60")
         long snapshotCopySweepIntervalSeconds();
+
+        /**
+         * Run the scheduled actions of provisioned clusters, which pause or resume a cluster on a schedule.
+         * Env: FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTIONS_ENABLED
+         */
+        @WithDefault("true")
+        boolean scheduledActionsEnabled();
+
+        @WithDefault("60")
+        long scheduledActionSweepIntervalSeconds();
         @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")

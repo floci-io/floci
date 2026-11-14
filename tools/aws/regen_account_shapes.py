@@ -2,7 +2,7 @@
 """Vendor Account Management request constraints from botocore's Apache-2.0 service model.
 
 AccountRequestShapes checks the operations listed here through RequestConstraintCheck using the
-model's types, required members, bounds and patterns.
+model's types, required members, bounds, patterns and enums.
 
 Run from anywhere in the repo:
     python3 tools/aws/regen_account_shapes.py
@@ -18,9 +18,11 @@ import request_shapes
 OUTPUT = request_shapes.REPO_ROOT / "src/main/resources/aws/account-request-shapes.json"
 MODEL = Path("account/2021-02-01")
 
-# The alternate contact operations keep the hand-written checks of AccountService.
 OPERATIONS = (
+    "DeleteAlternateContact",
+    "GetAlternateContact",
     "GetContactInformation",
+    "PutAlternateContact",
     "PutContactInformation",
 )
 

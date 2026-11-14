@@ -23,6 +23,8 @@
 # model by tools/aws/regen_apigateway_shapes.py.
 # src/main/resources/aws/ecs-request-shapes.json is generated from botocore's ECS model
 # by tools/aws/regen_ecs_shapes.py.
+# src/main/resources/aws/eks-request-shapes.json is generated from botocore's EKS model
+# by tools/aws/regen_eks_shapes.py.
 # src/main/resources/aws/organizations-request-shapes.json is generated from botocore's Organizations
 # model by tools/aws/regen_organizations_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
@@ -32,7 +34,7 @@
 # src/main/resources/aws/cur-request-shapes.json, the Cost and Usage Reports request constraints
 # for every operation, is generated from botocore's CUR model by tools/aws/regen_cur_shapes.py.
 # src/main/resources/aws/account-request-shapes.json, the Account Management request constraints of the
-# primary contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
+# contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.
@@ -307,6 +309,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_documentation_shapes.py
 	$(PYTHON) tools/aws/regen_ecs_shapes.py
+	$(PYTHON) tools/aws/regen_eks_shapes.py
 	$(PYTHON) tools/aws/regen_organizations_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
@@ -461,6 +464,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_ecs_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/ecs-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_eks_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/eks-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
@@ -900,7 +909,7 @@ s3control-tag-condition-keys-verify: ## Check the S3 Control tag condition actio
 	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --verify
 
 .PHONY: request-condition-keys-sync request-condition-keys-check request-condition-keys-verify
-request-condition-keys-sync: ## Regenerate the Lambda Web and Redshift request condition keys from AWS and botocore
+request-condition-keys-sync: ## Regenerate the Lambda Web, Redshift and Route 53 request condition keys from AWS and botocore
 	$(PYTHON) tools/aws/regen_request_condition_keys.py
 request-condition-keys-check: ## Check the request condition key members against pinned botocore
 	$(PYTHON) tools/aws/regen_request_condition_keys.py --check

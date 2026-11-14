@@ -372,6 +372,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "MEASURED", {})
+    monkeypatch.setattr(r, "FORWARDED", {})
     return monkeypatch
 
 
@@ -502,7 +503,8 @@ def test_redshift_serverless_account_inference_preserves_the_generated_resources
         if not operation.startswith("redshift-serverless:"):
             continue
         derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
-                              document["arnFormats"]["redshift-serverless"], models)
+                              document["arnFormats"]["redshift-serverless"], models, None,
+                              document["forwardedActions"])
         assert derived == entry, operation
         if r.account_members(models, operation.split(":", 1)[1]) == ["ownerAccount"]:
             account_operations.add(operation.split(":", 1)[1])
@@ -708,7 +710,7 @@ def good_document() -> dict:
     return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
-            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]},
+            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "forwardedActions": {},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
@@ -1008,6 +1010,125 @@ def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_pa
         r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
 
 
+GUIDE_SAYS = "the guide (https://example.com/guide) says 'restoring a thing needs keys:Decrypt on its key'"
+KEY_FORMAT = "arn:${Partition}:keys:${Region}:${Account}:key/${KeyId}"
+
+
+def keys_reference(resources: list[str] | None = None, condition_keys: list[str] | None = None) -> dict:
+    """A Service Reference document of a key service whose `Decrypt` acts on keys and takes its `ViaService` key."""
+    document = reference("keys", {"Decrypt": ["key"] if resources is None else resources}, {"key": KEY_FORMAT})
+    document["Actions"][0]["ActionConditionKeys"] = ["keys:ViaService"] if condition_keys is None else condition_keys
+    return document
+
+
+def forwarding_documents(tmp_path, record_member: str = "KeysKeyId", listed: bool = False,
+                         keys: dict | None = None) -> list[dict]:
+    """`svc`, whose `GetThing` restores a thing its record says a key of `keys` encrypts, and that key service."""
+    svc = model({"GetThing": {"ThingName": "String"}, "ListThings": {}})
+    svc["metadata"]["endpointPrefix"] = "svc"
+    svc["shapes"]["Thing"] = {"type": "structure", "members": {"ThingName": {"shape": "String"},
+                                                               record_member: {"shape": "String"}}}
+    write_models(tmp_path, {"svc": svc})
+    documents = [dict(DOCUMENTS[0]), *DOCUMENTS[1:], keys or keys_reference()]
+    if listed:
+        documents[0] = json.loads(json.dumps(DOCUMENTS[0]))
+        documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
+    return documents
+
+
+def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_holds(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+    # The member is the record's, named after the action's namespace and its type's variable, whatever its case.
+    assert document["operations"]["svc:GetThing"]["forwarded"] == [
+        {"action": "keys:Decrypt", "of": "thing", "member": "KeysKeyId", "endpoint": "svc"}]
+    assert document["forwardedActions"] == {
+        "keys:Decrypt": {"type": "key", "format": KEY_FORMAT, "viaService": "keys:ViaService"}}
+    assert "forwarded" not in document["operations"]["svc:ListThings"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    assert json.loads(r.render(document)) == document
+    # An action the reference gives no ViaService key carries none.
+    documents = forwarding_documents(tmp_path / "plain", keys=keys_reference(condition_keys=[]))
+    assert r.build(documents, "test", tmp_path / "plain", "botocore test")["forwardedActions"] == {
+        "keys:Decrypt": {"type": "key", "format": KEY_FORMAT}}
+
+
+@pytest.mark.parametrize("forwarded, change, problem", [
+    # No link to where AWS says it.
+    ((["keys:Decrypt", "thing"], "the guide says so"), {}, "no link to the evidence"),
+    # The reference lists the action for the operation: a rule reads it.
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"listed": True}, "which the Service Reference lists for it"),
+    # An action the reference does not list, or one acting on no one type.
+    ((["keys:Encrypt", "thing"], GUIDE_SAYS), {}, "which the Service Reference does not list"),
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"keys": keys_reference(resources=[])}, "not one resource type"),
+    # What a type the operation's action does not act on holds.
+    ((["keys:Decrypt", "group"], GUIDE_SAYS), {}, "no type its action acts on"),
+    # A record holding no member named after the action's namespace and its type's variable.
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"record_member": "EncryptionKey"}, "has no keysKeyId member"),
+])
+def test_a_forwarded_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say_and_is_read(
+        isolated, tmp_path, forwarded, change, problem):
+    (action, of), evidence = forwarded
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
+    with pytest.raises(ValueError, match=problem):
+        r.build(forwarding_documents(tmp_path, **change), "test", tmp_path, "botocore test")
+
+
+def test_a_forwarded_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    with pytest.raises(ValueError, match="FORWARDED gives svc:Gone, which the file does not read"):
+        r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+
+
+def forwarding_document() -> dict:
+    document = good_document()
+    document["forwardedActions"] = {"keys:Decrypt": {"type": "key", "format": KEY_FORMAT, "viaService": "keys:ViaService"}}
+    document["operations"]["svc:A"]["forwarded"] = [
+        {"action": "keys:Decrypt", "of": "thing", "member": "KeysKeyId", "endpoint": "svc"}]
+    return document
+
+
+@pytest.mark.parametrize("change, problem", [
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(action="keys:Encrypt"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(of="group"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(member="Keys[]"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].pop("endpoint"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"].update(forwarded=[]), "forwards no recorded action"),
+    (lambda d: d["forwardedActions"]["keys:Decrypt"].update(viaService="other:ViaService"), "forwardedActions is not"),
+    (lambda d: d["forwardedActions"]["keys:Decrypt"].update(format="arn:${Partition}:other:::key/${KeyId}"),
+     "forwardedActions is not"),
+    (lambda d: d.pop("forwardedActions"), "forwardedActions is not"),
+])
+def test_a_malformed_forwarded_entry_is_rejected(change, problem):
+    assert r.validate(forwarding_document()) == []
+    document = forwarding_document()
+    change(document)
+    assert any(problem in found for found in r.validate(document))
+
+
+def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists_it_for_the_operation(isolated):
+    isolated.setattr(r, "FORWARDED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = forwarding_document()
+    documents = [reference("svc", {"A": ["thing"]}, {"thing": FORMATS["thing"]}), keys_reference()]
+    assert r.verify_forwarded(document, documents) == []
+    assert r.verify_forwarded(document, [documents[0], keys_reference(condition_keys=[])]) == [
+        'AWS gives keys:Decrypt {"type": "key", "format": "' + KEY_FORMAT + '"}, not '
+        '{"type": "key", "format": "' + KEY_FORMAT + '", "viaService": "keys:ViaService"}']
+    documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
+    assert r.verify_forwarded(document, documents) == [
+        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so FORWARDED should not give them"]
+
+
+def test_check_fails_when_the_file_records_other_forwarded_actions_than_forwarded_names(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+    isolated.setattr(r, "FORWARDED", {})
+    document["operations"]["svc:GetThing"].pop("forwarded")
+    assert r.derive(document, tmp_path) == [
+        "the file records ['keys:Decrypt'] as forwarded actions, FORWARDED names []"]
+
+
 def test_a_variable_no_member_fills_takes_the_one_value_of_its_enum_the_operations_name_gives():
     formats = {"actiontype": "arn:${Partition}:svc:${Region}:${Account}:actiontype:${Owner}/${Category}"}
     owners = model({"CreateCustomActionType": {"category": "String"}})
@@ -1141,6 +1262,24 @@ def with_instance_example(model_: dict) -> dict:
     return model_
 
 
+def test_create_vpc_reads_the_new_vpc_and_each_optional_pool():
+    ec2 = model({"CreateVpc": {"CidrBlock": "String", "Ipv4IpamPoolId": "IpamPoolId",
+                               "Ipv6IpamPoolId": "IpamPoolId", "Ipv6Pool": "Ipv6PoolEc2Id"}}, "ec2")
+    ec2["shapes"]["IpamPoolId"] = {"type": "string"}
+    ec2["shapes"]["Ipv6PoolEc2Id"] = {"type": "string"}
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}",
+               "ipam-pool": "arn:${Partition}:ec2::${Account}:ipam-pool/${IpamPoolId}",
+               "ipv6pool-ec2": "arn:${Partition}:ec2:${Region}:${Account}:ipv6pool-ec2/${Ipv6PoolEc2Id}"}
+    upstream = {"action": "ec2:CreateVpc", "types": ["ipam-pool", "ipv6pool-ec2", "vpc"]}
+    entry = r.entry_for("ec2:CreateVpc", upstream, formats, {"ec2": ec2})
+    assert entry["resources"] == [
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv4IpamPoolId"}},
+        {"type": "ipv6pool-ec2", "fill": {"Ipv6PoolEc2Id": "Ipv6Pool"}},
+        {"type": "vpc", "fill": {}, "made": True},
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv6IpamPoolId"}}]
+    assert "targets" not in entry
+
+
 def test_id_targets_follow_the_model_and_resource_types_not_operation_names():
     ec2 = with_instance_example(model({"AnnotateResources": {"Resources": "Strings"}}, "ec2"))
     member = ec2["shapes"]["AnnotateResourcesIn"]["members"]["Resources"]
@@ -1180,7 +1319,9 @@ def test_generated_targets_match_botocores_actual_serialization(operation, targe
         operation_model = model.operation_model(name)
         parameters = ArgumentGenerator().generate_skeleton(operation_model.input_shape)
         parameters[target["member"].removesuffix("[]")] = ids
-        request = create_serializer(model.metadata["protocol"]).serialize_to_request(parameters, operation_model)
+        # The skeleton's other members are placeholders (an empty tag key), so only the serialization is checked.
+        request = create_serializer(model.metadata["protocol"], include_validation=False).serialize_to_request(
+            parameters, operation_model)
         assert [request["body"][target["query"] + "." + str(i)] for i in range(1, 4)] == ids
         checked += 1
     assert checked > 0
@@ -1210,13 +1351,32 @@ def test_instance_target_member_is_derived_from_the_arn_variable_not_the_action_
                        renamed_formats, {"ec2": renamed})["targets"]["member"] == "MachineIds[]"
 
 
-def test_resource_tag_prefixes_come_only_from_supported_reference_resources():
+def test_resource_tag_prefixes_cover_every_type_of_an_id_target_namespace_from_the_reference():
     documents = [{"Name": "ec2", "Resources": [
         {"Name": "instance", "ConditionKeys": ["vendor:ResourceTag/${TagKey}", "aws:RequestTag/${TagKey}",
                                                "aws:ResourceTag/${TagKey}", "ec2:Region"]},
-        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]}]}]
-    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"]}}
+        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]},
+        {"Name": "untaggable", "ConditionKeys": ["ec2:Region"]}]},
+        {"Name": "other", "Resources": [{"Name": "thing", "ConditionKeys": ["aws:ResourceTag/${TagKey}"]}]}]
+    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"],
+                                                      "volume": ["volume:ResourceTag/"]}}
     assert r.resource_tag_keys([]) == {}
+
+
+def test_id_prefixes_read_botocores_examples_by_the_shape_of_each_member():
+    ec2 = model({"DescribeGroups": {"GroupIds": "GroupIdList", "Label": "String"}}, "ec2")
+    ec2["shapes"]["SecurityGroupId"] = {"type": "string"}
+    ec2["shapes"]["GroupIdList"] = {"type": "list", "member": {"shape": "SecurityGroupId"}}
+    ec2["operations"]["DescribeGroups"]["output"] = {"shape": "DescribeGroupsOut"}
+    ec2["shapes"]["DescribeGroupsOut"] = {"type": "structure", "members": {"GroupId": {"shape": "SecurityGroupId"}}}
+    examples = {"ec2": {"examples": {"DescribeGroups": [
+        {"input": {"GroupIds": ["sg-903004f8", "sg-1a2b3c4d"], "Label": "lb-0123456789abcdef"},
+         "output": {"GroupId": "sg-0a1b2c3d4e5f60718"}},
+        {"input": {"GroupIds": ["xx-12345678"]}}]}}}
+    assert r.id_prefixes({"ec2": ec2}, ("security-group",), examples) == {"security-group": "sg-"}
+    # A String member's id-like value names no type, and without examples nothing is known.
+    assert r.id_prefixes({"ec2": ec2}, ("lb",), examples) == {}
+    assert r.id_prefixes({"ec2": ec2}, ("security-group",)) == {}
 
 
 def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_members():
@@ -1593,3 +1753,119 @@ def test_a_resource_id_variable_takes_a_member_named_so_and_a_bare_id_the_member
     # A bare `Id` is whatever the operation is about: the tenant's is its `DistributionTenantId`.
     assert r._filling("Id", "distributiontenant", 1, {"Id": "Id", "DistributionTenantId": "DistributionTenantId"},
                       {"Id"}) == "DistributionTenantId"
+
+
+def test_vpc_operations_read_vpc_ids_and_stored_tag_keys():
+    ec2 = model({"ModifyVpcAttribute": {"VpcId": "String"}}, "ec2")
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"}
+    assert r.entry_for("ec2:ModifyVpcAttribute", {"action": "ec2:ModifyVpcAttribute", "types": ["vpc"]},
+                       formats, {"ec2": ec2})["resources"] == [{"type": "vpc", "fill": {"VpcId": "VpcId"}}]
+    assert r.resource_tag_keys([{"Name": "ec2", "Resources": [{"Name": "vpc", "ConditionKeys": [
+        "aws:ResourceTag/${TagKey}", "ec2:ResourceTag/${TagKey}", "ec2:Region"]}]}]) == {
+            "ec2": {"vpc": ["aws:ResourceTag/", "ec2:ResourceTag/"]}}
+
+
+@pytest.mark.parametrize("operation,kind,variable", [
+    ("CreateSubnet", "subnet", "SubnetId"),
+    ("CreateRouteTable", "route-table", "RouteTableId"),
+    ("CreateSecurityGroup", "security-group", "SecurityGroupId"),
+    ("CreateInternetGateway", "internet-gateway", "InternetGatewayId"),
+])
+def test_network_creates_authorize_new_resource_and_existing_vpc(operation, kind, variable):
+    has_parent = operation != "CreateInternetGateway"
+    members = {"VpcId": "String"} if has_parent else {}
+    ec2 = model({operation: members}, "ec2")
+    formats = {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{{variable}}}",
+               "vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"}
+    types = [kind, "vpc"] if has_parent else [kind]
+    entry = r.entry_for(f"ec2:{operation}", {"action": f"ec2:{operation}", "types": types},
+                        formats, {"ec2": ec2})
+    expected = [{"type": kind, "fill": {}}]
+    if has_parent:
+        expected[0]["made"] = True
+        expected.append({"type": "vpc", "fill": {"VpcId": "VpcId"}})
+    assert entry["resources"] == expected
+
+
+@pytest.mark.parametrize("documentation,output_id,input_id,expected", [
+    ("<p>Allocates an Elastic IP address to your account.</p>", True, False, True),
+    ("Allocates a pool for an Elastic IP address.", True, False, False),
+    ("Describes an Elastic IP address.", True, False, False),
+    ("Allocates an Elastic IP address.", False, False, False),
+    ("Allocates an Elastic IP address.", True, True, False),
+])
+def test_documented_creation_requires_direct_object_and_new_response_id(documentation, output_id, input_id, expected):
+    ec2 = model({"AllocateAddress": {"AllocationId": "String"} if input_id else {}}, "ec2")
+    ec2["operations"]["AllocateAddress"].update(documentation=documentation, output={"shape": "Out"})
+    ec2["shapes"]["Out"] = {"type": "structure", "members": {
+        "AllocationId" if output_id else "PublicIp": {"shape": "String"}}}
+    formats = {"elastic-ip": "arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}"}
+    assert r.with_documented_creation([], "ec2:AllocateAddress", ["elastic-ip"], formats, {"ec2": ec2}) == (
+        [{"type": "elastic-ip", "fill": {}, "made": True}] if expected else [])
+
+
+def test_ec2_query_names_follow_model_serialization_and_only_read_resource_members():
+    ec2 = model({"CreateNetworkInterface": {"Groups": "Strings", "SubnetId": "String", "Ignored": "Strings"}}, "ec2")
+    group = ec2["shapes"]["CreateNetworkInterfaceIn"]["members"]["Groups"]
+    group["locationName"] = "securityGroupId"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups", "SubnetId"}) == {
+        "Groups[]": "SecurityGroupId"}
+    group["queryName"] = "ExactGroupWireName"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups"}) == {
+        "Groups[]": "ExactGroupWireName"}
+    ec2["metadata"]["protocol"] = "query"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups"}) == {}
+
+
+def test_a_typed_list_is_the_targets_only_when_the_request_names_nothing_else_the_action_acts_on():
+    ec2 = model({"Launch": {"SecurityGroupIds": "Strings", "ImageId": "String"},
+                 "ApplyGroups": {"SecurityGroupIds": "Strings"},
+                 "AnnotateResources": {"Resources": "Strings"}}, "ec2")
+    formats = {"security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}",
+               "image": "arn:${Partition}:ec2:${Region}::image/${ImageId}"}
+    known = {"security-group": "sg-"}
+    # A launch's groups sit beside its image: the ordinary rules read both, and the groups are not its targets.
+    launch = r.entry_for("ec2:Launch", {"action": "ec2:Launch", "types": ["image", "security-group"]},
+                         formats, {"ec2": ec2}, known)
+    assert "targets" not in launch
+    assert {"type": "image", "fill": {"ImageId": "ImageId"}} in launch["resources"]
+    applied = r.entry_for("ec2:ApplyGroups", {"action": "ec2:ApplyGroups", "types": ["security-group"]},
+                          formats, {"ec2": ec2}, known)
+    assert applied["targets"] == {"member": "SecurityGroupIds[]", "query": "SecurityGroupIds",
+                                  "prefixes": {"security-group": "sg-"}}
+    tags = r.entry_for("ec2:AnnotateResources", {"action": "ec2:AnnotateResources", "types": ["security-group"]},
+                       formats, {"ec2": ec2}, known)
+    assert tags["targets"]["prefixes"] == {"security-group": "sg-"}
+
+
+def test_a_list_inside_a_structure_is_no_member_the_rules_read():
+    ec2 = model({"CreateSnapshots": {"InstanceSpecification": "Specification"}}, "ec2")
+    ec2["shapes"]["Specification"] = {"type": "structure", "members": {
+        "InstanceId": {"shape": "String"}, "ExcludeDataVolumeIds": {"shape": "Strings"}}}
+    found = r.documented_members({"ec2": ec2}, "CreateSnapshots")
+    assert "InstanceSpecification.InstanceId" in found
+    assert "InstanceSpecification.ExcludeDataVolumeIds" not in found
+
+
+def test_lists_of_several_types_are_read_by_the_ordinary_rules():
+    ec2 = model({"CreateEndpoint": {"RouteTableIds": "Strings", "SecurityGroupIds": "Strings"}}, "ec2")
+    formats = {"route-table": "arn:${Partition}:ec2:${Region}:${Account}:route-table/${RouteTableId}",
+               "security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"}
+    entry = r.entry_for("ec2:CreateEndpoint", {"action": "ec2:CreateEndpoint", "types": ["route-table", "security-group"]},
+                        formats, {"ec2": ec2}, {"route-table": "rtb-", "security-group": "sg-"})
+    assert "targets" not in entry
+    assert {kind for resource in entry["resources"] for kind in r._kinds(resource)} == {"route-table", "security-group"}
+
+
+@pytest.mark.parametrize("operation,members,kinds", [
+    ("AssociateAddress", {"AllocationId": "String", "InstanceId": "String", "NetworkInterfaceId": "String"},
+     ["elastic-ip", "instance", "network-interface"]),
+    ("ReleaseAddress", {"AllocationId": "String"}, ["elastic-ip"]),
+])
+def test_eip_operations_read_scalar_targets_from_models(operation, members, kinds):
+    variables = {"elastic-ip": "AllocationId", "instance": "InstanceId", "network-interface": "NetworkInterfaceId"}
+    formats = {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{{variables[kind]}}}" for kind in kinds}
+    ec2 = model({operation: members}, "ec2")
+    action = "ec2:" + operation
+    entry = r.entry_for(action, {"action": action, "types": kinds}, formats, {"ec2": ec2})
+    assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]

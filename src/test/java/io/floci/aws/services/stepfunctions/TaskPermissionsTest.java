@@ -587,6 +587,37 @@ class TaskPermissionsTest {
                         .orElseThrow().permissions());
     }
 
+    /** A job run passes its execution role to EMR Serverless, as a direct {@code StartJobRun} does. */
+    @Test
+    void aJobRunNeedsPassRoleOnItsExecutionRole() throws Exception {
+        String role = "arn:aws:iam::111122223333:role/job";
+        assertEquals(List.of(new Permission("emr-serverless:StartJobRun", APPLICATION),
+                        new Permission("iam:PassRole", role,
+                                Map.of("iam:PassedToService", List.of("emr-serverless.amazonaws.com")))),
+                TaskPermissions.of(integration("emr-serverless:startJobRun"),
+                        json("{\"ApplicationId\":\"a\",\"ExecutionRoleArn\":\"" + role + "\"}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
+    /**
+     * Tags a create or a job run sends need {@code emr-serverless:TagResource}, on the application a create makes or
+     * the one a job run is checked on, as a direct request's do, and the call itself is checked with them.
+     */
+    @Test
+    void tagsACreateOrAJobRunSendsNeedTagResource() throws Exception {
+        Map<String, List<String>> tagged = Map.of("aws:RequestTag/team", List.of("data"), "aws:TagKeys", List.of("team"));
+        assertEquals(List.of(new Permission("emr-serverless:CreateApplication", "*", tagged),
+                        new Permission("emr-serverless:TagResource",
+                                "arn:aws:emr-serverless:eu-west-1:111122223333:/applications/*", tagged)),
+                TaskPermissions.of(integration("emr-serverless:createApplication"),
+                        json("{\"Tags\":{\"team\":\"data\"}}"), machine("aws")).orElseThrow().permissions());
+        assertEquals(List.of(new Permission("emr-serverless:StartJobRun", APPLICATION, tagged),
+                        new Permission("emr-serverless:TagResource", APPLICATION, tagged)),
+                TaskPermissions.of(integration("emr-serverless:startJobRun"),
+                        json("{\"ApplicationId\":\"a\",\"Tags\":{\"team\":\"data\"}}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
     private static TaskPermissions ecsPermissions(String tail, String request, EcsService ecs) throws Exception {
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, ecs, false).orElseThrow();
     }

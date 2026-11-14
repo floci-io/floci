@@ -214,6 +214,25 @@ class EmrEventPublisherTest {
                 + " cancelled.", detail.path("message").asText());
     }
 
+    @Test
+    void aStepPendingCancellationIsAWarningSayingWhenItWasCancelled() throws Exception {
+        EmrCluster cluster = service.runJobFlow(cluster("cancelling", true, step("doomed")), REGION);
+        EmrStep step = cluster.getSteps().get(0);
+
+        EmrEventPublisher.Event event = publisher.stepCancelPending(cluster, step,
+                Instant.parse("2026-10-24T09:41:30Z"));
+
+        assertEquals("EMR Step Status Change", event.detailType());
+        JsonNode detail = fixture.objectMapper.readTree(event.detail());
+        assertEquals(List.of("severity", "actionOnFailure", "stepId", "name", "clusterId", "state", "message"),
+                fieldNames(detail));
+        assertEquals("WARN", detail.path("severity").asText());
+        assertEquals("CANCEL_PENDING", detail.path("state").asText());
+        assertEquals("Step " + step.getId() + " (doomed) in Amazon EMR cluster " + cluster.getId() + " (cancelling)"
+                + " was cancelled at 2026-10-24 09:41 UTC and is pending cancellation.",
+                detail.path("message").asText());
+    }
+
     private void assertCluster(JsonNode event, EmrCluster cluster, String state, String severity, String reason,
                                String message) {
         assertEquals("EMR Cluster State Change", event.path("detail-type").asText());

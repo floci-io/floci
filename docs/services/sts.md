@@ -304,6 +304,11 @@ when its condition matches.
 The target role's tags do not supply the caller's principal tags. A chained request reads the
 current caller role's tags; tags on the user that originally assumed it are not inherited.
 
+A trust policy with a statement whose `Effect` is not exactly `Allow` or `Deny`, or whose
+`Condition` is not an object of non-empty operator objects, lets no one assume the role, the same
+on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML`. IAM refuses such a document
+when it is written; Floci stores it as given, so the whole document is refused when it is read.
+
 ### Known limitations
 
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,

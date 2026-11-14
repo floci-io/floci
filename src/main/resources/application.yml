@@ -167,7 +167,7 @@ quarkus:
       - --initialize-at-run-time=io.floci.aws.services.redshift.proxy.RedshiftRoleAccess
       - --initialize-at-run-time=io.floci.aws.services.redshift.spectrum.SpectrumMaterializer
       - --initialize-at-run-time=io.floci.aws.services.ecs.exec.EcsExecSessionRegistry
-      - --initialize-at-run-time=io.floci.aws.services.stepfunctions.ApiGatewayTaskInvoker
+      - --initialize-at-run-time=io.floci.aws.core.common.auth.LocalAwsSigningSession
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy
@@ -558,6 +558,8 @@ floci:
       snapshot-sweep-interval-seconds: 60
       snapshot-copy-enabled: true
       snapshot-copy-sweep-interval-seconds: 60
+      scheduled-actions-enabled: true
+      scheduled-action-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000

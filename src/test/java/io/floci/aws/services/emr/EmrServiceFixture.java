@@ -248,6 +248,11 @@ final class EmrServiceFixture {
         return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, releaseImages, iam, durations);
     }
 
+    /** A new service on the same storage and clock, as {@link #restart} builds, in the {@code immediate} mode. */
+    EmrServiceFixture restartImmediate() {
+        return new EmrServiceFixture(storage, clock, null, null, null, null, iam, durations);
+    }
+
     /**
      * A new service on the same storage and clock, as {@link #restart} builds, but with {@code runner},
      * its wakeups set on {@code wakeups}, and leftover drivers removed when it starts.
@@ -332,6 +337,11 @@ final class EmrServiceFixture {
                     ? detail.path("state").asText() + " " + detail.path("name").asText()
                     : detail.path("state").asText();
         }).toList();
+    }
+
+    /** Each step's state, in order. */
+    static List<String> stepStates(List<EmrStep> steps) {
+        return steps.stream().map(EmrStep::getState).toList();
     }
 
     static EmrCluster cluster(String name, boolean keepAlive, EmrStep... steps) {

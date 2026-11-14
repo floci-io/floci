@@ -215,6 +215,51 @@ class StepFunctionsJobTaskIamIntegrationTest {
         target.notReached().check();
     }
 
+    /**
+     * A job run passes its execution role to EMR Serverless as a direct {@code StartJobRun} does, so the role the task
+     * runs as needs {@code iam:PassRole} on it beside the action on the application.
+     */
+    @Test
+    void aJobRunNeedsPassRoleOnItsExecutionRole() throws Exception {
+        Target target = startJobRunTarget();
+        String role = role(STATES_TRUST, allow(target.resourceArn(), target.actions()));
+
+        Response refused = terminal(start(machine(jsonPathTask(target, null), role), "{}"));
+
+        assertFailed(refused, target.error());
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("iam:PassRole") && cause.contains(target.arguments().get("ExecutionRoleArn").toString()),
+                cause);
+        target.notReached().check();
+    }
+
+    /**
+     * Tags an application is created with need {@code emr-serverless:TagResource} on the application it makes, as a
+     * direct {@code CreateApplication} does, and the create itself is checked with them.
+     */
+    @Test
+    void tagsAnApplicationIsCreatedWithNeedTagResource() throws Exception {
+        Target untagged = createApplicationTarget();
+        Map<String, Object> arguments = new LinkedHashMap<>(untagged.arguments());
+        arguments.put("Tags", Map.of("team", "data"));
+        Target target = new Target(untagged.integration(), untagged.error(), untagged.resourceArn(), arguments,
+                untagged.reached(), untagged.notReached(), untagged.actions());
+
+        Response refused = terminal(start(machine(jsonPathTask(target, null), role(STATES_TRUST, target.grant())), "{}"));
+        assertFailed(refused, target.error());
+        assertTrue(refused.jsonPath().getString("cause").contains("emr-serverless:TagResource"), refused.asString());
+        target.notReached().check();
+
+        Response created = terminal(start(machine(jsonPathTask(target, null), role(STATES_TRUST, policy(List.of(
+                Map.of("Effect", "Allow", "Action", List.of("emr-serverless:CreateApplication"), "Resource", List.of("*"),
+                        "Condition", Map.of("StringEquals", Map.of("aws:RequestTag/team", "data"))),
+                Map.of("Effect", "Allow", "Action", List.of("emr-serverless:TagResource"),
+                        "Resource", List.of("arn:aws:emr-serverless:" + REGION + ":" + ACCOUNT + ":/applications/*")))))),
+                "{}"));
+        assertEquals("SUCCEEDED", created.jsonPath().getString("status"), created.asString());
+        target.reached().check();
+    }
+
     @ParameterizedTest
     @MethodSource("eachIntegration")
     void aCredentialsRoleNotAllowedTheActionIsRefusedEvenIfTheExecutionRoleIs(String integration) throws Exception {
@@ -530,8 +575,13 @@ class StepFunctionsJobTaskIamIntegrationTest {
             return actions[0];
         }
 
+        /** The actions on the resource, and {@code iam:PassRole} on the execution role a request passes, if any. */
         String grant() {
-            return allow(resourceArn, actions);
+            Object role = arguments.get("ExecutionRoleArn");
+            Map<String, Object> onResource = Map.of("Effect", "Allow", "Action", List.of(actions),
+                    "Resource", List.of(resourceArn));
+            return policy(role == null ? List.of(onResource) : List.of(onResource, Map.of("Effect", "Allow",
+                    "Action", List.of("iam:PassRole"), "Resource", List.of(role.toString()))));
         }
     }
 

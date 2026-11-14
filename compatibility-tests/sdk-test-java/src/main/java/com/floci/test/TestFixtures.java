@@ -1898,6 +1898,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static RedshiftClient redshiftClient(String accountId) {
+        return RedshiftClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static RedshiftDataClient redshiftDataClient() {
         return RedshiftDataClient.builder()
                 .endpointOverride(ENDPOINT)

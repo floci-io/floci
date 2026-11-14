@@ -118,6 +118,8 @@ class IamRestRouteEnforcementIntegrationTest {
         created.then().statusCode(201);
         String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
         String etag = created.header("ETag");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "cloudfront")).header("If-Match", etag)
+                .delete("/2020-05-31/key-value-store/" + name).then().statusCode(204));
 
         policy(user, allow("cloudfront:*", "*") + "," +
                 "{\"Effect\":\"Deny\",\"Action\":\"cloudfront:DeleteKeyValueStore\",\"Resource\":\"" + arn + "\"}");
@@ -900,11 +902,15 @@ class IamRestRouteEnforcementIntegrationTest {
     void accountIsCheckedOnTheMemberAccountOfTheCallersOrganization() {
         OrganizationsRequests.request(MANAGEMENT, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
                 .when().post("/").then().statusCode(200);
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "DeleteOrganization", "{}")
+                .when().post("/").then().statusCode(200));
         String organization = OrganizationsRequests.request(MANAGEMENT, "DescribeOrganization", "{}")
                 .when().post("/").then().statusCode(200).extract().path("Organization.Id");
         String member = OrganizationsRequests.request(MANAGEMENT, "CreateAccount",
                         "{\"Email\":\"route-contact@example.com\",\"AccountName\":\"RouteContact\"}")
                 .when().post("/").then().statusCode(200).extract().path("CreateAccountStatus.AccountId");
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "RemoveAccountFromOrganization",
+                "{\"AccountId\":\"" + member + "\"}").when().post("/").then().statusCode(200));
         OrganizationsRequests.request(MANAGEMENT, "EnableAWSServiceAccess",
                         "{\"ServicePrincipal\":\"account.amazonaws.com\"}")
                 .when().post("/").then().statusCode(200);
@@ -1019,8 +1025,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void ramIsCheckedOnTheResourceShareItNamesInItsBodyAndQuery() {
-        String share = adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}").post("/createresourceshare")
-                .then().statusCode(200).extract().path("resourceShare.resourceShareArn");
+        String share = madeShare(adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}")
+                .post("/createresourceshare").then());
         String other = "arn:aws:ram:us-east-1:" + ACCOUNT + ":resource-share/other";
         String user = user("route-ram");
 
@@ -1249,10 +1255,11 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, service, "POST", path, body.apply("red")), action);
     }
 
-    /** A create that got past the check and made a resource share, removed afterwards. */
-    private void madeShare(ValidatableResponse response) {
+    /** A create that got past the check and made a resource share, removed afterwards; returns the share's ARN. */
+    private String madeShare(ValidatableResponse response) {
         String share = response.statusCode(200).extract().path("resourceShare.resourceShareArn");
         cleanup.register(() -> adminOf("ram").queryParam("resourceShareArn", share).delete("/deleteresourceshare"));
+        return share;
     }
 
     /** Refuses a request until the caller holds the action, then lets it past the check. */

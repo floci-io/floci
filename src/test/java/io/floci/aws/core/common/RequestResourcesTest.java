@@ -31,6 +31,7 @@ class RequestResourcesTest {
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
     private static final RegionResolver US_EAST_1 = new RegionResolver("us-east-1", "000000000000");
+
     /** EventBridge as it answers the reader: the Region's default bus, {@code event-bus/default}. */
     private static final StoredResourceArns EVENTS = new StoredResourceArns() {
         @Override
@@ -49,6 +50,34 @@ class RequestResourcesTest {
                     : Optional.empty();
         }
     };
+
+    @Test
+    void ec2ListsUseSdkWireNamesAndIgnoreForgedQuerySpellings() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        List<String> expected = List.of(prefix + "network-interface/*", prefix + "security-group/sg-one",
+                prefix + "security-group/sg-two", prefix + "subnet/subnet-one");
+        assertEquals(expected, of("ec2:CreateNetworkInterface", form("Action=CreateNetworkInterface"
+                + "&SubnetId=subnet-one&SecurityGroupId.1=sg-one&SecurityGroupId.2=sg-two"
+                + "&Groups.member.1=sg-forged&Groups.2=sg-forged&Groups=sg-forged")));
+        assertEquals(expected, of("ec2:CreateNetworkInterface", json("""
+                {"SubnetId":"subnet-one","Groups":["sg-one","sg-two"]}
+                """)));
+    }
+
+    @Test
+    void createVpcChecksItsNewArnAndOnlyThePoolsPresentInTheRequest() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        assertEquals(List.of(prefix + "vpc/*"), of("ec2:CreateVpc", json("{\"CidrBlock\":\"10.0.0.0/16\"}")));
+        assertEquals(List.of("arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v4",
+                        prefix + "ipv6pool-ec2/ipv6pool-one", prefix + "vpc/*",
+                        "arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v6"),
+                of("ec2:CreateVpc", json("""
+                        {"Ipv4IpamPoolId":"ipam-pool-v4","Ipv6IpamPoolId":"ipam-pool-v6",
+                         "Ipv6Pool":"ipv6pool-one"}
+                        """)));
+        assertEquals(List.of(prefix + "vpc/*", "arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v6"),
+                of("ec2:CreateVpc", json("{\"Ipv6IpamPoolId\":\"ipam-pool-v6\"}")));
+    }
 
     @Test
     void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
@@ -1108,6 +1137,85 @@ class RequestResourcesTest {
         assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1"), codeBuild));
         // An id of no build it holds names none.
         assertEquals(List.of(), of("codebuild:StopBuild", json("{\"id\":\"orphan\"}"), codeBuild));
+    }
+
+    /**
+     * A restore whose service asks KMS, as the caller, to decrypt with the key its snapshot records is also checked
+     * as {@code kms:Decrypt} on that key, found in the snapshot's own account and Region, the caller's or another's;
+     * one KMS no longer holds is forwarded as the value the snapshot records, not held, which refuses it; a snapshot
+     * recording no key, or one under a key AWS manages, whose policy lets the account use it through the service,
+     * forwards nothing.
+     */
+    @Test
+    void aRestoreForwardsDecryptOnTheKeyItsSnapshotRecords() {
+        String caller = "000000000000";
+        String owner = "111122223333";
+        String own = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/mine";
+        String shared = "arn:aws:redshift-serverless:eu-west-1:" + owner + ":snapshot/theirs";
+        String plain = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/plain";
+        String lost = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/lost";
+        String managed = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/managed";
+        String awsKey = "arn:aws:kms:us-east-1:" + caller + ":key/aws-redshift";
+        Map<String, String> keys = Map.of(own, "k-own", shared, "alias/theirs", lost, "deleted",
+                managed, "alias/aws/redshift");
+        StoredResourceArns serverless = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "redshift-serverless";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> recorded(String arn, String member) {
+                return "kmsKeyId".equals(member) ? Optional.ofNullable(keys.get(arn)) : Optional.empty();
+            }
+        };
+        StoredResourceArns kms = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "kms";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                if (!"key".equals(type)) {
+                    return Optional.empty();
+                }
+                return names.equals(List.of("k-own")) ? Optional.of("arn:aws:kms:" + region + ":" + caller + ":key/k-own")
+                        : names.equals(List.of("alias/aws/redshift")) ? Optional.of(awsKey) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+                return "key".equals(type) && names.equals(List.of("alias/theirs"))
+                        ? Optional.of("arn:aws:kms:" + region + ":" + account + ":key/k-theirs") : Optional.empty();
+            }
+
+            @Override
+            public boolean grantsItsAccountThroughServices(String arn) {
+                return awsKey.equals(arn);
+            }
+        };
+        String operation = "redshift-serverless:RestoreFromSnapshot";
+        assertEquals(List.of(
+                new RequestResources.Forwarded("kms:Decrypt", "arn:aws:kms:us-east-1:" + caller + ":key/k-own",
+                        "kms:ViaService", "redshift-serverless", true),
+                new RequestResources.Forwarded("kms:Decrypt", "arn:aws:kms:eu-west-1:" + owner + ":key/k-theirs",
+                        "kms:ViaService", "redshift-serverless", true),
+                new RequestResources.Forwarded("kms:Decrypt", "deleted", "kms:ViaService", "redshift-serverless",
+                        false)),
+                RequestResources.forwarded(operation, List.of("*", own, shared, plain, lost, managed), caller,
+                        serverless, namespace -> "kms".equals(namespace) ? kms : null));
+        // Without the snapshot's or the key's service, or for an operation forwarding nothing, nothing is forwarded.
+        assertEquals(List.of(), RequestResources.forwarded(operation, List.of(own), caller, null, namespace -> kms));
+        assertEquals(List.of(), RequestResources.forwarded(operation, List.of(own), caller, serverless,
+                namespace -> null));
+        assertEquals(List.of(), RequestResources.forwarded("redshift-serverless:GetSnapshot", List.of(own), caller,
+                serverless, namespace -> kms));
     }
 
     /**

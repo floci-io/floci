@@ -456,4 +456,70 @@ public class EmrServerlessIntegrationTest {
             .body("message", equalTo("Image 000000000000.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0 is in "
                     + "an Amazon ECR repository in eu-west-1; it must be in the application's Region, us-east-1."));
     }
+
+    @Test
+    @Order(13)
+    void updateApplicationChangesAStartedApplicationsMaximumCapacityAndImageButNotItsOtherSettings() {
+        String started = givenReq()
+            .body("""
+                {
+                    "releaseLabel": "emr-7.5.0",
+                    "type": "SPARK",
+                    "clientToken": "%s",
+                    "imageConfiguration": {
+                        "imageUri": "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0"
+                    },
+                    "maximumCapacity": {"cpu": "400 vCPU", "memory": "1024 GB"}
+                }
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(200)
+            .extract().path("applicationId");
+        givenReq().when().post("/applications/" + started + "/start").then().statusCode(200);
+
+        givenReq()
+            .body("""
+                {
+                    "clientToken": "%s",
+                    "imageConfiguration": {
+                        "imageUri": "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1"
+                    },
+                    "maximumCapacity": {"cpu": "100 vCPU", "memory": "512 GB"}
+                }
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .patch("/applications/" + started)
+        .then()
+            .statusCode(200);
+        givenReq()
+        .when()
+            .get("/applications/" + started)
+        .then()
+            .statusCode(200)
+            .body("application.state", equalTo("STARTED"))
+            .body("application.maximumCapacity.cpu", equalTo("100 vCPU"))
+            .body("application.imageConfiguration.imageUri",
+                    equalTo("000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1"));
+
+        givenReq()
+            .body("""
+                {"clientToken": "%s", "releaseLabel": "emr-7.10.0", "maximumCapacity": {"cpu": "200 vCPU"}}
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .patch("/applications/" + started)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Application must be in a stopped or created state in order to be updated."));
+
+        givenReq()
+        .when()
+            .get("/applications/" + started)
+        .then()
+            .statusCode(200)
+            .body("application.releaseLabel", equalTo("emr-7.5.0"))
+            .body("application.maximumCapacity.cpu", equalTo("100 vCPU"));
+    }
 }

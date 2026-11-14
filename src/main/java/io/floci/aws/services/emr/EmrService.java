@@ -286,7 +286,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         for (AccountAwareStorageBackend.AccountEntry<EmrCluster> entry
                 : clusterStore.scanAllAccountEntries(k -> true)) {
             EmrCluster cluster = entry.value();
-            boolean interrupted = sparkRunner != null && hasContainerStepRunning(cluster)
+            boolean interrupted = cluster.getSteps().stream().anyMatch(this::leftByARestart)
                     || bootstrapRunner != null && bootstrapsInContainer(cluster);
             Instant due = interrupted ? clock.instant() : lifecycle.nextChange(cluster);
             if (due != null) {
@@ -528,11 +528,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public EmrStep describeStep(String clusterId, String stepId) {
         return call(() -> {
             EmrCluster cluster = snapshotOf(requireCluster(clusterId));
-            return cluster.getSteps().stream()
-                    .filter(s -> s.getId().equals(stepId))
-                    .findFirst()
-                    .orElseThrow(() -> new AwsException("InvalidRequestException",
-                            "Step " + stepId + " does not exist.", 400));
+            return stepOf(cluster, stepId).orElseThrow(() -> new AwsException("InvalidRequestException",
+                    "Step " + stepId + " does not exist.", 400));
         });
     }
 
@@ -563,8 +560,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             EmrCluster cluster = requireCluster(clusterId);
             List<CancelStepInfo> result = new ArrayList<>();
             for (String stepId : stepIds) {
-                EmrStep step = cluster.getSteps().stream()
-                        .filter(s -> s.getId().equals(stepId)).findFirst().orElse(null);
+                EmrStep step = stepOf(cluster, stepId).orElse(null);
                 String refusal = step == null ? "Step does not exist."
                         : lifecycle.cancel(cluster, step, now(), regionOf(cluster));
                 result.add(refusal == null
@@ -1403,25 +1399,35 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     private boolean failInterruptedSteps(EmrCluster cluster) {
-        if (sparkRunner == null) {
-            return false;
-        }
-        boolean failed = false;
+        boolean ended = false;
         for (EmrStep step : List.copyOf(cluster.getSteps())) {
-            if (runsInContainer(step) && !executing.contains(stepKey(regionResolver.getAccountId(), step.getId()))) {
+            if (leftByARestart(step)) {
                 lifecycle.stepEnded(cluster, step, EmrSparkSteps.INTERRUPTED, now(), regionOf(cluster));
-                failed = true;
+                ended = true;
             }
         }
-        return failed;
+        return ended;
     }
 
-    private static boolean hasContainerStepRunning(EmrCluster cluster) {
-        return cluster.getSteps().stream().anyMatch(EmrService::runsInContainer);
+    /**
+     * Whether a step a container ran is one no thread runs any more, since Floci stopped while it ran: it ends,
+     * FAILED, or CANCELLED when its cancel was pending. Without the docker runner mode only one whose cancel was
+     * pending is, as nothing would end it; a RUNNING one completes by time there.
+     */
+    private boolean leftByARestart(EmrStep step) {
+        if (sparkRunner == null) {
+            return EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState());
+        }
+        return runsInContainer(step) && !executing.contains(stepKey(regionResolver.getAccountId(), step.getId()));
     }
 
+    // A step a container runs: RUNNING, or CANCEL_PENDING until its driver is gone.
     private static boolean runsInContainer(EmrStep step) {
-        return EmrClusterLifecycle.RUNNING.equals(step.getState()) && step.isRunInContainer();
+        return EmrClusterLifecycle.holdsAPlace(step) && step.isRunInContainer();
+    }
+
+    private static Optional<EmrStep> stepOf(EmrCluster cluster, String stepId) {
+        return cluster.getSteps().stream().filter(step -> step.getId().equals(stepId)).findFirst();
     }
 
     private static String stepKey(String accountId, String stepId) {
@@ -1458,8 +1464,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * Ends a step its thread ran, COMPLETED when {@code failure} is null and FAILED otherwise, unless a
-     * reset came since it started or the step is no longer RUNNING: cancelled, or on a cluster that ended.
+     * Ends a step its thread ran, COMPLETED when {@code failure} is null and FAILED otherwise, or CANCELLED when a
+     * cancel had made it CANCEL_PENDING, unless a reset came since it started or the step is past running:
+     * cancelled, or on a cluster that ended.
      */
     private void stepEnded(StepLaunch launch, String failure) {
         if (launch.launchedIn() != generation) {
@@ -1468,9 +1475,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         // Read while the step still counts as running, so it is not taken for one a restart left.
         Optional<EmrCluster> found = findCluster(launch.clusterId());
         executing.remove(stepKey(launch.accountId(), launch.stepId()));
-        EmrStep step = found.flatMap(cluster -> cluster.getSteps().stream()
-                .filter(candidate -> launch.stepId().equals(candidate.getId())).findFirst()).orElse(null);
-        if (step == null || !EmrClusterLifecycle.RUNNING.equals(step.getState())) {
+        EmrStep step = found.flatMap(cluster -> stepOf(cluster, launch.stepId())).orElse(null);
+        if (step == null || !EmrClusterLifecycle.holdsAPlace(step)) {
             // A step of a cluster that has ended no longer runs: what the cluster kept may go with it, its last one.
             found.ifPresent(this::releaseEnded);
             return;
@@ -1482,16 +1488,30 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * A step's driver was stopped. A cancel, or its cluster's end, has ended the step already. One still
-     * RUNNING was stopped by Floci itself, by a reset's teardown or its shutdown, and is left as it is, still
-     * counted as running: the reset wipes it, a restart fails it, and its ActionOnFailure, which could start
-     * the next step after the teardown has passed, is not taken now.
+     * A step's driver was stopped. A cancel has made the step CANCEL_PENDING, which is CANCELLED now that its driver
+     * is gone, and makes room for the next; its cluster's end has ended it already. One still RUNNING, or
+     * CANCEL_PENDING, that Floci itself stopped, by a reset's teardown or its shutdown, is left as it is, still
+     * counted as running: the reset wipes it, a restart ends it, and what its end leads to, which could start the
+     * next step after the teardown has passed, does not happen now.
      */
     private void driverStopped(StepLaunch launch) {
-        if (!stillRunning(launch)) {
-            executing.remove(stepKey(launch.accountId(), launch.stepId()));
-            clusterStore.get(launch.clusterId()).ifPresent(this::releaseEnded);
+        if (stillRunning(launch)) {
+            return;
         }
+        Optional<EmrCluster> found = clusterStore.get(launch.clusterId());
+        Optional<EmrStep> cancelPending = found.flatMap(cluster -> stepOf(cluster, launch.stepId()))
+                .filter(step -> EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState()));
+        if (cancelPending.isPresent() && teardowns.get() != launch.teardownsBefore()) {
+            return;
+        }
+        executing.remove(stepKey(launch.accountId(), launch.stepId()));
+        if (cancelPending.isPresent() && launch.launchedIn() == generation) {
+            EmrCluster cluster = found.get();
+            lifecycle.stepEnded(cluster, cancelPending.get(), null, now(), regionOf(cluster));
+            store(cluster);
+            return;
+        }
+        found.ifPresent(this::releaseEnded);
     }
 
     /**
@@ -1509,10 +1529,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // Whether a step's driver may still start, or go on: one cancelled, on a cluster that ended, or a reset
     // removed, is past it.
     private synchronized boolean stillRunning(StepLaunch launch) {
-        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId()).stream()
-                .flatMap(cluster -> cluster.getSteps().stream())
-                .anyMatch(step -> launch.stepId().equals(step.getId())
-                        && EmrClusterLifecycle.RUNNING.equals(step.getState()));
+        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId())
+                .flatMap(cluster -> stepOf(cluster, launch.stepId()))
+                .filter(step -> EmrClusterLifecycle.RUNNING.equals(step.getState())).isPresent();
     }
 
     private synchronized boolean resetSince(StepLaunch launch) {
