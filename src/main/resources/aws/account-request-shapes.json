@@ -4,7 +4,10 @@
     "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
+    "DeleteAlternateContact": "DeleteAlternateContactRequest",
+    "GetAlternateContact": "GetAlternateContactRequest",
     "GetContactInformation": "GetContactInformationRequest",
+    "PutAlternateContact": "PutAlternateContactRequest",
     "PutContactInformation": "PutContactInformationRequest"
   },
   "shapes": {
@@ -16,6 +19,14 @@
       "type": "string",
       "min": 1,
       "max": 60
+    },
+    "AlternateContactType": {
+      "type": "string",
+      "enum": [
+        "BILLING",
+        "OPERATIONS",
+        "SECURITY"
+      ]
     },
     "City": {
       "type": "string",
@@ -63,15 +74,41 @@
       "min": 2,
       "max": 2
     },
+    "DeleteAlternateContactRequest": {
+      "type": "structure",
+      "required": [
+        "AlternateContactType"
+      ],
+      "members": {
+        "AlternateContactType": "AlternateContactType",
+        "AccountId": "AccountId"
+      }
+    },
     "DistrictOrCounty": {
       "type": "string",
       "min": 1,
       "max": 50
     },
+    "EmailAddress": {
+      "type": "string",
+      "min": 1,
+      "max": 254,
+      "pattern": "[\\s]*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+[\\s]*"
+    },
     "FullName": {
       "type": "string",
       "min": 1,
       "max": 50
+    },
+    "GetAlternateContactRequest": {
+      "type": "structure",
+      "required": [
+        "AlternateContactType"
+      ],
+      "members": {
+        "AlternateContactType": "AlternateContactType",
+        "AccountId": "AccountId"
+      }
     },
     "GetContactInformationRequest": {
       "type": "structure",
@@ -79,10 +116,39 @@
         "AccountId": "AccountId"
       }
     },
+    "Name": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "PhoneNumber": {
+      "type": "string",
+      "min": 1,
+      "max": 25,
+      "pattern": "[\\s0-9()+-]+"
+    },
     "PostalCode": {
       "type": "string",
       "min": 1,
       "max": 20
+    },
+    "PutAlternateContactRequest": {
+      "type": "structure",
+      "required": [
+        "Name",
+        "Title",
+        "EmailAddress",
+        "PhoneNumber",
+        "AlternateContactType"
+      ],
+      "members": {
+        "Name": "Name",
+        "Title": "Title",
+        "EmailAddress": "EmailAddress",
+        "PhoneNumber": "PhoneNumber",
+        "AlternateContactType": "AlternateContactType",
+        "AccountId": "AccountId"
+      }
     },
     "PutContactInformationRequest": {
       "type": "structure",
@@ -95,6 +161,11 @@
       }
     },
     "StateOrRegion": {
+      "type": "string",
+      "min": 1,
+      "max": 50
+    },
+    "Title": {
       "type": "string",
       "min": 1,
       "max": 50

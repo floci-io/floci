@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.services.account.AlternateContactRequests.alternateContactRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -74,8 +75,7 @@ class AccountOrganizationsContextIntegrationTest {
     }
 
     private static String alternateContact(String accountId) {
-        return "{\"AccountId\":\"" + accountId + "\",\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\","
-                + "\"Title\":\"Owner\",\"EmailAddress\":\"security@example.com\",\"PhoneNumber\":\"+12025550123\"}";
+        return alternateContactRequest().put("AccountId", accountId).toString();
     }
 
     private static String createAccount(String name) {
