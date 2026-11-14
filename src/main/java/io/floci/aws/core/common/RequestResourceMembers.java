@@ -224,6 +224,7 @@ final class RequestResourceMembers {
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
                  Map<String, Targets> targets,
+                 Map<String, Map<Member, String>> ec2Query,
                  Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
                  Map<String, Map<String, List<String>>> resourceTagKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
@@ -311,6 +312,7 @@ final class RequestResourceMembers {
         Map<String, List<Created>> creates = new LinkedHashMap<>();
         Map<String, List<Resource>> makes = new LinkedHashMap<>();
         Map<String, Targets> targets = new LinkedHashMap<>();
+        Map<String, Map<Member, String>> ec2Query = new LinkedHashMap<>();
         Map<String, Map<String, String>> located = new LinkedHashMap<>();
         Map<String, List<Forwarded>> forwarded = new LinkedHashMap<>();
         JsonNode forwardedActions = document.path("forwardedActions");
@@ -373,6 +375,20 @@ final class RequestResourceMembers {
             if (!under.isEmpty()) {
                 creates.put(operation.getKey(), List.copyOf(under));
             }
+            Map<Member, String> queryMembers = new LinkedHashMap<>();
+            operation.getValue().path("ec2Query").properties().forEach(member -> {
+                String path = member.getKey();
+                String wire = member.getValue().asText("");
+                if (!namespace.equals("ec2") || !path.matches("[A-Za-z][A-Za-z0-9_]*(\\[\\])?")
+                        || !LOCATED_MEMBER.matcher(wire).matches()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " has invalid EC2 Query member: " + path);
+                }
+                boolean list = path.endsWith("[]");
+                queryMembers.put(new Member(list ? path.substring(0, path.length() - 2) : path, list), wire);
+            });
+            if (!queryMembers.isEmpty()) {
+                ec2Query.put(operation.getKey(), Map.copyOf(queryMembers));
+            }
             Map<String, String> where = new LinkedHashMap<>();
             operation.getValue().path("located").properties().forEach(member -> {
                 if (!LOCATED_MEMBER.matcher(member.getKey()).matches()
@@ -395,7 +411,8 @@ final class RequestResourceMembers {
             }
         });
         return new Table(Map.copyOf(entries), Map.copyOf(actsOn), Map.copyOf(creates), Map.copyOf(makes),
-                Map.copyOf(targets), Map.copyOf(located), Map.copyOf(formats), Map.copyOf(resourceTagKeys), namespaces,
+                Map.copyOf(targets), Map.copyOf(ec2Query), Map.copyOf(located), Map.copyOf(formats),
+                Map.copyOf(resourceTagKeys), namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")), Map.copyOf(forwarded));

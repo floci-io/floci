@@ -11012,6 +11012,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         RouteTable rt = routeTables.get(storeKey).orElse(null);
         if (rt != null) { rt.setTags(new ArrayList<>(tagList)); routeTables.put(storeKey, rt); return; }
+        NetworkInterface networkInterface = networkInterfaces.get(storeKey).orElse(null);
+        if (networkInterface != null) {
+            networkInterface.getTagSet().clear();
+            networkInterface.getTagSet().addAll(tagList);
+            networkInterfaces.put(storeKey, networkInterface);
+            return;
+        }
         KeyPair kp = keyPairs.get(storeKey).orElse(null);
         if (kp != null) { kp.setTags(new ArrayList<>(tagList)); keyPairs.put(storeKey, kp); return; }
         LaunchTemplate lt = launchTemplates.get(storeKey).orElse(null);
@@ -15945,6 +15952,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 ni.setPrivateIpAddresses(ipList);
 
                 networkInterfaces.put(key(region, eniId), ni);
+                putTags(region, eniId, new ArrayList<>(ni.getTagSet()));
                 return ni;
             }
         }
@@ -15966,6 +15974,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             releaseInterfaceAddresses(region, networkInterfaceId, true);
             networkInterfaces.delete(key(region, networkInterfaceId));
+            removeTags(region, networkInterfaceId);
             releasePrivateIps(region, ni.getSubnetId(), List.of(ni.getPrivateIpAddress()));
         }
     }

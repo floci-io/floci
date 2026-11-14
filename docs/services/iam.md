@@ -2730,19 +2730,55 @@ also applies to other role operations such as `DeleteRole` and `ListRolePolicies
 `Path` cannot change this ARN. Once the role exists, its stored path and partition apply;
 creation still uses the path the request asks for.
 
+`ec2:CreateVpc` is evaluated against `vpc/*` in the caller's partition, Region and account,
+so a VPC-scoped grant can authorize creation with `aws:RequestTag` conditions. When supplied,
+IPv4 and IPv6 IPAM pools and an IPv6 address pool are checked as additional resources. Tags
+at creation additionally require `ec2:CreateTags` on the new VPC, with `ec2:CreateAction`
+set to `CreateVpc`. Explicit denies on these resources still apply. The resource mapping
+is generated from the Service Reference and botocore, as it is for every EC2 operation:
+a request is checked on the resources its members name, each EC2 Query list read under the
+wire name botocore serializes it with, and an operation whose request names none stays on `*`.
+
+`ec2:CreateSubnet`, `ec2:CreateRouteTable`, `ec2:CreateSecurityGroup`, and
+`ec2:CreateVpcEndpoint` authorize
+both the new resource ARN and the existing parent VPC. `ec2:CreateInternetGateway`
+authorizes the new gateway ARN. Tag-on-create checks apply to the new resource only;
+the parent VPC uses its own stored ownership tags.
+
+`ec2:CreateNetworkInterface` checks the new interface, its subnet and every supplied
+security group separately. The generated EC2 Query names preserve SDK list serialization
+(for example, `Groups` is sent as `SecurityGroupId.N`). `ec2:AllocateAddress` checks
+the new elastic IP and any supplied address pool; its created resource type is derived
+from botocore's operation description and returned allocation ID. `ec2:CreateNatGateway`
+checks the new gateway and each supplied subnet, elastic IP and VPC separately, including
+stored ownership tags on its existing parents.
+
+The network mutation operations include subnet attribute updates, route
+creation/replacement/deletion and association, gateway attachment/detachment,
+security-group ingress/egress changes, and VPC, subnet, route table, gateway, and
+security-group deletion. Each generated ARN is checked with that resource's own
+stored tags; allowing an owned VPC does not authorize an unowned gateway or subnet.
+
+`ec2:ModifyVpcAttribute` resolves the supplied `VpcId` to its ARN and checks the target's
+current stored tags under `aws:ResourceTag/` and `ec2:ResourceTag/`. Tags are read for each
+resolved ARN independently; request tags do not replace ownership tags on an existing VPC.
+The prefixes come from the generated `resourceTagKeys` table in `iam-request-resources.json`,
+derived from the Service Reference; new keys belong in the generator rather than Java branches.
+
 EC2 tagging targets come from `regen_iam_request_resources.py`, with EC2 among its namespaces.
 The Service Reference supplies the resource types and ARN formats, botocore supplies the
-`Resources` list and its EC2 Query spelling (`ResourceId.N`), and a documented generator
-mapping identifies instance IDs. The generated entries select `CreateTags` and `DeleteTags`
-from their input shapes and resource types, without an operation-name branch in Java.
-Each instance ARN is evaluated with that target's existing tags; every target must be authorized
-before the handler changes any tags. Other EC2 resource types retain wildcard authorization
-against every target context, including when mixed with instances. Only instance ARNs narrow
-the context to their own stored tags. Resource resolution reuses the decoded form parameters
-rather than reparsing the body for each target. The readers preserve the handler's parameter
-ordering, first duplicate value and stop at the first missing list index. This staged EC2 read
-covers only instances in heterogeneous target lists; other EC2 operations retain their existing
-wildcard resource resolution.
+`Resources` list and its EC2 Query spelling (`ResourceId.N`), and the id prefix botocore gives
+each type, in its documentation or its request and response examples (`"GroupId": "sg-903004f8"`),
+identifies instance, security-group, network-acl, route-table and network-interface IDs.
+The generated entries select `CreateTags` and `DeleteTags` from their input shapes and resource
+types, without an operation-name branch in Java. Each ARN is evaluated with that target's own
+stored tags; every target must be authorized before the handler changes any tags. Other EC2
+resource types retain wildcard authorization against every target context, including mixed
+batches. Resource resolution reuses the decoded form parameters rather than reparsing the body
+for each target. The readers preserve the handler's parameter ordering, first duplicate value
+and stop at the first missing list index. A list a type's ARN variable names, such as
+`InstanceIds`, is the request's targets only when the request names nothing else the action acts
+on: a launch's `SecurityGroupIds` are read beside its image and subnet, each on its own ARN.
 
 Which type each action takes is vendored, not written out in Java:
 `src/main/resources/aws/iam-action-resources.json` is generated by
