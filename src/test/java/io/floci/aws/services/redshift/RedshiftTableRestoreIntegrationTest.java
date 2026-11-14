@@ -2,24 +2,22 @@ package io.floci.aws.services.redshift;
 
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.TableRestoreStatus;
+import io.floci.aws.testing.DockerAvailability;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -38,43 +36,15 @@ class RedshiftTableRestoreIntegrationTest {
     private String clusterId;
 
     @BeforeAll
-    static void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(),
+    static void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(),
                 "Docker daemon must be available for Redshift table restore integration tests");
-    }
-
-    private static boolean isDockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true)
-                    .start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     @AfterEach
     void cleanUp() {
         if (clusterId != null) {
             service.deleteCluster(clusterId);
-        }
-    }
-
-    private static String jdbcUrl(Cluster cluster) {
-        return "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        try {
-            return Awaitility.await()
-                    .atMost(Duration.ofSeconds(30))
-                    .pollDelay(Duration.ZERO)
-                    .pollInterval(Duration.ofMillis(500))
-                    .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(jdbcUrl(cluster), username, password);
         }
     }
 
@@ -107,7 +77,7 @@ class RedshiftTableRestoreIntegrationTest {
         String snapshotId = clusterId + "-snap";
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
 
-        try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
+        try (Connection connection = RedshiftConnections.waitForConnection(cluster);
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE orders (id integer, note varchar(40))");
             statement.execute("INSERT INTO orders VALUES (1, 'first'), (2, 'it''s, quoted'), (3, 'third')");

@@ -35,7 +35,7 @@ class RedshiftTableRestoreQueryTest {
         tableRestores = mock(RedshiftTableRestoreService.class);
         handler = new RedshiftQueryHandler(mock(RedshiftService.class), new RedshiftCredentialBroker(),
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), mock(RedshiftIamDbUserResolver.class),
-                mock(RegionResolver.class), null, null, null, tableRestores);
+                mock(RegionResolver.class), null, null, null, null, tableRestores);
     }
 
     private static TableRestoreStatus status(String state) {

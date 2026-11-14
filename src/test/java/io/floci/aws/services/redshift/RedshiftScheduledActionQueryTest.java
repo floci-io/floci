@@ -51,7 +51,7 @@ class RedshiftScheduledActionQueryTest {
                 Clock.fixed(Instant.parse("2026-11-20T12:15:00Z"), ZoneOffset.UTC));
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         handler = new RedshiftQueryHandler(redshift, new RedshiftCredentialBroker(), config,
-                mock(RedshiftIamDbUserResolver.class), regionResolver, null, null, null, scheduledActions);
+                mock(RedshiftIamDbUserResolver.class), regionResolver, null, null, null, scheduledActions, null);
     }
 
     private static MultivaluedMap<String, String> createParams(String name) {
