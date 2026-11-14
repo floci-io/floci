@@ -33,6 +33,10 @@ public class RedshiftIamDbUserResolver {
 
     public String resolveDbUser(String authorizationHeader) {
         String accessKeyId = accountResolver.extractAccessKeyId(authorizationHeader);
+        return resolveDbUserForAccessKey(accessKeyId);
+    }
+
+    public String resolveDbUserForAccessKey(String accessKeyId) {
         Optional<String> arn = iamService.resolveCallerArn(accessKeyId);
         if (arn.isEmpty()) {
             LOG.warnv("GetClusterCredentialsWithIAM caller could not be resolved; using {0}", FALLBACK_DB_USER);
