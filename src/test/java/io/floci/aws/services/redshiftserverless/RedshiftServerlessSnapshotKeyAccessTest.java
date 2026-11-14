@@ -145,4 +145,37 @@ class RedshiftServerlessSnapshotKeyAccessTest {
 
         verify(kms, never()).findKeyPolicyOfAccount(anyString());
     }
+
+    @Test
+    void anAllowConditionedOnRedshiftServerlessViaServiceLetsTheRestoreThrough() {
+        snapshot.setKmsKeyId(KEY_ARN);
+        keyPolicy(KEY_ARN, "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::"
+                + CALLER + ":root\"},\"Action\":\"kms:Decrypt\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"redshift-serverless." + REGION
+                + ".amazonaws.com\"}}}]}");
+
+        assertDoesNotThrow(this::restore);
+    }
+
+    @Test
+    void anExplicitDenyConditionedOnRedshiftServerlessViaServiceBlocksAnUnconditionalAllow() {
+        snapshot.setKmsKeyId(KEY_ARN);
+        keyPolicy(KEY_ARN, ALLOW_CALLER.replace("]}", ",{\"Effect\":\"Deny\",\"Principal\":{\"AWS\":\"arn:aws:iam::"
+                + CALLER + ":root\"},\"Action\":\"kms:Decrypt\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"redshift-serverless." + REGION
+                + ".amazonaws.com\"}}}]}"));
+
+        assertThrows(AwsException.class, this::restore);
+    }
+
+    @Test
+    void anAllowConditionedOnAnotherServiceDoesNotLetTheRestoreThrough() {
+        snapshot.setKmsKeyId(KEY_ARN);
+        keyPolicy(KEY_ARN, "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::"
+                + CALLER + ":root\"},\"Action\":\"kms:Decrypt\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"kms:ViaService\":\"s3." + REGION
+                + ".amazonaws.com\"}}}]}");
+
+        assertThrows(AwsException.class, this::restore);
+    }
 }

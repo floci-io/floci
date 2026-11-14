@@ -2357,7 +2357,9 @@ public class KmsService implements ResourceProvider {
         String resource = arn.resource();
         String keyId;
         if (resource.startsWith("alias/")) {
-            keyId = aliases.getForAccount(arn.accountId(), arn.region() + "::" + resource)
+            String scopedAliasKey = arn.region() + "::" + resource;
+            keyId = aliases.getForAccount(arn.accountId(), scopedAliasKey)
+                    .or(() -> aliases.getLegacyForAccount(arn.accountId(), scopedAliasKey))
                     .map(KmsAlias::getTargetKeyId).orElse(null);
         } else if (resource.startsWith("key/")) {
             keyId = resource.substring("key/".length());
@@ -2367,7 +2369,9 @@ public class KmsService implements ResourceProvider {
         if (keyId == null) {
             return Optional.empty();
         }
-        return keys.getForAccount(arn.accountId(), arn.region() + "::" + keyId)
+        String scopedKey = arn.region() + "::" + keyId;
+        return keys.getForAccount(arn.accountId(), scopedKey)
+                .or(() -> keys.getLegacyForAccount(arn.accountId(), scopedKey))
                 .map(KmsKey::getPolicy)
                 .filter(policy -> policy != null && !policy.isBlank());
     }

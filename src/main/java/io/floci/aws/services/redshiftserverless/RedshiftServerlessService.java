@@ -958,10 +958,20 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
                                                                 String snapshotName, String snapshotAccountId,
                                                                 Boolean manageAdminPassword,
                                                                 String adminPasswordSecretKmsKeyId, String region) {
+        return restoreFromSharedSnapshot(namespaceName, workgroupName, snapshotName, snapshotAccountId,
+                manageAdminPassword, adminPasswordSecretKmsKeyId, region, ignored -> {});
+    }
+
+    public synchronized RestoreResult restoreFromSharedSnapshot(String namespaceName, String workgroupName,
+                                                                String snapshotName, String snapshotAccountId,
+                                                                Boolean manageAdminPassword,
+                                                                String adminPasswordSecretKmsKeyId, String region,
+                                                                Consumer<RedshiftServerlessSnapshot> beforeRestore) {
         validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
         RedshiftServerlessSnapshot snapshot = findSnapshotOfAccount(snapshotAccountId, snapshotName, region)
                 .orElseThrow(() -> snapshotNotFound(snapshotName));
+        beforeRestore.accept(snapshot);
         requireAvailableSnapshot(snapshot);
         return restoreFrom(namespaceName, workgroupName, snapshot, snapshotAccountId, manageAdminPassword,
                 adminPasswordSecretKmsKeyId, region);

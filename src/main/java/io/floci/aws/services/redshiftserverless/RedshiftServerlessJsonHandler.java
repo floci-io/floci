@@ -309,14 +309,10 @@ public class RedshiftServerlessJsonHandler {
         String workgroupName = ServerlessSupport.text(request, "workgroupName");
         Boolean manageAdminPassword = ServerlessSupport.bool(request, "manageAdminPassword");
         String kmsKeyId = ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId");
-        if (shared) {
-            // A snapshot that is not there is answered as not found by the restore itself.
-            service.findSnapshotOfAccount(ownerAccount, snapshotName, region)
-                    .ifPresent(found -> snapshotKeys.requireRestoreAccess(found, ownerAccount, region));
-        }
         RedshiftServerlessService.RestoreResult result = shared
                 ? service.restoreFromSharedSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
-                        manageAdminPassword, kmsKeyId, region)
+                        manageAdminPassword, kmsKeyId, region,
+                        found -> snapshotKeys.requireRestoreAccess(found, ownerAccount, region))
                 : service.restoreFromSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
                         manageAdminPassword, kmsKeyId, region);
         ObjectNode response = objectMapper.createObjectNode();

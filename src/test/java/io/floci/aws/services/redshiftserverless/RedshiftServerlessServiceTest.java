@@ -1190,6 +1190,28 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void restoreFromSharedSnapshotChecksTheResolvedSnapshotBeforeRestoring() {
+        String owner = "111122223333";
+        create("dst-ns");
+        createWorkgroup("dst-wg", "dst-ns");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(
+                service.createSnapshot("own-snap", "dst-ns", null, null, REGION));
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+        theirs.setKmsKeyId("arn:aws:kms:" + REGION + ":" + owner + ":key/replaced-key");
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+
+        AwsException denied = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "dst-ns", "dst-wg", "their-snap", owner, null, null, REGION,
+                resolved -> {
+                    assertEquals("arn:aws:kms:" + REGION + ":" + owner + ":key/replaced-key",
+                            resolved.getKmsKeyId());
+                    throw new AwsException("AccessDeniedException", "denied", 400);
+                }));
+        assertEquals("AccessDeniedException", denied.getErrorCode());
+    }
+
+    @Test
     void restoreRejectsAWorkgroupOfAnotherNamespace() {
         create("rest-a");
         create("rest-b");

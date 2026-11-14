@@ -3,6 +3,7 @@ package io.floci.aws.services.redshiftserverless;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
@@ -89,6 +90,10 @@ public class RedshiftServerlessSnapshotKeyAccess {
         String keyAccount = AwsArnUtils.parse(keyArn).accountId();
         Map<String, List<String>> context = new HashMap<>();
         caller.putPrincipalKeys(context);
+        context.put("aws:ViaAWSService", List.of("true"));
+        if (region != null && !region.isBlank()) {
+            context.put("kms:ViaService", List.of("redshift-serverless." + region + "." + AwsRegions.dnsSuffixFor(region)));
+        }
         Map<String, List<String>> effective = IamConditionContextResolver.withGlobalContext(context, keyArn, region,
                 regionResolver.getAccountId(), keyAccount, DECRYPT_ACTION);
         ResourcePolicyDecision decision = evaluator.evaluateResourcePolicyFor(List.of(policy),

@@ -91,4 +91,29 @@ class KmsKeyPolicyOfAccountServiceTest {
 
         assertTrue(plain.findKeyPolicyOfAccount(keyArn("key/" + KEY_ID)).isEmpty());
     }
+
+    @Test
+    void legacyUnprefixedKeyAndAliasBelongToTheDefaultAccountOnly() {
+        InMemoryStorage<String, KmsKey> rawKeys = new InMemoryStorage<>();
+        InMemoryStorage<String, KmsAlias> rawAliases = new InMemoryStorage<>();
+        KmsService legacyService = new KmsService(
+                new AccountAwareStorageBackend<>(rawKeys, null, ACCOUNT),
+                new AccountAwareStorageBackend<>(rawAliases, null, ACCOUNT),
+                new InMemoryStorage<>(),
+                new RegionResolver(REGION, ACCOUNT));
+        String legacyKeyId = "11111111-2222-3333-4444-555566667777";
+        KmsKey legacyKey = new KmsKey();
+        legacyKey.setKeyId(legacyKeyId);
+        legacyKey.setPolicy(POLICY);
+        rawKeys.put(REGION + "::" + legacyKeyId, legacyKey);
+        rawAliases.put(REGION + "::alias/legacy",
+                new KmsAlias("alias/legacy", keyArn("alias/legacy"), legacyKeyId));
+
+        assertEquals(Optional.of(POLICY), legacyService.findKeyPolicyOfAccount(keyArn("key/" + legacyKeyId)));
+        assertEquals(Optional.of(POLICY), legacyService.findKeyPolicyOfAccount(keyArn("alias/legacy")));
+        assertTrue(legacyService.findKeyPolicyOfAccount(
+                "arn:aws:kms:" + REGION + ":" + OTHER_ACCOUNT + ":key/" + legacyKeyId).isEmpty());
+        assertTrue(legacyService.findKeyPolicyOfAccount(
+                "arn:aws:kms:" + REGION + ":" + OTHER_ACCOUNT + ":alias/legacy").isEmpty());
+    }
 }
