@@ -7817,11 +7817,10 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static String numericBucketName(String storeKey) {
-        if (storeKey.indexOf('/') != 12) {
+        if (!AccountAwareStorageBackend.hasAccountPrefix(storeKey)) {
             return null;
         }
-        String bucketName = storeKey.substring(0, 12);
-        return bucketName.matches("[0-9]{12}") ? bucketName : null;
+        return storeKey.substring(0, 12);
     }
 
     private boolean matchesStoredObjectKey(String bucketName, String storeKey, S3Object object) {
