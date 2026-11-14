@@ -270,9 +270,7 @@ final class DurableCheckpointApplier {
                     existing.setStatus(succeeded ? DurableOperationStatus.SUCCEEDED : DurableOperationStatus.FAILED);
                     existing.setResult(succeeded ? update.payload() : null);
                     existing.setError(succeeded ? null : update.error());
-                    if (update.replayChildren() != null) {
-                        existing.setReplayChildren(update.replayChildren());
-                    }
+                    existing.setReplayChildren(Boolean.TRUE.equals(update.replayChildren()));
                     existing.setEndTimestamp(now);
                     touch(existing);
                     event(existing, succeeded ? "ContextSucceeded" : "ContextFailed",

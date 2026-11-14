@@ -232,6 +232,91 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void childrenOfAContextClosedWithoutReplayChildrenAreLeftOutOfTheStateAndTheNextInvocation() {
+        List<String> state = new ArrayList<>();
+        List<String> firstPage = new ArrayList<>();
+        List<String> secondPage = new ArrayList<>();
+        List<String> answer = new ArrayList<>();
+        List<JsonNode> closedWire = new ArrayList<>();
+        invoker.script(event -> {
+            String arn = event.get("DurableExecutionArn").asText();
+            List<DurableOperationUpdate> starts = new ArrayList<>();
+            for (int i = 1; i <= 8; i++) {
+                starts.add(contextUpdate("c" + i, null, DurableOperationAction.START, null));
+            }
+            starts.add(step("a1", "c1"));
+            starts.add(contextUpdate("n1", "c1", DurableOperationAction.START, null));
+            starts.add(step("g1", "n1"));
+            starts.add(step("a2", "c2"));
+            starts.add(step("a3", "c3"));
+            starts.add(step("a4", "c4"));
+            starts.add(step("a5", "c5"));
+            starts.add(step("a8", "c8"));
+            starts.add(contextUpdate("n2", "c6", DurableOperationAction.START, null));
+            starts.add(step("g2", "n2"));
+            starts.add(contextUpdate("n3", "c7", DurableOperationAction.START, null));
+            starts.add(step("g3", "n3"));
+            String token = checkpoint(event, token(event), starts).checkpointToken();
+            token = checkpoint(event, token, List.of(
+                    contextUpdate("n1", "c1", DurableOperationAction.SUCCEED, true),
+                    contextUpdate("n2", "c6", DurableOperationAction.SUCCEED, false),
+                    contextUpdate("n3", "c7", DurableOperationAction.SUCCEED, false),
+                    contextUpdate("c1", null, DurableOperationAction.SUCCEED, false),
+                    contextUpdate("c2", null, DurableOperationAction.SUCCEED, true),
+                    contextUpdate("c3", null, DurableOperationAction.SUCCEED, null),
+                    contextUpdate("c4", null, DurableOperationAction.FAIL, false),
+                    contextUpdate("c6", null, DurableOperationAction.SUCCEED, true),
+                    contextUpdate("c8", null, DurableOperationAction.SUCCEED, false))).checkpointToken();
+            service.getState(arn, token, null, null).operations().forEach(o -> state.add(o.getId()));
+            DurableExecutionService.StatePage first = service.getState(arn, token, null, 5);
+            first.operations().forEach(o -> firstPage.add(o.getId()));
+            service.getState(arn, token, first.nextMarker(), 5).operations().forEach(o -> secondPage.add(o.getId()));
+            checkpoint(event, token, List.of(waitStart("w1", 1)));
+            return pending();
+        });
+        invoker.script(event -> {
+            event.get("InitialExecutionState").get("Operations").forEach(o -> answer.add(o.get("Id").asText()));
+            closedWire.add(operation(event, "c1").get("ContextDetails"));
+            closedWire.add(operation(event, "c5").get("ContextDetails"));
+            return succeeded("\"done\"");
+        });
+
+        DurableExecution execution = start("exec-1", "{}", false);
+        clock.advance(Duration.ofSeconds(2));
+        service.sweep();
+
+        List<String> expected = List.of(execution.getExecutionId(), "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
+                "a2", "a5", "n2", "n3");
+        assertEquals(expected, state);
+        List<String> replayed = new ArrayList<>(expected);
+        replayed.add("w1");
+        assertEquals(replayed, answer);
+        assertEquals(expected.subList(0, 5), firstPage);
+        assertEquals(expected.subList(5, 10), secondPage);
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(execution.getExecutionArn()).getStatus());
+        assertEquals("{\"ReplayChildren\":false}", closedWire.get(0).toString());
+        assertEquals("{}", closedWire.get(1).toString());
+    }
+
+    @Test
+    void theCheckpointAnswerKeepsTheChildOfAContextClosedInTheSameBatch() {
+        List<String> answered = new ArrayList<>();
+        invoker.script(event -> {
+            String token = checkpoint(event, token(event), List.of(
+                    contextUpdate("c9", null, DurableOperationAction.START, null), step("a9", "c9"))).checkpointToken();
+            CheckpointResult result = checkpoint(event, token, List.of(
+                    step("a9", "c9", DurableOperationAction.SUCCEED),
+                    contextUpdate("c9", null, DurableOperationAction.SUCCEED, false)));
+            result.newExecutionState().forEach(o -> answered.add(o.getId()));
+            return succeeded("\"x\"");
+        });
+
+        start("exec-1", "{}", true);
+
+        assertEquals(List.of("c9", "a9"), answered);
+    }
+
+    @Test
     void staleTokensAndTokensOfClosedExecutionsAreRejected() {
         invoker.script(event -> {
             String first = token(event);
@@ -1061,6 +1146,21 @@ class DurableExecutionServiceTest {
                                                DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step", action, payload, error,
                 null, null, null, null, null, null, null, null);
+    }
+
+    private static DurableOperationUpdate step(String id, String parentId) {
+        return step(id, parentId, DurableOperationAction.START);
+    }
+
+    private static DurableOperationUpdate step(String id, String parentId, DurableOperationAction action) {
+        return new DurableOperationUpdate(id, parentId, null, DurableOperationType.STEP, "Step", action, null, null,
+                null, null, null, null, null, null, null, null);
+    }
+
+    private static DurableOperationUpdate contextUpdate(String id, String parentId, DurableOperationAction action,
+                                                        Boolean replayChildren) {
+        return new DurableOperationUpdate(id, parentId, null, DurableOperationType.CONTEXT, "Context", action, null,
+                null, null, null, replayChildren, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate stepRetry(String id, int delaySeconds, DurableErrorObject error) {
