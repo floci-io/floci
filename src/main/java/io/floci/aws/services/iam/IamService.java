@@ -3905,28 +3905,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      *
      * <p>The secret half is returned here and by the reset, and nowhere else: there is no get
      * operation, and the list is defined without it.
+     *
+     * <p>A request wrong in both halves is answered for the user: recordings validated against AWS
+     * answer a user that does not exist beside a service that is not supported with the user, so
+     * the user is confirmed before the service name is read. What the bounds of
+     * {@code CredentialAgeDays} say is settled ahead of either, by the constraints every request
+     * is held to; what is left here is whether the service this is takes the member at all, which
+     * cannot be asked before the service is known.
      */
     public ServiceSpecificCredential createServiceSpecificCredential(
             String userName, String requestedServiceName, Integer credentialAgeDays) {
-        String serviceName = supportedServiceName(requestedServiceName);
-        boolean longTermKey = LONG_TERM_API_KEY_SERVICES.contains(serviceName);
-        if (credentialAgeDays != null) {
-            if (!longTermKey) {
-                throw new AwsException("ValidationError",
-                        "CredentialAgeDays is only valid for services that support long-term API "
-                                + "keys.", 400);
-            }
-            if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
-                    || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
-                throw IamValidationErrors.validationError("credentialAgeDays",
-                        String.valueOf(credentialAgeDays), "Member must be between "
-                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS);
-            }
-        }
         synchronized (serviceCredentialLock) {
             // Confirmed under the lock, as the other per-user credentials are: DeleteUser checks
             // for these holding the same lock.
             getUser(userName);
+            String serviceName = supportedServiceName(requestedServiceName);
+            boolean longTermKey = LONG_TERM_API_KEY_SERVICES.contains(serviceName);
+            if (credentialAgeDays != null) {
+                if (!longTermKey) {
+                    throw new AwsException("ValidationError",
+                            "CredentialAgeDays is only valid for services that support long-term "
+                                    + "API keys.", 400);
+                }
+                if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
+                        || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
+                    throw IamValidationErrors.validationError("credentialAgeDays",
+                            String.valueOf(credentialAgeDays), "Member must be between "
+                                    + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS);
+                }
+            }
             // One scan serves both checks: the quota counts this user's credentials for this
             // service, the name search needs every name in the account, and no write can land
             // between them while this holds the lock.
@@ -4070,8 +4077,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Every credential of a user, or of every user when the caller asked for all of them. */
     public List<ServiceSpecificCredential> listServiceSpecificCredentials(
             String userName, String requestedServiceName, boolean allUsers) {
-        String serviceName = requestedServiceName == null
-                ? null : supportedServiceName(requestedServiceName);
+        // The user before the service name, as on the create: a request wrong in both halves is
+        // answered for the user. Under AllUsers there is no user to look up, and the filter is
+        // then the only thing the request can be wrong about.
         List<ServiceSpecificCredential> found;
         if (allUsers) {
             found = serviceCredentials.scan(key -> true);
@@ -4079,6 +4087,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             getUser(userName); // validates existence
             found = userServiceCredentials(userName);
         }
+        String serviceName = requestedServiceName == null
+                ? null : supportedServiceName(requestedServiceName);
         return found.stream()
                 .filter(c -> serviceName == null || serviceName.equals(c.getServiceName()))
                 .sorted(Comparator.comparing(
