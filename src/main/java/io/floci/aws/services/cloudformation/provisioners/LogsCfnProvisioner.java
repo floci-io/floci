@@ -15,15 +15,7 @@ import java.util.Set;
 @ApplicationScoped
 public class LogsCfnProvisioner implements CfnResourceProvisioner {
 
-    /**
-     * Records whether the log group's name came from the template or was generated, so a later
-     * update can tell a rename from a no-op. Read back off the resource's stored attributes.
-     */
-    private static final String LOG_GROUP_NAME_MODE_ATTR = "FlociLogGroupNameMode";
-    private static final String NAME_MODE_EXPLICIT = "explicit";
-    private static final String NAME_MODE_GENERATED = "generated";
     private static final int LOG_GROUP_NAME_MAX_LENGTH = 512;
-    private static final int GENERATED_NAME_SUFFIX_LENGTH = 12;
 
     private final CloudWatchLogsService logsService;
 
@@ -37,31 +29,57 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
+    }
+
+    @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String explicitName = ctx.resolveOptional(props, "LogGroupName");
         boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
         String priorPhysicalId = ctx.priorPhysicalId();
 
-        String previousNameMode = r.getAttributes().get(LOG_GROUP_NAME_MODE_ATTR);
-        if (previousNameMode == null && priorPhysicalId != null) {
-            // Stacks persisted before FlociLogGroupNameMode existed have no recorded mode, but an
-            // auto-generated name always has the deterministic shape generatePhysicalName produces,
-            // so anything else must have been explicit.
-            previousNameMode = isGeneratedName(priorPhysicalId, ctx.stackName(), r.getLogicalId(),
-                    LOG_GROUP_NAME_MAX_LENGTH) ? NAME_MODE_GENERATED : NAME_MODE_EXPLICIT;
+        // LogGroupName is create-only, so the engine's change decides whether this update replaces
+        // the group, an added, changed or removed name included. A named group cannot be replaced
+        // under the same name.
+        boolean replaces = ctx.isUpdate() && priorPhysicalId != null
+                && ctx.changes("AWS::Logs::LogGroup", props).requiresReplacement();
+        if (replaces && hasExplicitName && explicitName.equals(priorPhysicalId)) {
+            throw CfnExceptions.customNamedReplacement(explicitName);
         }
-        // Going from an explicit name to none is itself a replacement-worthy change on real AWS, not
-        // something to silently keep reconciling under the old explicit name.
-        boolean explicitNameRemoved = priorPhysicalId != null && !hasExplicitName
-                && NAME_MODE_EXPLICIT.equals(previousNameMode);
 
         String name;
         if (hasExplicitName) {
             name = explicitName;
-        } else if (priorPhysicalId != null && !explicitNameRemoved) {
-            // No explicit name and the prior name was itself auto-generated: keep it across updates
-            // instead of generating a fresh random one each time, so the log group is reconciled in
-            // place rather than replaced on every no-op update.
+        } else if (priorPhysicalId != null && !replaces) {
+            // No explicit name and no replacement: keep the prior name across updates instead of
+            // generating a fresh random one each time, so the log group is reconciled in place.
             name = priorPhysicalId;
         } else {
             name = ctx.generatePhysicalName(r.getLogicalId(), LOG_GROUP_NAME_MAX_LENGTH, false);
@@ -87,38 +105,24 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        // LogGroupName isn't updatable in place on real AWS (a change replaces the resource), so only
-        // reconcile in place when the name is unchanged and the group is still there; otherwise this is
-        // either a first create or a rename, both of which need a fresh createLogGroup call. On a rename,
-        // create the new group before deleting the old one: if the new name collides with something else
-        // and createLogGroup throws, the update rolls back without touching the old group, since rollback
-        // does not restore a resource this method already deleted.
+        // Reconcile in place when the name is unchanged and the group is still there; otherwise this is
+        // either a first create or a replacement, both of which need a fresh createLogGroup call. A
+        // replacement leaves the old group alone: ReplacementCleanup deletes it once the stack update
+        // commits, or the new one when the update rolls back.
         if (priorPhysicalId != null && priorPhysicalId.equals(name)
                 && logsService.logGroupExists(name, ctx.region())) {
             reconcileLogGroup(name, retentionInDays, tags, ctx.region());
         } else {
-            boolean preservedPriorGroup = priorPhysicalId != null
-                    && !priorPhysicalId.equals(name)
-                    && logsService.logGroupExists(priorPhysicalId, ctx.region());
-            try {
-                logsService.createLogGroup(name, retentionInDays, tags, ctx.region());
-            } catch (RuntimeException failure) {
-                if (preservedPriorGroup) {
-                    r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
-                }
-                throw failure;
-            }
-            if (preservedPriorGroup) {
-                logsService.deleteLogGroup(priorPhysicalId, ctx.region());
-            }
+            logsService.createLogGroup(name, retentionInDays, tags, ctx.region());
         }
 
         // Ref returns the log group name; GetAtt Arn is arn:aws:logs:<region>:<account>:log-group:<name>:*
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", AwsArnUtils.Arn
                 .of("logs", ctx.region(), ctx.accountId(), "log-group:" + name + ":*").toString());
-        r.getAttributes().put(LOG_GROUP_NAME_MODE_ATTR,
-                hasExplicitName ? NAME_MODE_EXPLICIT : NAME_MODE_GENERATED);
+        // createLogGroup fails on an existing name, so a replacing update always created its group.
+        ReplacementCleanup.record(r, ctx, attributesBefore,
+                ctx.isUpdate() && !priorPhysicalId.equals(name));
     }
 
     private void reconcileLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
@@ -140,44 +144,9 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    /**
-     * Whether a physical id has the exact shape {@code generatePhysicalName} produces. Copied from
-     * the monolith, which still needs it for a type that has not migrated yet.
-     */
-    private boolean isGeneratedName(String physicalId, String stackName, String logicalId, int maxLength) {
-        if (physicalId == null || physicalId.length() < GENERATED_NAME_SUFFIX_LENGTH + 1) {
-            return false;
-        }
-        String suffix = physicalId.substring(physicalId.length() - GENERATED_NAME_SUFFIX_LENGTH);
-        for (int i = 0; i < suffix.length(); i++) {
-            char c = suffix.charAt(i);
-            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-            if (!hex) {
-                return false;
-            }
-        }
-        if (physicalId.charAt(physicalId.length() - GENERATED_NAME_SUFFIX_LENGTH - 1) != '-') {
-            return false;
-        }
-        String actualPrefix = physicalId.substring(0, physicalId.length() - GENERATED_NAME_SUFFIX_LENGTH - 1);
-        return actualPrefix.equals(expectedGeneratedNamePrefix(stackName, logicalId, maxLength));
-    }
-
-    private String expectedGeneratedNamePrefix(String stackName, String logicalId, int maxLength) {
-        String base = stackName + "-" + logicalId;
-        if (maxLength <= 0 || base.length() + 1 + GENERATED_NAME_SUFFIX_LENGTH <= maxLength) {
-            return base;
-        }
-        int keep = Math.max(0, maxLength - GENERATED_NAME_SUFFIX_LENGTH - 1);
-        String prefix = base.length() > keep ? base.substring(0, keep) : base;
-        while (prefix.endsWith("-")) {
-            prefix = prefix.substring(0, prefix.length() - 1);
-        }
-        return prefix;
-    }
-
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        logsService.deleteLogGroup(physicalId, region);
+        CfnDeletes.safeDelete("log group", physicalId,
+                () -> logsService.deleteLogGroup(physicalId, region), "ResourceNotFoundException");
     }
 }
