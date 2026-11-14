@@ -6193,6 +6193,10 @@ public class RdsService implements Resettable, ResourceProvider {
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
 
+        if (cluster.isDeletionProtection()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Cannot delete protected Cluster, please disable deletion protection and try again.", 400);
+        }
         if (!cluster.getDbClusterMembers().isEmpty()) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " still has DB instances.", 400);
@@ -11560,6 +11564,75 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.getDbClusterIdentifier());
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
+
+    /**
+     * The format checks the instance path applies, and the overlap check against the window that
+     * will be in effect: the given one, else the cluster's stored one, else the default.
+     */
+    public static void validateClusterWindows(DbCluster current, String backupWindow, String maintenanceWindow) {
+        if (backupWindow != null) {
+            BackupWindows.parseBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            BackupWindows.parseMaintenanceWindow(maintenanceWindow);
+        }
+        String backup = backupWindow != null ? backupWindow
+                : current != null && current.getPreferredBackupWindow() != null
+                        ? current.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW;
+        String maintenance = maintenanceWindow != null ? maintenanceWindow
+                : current != null && current.getPreferredMaintenanceWindow() != null
+                        ? current.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
+        if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+            throw DbInstanceSettings.overlappingWindows();
+        }
+    }
+
+    /**
+     * On create a window given alone is paired with the default, or with one starting where the
+     * given one ends when the default would overlap it: AWS picks a clear window itself.
+     * Validates before the cluster exists; returns {backup, maintenance} to store.
+     */
+    public static String[] resolveClusterCreateWindows(String backupWindow, String maintenanceWindow) {
+        if (backupWindow != null) {
+            BackupWindows.parseBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            BackupWindows.parseMaintenanceWindow(maintenanceWindow);
+        }
+        if (backupWindow != null && maintenanceWindow == null
+                && DbInstanceSettings.windowsOverlap(backupWindow, BackupWindows.DEFAULT_MAINTENANCE_WINDOW)) {
+            maintenanceWindow = DbInstanceSettings.maintenanceWindowAfter(backupWindow);
+        } else if (maintenanceWindow != null && backupWindow == null
+                && DbInstanceSettings.windowsOverlap(BackupWindows.DEFAULT_BACKUP_WINDOW, maintenanceWindow)) {
+            backupWindow = DbInstanceSettings.backupWindowAfter(maintenanceWindow);
+        }
+        validateClusterWindows(null, backupWindow, maintenanceWindow);
+        return new String[] {backupWindow, maintenanceWindow};
+    }
+
+    /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
+    public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
+            List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow,
+            Boolean deletionProtection) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(id, effectiveRegion);
+        validateClusterWindows(cluster, backupWindow, maintenanceWindow);
+        if (vpcSecurityGroupIds != null) {
+            cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (backupWindow != null) {
+            cluster.setPreferredBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            cluster.setPreferredMaintenanceWindow(maintenanceWindow);
+        }
+        if (deletionProtection != null) {
+            cluster.setDeletionProtection(deletionProtection);
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
 
     /**

@@ -63,6 +63,8 @@ class RdsQueryHandlerTest {
     @BeforeEach
     void setUp() {
         service = mock(RdsService.class);
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any()))
+                .thenAnswer(inv -> makeCluster(inv.getArgument(0)));
         when(service.instanceCertificate(any())).thenReturn(
                 new RdsService.InstanceCertificate("rds-ca-rsa2048-g1", Instant.parse("2061-05-25T23:34:57Z")));
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -570,6 +572,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void modifyDbCluster_forwardsDbClusterParameterGroupName() {
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("mycluster"));
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
                 isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), eq(false), eq(false), any()))
                 .thenReturn(makeCluster("mycluster"));
@@ -859,7 +862,7 @@ class RdsQueryHandlerTest {
                 any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), isNull(), isNull());
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
-        verify(service).getDbCluster("mycluster", "us-west-2");
+        verify(service, times(2)).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2", true);
         verify(service).modifyDbCluster("mycluster", null, null,
                 null, null, null, null, null, null, false, false, "us-west-2");
@@ -871,6 +874,7 @@ class RdsQueryHandlerTest {
         cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!cluster-ABC");
         cluster.setMasterUserSecretStatus("active");
         cluster.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
@@ -959,6 +963,7 @@ class RdsQueryHandlerTest {
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
     void modifyDbClusterForwardsRotationAndApplyImmediately(boolean rotatePassword, boolean applyImmediately) {
         DbCluster cluster = makeCluster("mycluster");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null, null, null, null,
                 null, null, null, rotatePassword, applyImmediately, "us-west-2")).thenReturn(cluster);
         MultivaluedMap<String, String> p = params();

@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
@@ -1438,6 +1439,8 @@ public class RdsQueryHandler {
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Integer requestedPort = parseIntegerParam(params, "Port");
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
+            String[] windows = RdsService.resolveClusterCreateWindows(
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
                 cluster = requestedPort == null
@@ -1490,6 +1493,10 @@ public class RdsQueryHandler {
             if (backupRetentionPeriodParam != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, backupRetentionPeriod);
             }
+            cluster = service.setDbClusterRequestSettings(id, region,
+                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                    windows[0], windows[1],
+                    parseOptionalBoolean(params, "DeletionProtection"));
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1607,6 +1614,8 @@ public class RdsQueryHandler {
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
+            RdsService.validateClusterWindows(service.getDbCluster(id, region),
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId,
@@ -1619,6 +1628,10 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, modifyBackupRetentionPeriod);
             }
+            cluster = service.setDbClusterRequestSettings(id, region,
+                    hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
+                    parseOptionalBoolean(params, "DeletionProtection"));
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -3390,7 +3403,7 @@ public class RdsQueryHandler {
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
            .elem("DeletionProtection", i.isDeletionProtection())
-           .raw(vpcSecurityGroupsXml(i))
+           .raw(vpcSecurityGroupsXml(i.getVpcSecurityGroupIds()))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
@@ -3472,10 +3485,10 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    private String vpcSecurityGroupsXml(DbInstance i) {
-        List<String> groupIds = i.getVpcSecurityGroupIds().isEmpty()
+    private String vpcSecurityGroupsXml(List<String> vpcSecurityGroupIds) {
+        List<String> groupIds = vpcSecurityGroupIds.isEmpty()
                 ? List.of("sg-00000000")
-                : i.getVpcSecurityGroupIds();
+                : vpcSecurityGroupIds;
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
         for (String groupId : groupIds) {
             xml.start("VpcSecurityGroupMembership")
@@ -3622,14 +3635,12 @@ public class RdsQueryHandler {
            .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
-           .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+           .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                   ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+           .elem("DeletionProtection", c.isDeletionProtection())
+           .raw(vpcSecurityGroupsXml(c.getVpcSecurityGroupIds()))
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
         String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
         if (clusterParameterGroup != null) {
