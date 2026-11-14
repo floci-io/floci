@@ -5,6 +5,19 @@
 
 EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
 
+## Cluster request IAM conditions
+
+With IAM enforcement enabled, `CreateCluster` evaluates `eks:authenticationMode`,
+`eks:bootstrapClusterCreatorAdminPermissions`, `eks:endpointPrivateAccess`, and
+`eks:endpointPublicAccess` from the request's `accessConfig` and `resourcesVpcConfig`.
+The generated metadata also maps those keys for `UpdateClusterConfig`, except the
+create-only bootstrap flag; this does not implement the currently unsupported
+update API. Its extraction is covered by resolver tests, not an SDK update lifecycle.
+The action-to-key mappings come from AWS's Service Reference and the request paths from
+botocore. Omitted attributes remain absent from the IAM context; stored cluster settings
+and service defaults do not supply missing request conditions. Generic request-tag
+conditions continue to apply alongside these EKS-specific keys.
+
 ## Supported Operations
 
 | Operation | Description |
