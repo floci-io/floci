@@ -845,6 +845,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
         checkedAs(user, "account", "POST", "/getAlternateContact", "{\"AlternateContactType\":\"BILLING\"}",
                 "account:GetAlternateContact");
+        checkedAs(user, "account", "POST", "/getContactInformation", "{}", "account:GetContactInformation");
+        checkedAs(user, "account", "POST", "/putContactInformation", "{}", "account:PutContactInformation");
         checkedAs(user, "controlcatalog", "POST", "/list-controls", "{}", "controlcatalog:ListControls");
         checkedAs(user, "fis", "GET", "/experimentTemplates", null, "fis:ListExperimentTemplates");
         checkedAs(user, "oam", "POST", "/ListSinks", "{}", "oam:ListSinks");
