@@ -1,27 +1,23 @@
 package io.floci.aws.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.redshift.RedshiftSnapshotTableExtractor;
 import io.floci.aws.services.redshift.RedshiftTableRestorer;
 import io.floci.aws.services.redshift.RedshiftTableRestorer.TableNames;
 import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.TableRestoreSource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.time.Clock;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 /**
  * Restores one table of a Redshift Serverless snapshot into a workgroup under a new name, and keeps the status of
@@ -32,7 +28,6 @@ import java.util.UUID;
 @ApplicationScoped
 public class RedshiftServerlessTableRestoreService implements Resettable {
 
-    private static final Logger LOG = Logger.getLogger(RedshiftServerlessTableRestoreService.class);
 
     private final AccountAwareStorageBackend<TableRestoreStatus> restores;
     private final RedshiftServerlessService serverless;
@@ -70,53 +65,14 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
         TableNames names = new TableNames(request.sourceDatabaseName(), request.sourceSchemaName(),
                 request.sourceTableName(), request.targetDatabaseName(), request.targetSchemaName(),
                 request.newTableName(), request.caseSensitive());
-        if (!names.sourceDatabaseIs(source.namespace().getDbName())) {
-            throw ServerlessSupport.validation("The database " + request.sourceDatabaseName()
-                    + " does not exist in the snapshot.");
-        }
-        // A workgroup holds one database; psql would also read an odd name as a connection string.
-        if (!names.targetDatabaseIs(source.namespace().getDbName())) {
-            throw ServerlessSupport.validation("The database " + request.targetDatabaseName() + " does not exist.");
-        }
-        String script;
-        try {
-            script = restorer.script(source.dump(), names.sourceSchema(), names.sourceTable(), names.targetSchema(),
-                    names.newTable(), request.caseSensitive()).orElseThrow(() -> ServerlessSupport.validation(
-                            "The table " + names.sourceSchema() + "." + names.sourceTable()
-                                    + " does not exist in the database " + names.sourceDatabase() + " of the snapshot."));
-        } catch (RedshiftSnapshotTableExtractor.UnsupportedTableException e) {
-            throw ServerlessSupport.validation(e.getMessage());
-        }
-
-        TableRestoreStatus status = new TableRestoreStatus();
-        status.setTableRestoreRequestId(UUID.randomUUID().toString());
-        status.setRequestTime(clock.instant());
-        status.setNamespaceName(request.namespaceName());
-        status.setWorkgroupName(request.workgroupName());
-        status.setSnapshotIdentifier(request.snapshotName());
-        names.applyTo(status);
-        status.setTotalDataInMegaBytes(RedshiftTableRestorer.megabytes(script));
-        status.setProgressInMegaBytes(0L);
-        TableRestoreStatus accepted = new TableRestoreStatus(status);
-        accepted.setStatus(TableRestoreStatus.PENDING);
-
-        String key = storageKey(region, status.getTableRestoreRequestId());
-        status.setStatus(TableRestoreStatus.IN_PROGRESS);
-        restores.put(key, status);
-        try {
-            restorer.run(regionResolver.getAccountId(),
-                    RedshiftServerlessRuntime.backendId(region, request.workgroupName()),
-                    source.workgroup().getMasterUsername(), names.targetDatabase(), script);
-            status.setStatus(TableRestoreStatus.SUCCEEDED);
-            status.setProgressInMegaBytes(status.getTotalDataInMegaBytes());
-        } catch (AwsException e) {
-            LOG.warnv(e, "Table restore {0} into workgroup {1} failed", status.getTableRestoreRequestId(),
-                    request.workgroupName());
-            status.setStatus(TableRestoreStatus.FAILED);
-            status.setMessage(e.getMessage());
-        }
-        restores.put(key, status);
-        return accepted;
+        return restorer.restore(names, source.dump(), new RedshiftTableRestorer.Backend(regionResolver.getAccountId(),
+                RedshiftServerlessRuntime.backendId(region, request.workgroupName()),
+                source.workgroup().getMasterUsername(), source.namespace().getDbName()), clock.instant(),
+                ServerlessSupport::validation, status -> {
+                    status.setNamespaceName(request.namespaceName());
+                    status.setWorkgroupName(request.workgroupName());
+                    status.setSnapshotIdentifier(request.snapshotName());
+                }, status -> restores.put(storageKey(region, status.getTableRestoreRequestId()), status));
     }
 
     public TableRestoreStatus getTableRestoreStatus(String tableRestoreRequestId, String region) {
@@ -142,7 +98,7 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
                 .toList();
         return Pagination.paginate(matching, TableRestoreStatus::getTableRestoreRequestId, limit, nextToken,
                 "redshift-serverless-table-restore",
-                token -> ServerlessSupport.validation("Invalid nextToken."));
+                token -> ServerlessSupport.invalidPagination("Invalid nextToken."));
     }
 
     @Override
