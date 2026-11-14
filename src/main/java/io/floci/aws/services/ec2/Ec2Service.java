@@ -6165,6 +6165,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         copy.setStateReasonMessage(source.getStateReasonMessage());
         copy.setRegion(source.getRegion());
         copy.setDockerContainerId(source.getDockerContainerId());
+        copy.setContainerBridgeIp(source.getContainerBridgeIp());
         copy.setRootVolumeId(source.getRootVolumeId());
         copy.setDisableApiStop(source.isDisableApiStop());
         copy.setDisableApiTermination(source.isDisableApiTermination());

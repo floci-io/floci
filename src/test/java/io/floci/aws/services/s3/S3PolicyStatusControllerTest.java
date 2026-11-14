@@ -64,6 +64,7 @@ class S3PolicyStatusControllerTest {
                 mock(IamService.class),
                 mock(IamEnforcementFilter.class),
                 mock(EmulatorConfig.class),
+                new S3VirtualHostFilter(),
                 Clock.systemUTC());
 
         Response response = controller.listObjects(bucket, null, null, null, null, null, null, null,

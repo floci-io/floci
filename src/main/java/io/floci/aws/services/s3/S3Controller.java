@@ -149,6 +149,7 @@ public class S3Controller {
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
     private final EmulatorConfig config;
+    private final S3VirtualHostFilter virtualHostFilter;
     private final Clock clock;
 
     @Inject
@@ -163,6 +164,7 @@ public class S3Controller {
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
                         EmulatorConfig config,
+                        S3VirtualHostFilter virtualHostFilter,
                         Clock clock) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
@@ -176,6 +178,7 @@ public class S3Controller {
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.config = config;
+        this.virtualHostFilter = virtualHostFilter;
         this.clock = clock;
     }
 
@@ -4995,7 +4998,7 @@ public class S3Controller {
                 httpHeaders.getHeaderString("Host"),
                 httpHeaders.getHeaderString("X-Forwarded-Host"),
                 uriInfo.getRequestUri());
-        if (host == null) {
+        if (host == null || virtualHostFilter.isEndpointRoot(host)) {
             return null;
         }
         String bucket = S3VirtualHostFilter.extractBucketFromExisting(host, s3Service);

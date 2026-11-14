@@ -44,6 +44,20 @@ public class EmrServerlessService {
     // The EMR Serverless user guide's tagging limitations: at most 50 user-created tags per resource
     // (the model's TagMap max of 200 only bounds a single request), and no "aws:" prefix, in any case,
     // on a key or a value. TagKey and TagValue share one character set in the API model.
+    private static final String NOT_STOPPED_FOR_UPDATE =
+            "Application must be in a stopped or created state in order to be updated.";
+    // The settings an update may change only on a CREATED or STOPPED application: all but its maximum capacity and
+    // its custom images, which a STARTED one takes too (checkStartedUpdate).
+    private static final List<Function<UpdateApplicationRequest, Object>> STOPPED_ONLY_SETTINGS = List.of(
+            UpdateApplicationRequest::getReleaseLabel, UpdateApplicationRequest::getInitialCapacity,
+            UpdateApplicationRequest::getAutoStartConfiguration, UpdateApplicationRequest::getAutoStopConfiguration,
+            UpdateApplicationRequest::getNetworkConfiguration, UpdateApplicationRequest::getArchitecture,
+            UpdateApplicationRequest::getMonitoringConfiguration, UpdateApplicationRequest::getRuntimeConfiguration,
+            UpdateApplicationRequest::getSchedulerConfiguration,
+            UpdateApplicationRequest::getDiskEncryptionConfiguration,
+            UpdateApplicationRequest::getInteractiveConfiguration,
+            UpdateApplicationRequest::getIdentityCenterConfiguration,
+            UpdateApplicationRequest::getJobLevelCostAllocationConfiguration);
     private static final int MAX_TAGS = 50;
     private static final String RESERVED_PREFIX = "aws:";
     private static final Pattern TAG_TEXT = Pattern.compile("[A-Za-z0-9 /_.:=+@-]*");
@@ -176,10 +190,12 @@ public class EmrServerlessService {
     public synchronized Application updateApplication(String applicationId, UpdateApplicationRequest request) {
         validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), false);
         Application app = getApplication(applicationId);
-        
+
         String state = app.getState();
-        if (!"CREATED".equals(state) && !"STOPPED".equals(state)) {
-            throw new AwsException("ValidationException", "Application must be in a stopped or created state in order to be updated.", 400);
+        if ("STARTED".equals(state)) {
+            checkStartedUpdate(app, request);
+        } else if (!"CREATED".equals(state) && !"STOPPED".equals(state)) {
+            throw new AwsException("ValidationException", NOT_STOPPED_FOR_UPDATE, 400);
         }
 
         if (request.getReleaseLabel() != null) {
@@ -239,6 +255,26 @@ public class EmrServerlessService {
         app.setUpdatedAt(now());
         storage.put(applicationId, app);
         return app;
+    }
+
+    /**
+     * What an update may change on a STARTED application, from AWS's "Updating Running Applications": its maximum
+     * capacity, "for a STARTED application to modify the scaling boundary", and its custom images, "without stopping
+     * it", though "Custom image updates on running applications are not supported on applications with
+     * pre-initialized capacity configured". Any other setting still needs the application "in a stopped or created
+     * state". A run already going keeps the image and maximum capacity it was launched with, as "existing workloads
+     * continue with the original image" and "The new settings only apply to workers on new workloads"; a new run, or a
+     * new attempt of one, takes the application's current ones.
+     */
+    private static void checkStartedUpdate(Application app, UpdateApplicationRequest request) {
+        if (STOPPED_ONLY_SETTINGS.stream().anyMatch(setting -> setting.apply(request) != null)) {
+            throw new AwsException("ValidationException", NOT_STOPPED_FOR_UPDATE, 400);
+        }
+        boolean images = request.getImageConfiguration() != null || request.getWorkerTypeSpecifications() != null;
+        if (images && app.getInitialCapacity() != null && !app.getInitialCapacity().isEmpty()) {
+            throw new AwsException("ValidationException", "Custom image updates on running applications are not "
+                    + "supported on applications with pre-initialized capacity configured.", 400);
+        }
     }
 
     public synchronized void deleteApplication(String applicationId) {

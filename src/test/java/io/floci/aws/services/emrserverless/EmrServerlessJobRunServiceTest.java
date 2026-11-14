@@ -18,6 +18,7 @@ import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.MonitoringConfiguration;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
+import io.floci.aws.services.emrserverless.model.UpdateApplicationRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.MutableClock;
@@ -579,6 +580,65 @@ class EmrServerlessJobRunServiceTest {
                 applications.getApplication(applicationId).getArn()), runner.jobs.get(2).executors());
         // Tez runs a Hive run's tasks in its driver's container.
         assertNull(runner.jobs.get(3).executors());
+    }
+
+    @Test
+    void aRunGoingKeepsWhatItWasLaunchedWithAndTheNextTakesItsStartedApplicationsNewImageAndMaximumCapacity() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner, 2);
+        String firstImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String nextImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1";
+        CreateApplicationRequest create = applicationRequest("updated-while-started", "emr-7.5.0", "SPARK");
+        create.setImageConfiguration(EmrServerlessServiceTest.image(firstImage));
+        create.setMaximumCapacity(EmrServerlessServiceTest.capacity("400 vCPU"));
+        Application app = applications.createApplication(create);
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setImageConfiguration(EmrServerlessServiceTest.image(nextImage));
+        update.setMaximumCapacity(EmrServerlessServiceTest.capacity("100 vCPU"));
+        List<String> statesUpdated = new ArrayList<>();
+        runner.whileRunning = () -> statesUpdated.add(
+                applications.updateApplication(app.getApplicationId(), update).getState());
+
+        service.startJobRun(app.getApplicationId(), request(null, null));
+        runNext();
+        runner.whileRunning = () -> { };
+        service.startJobRun(app.getApplicationId(), request(null, null));
+        runNext();
+
+        // The first run started the application, which took the update while that run went on.
+        assertEquals(List.of("STARTED"), statesUpdated);
+        assertEquals(firstImage, runner.jobs.get(0).customImage());
+        assertEquals(new SparkJobRunner.Executors(2, firstImage, 400, 0, 0, app.getArn()),
+                runner.jobs.get(0).executors());
+        assertEquals(nextImage, runner.jobs.get(1).customImage());
+        assertEquals(new SparkJobRunner.Executors(2, nextImage, 100, 0, 0, app.getArn()),
+                runner.jobs.get(1).executors());
+    }
+
+    @Test
+    void aRunsNextAttemptTakesTheImageItsStartedApplicationWasUpdatedTo() {
+        FakeRunner runner = new FakeRunner();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        EmrServerlessJobRunService service = dockerService(runner);
+        String firstImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String nextImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.1";
+        CreateApplicationRequest create = applicationRequest("retried-after-update", "emr-7.5.0", "SPARK");
+        create.setImageConfiguration(EmrServerlessServiceTest.image(firstImage));
+        String id = applications.createApplication(create).getApplicationId();
+        UpdateApplicationRequest update = new UpdateApplicationRequest();
+        update.setImageConfiguration(EmrServerlessServiceTest.image(nextImage));
+        runner.whileRunning = () -> applications.updateApplication(id, update);
+        StartJobRunRequest resilient = request(null, null);
+        resilient.setRetryPolicy(Map.of("maxAttempts", 2));
+
+        service.startJobRun(id, resilient);
+        runNext();
+        runner.whileRunning = () -> { };
+        runNext();
+
+        // "New job attempts will pick new images".
+        assertEquals(firstImage, runner.jobs.get(0).customImage());
+        assertEquals(nextImage, runner.jobs.get(1).customImage());
     }
 
     @Test
