@@ -6551,18 +6551,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         synchronized (attachmentTopologyLock(region)) {
-            if (token != null) {
-                for (EgressOnlyInternetGateway existing : egressOnlyInternetGateways.scan(
-                        k -> k.startsWith(region + "::"))) {
-                    if (token.equals(existing.getClientToken())) {
-                        if (!vpcId.equals(existing.getAttachments().get(0).getVpcId())
-                                || !tagMap(tagList).equals(tagMap(existing.getCreationTags()))) {
-                            throw new AwsException("IdempotentParameterMismatch",
-                                    "The client token '" + token + "' was already used with different parameters", 400);
-                        }
-                        return existing;
-                    }
-                }
+            Optional<EgressOnlyInternetGateway> replay = Ec2ClientTokens.replay(token,
+                    () -> egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream(),
+                    EgressOnlyInternetGateway::getClientToken,
+                    first -> vpcId.equals(first.getAttachments().get(0).getVpcId())
+                            && tagMap(tagList).equals(tagMap(first.getCreationTags())),
+                    "The client token '" + token + "' was already used with different parameters");
+            if (replay.isPresent()) {
+                return replay.get();
             }
             getRequiredVpc(region, vpcId);
             EgressOnlyInternetGateway eigw = new EgressOnlyInternetGateway();
@@ -11643,19 +11639,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     String.valueOf(ephemeralStorage), endDateType, String.valueOf(endDate), instanceMatchCriteria,
                     outpostArn, placementGroupArn, String.valueOf(startDate), String.valueOf(commitmentDuration),
                     deliveryPreference);
-            if (isSet(clientToken)) {
-                for (CapacityReservation existing : capacityReservations.scan(k -> k.startsWith(region + "::"))) {
-                    if (clientToken.equals(existing.getClientToken()) && callerAccountId().equals(existing.getOwnerId())) {
-                        if (!parameters.equals(existing.getRequestParameters())
-                                || !requestTags.equals(existing.getRequestTags())) {
-                            throw new AwsException("IdempotentParameterMismatch",
-                                    "Parameters differ from the previous request with this ClientToken.", 400);
-                        }
-                        reconcileCapacityMembership(region);
-                        return new CapacityReservation(getRequiredCapacityReservation(region,
-                                existing.getCapacityReservationId()));
-                    }
-                }
+            Optional<CapacityReservation> replay = Ec2ClientTokens.replay(clientToken,
+                    () -> capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
+                            .filter(existing -> callerAccountId().equals(existing.getOwnerId())),
+                    CapacityReservation::getClientToken,
+                    first -> parameters.equals(first.getRequestParameters())
+                            && requestTags.equals(first.getRequestTags()),
+                    "Parameters differ from the previous request with this ClientToken.");
+            if (replay.isPresent()) {
+                reconcileCapacityMembership(region);
+                return new CapacityReservation(getRequiredCapacityReservation(region,
+                        replay.get().getCapacityReservationId()));
             }
             Instant now = capacityReservationNow();
             validateCapacityReservationSchedule(startDate, commitmentDuration, deliveryPreference, endDate, now);
@@ -13302,23 +13296,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw dryRunOperation();
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
-        if (token != null) {
-            // Compared after defaults are applied, so a retry that omits a defaulted parameter the
-            // first call also omitted still matches.
-            Optional<InstanceConnectEndpoint> replay = instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"))
-                    .stream().filter(existing -> token.equals(existing.getClientToken())).findFirst();
-            if (replay.isPresent()) {
-                InstanceConnectEndpoint first = replay.get();
-                if (!subnetId.equals(first.getSubnetId())
-                        || !new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
-                        || !type.equals(first.getIpAddressType())
-                        || Boolean.TRUE.equals(preserveClientIp) != first.isPreserveClientIp()
-                        || !tagMap(tagList).equals(tagMap(first.getCreationTags()))) {
-                    throw new AwsException("IdempotentParameterMismatch",
-                            "The client token '" + token + "' was already used with different parameters", 400);
-                }
-                return withTags(first);
-            }
+        // Compared after defaults are applied, so a retry that omits a defaulted parameter the
+        // first call also omitted still matches.
+        Optional<InstanceConnectEndpoint> replay = Ec2ClientTokens.replay(token,
+                () -> instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream(),
+                InstanceConnectEndpoint::getClientToken,
+                first -> subnetId.equals(first.getSubnetId())
+                        && new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
+                        && type.equals(first.getIpAddressType())
+                        && Boolean.TRUE.equals(preserveClientIp) == first.isPreserveClientIp()
+                        && tagMap(tagList).equals(tagMap(first.getCreationTags())),
+                "The client token '" + token + "' was already used with different parameters");
+        if (replay.isPresent()) {
+            return withTags(replay.get());
         }
 
         String id = "eice-" + randomHex(17);
@@ -14955,20 +14945,60 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public Volume createVolume(String region, String availabilityZone, String volumeType,
                                int size, boolean encrypted, String kmsKeyId, int iops, Integer throughput,
                                String snapshotId, List<Tag> volumeTags) {
-        ensureDefaultResources(region);
-        Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops, throughput,
-                snapshotId);
-        String volumeId = vol.getVolumeId();
-        if (volumeTags != null) {
-            vol.setTags(new ArrayList<>(volumeTags));
-            // Tags on create are tags like any other: DescribeTags lists them in this region.
-            putTags(region, vol.getVolumeId(), new ArrayList<>(volumeTags));
-        }
-        volumes.put(key(region, volumeId), vol);
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
-        }
-        return vol;
+        return createVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops, throughput,
+                snapshotId, volumeTags, null);
+    }
+
+    /**
+     * As above, honouring {@code clientToken}: a replay in the same Availability Zone returns the
+     * volume the first call created, and the same token with another volume parameter or other
+     * creation tags fails with IdempotentParameterMismatch. The EC2 idempotency guide exempts the
+     * Availability Zone from that check, so the same token in another zone gets that zone's own volume.
+     * Parameters are compared as requested, so a later ModifyVolume or CreateTags does not turn a
+     * retry into a mismatch.
+     */
+    public Volume createVolume(String region, String availabilityZone, String volumeType,
+                               int size, boolean encrypted, String kmsKeyId, int iops, Integer throughput,
+                               String snapshotId, List<Tag> volumeTags, String clientToken) {
+        String token = isSet(clientToken) ? clientToken : null;
+        // Held from the replay scan to the save, so two creates with one token see each other.
+        return withResourceLock(volumeClientTokenLocks,
+                token == null ? null : callerAccountId() + "::" + key(region, token), () -> {
+            ensureDefaultResources(region);
+            Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops,
+                    throughput, snapshotId);
+            List<String> parameters = Arrays.asList(volumeType, String.valueOf(size), String.valueOf(encrypted),
+                    kmsKeyId, String.valueOf(iops), String.valueOf(throughput), snapshotId);
+            Map<String, String> requestTags = tagMap(volumeTags);
+            // The zone's volume with this token, settled as a read would settle it, so the answer is
+            // the same whether or not something read the volume since its instance terminated.
+            Optional<Volume> replay = Ec2ClientTokens.replay(token,
+                    () -> volumes.scan(k -> k.startsWith(region + "::")).stream()
+                            .filter(existing -> vol.getAvailabilityZone().equals(existing.getAvailabilityZone())
+                                    && token.equals(existing.getClientToken()))
+                            .flatMap(existing -> settleEndedHolders(region, existing).stream()),
+                    Volume::getClientToken,
+                    first -> parameters.equals(first.getRequestParameters())
+                            && requestTags.equals(first.getRequestTags()),
+                    "Parameters differ from the previous request with this ClientToken.");
+            if (replay.isPresent()) {
+                return replay.get();
+            }
+            vol.setClientToken(token);
+            vol.setRequestParameters(parameters);
+            vol.setRequestTags(requestTags);
+            String volumeId = vol.getVolumeId();
+            if (volumeTags != null) {
+                vol.setTags(new ArrayList<>(volumeTags));
+                // Tags on create are tags like any other: DescribeTags lists them in this region.
+                putTags(region, vol.getVolumeId(), new ArrayList<>(volumeTags));
+            }
+            volumes.put(key(region, volumeId), vol);
+            if (volumeBlockDeviceManager != null) {
+                volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
+            }
+            return vol;
+        });
     }
 
     /**
@@ -15070,6 +15100,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RefCountedLock> volumeClientTokenLocks = new ConcurrentHashMap<>();
     private final Set<VolumeDevice> pendingVolumeAttachments = ConcurrentHashMap.newKeySet();
 
     private record VolumeDevice(String accountId, String region, String instanceId, String device) {}

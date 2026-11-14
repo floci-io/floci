@@ -6790,7 +6790,7 @@ public class Ec2QueryHandler {
         checkDryRun(p);
 
         Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
-                encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags);
+                encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags, p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVolumeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
