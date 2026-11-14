@@ -680,7 +680,7 @@ public class NativeDynamoDbJsonHandler {
             List.of("ALL_NEW", "UPDATED_OLD", "ALL_OLD", "NONE", "UPDATED_NEW");
     private static final List<String> OLDER_CONDITIONAL_OPERATORS = List.of("OR", "AND");
 
-    // The older validator lists the members in this order and leaves out a missing table name.
+    // The older validator lists the members in this order.
     private void requireValidOlderItemWrite(JsonNode request, String target) {
         String tableName = textOrNull(request, "TableName");
         String returnValues = textOrNull(request, "ReturnValues");
@@ -697,7 +697,9 @@ public class NativeDynamoDbJsonHandler {
         if ("Key".equals(target) && !request.hasNonNull(target)) {
             validationErrors.add(SmithyValidationErrors.notNull("key"));
         }
-        if ("".equals(tableName)) {
+        if (tableName == null) {
+            validationErrors.add(SmithyValidationErrors.notNull("tableName"));
+        } else if (tableName.isEmpty()) {
             validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
         }
         throwValidationErrors(validationErrors);
