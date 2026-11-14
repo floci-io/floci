@@ -124,6 +124,30 @@ class S3VirtualHostFilterTest {
 
     @ParameterizedTest
     @CsvSource({
+            "edge.localhost.floci.io, edge.localhost.floci.io",
+            "edge.localhost.floci.io:4566, edge.localhost.floci.io",
+            "EDGE.LOCALHOST.FLOCI.IO.:4566, edge.localhost.floci.io",
+            "edge.localhost.localstack.cloud, edge.localhost.localstack.cloud",
+            "edge.localhost, edge.localhost",
+    })
+    void configuredEndpointRootWinsOverShorterBuiltinSuffix(String host, String baseHostname) {
+        assertNull(S3VirtualHostFilter.extractBucket(host, baseHostname, DEFAULT_SUFFIXES));
+        assertEquals("bucket", S3VirtualHostFilter.extractBucket(
+                "bucket." + baseHostname, baseHostname, DEFAULT_SUFFIXES));
+    }
+
+    @Test
+    void configuredSuffixRootWinsOverShorterEndpointSuffix() {
+        Set<String> suffixes = Set.of("localhost.floci.io", "tenant.localhost.floci.io",
+                "alias.tenant.localhost.floci.io");
+        assertNull(S3VirtualHostFilter.extractBucket(
+                "alias.tenant.localhost.floci.io:4566", "tenant.localhost.floci.io", suffixes));
+        assertEquals("bucket", S3VirtualHostFilter.extractBucket(
+                "bucket.alias.tenant.localhost.floci.io:4566", "tenant.localhost.floci.io", suffixes));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
             "192.168.1.1,      localhost",
             "192.168.1.1:4566, localhost",
             "127.0.0.1,        localhost",
