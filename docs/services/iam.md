@@ -1922,7 +1922,7 @@ action is denied. The routed protocol determines the status, not just the reques
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
-Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
+Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -2690,13 +2690,16 @@ iam:PassRole permission."
 `logs:DescribeIndexPolicies`. Its reference names none for `METRIC_EXTRACTION_POLICY`, which needs only
 `logs:DescribeAccountPolicies`.
 
-**Secrets Manager secrets.** A request that names a secret by its name, or by a partial ARN without
-the random suffix, is evaluated against the stored secret's full ARN, suffix included, so a
-`secret:<name>-??????` resource, the pattern the Secrets Manager User Guide documents, matches it as
-it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluated against
-`secret:<Name>-??????`, standing in for the suffix the secret is assigned when it is created, so a
-policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
-request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
+**Secrets Manager secrets.** Secrets Manager is read from the generated request resources. A request
+that names a secret by its name, or by a partial ARN without the random suffix, is evaluated against
+the stored secret's full ARN, suffix included, so a `secret:<name>-??????` resource, the pattern the
+Secrets Manager User Guide documents, matches it as it does on AWS, and a `Deny` on the full ARN
+applies. A secret Secrets Manager does not hold, as `CreateSecret` names the one it makes by `Name`,
+is evaluated against `secret:<name>-??????`, the hyphen and six random characters botocore documents
+the service adding after the name left open, so a policy scoped to a name prefix such as
+`secret:app/*` allows it; an ARN that matches none is evaluated as given. An operation acting on no
+resource type in the Service Authorization Reference (`ListSecrets`, `GetRandomPassword`,
+`BatchGetSecretValue`) is evaluated on `*`.
 
 **KMS keys.** A request that names a key by its id, an alias name, an alias ARN or a key ARN is
 evaluated against the stored key's ARN, as the KMS API reference resolves the request's key

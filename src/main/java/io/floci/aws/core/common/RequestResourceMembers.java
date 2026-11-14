@@ -47,6 +47,8 @@ final class RequestResourceMembers {
             "^arn:\\$\\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$");
     /** A format's resource that is a literal and one variable. */
     private static final Pattern ONE_VARIABLE = Pattern.compile("[^$]*\\$\\{\\w+}");
+    /** A separator and the characters a service mints after a name, each {@code ?}: {@code -??????}. */
+    private static final Pattern MINTED_SUFFIX = Pattern.compile("[-_.]\\?+");
     /** A member a REST request carries outside its body, by its name, and where: a path label or a query parameter. */
     private static final Pattern LOCATED_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
@@ -95,9 +97,15 @@ final class RequestResourceMembers {
      * checks an ARN of it given with a qualifier, one more {@code :<name>} past the format, without that qualifier
      * (Step Functions checks a version or an alias on its state machine's ARN); {@code minted} when its service
      * follows the one variable the format ends in with an id it mints, {@code /<id>}, which the format leaves out
-     * (EventBridge's {@code connection/<name>/<id>}).
+     * (EventBridge's {@code connection/<name>/<id>}); {@code mintedSuffix} the characters its service follows the
+     * name that variable takes with, as IAM matches them, one {@code ?} each after the separator (a Secrets Manager
+     * secret's {@code -??????}), or null.
      */
-    record ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted) {
+    record ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted, String mintedSuffix) {
+
+        ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted) {
+            this(format, pattern, unqualified, minted, null);
+        }
 
         ArnFormat(String format, Pattern pattern, boolean unqualified) {
             this(format, pattern, unqualified, false);
@@ -254,6 +262,7 @@ final class RequestResourceMembers {
         document.path("arnFormats").properties().forEach(namespace -> {
             Set<String> unqualified = names(document.path("unqualified").path(namespace.getKey()));
             Set<String> minted = names(document.path("mintedIds").path(namespace.getKey()));
+            JsonNode suffixes = document.path("mintedSuffixes").path(namespace.getKey());
             Map<String, ArnFormat> types = new LinkedHashMap<>();
             namespace.getValue().properties().forEach(type -> {
                 String format = type.getValue().asText("");
@@ -262,7 +271,7 @@ final class RequestResourceMembers {
                             + type.getKey() + " no ARN format");
                 }
                 types.put(type.getKey(), new ArnFormat(format, pattern(format), unqualified.contains(type.getKey()),
-                        minted.contains(type.getKey())));
+                        minted.contains(type.getKey()), suffixes.path(type.getKey()).asText(null)));
             });
             formats.put(namespace.getKey(), Map.copyOf(types));
         });
@@ -280,6 +289,18 @@ final class RequestResourceMembers {
                 throw new IllegalStateException(RESOURCE_NAME + " gives " + namespace.getKey() + "'s "
                         + namespace.getValue() + " a minted id, no types whose format ends in its one variable");
             }
+        });
+        document.path("mintedSuffixes").properties().forEach(namespace -> {
+            Map<String, ArnFormat> types = formats.getOrDefault(namespace.getKey(), Map.of());
+            namespace.getValue().properties().forEach(type -> {
+                if (!types.containsKey(type.getKey())
+                        || !ONE_VARIABLE.matcher(types.get(type.getKey()).format().split(":", 6)[5]).matches()
+                        || !type.getValue().isTextual() || !MINTED_SUFFIX.matcher(type.getValue().asText()).matches()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " gives " + namespace.getKey() + "'s "
+                            + type.getKey() + " the minted suffix " + type.getValue()
+                            + ", no type whose format ends in its one variable or no separator and characters");
+                }
+            });
         });
         Map<String, Map<String, List<String>>> resourceTagKeys = new LinkedHashMap<>();
         if (!document.path("resourceTagKeys").isMissingNode() && !document.path("resourceTagKeys").isObject()) {

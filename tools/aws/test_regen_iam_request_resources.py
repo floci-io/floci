@@ -603,6 +603,31 @@ def test_a_type_whose_arn_shape_takes_a_segment_past_its_name_has_an_id_its_serv
     assert r.build(DOCUMENTS, "test", tmp_path / "plain", "botocore test")["mintedIds"] == {}
 
 
+def test_a_create_documenting_characters_its_service_mints_after_a_name_gives_them_open(isolated, tmp_path):
+    # Secrets Manager: "automatically adds a hyphen and six random characters after the secret name at the end of
+    # the ARN".
+    service = model({"CreateThing": {"Name": "String"}, "GetThing": {"ThingName": "String"}, "ListThings": {}})
+    service["shapes"]["CreateThingIn"]["members"]["Name"]["documentation"] = (
+        "<p>The name of the new thing.</p> <p>Svc automatically adds a hyphen and six random characters after the "
+        "thing name at the end of the ARN.</p>")
+    write_models(tmp_path, {"svc": service})
+    documents = [reference("svc", {"CreateThing": ["thing"], "GetThing": ["thing"], "ListThings": []},
+                           {"thing": FORMATS["thing"]})]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["mintedSuffixes"] == {"svc": {"thing": "-??????"}}
+    assert document["operations"]["svc:CreateThing"]["resources"] == [{"type": "thing", "fill": {"ThingName": "Name"}}]
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    document["mintedSuffixes"] = {}
+    assert any("minted suffix" in problem for problem in r.derive(document, tmp_path))
+    for bad in ({"svc": {"thing": "??????"}}, {"svc": {"group": "-??"}}, {"svc": {"thing": "-ab"}}, {"svc": {}}):
+        document["mintedSuffixes"] = bad
+        assert any("mintedSuffixes" in problem for problem in r.validate(document)), bad
+    # Undocumented, the thing has no suffix.
+    write_models(tmp_path / "plain", {"svc": model({"CreateThing": {"Name": "String"},
+                                                    "GetThing": {"ThingName": "String"}, "ListThings": {}})})
+    assert r.build(documents, "test", tmp_path / "plain", "botocore test")["mintedSuffixes"] == {}
+
+
 def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_its_documented_key_or_its_name(isolated, tmp_path):
     documents = [reference("svc", {"PutTarget": ["target"], "TagTarget": ["target"], "GetByResource": ["target"],
                                    "RunOn": ["target", "group"], "RenameGroup": ["group"]},
@@ -710,7 +735,8 @@ def good_document() -> dict:
     return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
-            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "forwardedActions": {},
+            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "mintedSuffixes": {},
+            "forwardedActions": {},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
