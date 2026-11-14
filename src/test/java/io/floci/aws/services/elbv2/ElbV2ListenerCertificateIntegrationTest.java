@@ -14,10 +14,12 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -146,6 +148,80 @@ class ElbV2ListenerCertificateIntegrationTest {
         return createListener(protocol, certificateArn).statusCode(200)
                 .extract().path("CreateListenerResponse.CreateListenerResult.Listeners.member"
                         + ".ListenerArn");
+    }
+
+    @Test
+    void cloudFormationManagesAdditionalListenerCertificate() {
+        String defaultCertificate = uploadCertificate();
+        String firstCertificate = uploadCertificate();
+        String nextCertificate = uploadCertificate();
+        String unrelatedCertificate = uploadCertificate();
+        String listener = listenerServing(defaultCertificate);
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "AddListenerCertificates")
+                .formParam("ListenerArn", listener)
+                .formParam("Certificates.member.1.CertificateArn", unrelatedCertificate)
+            .when().post("/").then().statusCode(200);
+
+        String stack = "elbv2-certs-" + suffix();
+        cleanup.register(() -> stackAction("DeleteStack", stack).post("/"));
+        stackAction("CreateStack", stack)
+                .formParam("TemplateBody", certificateTemplate(listener, firstCertificate))
+            .when().post("/").then().statusCode(200);
+        String stackId = stackAction("DescribeStacks", stack).post("/").then().statusCode(200).extract()
+                .path("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackId");
+        awaitStackStatus(stackId, "CREATE_COMPLETE");
+        assertEquals(List.of(defaultCertificate, unrelatedCertificate, firstCertificate),
+                listenerCertificates(listener));
+        String attachmentId = physicalAttachmentId(stack);
+        assertFalse(attachmentId.isBlank());
+
+        stackAction("UpdateStack", stack)
+                .formParam("TemplateBody", certificateTemplate(listener, nextCertificate))
+            .when().post("/").then().statusCode(200);
+        awaitStackStatus(stackId, "UPDATE_COMPLETE");
+        assertEquals(attachmentId, physicalAttachmentId(stack));
+        assertEquals(List.of(defaultCertificate, unrelatedCertificate, nextCertificate),
+                listenerCertificates(listener));
+
+        stackAction("DeleteStack", stack).post("/").then().statusCode(200);
+        awaitStackStatus(stackId, "DELETE_COMPLETE");
+        assertEquals(List.of(defaultCertificate, unrelatedCertificate), listenerCertificates(listener));
+    }
+
+    private static String certificateTemplate(String listener, String certificate) {
+        return """
+                {
+                  "Resources": {
+                    "AdditionalCertificate": {
+                      "Type": "AWS::ElasticLoadBalancingV2::ListenerCertificate",
+                      "Properties": {
+                        "ListenerArn": "%s",
+                        "Certificates": [{ "CertificateArn": "%s" }]
+                      }
+                    }
+                  }
+                }
+                """.formatted(listener, certificate);
+    }
+
+    private static RequestSpecification stackAction(String action, String stack) {
+        return given().header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/cloudformation/aws4_request")
+                .formParam("Action", action).formParam("StackName", stack);
+    }
+
+    private static void awaitStackStatus(String stack, String status) {
+        await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+                stackAction("DescribeStacks", stack).post("/").then().statusCode(200)
+                        .body("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus", equalTo(status)));
+    }
+
+    private static String physicalAttachmentId(String stack) {
+        return stackAction("DescribeStackResource", stack)
+                .formParam("LogicalResourceId", "AdditionalCertificate")
+                .post("/").then().statusCode(200).extract()
+                .path("DescribeStackResourceResponse.DescribeStackResourceResult.StackResourceDetail.PhysicalResourceId");
     }
 
     private static ValidatableResponse describeListener(String listenerArn) {

@@ -55,7 +55,7 @@ import static org.mockito.Mockito.when;
 
 /**
  * The ELBv2 CFN provisioner in isolation: one mocked service, no Quarkus boot.
- * {@code CloudFormationIntegrationTest} covers the four types end to end.
+ * {@code CloudFormationIntegrationTest} covers the load balancer, target group, listener and rule end to end.
  */
 class ElbV2CfnProvisionerTest {
 
@@ -138,6 +138,86 @@ class ElbV2CfnProvisionerTest {
                 anyList(), anyList(), isNull(), eq(Map.of()));
     }
 
+    @Test
+    void listenerCertificateAttachesAndDetaches() {
+        String type = "AWS::ElasticLoadBalancingV2::ListenerCertificate";
+        StackResource attachment = resource(type, "Certificate");
+
+        assertTrue(provisioner.resourceTypes().contains(type));
+        provisioner.provision(attachment, certificateAttachment(LISTENER_ARN, "certificate-a"), ctx());
+        assertEquals(attachment.getPhysicalId(), attachment.getAttributes().get("Id"));
+        verify(elb).addListenerCertificates(REGION, LISTENER_ARN, List.of("certificate-a"));
+
+        provisioner.delete(attachment, REGION);
+        verify(elb).removeListenerCertificates(REGION, LISTENER_ARN, List.of("certificate-a"));
+    }
+
+    @Test
+    void listenerCertificateUpdateKeepsPhysicalIdAndRollsBack() {
+        StackResource attachment = resource("AWS::ElasticLoadBalancingV2::ListenerCertificate", "Certificate");
+        provisioner.provision(attachment, certificateAttachment(LISTENER_ARN, "certificate-a"), ctx());
+        String id = attachment.getPhysicalId();
+
+        provisioner.provision(attachment, certificateAttachment(LISTENER_ARN, "certificate-b"), ctx(id));
+        assertEquals(id, attachment.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(attachment));
+        assertTrue(provisioner.rollbackUpdate(attachment));
+        provisioner.delete(attachment, REGION);
+
+        InOrder calls = inOrder(elb);
+        calls.verify(elb).updateListenerCertificates(REGION, LISTENER_ARN,
+                List.of("certificate-b"), List.of("certificate-a"));
+        calls.verify(elb).updateListenerCertificates(REGION, LISTENER_ARN,
+                List.of("certificate-a"), List.of("certificate-b"));
+        calls.verify(elb).removeListenerCertificates(REGION, LISTENER_ARN, List.of("certificate-a"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void movingListenerCertificateReplacesAttachment(boolean rollback) {
+        String otherListener = LISTENER_ARN + "2";
+        StackResource attachment = resource("AWS::ElasticLoadBalancingV2::ListenerCertificate", "Certificate");
+        provisioner.provision(attachment, certificateAttachment(LISTENER_ARN, "certificate-a"), ctx());
+        String oldId = attachment.getPhysicalId();
+        provisioner.provision(attachment, certificateAttachment(otherListener, "certificate-b"), ctx(oldId));
+
+        assertFalse(oldId.equals(attachment.getPhysicalId()));
+        assertEquals(oldId, provisioner.updateCleanupPhysicalId(attachment));
+        verify(elb).addListenerCertificates(REGION, otherListener, List.of("certificate-b"));
+        verify(elb, never()).removeListenerCertificates(anyString(), anyString(), anyList());
+
+        if (rollback) {
+            assertTrue(provisioner.rollbackUpdate(attachment));
+            assertEquals(oldId, attachment.getPhysicalId());
+            verify(elb).removeListenerCertificates(REGION, otherListener, List.of("certificate-b"));
+            verify(elb, never()).removeListenerCertificates(eq(REGION), eq(LISTENER_ARN), anyList());
+        } else {
+            provisioner.completeUpdate(attachment);
+            verify(elb).removeListenerCertificates(REGION, LISTENER_ARN, List.of("certificate-a"));
+            verify(elb, never()).removeListenerCertificates(eq(REGION), eq(otherListener), anyList());
+        }
+    }
+
+    @Test
+    void listenerCertificateMigratesAStubOnUpdate() {
+        StackResource attachment = resource("AWS::ElasticLoadBalancingV2::ListenerCertificate", "Certificate");
+        String stubId = "Certificate-abcdef01";
+        attachment.setPhysicalId(stubId);
+        attachment.getAttributes().put("Arn", CfnResourceDispatcher.STUB_ARN_PREFIX + "Certificate");
+
+        provisioner.provision(attachment, certificateAttachment(LISTENER_ARN, "certificate-a"), ctx(stubId));
+
+        assertFalse(stubId.equals(attachment.getPhysicalId()));
+        assertNull(provisioner.updateCleanupPhysicalId(attachment));
+        verify(elb).addListenerCertificates(REGION, LISTENER_ARN, List.of("certificate-a"));
+    }
+
+    private ObjectNode certificateAttachment(String listener, String certificate) {
+        ObjectNode props = mapper.createObjectNode().put("ListenerArn", listener);
+        props.putArray("Certificates").addObject().put("CertificateArn", certificate);
+        return props;
+    }
+
     private ProvisionContext ctx() {
         return ctx(null);
     }
@@ -204,9 +284,10 @@ class ElbV2CfnProvisionerTest {
     }
 
     @Test
-    void declaresTheFourTypes() {
+    void declaresTheFiveTypes() {
         assertEquals(Set.of("AWS::ElasticLoadBalancingV2::LoadBalancer", "AWS::ElasticLoadBalancingV2::TargetGroup",
-                "AWS::ElasticLoadBalancingV2::Listener", "AWS::ElasticLoadBalancingV2::ListenerRule"),
+                "AWS::ElasticLoadBalancingV2::Listener", "AWS::ElasticLoadBalancingV2::ListenerRule",
+                "AWS::ElasticLoadBalancingV2::ListenerCertificate"),
                 provisioner.resourceTypes());
     }
 
