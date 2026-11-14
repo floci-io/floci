@@ -1753,4 +1753,41 @@ class SecretsManagerServiceTest {
         assertEquals(List.of("AWSCURRENT"), after.getVersions().get(current).getVersionStages());
         assertEquals(current, after.getCurrentVersionId());
     }
+
+    @Test
+    void listSecretsAllFilterSplitsValueIntoWords() {
+        service.createSecret("database", "v", null, "production credentials", null, null, REGION);
+        service.createSecret("unrelated", "v", null, "nothing here", null, null, REGION);
+        List<SecretsManagerService.Filter> filters =
+                List.of(new SecretsManagerService.Filter("all", List.of("Database PRODUCTION")));
+
+        List<Secret> found = service.listSecrets(REGION, filters);
+
+        assertEquals(List.of("database"), found.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void listSecretsAllFilterMatchesWordPrefixInTagsAndNegates() {
+        service.createSecret("alpha", "v", null, null, null, List.of(new Secret.Tag("Team", "Platform")), REGION);
+        service.createSecret("beta", "v", null, null, null, null, REGION);
+
+        List<Secret> tagged = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("zzz plat"))));
+        List<Secret> others = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("!plat zzz"))));
+
+        assertEquals(List.of("alpha"), tagged.stream().map(Secret::getName).toList());
+        assertEquals(List.of("beta"), others.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void batchGetSecretValueByFiltersAllFilterSplitsValueIntoWords() {
+        service.createSecret("database", "v1", null, "production credentials", null, null, REGION);
+        service.createSecret("unrelated", "v2", null, "nothing here", null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> found = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of("database production"))), REGION);
+
+        assertEquals(List.of("database"), found.stream().map(SecretsManagerService.BatchSecretValue::name).toList());
+    }
 }
