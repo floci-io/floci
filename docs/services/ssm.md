@@ -51,8 +51,19 @@ the request's partition, region and account, and read it as `parameter/<name>`.
 `PutParameter` removes leading and trailing spaces from `Name` before it validates and stores it,
 as AWS does; a tab, newline or other whitespace is not removed. The name must then consist of
 letters, numbers, `.`, `-`, `_` and the `/` separator, so a colon or an interior space fails with
-a `ValidationException`. A parameter stored under such a name by an older Floci version can still
-be read, overwritten by a CloudFormation rollback, and deleted.
+a `ValidationException`. Parameters stored under invalid names by older Floci versions can
+still be read, restored during CloudFormation rollback and deleted.
+
+`GetParameter`, `GetParameters`, `GetParameterHistory`, `LabelParameterVersion` and
+`GetParametersByPath` remove leading and trailing ASCII spaces from the requested name
+or path before lookup, labeling or pagination. An interior space fails the complete
+request with `ValidationException` unless the name addresses a stored parameter, or the
+path contains stored descendants, in the caller's account and region. This exception
+preserves access to legacy Floci data; it does not allow new names with interior spaces.
+Secret-reference authorization uses the trimmed name;
+ARN, version and label selectors retain their normal scope and permission checks.
+Missing batch names are returned in `InvalidParameters` after this trimming. History
+and path pagination tokens work with either the padded or canonical name.
 
 `GetParametersByPath` supports `Type` and `KeyId` entries in `ParameterFilters`, with `Equals`
 (the default) or `BeginsWith`. Values within one filter combine with OR; multiple

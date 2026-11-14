@@ -87,6 +87,39 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void forwardedRequestsJoinTheirActionsRecordedTypeAndViaServiceKeyAndRefuseAnythingElse() throws Exception {
+        assertEquals(List.of(new RequestResourceMembers.Forwarded("kms:Decrypt", "key", "snapshot", "kmsKeyId",
+                        "redshift-serverless", "kms:ViaService")),
+                RequestResourceMembers.table().forwarded().get("redshift-serverless:RestoreFromSnapshot"));
+        assertEquals(List.of(new RequestResourceMembers.Forwarded("kms:Decrypt", "key", "snapshot", "KmsKeyId",
+                        "redshift", "kms:ViaService")),
+                RequestResourceMembers.table().forwarded().get("redshift:RestoreFromClusterSnapshot"));
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {"namespaces":{"example":["example"]},"arnFormats":{"example":{
+                "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
+                "forwardedActions":{"keys:Decrypt":{"type":"key",
+                "format":"arn:${Partition}:keys:${Region}:${Account}:key/${KeyId}"}},
+                "operations":{"example:Restore":{"types":["thing"],"resources":[],
+                "forwarded":[{"action":"keys:Decrypt","of":"thing","member":"keysKeyId","endpoint":"example"}]}}}
+                """);
+        assertEquals(List.of(new RequestResourceMembers.Forwarded("keys:Decrypt", "key", "thing", "keysKeyId",
+                "example", null)), parse(document.toString()).forwarded().get("example:Restore"));
+        for (String invalid : List.of(
+                "[{\"action\":\"keys:Encrypt\",\"of\":\"thing\",\"member\":\"keysKeyId\",\"endpoint\":\"example\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"gadget\",\"member\":\"keysKeyId\",\"endpoint\":\"example\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"thing\",\"member\":\"Keys[]\",\"endpoint\":\"example\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"thing\",\"member\":\"keysKeyId\",\"endpoint\":\"\"}]",
+                "[{\"action\":\"keys:Decrypt\",\"of\":\"thing\",\"member\":\"keysKeyId\"}]")) {
+            ObjectNode changed = document.deepCopy();
+            ((ObjectNode) changed.path("operations").path("example:Restore")).set("forwarded", MAPPER.readTree(invalid));
+            assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
+        }
+        ObjectNode otherKey = document.deepCopy();
+        ((ObjectNode) otherKey.path("forwardedActions").path("keys:Decrypt")).put("viaService", "other:ViaService");
+        assertThrows(IllegalStateException.class, () -> parse(otherKey.toString()));
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));

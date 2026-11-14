@@ -4022,6 +4022,52 @@ class RedshiftServiceTest {
         assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
     }
 
+    /**
+     * A snapshot ARN of the caller's names the copy kept in its Region before the snapshot itself, a cluster left open
+     * matching any, and what it records as its {@code KmsKeyId} is the key a restore decrypts with. One of another
+     * account names that account's snapshot itself alone, taken in the ARN's Region, as a shared restore reads it.
+     */
+    @Test
+    void aSnapshotArnNamesTheCopyInItsRegionFirstAndItsKeyIsWhatItRecords() {
+        Snapshot copy = snapshot("c1", "snap", "arn:aws:redshift:eu-west-1:111111111111:snapshot:c1/snap");
+        copy.setKmsKeyId("key-copy");
+        Snapshot original = snapshot("c1", "snap", "arn:aws:redshift:us-east-1:111111111111:snapshot:c1/snap");
+        when(snapshotCopyBackend.getForAccount("111111111111", "eu-west-1::snap")).thenReturn(Optional.of(copy));
+        when(snapshotBackend.getForAccount("111111111111", "snap")).thenReturn(Optional.of(original));
+        String prefix = "arn:aws:redshift:eu-west-1:111111111111:snapshot:";
+
+        assertEquals(Optional.of(copy), service.findSnapshotAt(prefix + "c1/snap"));
+        assertEquals(Optional.of(copy), service.findSnapshotAt(prefix + "*/snap"));
+        assertEquals(Optional.of(original), service.findSnapshotAt("arn:aws:redshift:us-east-1:111111111111:snapshot:c1/snap"));
+        assertEquals(Optional.empty(), service.findSnapshotAt(prefix + "c2/snap"));
+        assertEquals(Optional.empty(), service.findSnapshotAt("arn:aws:redshift:eu-west-1:111111111111:cluster:c1"));
+        assertEquals(Optional.empty(), service.findSnapshotAt("arn:aws:redshift-serverless:eu-west-1:111111111111:snapshot/x"));
+
+        RedshiftStoredResourceArns stored = new RedshiftStoredResourceArns(service);
+        assertEquals("redshift", stored.namespace());
+        assertEquals(Optional.of("key-copy"), stored.recorded(prefix + "*/snap", "KmsKeyId"));
+        assertEquals(Optional.empty(), stored.recorded("arn:aws:redshift:us-east-1:111111111111:snapshot:c1/snap", "KmsKeyId"));
+        assertEquals(Optional.empty(), stored.recorded(prefix + "c1/snap", "kmsKeyId"));
+
+        // Another account's: its snapshot in the ARN's Region, never the copy it keeps there.
+        Snapshot theirs = snapshot("c1", "snap", "arn:aws:redshift:us-east-1:222222222222:snapshot:c1/snap");
+        Snapshot theirCopy = snapshot("c1", "snap", "arn:aws:redshift:eu-west-1:222222222222:snapshot:c1/snap");
+        theirCopy.setKmsKeyId("key-their-copy");
+        when(snapshotCopyBackend.getForAccount("222222222222", "eu-west-1::snap")).thenReturn(Optional.of(theirCopy));
+        when(snapshotBackend.getForAccount("222222222222", "snap")).thenReturn(Optional.of(theirs));
+        assertEquals(Optional.of(theirs), service.findSnapshotAt("arn:aws:redshift:us-east-1:222222222222:snapshot:c1/snap"));
+        assertEquals(Optional.empty(), service.findSnapshotAt("arn:aws:redshift:eu-west-1:222222222222:snapshot:c1/snap"));
+        assertEquals(Optional.empty(), stored.recorded("arn:aws:redshift:eu-west-1:222222222222:snapshot:*/snap", "KmsKeyId"));
+    }
+
+    private static Snapshot snapshot(String cluster, String identifier, String arn) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setClusterIdentifier(cluster);
+        snapshot.setSnapshotIdentifier(identifier);
+        snapshot.setSnapshotArn(arn);
+        return snapshot;
+    }
+
     @Test
     void createsSnapshotCopyGrant() {
         when(snapshotCopyGrantBackend.get("my-grant")).thenReturn(Optional.empty());

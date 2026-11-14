@@ -290,7 +290,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 execSessions, discoveryRegistrar, cloudWatchMetricsService, Clock.systemUTC());
     }
 
-    /** With the clock for Container Insights samples and task protection deadlines. */
+    /** With the clock for Container Insights samples, task protection deadlines and target drains. */
     EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
                StorageFactory storageFactory, EcsEventPublisher eventPublisher,
@@ -2255,15 +2255,29 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.bumpVersion();
             return task;
         }
-        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+        boolean deactivating = TaskStatus.DEACTIVATING.name().equals(task.getLastStatus());
+        if (!deactivating && !TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
             task.setDesiredStatus(TaskStatus.STOPPED.name());
-            task.setLastStatus(TaskStatus.STOPPING.name());
-            task.setStoppingAt(Instant.now());
             task.setStoppedReason(reason != null ? reason : "Stopped by user");
             task.setStopCode(stopCode);
-            task.bumpVersion();
-            deregisterTaskFromLoadBalancers(task, region);
+            Duration drain = deregisterTaskFromLoadBalancers(task, region);
             deregisterTaskFromServiceDiscovery(task, region);
+            if (inBackground && !drain.isZero()) {
+                // As on AWS, the task stays DEACTIVATING, serving its in-flight requests, until its
+                // targets have drained; the first reconciliation tick after that stops it.
+                task.setLastStatus(TaskStatus.DEACTIVATING.name());
+                task.setTargetsDrainedAt(clock.instant().plus(drain));
+                task.bumpVersion();
+                return task;
+            }
+        } else if (deactivating && inBackground && task.getTargetsDrainedAt() != null
+                && clock.instant().isBefore(task.getTargetsDrainedAt())) {
+            return task; // StopTask does not wait for the drain
+        }
+        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+            task.setLastStatus(TaskStatus.STOPPING.name());
+            task.setStoppingAt(Instant.now());
+            task.bumpVersion();
         }
 
         if (!dockerMode) {
@@ -2537,21 +2551,26 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .orElse(null);
     }
 
-    /** Deregisters a stopping task's containers from any ELBv2 target groups its service declared. */
-    private void deregisterTaskFromLoadBalancers(EcsTask task, String region) {
+    /**
+     * Deregisters a stopping task's containers from any ELBv2 target groups its service declared.
+     *
+     * @return how long those targets drain, as {@link EcsLoadBalancerRegistrar#deregisterTask} reports
+     */
+    private Duration deregisterTaskFromLoadBalancers(EcsTask task, String region) {
         // Gated on dockerMode for symmetry with the register hook (inside launchTasks'
         // dockerMode branch): mock-mode tasks have no containers and never registered.
         if (!dockerMode || task.getOwningServiceArn() == null) {
-            return;
+            return Duration.ZERO;
         }
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
         if (cluster == null) {
-            return;
+            return Duration.ZERO;
         }
         EcsServiceModel svc = owningService(task, cluster);
         if (svc != null && !svc.getLoadBalancers().isEmpty()) {
-            lbRegistrar.deregisterTask(task, svc, region);
+            return lbRegistrar.deregisterTask(task, svc, region);
         }
+        return Duration.ZERO;
     }
 
     /** Deregisters a stopping task from the Cloud Map services it actually joined. */
@@ -2882,6 +2901,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         synchronized (task) {
             return isTaskProtected(task, clock.instant());
         }
+    }
+
+    /**
+     * Whether a task's load balancer targets pass their health checks, as ECS waits for before it
+     * stops the task a rolling deployment replaces. As on AWS, a replacement that never turns
+     * healthy holds the deployment.
+     */
+    private boolean loadBalancerTargetsHealthy(EcsTask task, EcsServiceModel svc) {
+        if (!dockerMode || lbRegistrar == null || svc.getLoadBalancers().isEmpty()) {
+            return true;
+        }
+        return lbRegistrar.targetsHealthy(task);
     }
 
     private boolean eligibleForServiceStop(EcsTask task) {
@@ -5370,7 +5401,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void reconcileTaskLocked(String taskArn, EcsTask task) {
-        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())
+                || TaskStatus.DEACTIVATING.name().equals(task.getLastStatus())) {
             // Never stopTask(...), which waits for a stop already running: that stop lands under
             // this task's monitor, held here.
             stopTaskLocked(task, task.getStoppedReason(), task.getStopCode(), taskRegion(task), true);
@@ -5950,11 +5982,16 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
         } else if (running > svc.getDesiredCount()) {
-            // Drain stale tasks first: once their replacements are RUNNING this is the second
-            // half of the rolling deployment. Protected stale tasks cannot displace the
-            // desired number of current-revision tasks.
+            // Drain stale tasks first: once their replacements are RUNNING, and healthy behind
+            // the service's load balancers, this is the second half of the rolling deployment.
+            // Protected stale tasks cannot displace the desired number of current-revision tasks.
             int currentToStop = Math.max(0, (int) current - svc.getDesiredCount());
-            Stream.concat(staleTasks.stream().filter(this::eligibleForServiceStop),
+            boolean replacementsHealthy = runningTasks.stream()
+                    .filter(t -> !staleTasks.contains(t))
+                    .allMatch(t -> loadBalancerTargetsHealthy(t, svc));
+            Stream.concat(staleTasks.stream()
+                                    .filter(t -> replacementsHealthy)
+                                    .filter(this::eligibleForServiceStop),
                             runningTasks.stream()
                                     .filter(t -> !staleTasks.contains(t))
                                     .filter(this::eligibleForServiceStop)
