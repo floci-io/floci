@@ -87,7 +87,10 @@ class SesConfigurationSetEventDestinationTest {
             for (String arn : new String[] {topicArn, topicArn2}) {
                 try {
                     sns.deleteTopic(b -> b.topicArn(arn));
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                    // Setup may have failed before the topic existed, and a topic left behind
+                    // has a name no other class uses, so it cannot change another result.
+                }
             }
             sns.close();
         }
