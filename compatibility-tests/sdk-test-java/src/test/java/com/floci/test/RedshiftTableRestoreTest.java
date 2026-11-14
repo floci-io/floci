@@ -49,14 +49,18 @@ class RedshiftTableRestoreTest {
         if (client == null) {
             return;
         }
-        if (snapshotId != null) {
-            client.deleteClusterSnapshot(DeleteClusterSnapshotRequest.builder().snapshotIdentifier(snapshotId).build());
+        try {
+            if (snapshotId != null) {
+                client.deleteClusterSnapshot(
+                        DeleteClusterSnapshotRequest.builder().snapshotIdentifier(snapshotId).build());
+            }
+            if (clusterId != null) {
+                client.deleteCluster(DeleteClusterRequest.builder()
+                        .clusterIdentifier(clusterId).skipFinalClusterSnapshot(true).build());
+            }
+        } finally {
+            client.close();
         }
-        if (clusterId != null) {
-            client.deleteCluster(DeleteClusterRequest.builder()
-                    .clusterIdentifier(clusterId).skipFinalClusterSnapshot(true).build());
-        }
-        client.close();
     }
 
     @Test

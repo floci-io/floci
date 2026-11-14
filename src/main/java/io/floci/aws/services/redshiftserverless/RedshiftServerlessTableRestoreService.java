@@ -8,7 +8,9 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftSnapshotTableExtractor;
 import io.floci.aws.services.redshift.RedshiftTableRestorer;
+import io.floci.aws.services.redshift.RedshiftTableRestorer.TableNames;
 import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.TableRestoreSource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,7 +20,6 @@ import org.jboss.logging.Logger;
 import java.time.Clock;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -32,7 +33,6 @@ import java.util.UUID;
 public class RedshiftServerlessTableRestoreService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessTableRestoreService.class);
-    private static final long MEGABYTE = 1024L * 1024L;
 
     private final AccountAwareStorageBackend<TableRestoreStatus> restores;
     private final RedshiftServerlessService serverless;
@@ -59,27 +59,34 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
     }
 
     public TableRestoreStatus restoreTable(Request request, String region) {
+        ServerlessSupport.requireText(request.namespaceName(), "namespaceName");
+        ServerlessSupport.requireText(request.workgroupName(), "workgroupName");
+        ServerlessSupport.requireText(request.snapshotName(), "snapshotName");
+        ServerlessSupport.requireText(request.sourceDatabaseName(), "sourceDatabaseName");
+        ServerlessSupport.requireText(request.sourceTableName(), "sourceTableName");
+        ServerlessSupport.requireText(request.newTableName(), "newTableName");
         TableRestoreSource source = serverless.tableRestoreSource(request.namespaceName(), request.workgroupName(),
                 request.snapshotName(), region);
-        boolean caseSensitive = request.caseSensitive();
-        String sourceDatabase = fold(request.sourceDatabaseName(), caseSensitive);
-        String sourceSchema = fold(orDefault(request.sourceSchemaName(), "public"), caseSensitive);
-        String sourceTable = fold(request.sourceTableName(), caseSensitive);
-        String targetDatabase = fold(orDefault(request.targetDatabaseName(), request.sourceDatabaseName()),
-                caseSensitive);
-        String targetSchema = fold(orDefault(request.targetSchemaName(), sourceSchema), caseSensitive);
-        String newTable = fold(request.newTableName(), caseSensitive);
-        if (!fold(source.namespace().getDbName(), caseSensitive).equals(sourceDatabase)) {
+        TableNames names = new TableNames(request.sourceDatabaseName(), request.sourceSchemaName(),
+                request.sourceTableName(), request.targetDatabaseName(), request.targetSchemaName(),
+                request.newTableName(), request.caseSensitive());
+        if (!names.sourceDatabaseIs(source.namespace().getDbName())) {
             throw ServerlessSupport.validation("The database " + request.sourceDatabaseName()
                     + " does not exist in the snapshot.");
         }
         // A workgroup holds one database; psql would also read an odd name as a connection string.
-        if (!fold(source.namespace().getDbName(), caseSensitive).equals(targetDatabase)) {
+        if (!names.targetDatabaseIs(source.namespace().getDbName())) {
             throw ServerlessSupport.validation("The database " + request.targetDatabaseName() + " does not exist.");
         }
-        String script = restorer.script(source.dump(), sourceSchema, sourceTable, targetSchema, newTable,
-                caseSensitive).orElseThrow(() -> ServerlessSupport.validation("The table " + sourceSchema + "."
-                        + sourceTable + " does not exist in the database " + sourceDatabase + " of the snapshot."));
+        String script;
+        try {
+            script = restorer.script(source.dump(), names.sourceSchema(), names.sourceTable(), names.targetSchema(),
+                    names.newTable(), request.caseSensitive()).orElseThrow(() -> ServerlessSupport.validation(
+                            "The table " + names.sourceSchema() + "." + names.sourceTable()
+                                    + " does not exist in the database " + names.sourceDatabase() + " of the snapshot."));
+        } catch (RedshiftSnapshotTableExtractor.UnsupportedTableException e) {
+            throw ServerlessSupport.validation(e.getMessage());
+        }
 
         TableRestoreStatus status = new TableRestoreStatus();
         status.setTableRestoreRequestId(UUID.randomUUID().toString());
@@ -87,13 +94,8 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
         status.setNamespaceName(request.namespaceName());
         status.setWorkgroupName(request.workgroupName());
         status.setSnapshotIdentifier(request.snapshotName());
-        status.setSourceDatabaseName(request.sourceDatabaseName());
-        status.setSourceSchemaName(orDefault(request.sourceSchemaName(), "public"));
-        status.setSourceTableName(request.sourceTableName());
-        status.setTargetDatabaseName(orDefault(request.targetDatabaseName(), request.sourceDatabaseName()));
-        status.setTargetSchemaName(orDefault(request.targetSchemaName(), status.getSourceSchemaName()));
-        status.setNewTableName(request.newTableName());
-        status.setTotalDataInMegaBytes(script.length() / MEGABYTE);
+        names.applyTo(status);
+        status.setTotalDataInMegaBytes(RedshiftTableRestorer.megabytes(script));
         status.setProgressInMegaBytes(0L);
         TableRestoreStatus accepted = new TableRestoreStatus(status);
         accepted.setStatus(TableRestoreStatus.PENDING);
@@ -104,7 +106,7 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
         try {
             restorer.run(regionResolver.getAccountId(),
                     RedshiftServerlessRuntime.backendId(region, request.workgroupName()),
-                    source.workgroup().getMasterUsername(), targetDatabase, script);
+                    source.workgroup().getMasterUsername(), names.targetDatabase(), script);
             status.setStatus(TableRestoreStatus.SUCCEEDED);
             status.setProgressInMegaBytes(status.getTotalDataInMegaBytes());
         } catch (AwsException e) {
@@ -118,6 +120,7 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
     }
 
     public TableRestoreStatus getTableRestoreStatus(String tableRestoreRequestId, String region) {
+        ServerlessSupport.requireText(tableRestoreRequestId, "tableRestoreRequestId");
         return restores.get(storageKey(region, tableRestoreRequestId))
                 .filter(restore -> hasWorkgroup(restore, region))
                 .map(TableRestoreStatus::new)
@@ -153,13 +156,5 @@ public class RedshiftServerlessTableRestoreService implements Resettable {
 
     private static String storageKey(String region, String requestId) {
         return region + "::" + requestId;
-    }
-
-    private static String orDefault(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value;
-    }
-
-    private static String fold(String name, boolean caseSensitive) {
-        return caseSensitive ? name : name.toLowerCase(Locale.ROOT);
     }
 }

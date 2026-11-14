@@ -9,6 +9,7 @@ import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.redshift.RedshiftService.TableRestoreSource;
+import io.floci.aws.services.redshift.RedshiftTableRestorer.TableNames;
 import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -17,7 +18,6 @@ import org.jboss.logging.Logger;
 import java.time.Clock;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -33,7 +33,6 @@ public class RedshiftTableRestoreService implements Resettable {
     private static final Logger LOG = Logger.getLogger(RedshiftTableRestoreService.class);
     private static final int MIN_MAX_RECORDS = 20;
     private static final int MAX_MAX_RECORDS = 100;
-    private static final long MEGABYTE = 1024L * 1024L;
 
     private final AccountAwareStorageBackend<TableRestoreStatus> restores;
     private final RedshiftService redshift;
@@ -66,37 +65,33 @@ public class RedshiftTableRestoreService implements Resettable {
     private TableRestoreStatus restore(Request request) {
         TableRestoreSource source = redshift.tableRestoreSource(request.clusterIdentifier(),
                 request.snapshotIdentifier());
-        boolean caseSensitive = request.caseSensitive();
-        String sourceDatabase = fold(request.sourceDatabaseName(), caseSensitive);
-        String sourceSchema = fold(orDefault(request.sourceSchemaName(), "public"), caseSensitive);
-        String sourceTable = fold(request.sourceTableName(), caseSensitive);
-        String targetDatabase = fold(orDefault(request.targetDatabaseName(), request.sourceDatabaseName()),
-                caseSensitive);
-        String targetSchema = fold(orDefault(request.targetSchemaName(), sourceSchema), caseSensitive);
-        String newTable = fold(request.newTableName(), caseSensitive);
-        if (!source.database().equals(sourceDatabase)) {
+        TableNames names = new TableNames(request.sourceDatabaseName(), request.sourceSchemaName(),
+                request.sourceTableName(), request.targetDatabaseName(), request.targetSchemaName(),
+                request.newTableName(), request.caseSensitive());
+        if (!names.sourceDatabaseIs(source.database())) {
             throw invalidArgument("The database " + request.sourceDatabaseName() + " does not exist in the snapshot.");
         }
         // A cluster holds one database; psql would also read an odd name as a connection string.
-        if (!source.database().equals(targetDatabase)) {
+        if (!names.targetDatabaseIs(source.database())) {
             throw invalidArgument("The database " + request.targetDatabaseName() + " does not exist.");
         }
-        String script = restorer.script(source.dump(), sourceSchema, sourceTable, targetSchema, newTable,
-                caseSensitive).orElseThrow(() -> invalidArgument("The table " + sourceSchema + "." + sourceTable
-                        + " does not exist in the database " + sourceDatabase + " of the snapshot."));
+        String script;
+        try {
+            script = restorer.script(source.dump(), names.sourceSchema(), names.sourceTable(), names.targetSchema(),
+                    names.newTable(), request.caseSensitive()).orElseThrow(() -> invalidArgument("The table "
+                            + names.sourceSchema() + "." + names.sourceTable() + " does not exist in the database "
+                            + names.sourceDatabase() + " of the snapshot."));
+        } catch (RedshiftSnapshotTableExtractor.UnsupportedTableException e) {
+            throw invalidArgument(e.getMessage());
+        }
 
         TableRestoreStatus status = new TableRestoreStatus();
         status.setTableRestoreRequestId(UUID.randomUUID().toString());
         status.setRequestTime(clock.instant());
         status.setClusterIdentifier(request.clusterIdentifier());
         status.setSnapshotIdentifier(request.snapshotIdentifier());
-        status.setSourceDatabaseName(request.sourceDatabaseName());
-        status.setSourceSchemaName(orDefault(request.sourceSchemaName(), "public"));
-        status.setSourceTableName(request.sourceTableName());
-        status.setTargetDatabaseName(orDefault(request.targetDatabaseName(), request.sourceDatabaseName()));
-        status.setTargetSchemaName(orDefault(request.targetSchemaName(), status.getSourceSchemaName()));
-        status.setNewTableName(request.newTableName());
-        status.setTotalDataInMegaBytes(script.length() / MEGABYTE);
+        names.applyTo(status);
+        status.setTotalDataInMegaBytes(RedshiftTableRestorer.megabytes(script));
         status.setProgressInMegaBytes(0L);
         TableRestoreStatus accepted = pending(status);
 
@@ -104,7 +99,7 @@ public class RedshiftTableRestoreService implements Resettable {
         restores.put(status.getTableRestoreRequestId(), status);
         try {
             restorer.run(regionResolver.getAccountId(), request.clusterIdentifier(),
-                    source.cluster().getMasterUsername(), targetDatabase, script);
+                    source.cluster().getMasterUsername(), names.targetDatabase(), script);
             status.setStatus(TableRestoreStatus.SUCCEEDED);
             status.setProgressInMegaBytes(status.getTotalDataInMegaBytes());
             status.setMessage(null);
@@ -171,15 +166,6 @@ public class RedshiftTableRestoreService implements Resettable {
     @Override
     public void clear() {
         restores.clear();
-    }
-
-    private static String orDefault(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value;
-    }
-
-    /** Names are case insensitive unless the request says otherwise, which Postgres folds to lower case. */
-    private static String fold(String name, boolean caseSensitive) {
-        return caseSensitive ? name : name.toLowerCase(Locale.ROOT);
     }
 
     private static AwsException invalidArgument(String message) {

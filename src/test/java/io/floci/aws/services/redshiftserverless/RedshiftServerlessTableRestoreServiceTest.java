@@ -6,6 +6,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftSnapshotTableExtractor;
 import io.floci.aws.services.redshift.RedshiftTableRestorer;
 import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.TableRestoreSource;
@@ -116,6 +117,25 @@ class RedshiftServerlessTableRestoreServiceTest {
                         null, "copy", false), REGION)).getErrorCode());
         assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
                 () -> service.getTableRestoreStatus("nope", REGION)).getErrorCode());
+    }
+
+    @Test
+    void missingRequiredMembersAreAValidationErrorAndWriteNothing() {
+        assertEquals("ValidationException", assertThrows(AwsException.class, () -> service.restoreTable(
+                new RedshiftServerlessTableRestoreService.Request("ns", "wg", "snap", null, null, "orders", null, null,
+                        "copy", false), REGION)).getErrorCode());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.getTableRestoreStatus(null, REGION)).getErrorCode());
+        assertTrue(service.listTableRestoreStatus(null, null, null, null, REGION).items().isEmpty());
+    }
+
+    @Test
+    void aPartitionedTableIsRefused() {
+        when(restorer.script(any(), anyString(), anyString(), anyString(), anyString(), any(Boolean.class)))
+                .thenThrow(new RedshiftSnapshotTableExtractor.UnsupportedTableException("the table is partitioned"));
+
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.restoreTable(request("orders"), REGION)).getErrorCode());
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.floci.aws.services.redshift;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.redshift.container.RedshiftContainerManager;
+import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -10,6 +11,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -26,6 +28,73 @@ public class RedshiftTableRestorer {
     @Inject
     public RedshiftTableRestorer(RedshiftContainerManager containerManager) {
         this.containerManager = containerManager;
+    }
+
+    private static final long MEGABYTE = 1024L * 1024L;
+
+    /**
+     * The names of one table restore request. They are case insensitive unless the request says otherwise, which
+     * Postgres folds to lower case; {@code applyTo} reports them as the request gave them.
+     */
+    public record TableNames(String sourceDatabaseName, String sourceSchemaName, String sourceTableName,
+                             String targetDatabaseName, String targetSchemaName, String newTableName,
+                             boolean caseSensitive) {
+
+        public String sourceDatabase() {
+            return fold(sourceDatabaseName);
+        }
+
+        public String sourceSchema() {
+            return fold(orDefault(sourceSchemaName, "public"));
+        }
+
+        public String sourceTable() {
+            return fold(sourceTableName);
+        }
+
+        public String targetDatabase() {
+            return fold(orDefault(targetDatabaseName, sourceDatabaseName));
+        }
+
+        public String targetSchema() {
+            return fold(orDefault(targetSchemaName, sourceSchema()));
+        }
+
+        public String newTable() {
+            return fold(newTableName);
+        }
+
+        /** Whether {@code actual}, the one database of the backend, is the source database the request names. */
+        public boolean sourceDatabaseIs(String actual) {
+            return sourceDatabase().equals(fold(actual));
+        }
+
+        /** Whether {@code actual}, the one database of the backend, is the target database the request names. */
+        public boolean targetDatabaseIs(String actual) {
+            return targetDatabase().equals(fold(actual));
+        }
+
+        public void applyTo(TableRestoreStatus status) {
+            status.setSourceDatabaseName(sourceDatabaseName);
+            status.setSourceSchemaName(orDefault(sourceSchemaName, "public"));
+            status.setSourceTableName(sourceTableName);
+            status.setTargetDatabaseName(orDefault(targetDatabaseName, sourceDatabaseName));
+            status.setTargetSchemaName(orDefault(targetSchemaName, status.getSourceSchemaName()));
+            status.setNewTableName(newTableName);
+        }
+
+        private String fold(String name) {
+            return caseSensitive ? name : name.toLowerCase(Locale.ROOT);
+        }
+
+        private static String orDefault(String value, String fallback) {
+            return value == null || value.isBlank() ? fallback : value;
+        }
+    }
+
+    /** The size of {@code script} in whole megabytes, which a status reports as the data to restore. */
+    public static long megabytes(String script) {
+        return script.length() / MEGABYTE;
     }
 
     /** The script that restores the table under its new name, or empty when the dump has no such table. */
@@ -70,7 +139,7 @@ public class RedshiftTableRestorer {
         }
         try {
             try {
-                containerManager.restoreSnapshot(accountId, backendId, masterUsername, database, file, true);
+                containerManager.runTableRestoreScript(accountId, backendId, masterUsername, database, file);
             } catch (AwsException e) {
                 throw new AwsException("InternalFailure", "The table could not be restored: " + reason(e.getMessage()), 500);
             }
