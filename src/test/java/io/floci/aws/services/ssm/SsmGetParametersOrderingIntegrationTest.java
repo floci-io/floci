@@ -14,7 +14,6 @@ import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.GetParametersResponse;
 import software.amazon.awssdk.services.ssm.model.Parameter;
 import software.amazon.awssdk.services.ssm.model.PutParameterResponse;
-import software.amazon.awssdk.services.ssm.model.SsmException;
 import software.amazon.awssdk.services.ssm.model.Tag;
 
 import java.time.Duration;
@@ -25,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
@@ -208,10 +208,8 @@ class SsmGetParametersOrderingIntegrationTest {
     }
 
     private void assertAbsent(String name) {
-        SsmException response = assertThrows(SsmException.class,
+        assertAwsError("ParameterNotFound", 400,
                 () -> client.getParameter(request -> request.name(name)));
-        assertEquals(400, response.statusCode());
-        assertEquals("ParameterNotFound", response.awsErrorDetails().errorCode());
     }
 
     private GetParametersResponse batch(List<String> names) {
