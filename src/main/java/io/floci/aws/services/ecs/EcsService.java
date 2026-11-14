@@ -154,10 +154,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final long LAUNCHER_SHUTDOWN_SECONDS = 30;
     // Runs the service scheduler's Docker stops (see stopInBackground). A container teardown drains
     // and shuts it down, and afterReset() replaces it, as with the reconciler.
-    private volatile ExecutorService taskStopper = newTaskStopper();
+    private volatile ExecutorService taskStopper;
     // Runs RunTask's and StartTask's launches after the call has answered. A container teardown
     // interrupts and shuts it down, and afterReset() replaces it, as with the task stopper.
-    private volatile ExecutorService taskLauncher = newTaskLauncher();
+    private volatile ExecutorService taskLauncher;
     private final Object reconcilerLock = new Object();
     private final Object reconciliationPassLock = new Object();
     // False until a previous run's task containers are confirmed gone; no task starts before.
@@ -297,6 +297,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                EcsExecSessionRegistry execSessions,
                EcsServiceDiscoveryRegistrar discoveryRegistrar,
                CloudWatchMetricsService cloudWatchMetricsService, Clock clock) {
+        this(regionResolver, containerManager, config, lbRegistrar, storageFactory, eventPublisher,
+                execSessions, discoveryRegistrar, cloudWatchMetricsService, clock, newTaskLauncher(), newTaskStopper());
+    }
+
+    /** With explicit task executors for deterministic lifecycle tests. */
+    EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
+               EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
+               StorageFactory storageFactory, EcsEventPublisher eventPublisher,
+               EcsExecSessionRegistry execSessions,
+               EcsServiceDiscoveryRegistrar discoveryRegistrar,
+               CloudWatchMetricsService cloudWatchMetricsService, Clock clock,
+               ExecutorService taskLauncher, ExecutorService taskStopper) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
@@ -312,6 +324,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.discoveryRegistrar = discoveryRegistrar;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.clock = clock;
+        this.taskLauncher = taskLauncher;
+        this.taskStopper = taskStopper;
     }
 
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
@@ -2262,7 +2276,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.setStopCode(stopCode);
             Duration drain = deregisterTaskFromLoadBalancers(task, region);
             deregisterTaskFromServiceDiscovery(task, region);
-            if (inBackground && !drain.isZero()) {
+            if (inBackground && !drain.isZero() && !STOP_CODE_ESSENTIAL_CONTAINER_EXITED.equals(stopCode)) {
                 // As on AWS, the task stays DEACTIVATING, serving its in-flight requests, until its
                 // targets have drained; the first reconciliation tick after that stops it.
                 task.setLastStatus(TaskStatus.DEACTIVATING.name());

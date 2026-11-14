@@ -4,8 +4,11 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
+import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
+import io.floci.aws.services.ecs.model.EcsLoadBalancer;
+import io.floci.aws.services.ecs.model.EcsServiceModel;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.testing.InMemoryStorageFactory;
@@ -16,7 +19,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.lang.reflect.Field;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.LinkedHashMap;
@@ -48,21 +52,22 @@ class EcsEssentialContainerExitServiceTest {
     private static final Instant SIDECAR_FINISHED = APP_FINISHED.plusSeconds(1);
 
     private final EcsContainerManager manager = mock(EcsContainerManager.class);
+    private final EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
     private final Queue<Runnable> launches = new ArrayDeque<>();
     private final Queue<Runnable> stops = new ArrayDeque<>();
     private EcsService service;
     private EcsTaskHandle handle;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp() throws InterruptedException {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         service = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
-                mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"), null);
+                lbRegistrar, new InMemoryStorageFactory("000000000000"), null,
+                new EcsExecSessionRegistry(), null, null, Clock.systemUTC(),
+                queuedExecutor(launches), queuedExecutor(stops));
         service.initializeStorage();
-        installQueuedExecutor("taskLauncher", launches);
-        installQueuedExecutor("taskStopper", stops);
         service.createCluster(CLUSTER, REGION);
         when(manager.getExitCodeIfStopped(anyString())).thenReturn(null);
         when(manager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
@@ -145,6 +150,45 @@ class EcsEssentialContainerExitServiceTest {
         verify(manager, never()).stopTaskAndCollectExitCodes(any());
         verify(manager, never()).cleanupStoppedTask(any());
         verify(manager, never()).releaseTaskNetwork(any(), anyString());
+    }
+
+    @Test
+    void essentialExitStopsALiveSidecarImmediatelyWhileLoadBalancerTargetsDrain() {
+        EcsTask task = runningTask(false);
+        EcsLoadBalancer loadBalancer = new EcsLoadBalancer();
+        loadBalancer.setTargetGroupArn("arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/app/123");
+        loadBalancer.setContainerName("app");
+        loadBalancer.setContainerPort(8080);
+        // Isolate this task's teardown from the scheduler launching a replacement.
+        EcsServiceModel owner = service.createService(CLUSTER, "load-balanced", "essential-exit", 0,
+                LaunchType.FARGATE, List.of(loadBalancer), null, REGION);
+        task.setOwningServiceArn(owner.getServiceArn());
+        task.setDeploymentId(owner.getDeploymentId());
+        when(lbRegistrar.deregisterTask(task, owner, REGION)).thenReturn(Duration.ofSeconds(300));
+        when(manager.getExitCodeIfStopped("app-id")).thenReturn(17);
+        when(manager.getFinishedAtIfStopped("app-id")).thenReturn(APP_FINISHED);
+
+        service.reconcile();
+
+        verify(lbRegistrar, times(1)).deregisterTask(task, owner, REGION);
+        assertEquals("STOPPING", task.getLastStatus());
+        assertEquals("STOPPED", task.getDesiredStatus());
+        assertEquals("EssentialContainerExited", task.getStopCode());
+        assertEquals(1, stops.size(), "a live sidecar must stop without waiting for target draining");
+        verify(manager, never()).stopTaskAndCollectExitCodes(any());
+        service.reconcile();
+        assertEquals(1, stops.size());
+
+        when(manager.getExitCodeIfStopped("app-id")).thenReturn(null);
+        when(manager.getFinishedAtIfStopped("app-id")).thenReturn(null);
+        stops.remove().run();
+
+        assertStopped(task, 17);
+        service.reconcile();
+        assertTrue(stops.isEmpty());
+        verify(lbRegistrar, times(1)).deregisterTask(task, owner, REGION);
+        verify(manager, times(1)).stopTaskAndCollectExitCodes(handle);
+        verify(manager, times(1)).releaseTaskNetwork(task, REGION);
     }
 
     @Test
@@ -289,16 +333,13 @@ class EcsEssentialContainerExitServiceTest {
         return service.describeClusters(List.of(CLUSTER), REGION).getFirst().getRunningTasksCount();
     }
 
-    private void installQueuedExecutor(String fieldName, Queue<Runnable> queue) throws Exception {
-        Field field = EcsService.class.getDeclaredField(fieldName);
-        field.setAccessible(true);
-        ((ExecutorService) field.get(service)).shutdownNow();
+    private ExecutorService queuedExecutor(Queue<Runnable> queue) throws InterruptedException {
         ExecutorService executor = mock(ExecutorService.class);
         doAnswer(invocation -> {
             queue.add(invocation.getArgument(0));
             return null;
         }).when(executor).execute(any(Runnable.class));
         when(executor.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(true);
-        field.set(service, executor);
+        return executor;
     }
 }

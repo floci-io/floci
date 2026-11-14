@@ -361,7 +361,9 @@ including when it exits successfully. An omitted `essential` flag defaults to tr
 `EssentialContainerExited` and `Essential container in task exited`, retaining each container's
 exit code. A nonessential container's exit updates that container to `STOPPED` without stopping
 its still-running siblings. Remaining containers are stopped through the same background stop
-and retry path described above.
+and retry path described above. When an essential exit initiates the stop, Floci deregisters its
+load-balancer targets but stops the siblings without waiting for the service-replacement drain
+period. Graceful service replacements retain their configured drain delay.
 
 Every `awsvpc` task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
 and reports it as an `attachments` entry with its `networkInterfaceId`, `privateIPv4Address` and
