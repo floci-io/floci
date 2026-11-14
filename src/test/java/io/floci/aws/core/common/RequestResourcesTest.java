@@ -51,6 +51,21 @@ class RequestResourcesTest {
     };
 
     @Test
+    void createVpcChecksItsNewArnAndOnlyThePoolsPresentInTheRequest() {
+        String prefix = "arn:aws:ec2:us-east-1:000000000000:";
+        assertEquals(List.of(prefix + "vpc/*"), of("ec2:CreateVpc", json("{\"CidrBlock\":\"10.0.0.0/16\"}")));
+        assertEquals(List.of("arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v4",
+                        prefix + "ipv6pool-ec2/ipv6pool-one", prefix + "vpc/*",
+                        "arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v6"),
+                of("ec2:CreateVpc", json("""
+                        {"Ipv4IpamPoolId":"ipam-pool-v4","Ipv6IpamPoolId":"ipam-pool-v6",
+                         "Ipv6Pool":"ipv6pool-one"}
+                        """)));
+        assertEquals(List.of(prefix + "vpc/*", "arn:aws:ec2::000000000000:ipam-pool/ipam-pool-v6"),
+                of("ec2:CreateVpc", json("{\"Ipv6IpamPoolId\":\"ipam-pool-v6\"}")));
+    }
+
+    @Test
     void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
         String arn = "arn:aws:controltower:::landingzone/missing";
         for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {

@@ -99,7 +99,8 @@ with the configured heterogeneous resource list as a fallback. Botocore supplies
 EC2 Query name (including queryName and capitalization), and documented id prefixes distinguish
 the supported resource types. `resourceTagKeys` comes from those types' Service Reference condition keys. Each generated `targets` entry preserves the
 request's order and duplicates, including a wildcard for each unsupported id; only resolved ARNs
-use the corresponding target's condition context. Other requests in those namespaces stay on `*`.
+use the corresponding target's condition context. `READ_IN_ID_TARGETS` stages individual operations onto
+the ordinary resource rules; other requests in those namespaces stay on `*`.
 Beyond the members' names, botocore's shapes and documentation say what a member names, and the rule reads them:
 - a member whose documentation names the type, word for word ("The name of the pipeline to start"), fills its
   variable when it is the kind the variable is (a name, an id), and is found by the type's service otherwise
@@ -452,6 +453,8 @@ KNOWN_VARIABLES = {"Partition", "Region", "Account"}
 # a wildcard entry. Lists named by their resource ARN variable and heterogeneous Resources lists
 # share this reader and its generated condition contexts; requests without those lists stay unchanged.
 ID_TARGETS = {"ec2": {"member": "Resources", "prefixes": {"instance": "i-"}}}
+# Operations promoted from the staged namespace to the ordinary, metadata-derived resource rules.
+READ_IN_ID_TARGETS = {"ec2:CreateVpc"}
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
@@ -1460,7 +1463,7 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
     specs = [{"types": kinds, "arn": arns[member]} for member, kinds in sorted(by_arn.items())]
     qualified = namespace_of(operation) in QUALIFIED_MEMBERS
     return specs + [{"type": kind, "fill": dict(sorted(filled[kind].items()))} for kind in types if kind in kept] + \
-        also_filled(types, members, filled, kept, used, qualified)
+        also_filled(types, members, filled, kept, used, qualified, shapes)
 
 
 RESOURCE_PART_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$")
@@ -1593,7 +1596,8 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
 
 
 def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dict[str, str]],
-                kept: list[str], used: dict[str, str], qualified: bool) -> list[dict]:
+                kept: list[str], used: dict[str, str], qualified: bool,
+                shapes: dict[str, str] | None = None) -> list[dict]:
     """The resources a request names besides the one it fills a type with, when it names several of that type and
     acts on each of them.
 
@@ -1609,7 +1613,15 @@ def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dic
         for member in sorted(members):
             if used.get(kind) == member:
                 continue
-            if not qualified or not names_type(member, kind_stem):
+            # Two qualified ids of the same modeled id shape name separate resources: IPv4 and IPv6 IPAM pools.
+            selected = used.get(kind, "")
+            sibling_id = (len(filled[kind]) == 1 and kind_of(variable) == "id"
+                          and kind_of(member) == "id" and kind_of(selected) == "id"
+                          and stem(member) != stem(variable) and stem(selected) != stem(variable)
+                          and stem(member).endswith(stem(variable)) and stem(selected).endswith(stem(variable))
+                          and (shapes or {}).get(member) == (shapes or {}).get(selected)
+                          and stem((shapes or {}).get(member, "")) == stem(variable))
+            if not sibling_id and (not qualified or not names_type(member, kind_stem)):
                 continue
             if not compatible(member, variable):
                 continue
@@ -1678,7 +1690,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     arn_members = {member for member, values in patterns.items()
                    if (kind_of(member) == "identifier" or stem(member) in ("", "resource"))
                    and values and all(only_arn(value) for value in values)}
-    if namespace_of(operation) in ID_TARGETS:
+    if namespace_of(operation) in ID_TARGETS and operation not in READ_IN_ID_TARGETS:
         entry = {"action": upstream["action"], "types": types, "resources": []}
         targets = id_targets(operation, types, formats, models)
         if targets is not None:

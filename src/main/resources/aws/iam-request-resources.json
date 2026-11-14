@@ -1077,7 +1077,7 @@
     "ec2:CreateVerifiedAccessInstance": {"action": "ec2:CreateVerifiedAccessInstance", "types": ["verified-access-instance"], "resources": []},
     "ec2:CreateVerifiedAccessTrustProvider": {"action": "ec2:CreateVerifiedAccessTrustProvider", "types": ["verified-access-trust-provider"], "resources": []},
     "ec2:CreateVolume": {"action": "ec2:CreateVolume", "types": ["snapshot", "volume"], "resources": []},
-    "ec2:CreateVpc": {"action": "ec2:CreateVpc", "types": ["ipam-pool", "ipv6pool-ec2", "vpc"], "resources": []},
+    "ec2:CreateVpc": {"action": "ec2:CreateVpc", "types": ["ipam-pool", "ipv6pool-ec2", "vpc"], "resources": [{"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv4IpamPoolId"}}, {"type": "ipv6pool-ec2", "fill": {"Ipv6PoolEc2Id": "Ipv6Pool"}}, {"type": "vpc", "fill": {}, "made": true}, {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv6IpamPoolId"}}]},
     "ec2:CreateVpcBlockPublicAccessExclusion": {"action": "ec2:CreateVpcBlockPublicAccessExclusion", "types": ["subnet", "vpc", "vpc-block-public-access-exclusion"], "resources": []},
     "ec2:CreateVpcEncryptionControl": {"action": "ec2:CreateVpcEncryptionControl", "types": ["vpc", "vpc-encryption-control"], "resources": []},
     "ec2:CreateVpcEndpoint": {"action": "ec2:CreateVpcEndpoint", "types": ["route-table", "security-group", "subnet", "vpc", "vpc-endpoint"], "resources": []},

@@ -1119,6 +1119,24 @@ def test_verify_reports_a_rest_models_operation_whose_action_aws_no_longer_has(i
     assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 1
 
 
+def test_create_vpc_reads_the_new_vpc_and_each_optional_pool():
+    ec2 = model({"CreateVpc": {"CidrBlock": "String", "Ipv4IpamPoolId": "IpamPoolId",
+                               "Ipv6IpamPoolId": "IpamPoolId", "Ipv6Pool": "Ipv6PoolEc2Id"}}, "ec2")
+    ec2["shapes"]["IpamPoolId"] = {"type": "string"}
+    ec2["shapes"]["Ipv6PoolEc2Id"] = {"type": "string"}
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}",
+               "ipam-pool": "arn:${Partition}:ec2::${Account}:ipam-pool/${IpamPoolId}",
+               "ipv6pool-ec2": "arn:${Partition}:ec2:${Region}:${Account}:ipv6pool-ec2/${Ipv6PoolEc2Id}"}
+    upstream = {"action": "ec2:CreateVpc", "types": ["ipam-pool", "ipv6pool-ec2", "vpc"]}
+    entry = r.entry_for("ec2:CreateVpc", upstream, formats, {"ec2": ec2})
+    assert entry["resources"] == [
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv4IpamPoolId"}},
+        {"type": "ipv6pool-ec2", "fill": {"Ipv6PoolEc2Id": "Ipv6Pool"}},
+        {"type": "vpc", "fill": {}, "made": True},
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv6IpamPoolId"}}]
+    assert "targets" not in entry
+
+
 def test_id_targets_follow_the_model_and_resource_types_not_operation_names():
     ec2 = model({"AnnotateResources": {"Resources": "Strings"}}, "ec2")
     member = ec2["shapes"]["AnnotateResourcesIn"]["members"]["Resources"]
