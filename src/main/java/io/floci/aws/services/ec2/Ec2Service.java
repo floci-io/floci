@@ -6460,8 +6460,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         synchronized (attachmentTopologyLock(region)) {
-            Optional<EgressOnlyInternetGateway> replay = clientTokenReplay(token,
-                    egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream(),
+            Optional<EgressOnlyInternetGateway> replay = Ec2ClientTokens.replay(token,
+                    () -> egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream(),
                     EgressOnlyInternetGateway::getClientToken,
                     first -> vpcId.equals(first.getAttachments().get(0).getVpcId())
                             && tagMap(tagList).equals(tagMap(first.getCreationTags())),
@@ -11548,8 +11548,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     String.valueOf(ephemeralStorage), endDateType, String.valueOf(endDate), instanceMatchCriteria,
                     outpostArn, placementGroupArn, String.valueOf(startDate), String.valueOf(commitmentDuration),
                     deliveryPreference);
-            Optional<CapacityReservation> replay = clientTokenReplay(clientToken,
-                    capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
+            Optional<CapacityReservation> replay = Ec2ClientTokens.replay(clientToken,
+                    () -> capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
                             .filter(existing -> callerAccountId().equals(existing.getOwnerId())),
                     CapacityReservation::getClientToken,
                     first -> parameters.equals(first.getRequestParameters())
@@ -12043,25 +12043,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private static boolean isSet(String value) {
         return value != null && !value.isBlank();
-    }
-
-    /**
-     * The resource an earlier create made with {@code clientToken}, for a ClientToken replay: the
-     * first of {@code candidates} that carries the token, or empty when the token is unset or unused.
-     * A reused token whose request differs from the first one ({@code sameRequest} false) fails with
-     * IdempotentParameterMismatch, worded {@code mismatch}, as the EC2 idempotency guide documents.
-     */
-    private static <T> Optional<T> clientTokenReplay(String clientToken, Stream<T> candidates,
-                                                     Function<T, String> tokenOf, Predicate<T> sameRequest,
-                                                     String mismatch) {
-        if (!isSet(clientToken)) {
-            return Optional.empty();
-        }
-        Optional<T> first = candidates.filter(candidate -> clientToken.equals(tokenOf.apply(candidate))).findFirst();
-        if (first.isPresent() && !sameRequest.test(first.get())) {
-            throw new AwsException("IdempotentParameterMismatch", mismatch, 400);
-        }
-        return first;
     }
 
     /**
@@ -13226,8 +13207,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         // Compared after defaults are applied, so a retry that omits a defaulted parameter the
         // first call also omitted still matches.
-        Optional<InstanceConnectEndpoint> replay = clientTokenReplay(token,
-                instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream(),
+        Optional<InstanceConnectEndpoint> replay = Ec2ClientTokens.replay(token,
+                () -> instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream(),
                 InstanceConnectEndpoint::getClientToken,
                 first -> subnetId.equals(first.getSubnetId())
                         && new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
@@ -14880,8 +14861,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * As above, honouring {@code clientToken}: a replay in the same Availability Zone returns the
      * volume the first call created, and the same token with another volume parameter or other
-     * creation tags fails with IdempotentParameterMismatch. The token is zonal, as the EC2
-     * idempotency guide documents: a different zone is not a mismatch, so it gets its own volume.
+     * creation tags fails with IdempotentParameterMismatch. The EC2 idempotency guide exempts the
+     * Availability Zone from that check, so the same token in another zone gets that zone's own volume.
      * Parameters are compared as requested, so a later ModifyVolume or CreateTags does not turn a
      * retry into a mismatch.
      */
@@ -14890,7 +14871,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                String snapshotId, List<Tag> volumeTags, String clientToken) {
         String token = isSet(clientToken) ? clientToken : null;
         // Held from the replay scan to the save, so two creates with one token see each other.
-        return withResourceLock(volumeClientTokenLocks, token == null ? null : key(region, token), () -> {
+        return withResourceLock(volumeClientTokenLocks,
+                token == null ? null : callerAccountId() + "::" + key(region, token), () -> {
             ensureDefaultResources(region);
             Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops,
                     throughput, snapshotId);
@@ -14899,10 +14881,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             Map<String, String> requestTags = tagMap(volumeTags);
             // The zone's volume with this token, settled as a read would settle it, so the answer is
             // the same whether or not something read the volume since its instance terminated.
-            Optional<Volume> replay = clientTokenReplay(token,
-                    volumes.scan(k -> k.startsWith(region + "::")).stream()
+            Optional<Volume> replay = Ec2ClientTokens.replay(token,
+                    () -> volumes.scan(k -> k.startsWith(region + "::")).stream()
                             .filter(existing -> vol.getAvailabilityZone().equals(existing.getAvailabilityZone())
-                                    && Objects.equals(token, existing.getClientToken()))
+                                    && token.equals(existing.getClientToken()))
                             .flatMap(existing -> settleEndedHolders(region, existing).stream()),
                     Volume::getClientToken,
                     first -> parameters.equals(first.getRequestParameters())
