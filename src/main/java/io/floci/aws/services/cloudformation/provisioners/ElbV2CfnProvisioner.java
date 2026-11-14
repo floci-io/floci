@@ -32,7 +32,7 @@ import java.util.UUID;
 /**
  * CloudFormation provisioning for the Elastic Load Balancing v2 types,
  * {@code AWS::ElasticLoadBalancingV2::LoadBalancer}, {@code TargetGroup}, {@code Listener} and
- * {@code ListenerRule}, moved out of the former CloudFormation monolith's switch.
+ * {@code ListenerRule}, and {@code ListenerCertificate}.
  */
 @ApplicationScoped
 public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
@@ -43,6 +43,10 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     private static final String TARGET_GROUP = "AWS::ElasticLoadBalancingV2::TargetGroup";
     private static final String LISTENER = "AWS::ElasticLoadBalancingV2::Listener";
     private static final String LISTENER_RULE = "AWS::ElasticLoadBalancingV2::ListenerRule";
+    private static final String LISTENER_CERTIFICATE = "AWS::ElasticLoadBalancingV2::ListenerCertificate";
+    private static final String CERTIFICATE_ATTACHMENTS = "__FlociListenerCertificateAttachments";
+    private static final String CERTIFICATE_UPDATE = "__FlociListenerCertificateUpdate";
+    private static final TypeReference<List<String>> CERTIFICATE_ARNS = new TypeReference<>() { };
     /** Prefixes one uses attribute per subnet a load balancer is on, numbered from 1. */
     private static final String USED_SUBNET_ATTR_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Subnet.";
     /**
@@ -68,7 +72,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(LOAD_BALANCER, TARGET_GROUP, LISTENER, LISTENER_RULE);
+        return Set.of(LOAD_BALANCER, TARGET_GROUP, LISTENER, LISTENER_RULE, LISTENER_CERTIFICATE);
     }
 
     @Override
@@ -81,6 +85,10 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             case TARGET_GROUP -> provisionTargetGroup(r, props, ctx, attributesBefore);
             case LISTENER -> provisionListener(r, props, ctx);
             case LISTENER_RULE -> provisionListenerRule(r, props, ctx);
+            case LISTENER_CERTIFICATE -> {
+                provisionListenerCertificate(r, props, ctx, attributesBefore);
+                return;
+            }
             default -> throw new IllegalStateException("ElbV2CfnProvisioner cannot handle " + r.getResourceType());
         }
         // A provision that left the resource with a new physical id replaced the entity: the
@@ -113,6 +121,26 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public void delete(StackResource resource, String region) {
+        deleter(resource).delete(resource.getResourceType(), resource.getPhysicalId(), region);
+    }
+
+    private ReplacementCleanup.Deleter deleter(StackResource resource) {
+        if (!LISTENER_CERTIFICATE.equals(resource.getResourceType())) {
+            return this::delete;
+        }
+        return (type, id, region) -> {
+            JsonNode attachment = certificateAttachment(resource, id);
+            if (!attachment.isMissingNode()) {
+                CfnDeletes.safeDelete("listener certificate attachment", id,
+                        () -> elbV2Service.removeListenerCertificates(region,
+                                attachment.path("listenerArn").asText(), certificateArns(attachment)),
+                        "ListenerNotFound");
+            }
+        };
+    }
+
+    @Override
     public boolean hasReplacementUpdate(StackResource resource) {
         return ReplacementCleanup.hasReplacement(resource);
     }
@@ -126,9 +154,10 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     public UpdateCleanupResult completeUpdate(StackResource resource) {
         if ("UPDATE_COMPLETE".equals(resource.getStatus())) {
             resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
+            resource.getAttributes().remove(CERTIFICATE_UPDATE);
         }
         clearTargetUpdateRecords(resource);
-        return ReplacementCleanup.complete(resource, this::delete);
+        return ReplacementCleanup.complete(resource, deleter(resource));
     }
 
     @Override
@@ -136,6 +165,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         clearTargetUpdateRecords(resource);
         ReplacementCleanup.clear(resource);
+        if (LISTENER_CERTIFICATE.equals(resource.getResourceType())) {
+            retainCertificateAttachments(resource, certificateAttachments(resource));
+        }
     }
 
     private static void clearTargetUpdateRecords(StackResource resource) {
@@ -170,11 +202,15 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     public boolean rollbackUpdate(StackResource resource) {
         boolean replaced;
         try {
-            replaced = ReplacementCleanup.rollback(resource, this::delete);
+            replaced = ReplacementCleanup.rollback(resource, deleter(resource));
         } finally {
             DECLARED_TARGETS.restorePrior(resource);
         }
         if (replaced) {
+            return true;
+        }
+        if (LISTENER_CERTIFICATE.equals(resource.getResourceType())) {
+            rollbackListenerCertificate(resource);
             return true;
         }
         if (LOAD_BALANCER.equals(resource.getResourceType())) {
@@ -525,6 +561,84 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
         r.setPhysicalId(listener.getListenerArn());
         r.getAttributes().put("ListenerArn", listener.getListenerArn());
+    }
+
+    private void provisionListenerCertificate(StackResource resource, JsonNode props, ProvisionContext ctx,
+                                              Map<String, String> attributesBefore) {
+        String listenerArn = ctx.resolveOptional(props, "ListenerArn");
+        List<String> certificates = parseCertificates(props, ctx);
+        if (listenerArn == null || listenerArn.isBlank() || certificates.isEmpty()
+                || certificates.stream().anyMatch(String::isBlank)) {
+            throw new AwsException("ValidationError", "ListenerCertificate requires ListenerArn and Certificates", 400);
+        }
+
+        ObjectNode attachments = certificateAttachments(resource);
+        JsonNode prior = certificateAttachment(attachments, ctx.priorPhysicalId());
+        boolean reuse = listenerArn.equals(prior.path("listenerArn").asText(null));
+        String id = reuse ? ctx.priorPhysicalId() : UUID.randomUUID().toString();
+        ObjectNode attachment = MAPPER.createObjectNode().put("listenerArn", listenerArn);
+        attachment.set("certificates", MAPPER.valueToTree(certificates));
+
+        resource.getAttributes().remove(CERTIFICATE_UPDATE);
+        if (reuse) {
+            updateAttachedCertificates(ctx.region(), prior, attachment);
+            resource.getAttributes().put(CERTIFICATE_UPDATE, prior.toString());
+        } else {
+            elbV2Service.addListenerCertificates(ctx.region(), listenerArn, certificates);
+        }
+        resource.setPhysicalId(id);
+        resource.getAttributes().remove("Arn");
+        resource.getAttributes().put("Id", id);
+        ReplacementCleanup.record(resource, ctx, attributesBefore);
+        attachments.set(id, attachment);
+        retainCertificateAttachments(resource, attachments);
+    }
+
+    private void updateAttachedCertificates(String region, JsonNode before, JsonNode after) {
+        List<String> oldCertificates = certificateArns(before);
+        List<String> newCertificates = certificateArns(after);
+        List<String> added = newCertificates.stream().filter(arn -> !oldCertificates.contains(arn)).toList();
+        List<String> removed = oldCertificates.stream().filter(arn -> !newCertificates.contains(arn)).toList();
+        if (!added.isEmpty() || !removed.isEmpty()) {
+            elbV2Service.updateListenerCertificates(region, after.path("listenerArn").asText(), added, removed);
+        }
+    }
+
+    private void rollbackListenerCertificate(StackResource resource) {
+        JsonNode prior = CfnRollback.updateSnapshot(resource, CERTIFICATE_UPDATE);
+        if (prior != null) {
+            String id = resource.getPhysicalId();
+            ObjectNode attachments = certificateAttachments(resource);
+            String region = AwsArnUtils.parse(prior.path("listenerArn").asText()).region();
+            updateAttachedCertificates(region, certificateAttachment(attachments, id), prior);
+            attachments.set(id, prior);
+            retainCertificateAttachments(resource, attachments);
+            resource.getAttributes().remove(CERTIFICATE_UPDATE);
+        }
+    }
+
+    private static List<String> certificateArns(JsonNode attachment) {
+        return MAPPER.convertValue(attachment.path("certificates"), CERTIFICATE_ARNS);
+    }
+
+    private static JsonNode certificateAttachment(StackResource resource, String id) {
+        return certificateAttachment(certificateAttachments(resource), id);
+    }
+
+    private static JsonNode certificateAttachment(ObjectNode attachments, String id) {
+        return id == null ? MAPPER.missingNode() : attachments.path(id);
+    }
+
+    private static ObjectNode certificateAttachments(StackResource resource) {
+        JsonNode saved = CfnRollback.updateSnapshot(resource, CERTIFICATE_ATTACHMENTS);
+        return saved == null ? MAPPER.createObjectNode() : (ObjectNode) saved;
+    }
+
+    private static void retainCertificateAttachments(StackResource resource, ObjectNode attachments) {
+        Set<String> retained = ReplacementCleanup.owedPhysicalIds(resource);
+        retained.add(resource.getPhysicalId());
+        attachments.retain(retained);
+        resource.getAttributes().put(CERTIFICATE_ATTACHMENTS, attachments.toString());
     }
 
     /**

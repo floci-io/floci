@@ -1243,34 +1243,40 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     public List<String> addListenerCertificates(String region, String listenerArn, List<String> certArns) {
         Listener initial = requireListener(region, listenerArn);
         requireCertificates(region, initial.getProtocol(), certArns);
-        return changeListenerCertificates(region, listenerArn, certArns, false);
+        return changeListenerCertificates(region, listenerArn, certArns, List.of());
     }
 
     public void removeListenerCertificates(String region, String listenerArn, List<String> certArns) {
-        changeListenerCertificates(region, listenerArn, certArns, true);
+        changeListenerCertificates(region, listenerArn, List.of(), certArns);
+    }
+
+    /** Reconciles a CloudFormation attachment with a single certificate-list publication. */
+    public void updateListenerCertificates(String region, String listenerArn,
+                                           List<String> added, List<String> removed) {
+        changeListenerCertificates(region, listenerArn, added, removed);
     }
 
     private List<String> changeListenerCertificates(String region, String listenerArn,
-                                                    List<String> requested, boolean remove) {
+                                                    List<String> added, List<String> removed) {
+        boolean adding = !added.isEmpty();
         while (true) {
             Listener listener = requireListener(region, listenerArn);
             LoadBalancer lb = requireLoadBalancer(region, listener.getLoadBalancerArn());
             ListenerState expected = listenerState(listener, lb);
             List<String> certificates = new ArrayList<>(expected.certificateList());
-            boolean namesTheDefault = remove && expected.defaultCertificate() != null
-                    && requested.contains(expected.defaultCertificate());
-            if (remove) {
-                if (servesCertificates(expected.protocol()) && namesTheDefault) {
-                    throw new AwsException("OperationNotPermitted",
-                            "The default listener certificate cannot be removed.", 400);
-                }
-                certificates.removeAll(requested);
-            } else {
+            boolean namesTheDefault = expected.defaultCertificate() != null
+                    && removed.contains(expected.defaultCertificate());
+            if (servesCertificates(expected.protocol()) && namesTheDefault) {
+                throw new AwsException("OperationNotPermitted",
+                        "The default listener certificate cannot be removed.", 400);
+            }
+            certificates.removeAll(removed);
+            if (adding) {
                 if (!validateExistingListener(region, expected, lb,
-                        () -> requireCertificates(region, expected.protocol(), requested))) {
+                        () -> requireCertificates(region, expected.protocol(), added))) {
                     continue;
                 }
-                for (String arn : requested) {
+                for (String arn : added) {
                     if (!certificates.contains(arn)) {
                         certificates.add(arn);
                     }
@@ -1282,8 +1288,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 prospective.setDefaultCertificate(null);
             }
             if (publishExistingListener(prospective, region, expected, lb, () -> {
-                if (!remove) {
-                    requireCertificates(region, expected.protocol(), requested);
+                if (adding) {
+                    requireCertificates(region, expected.protocol(), added);
                     requireCertificateQuota(region, expected, certificates);
                 }
             }, () -> {
@@ -1292,7 +1298,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     if (!isCurrentListener(region, expected)) {
                         return false;
                     }
-                    if (!remove) {
+                    if (adding) {
                         // The ceiling belongs to the load balancer rather than to the listener, so
                         // it is counted here as well, under the lock every certificate write takes:
                         // two adds on sibling listeners would otherwise each count the other's list
