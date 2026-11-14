@@ -18,6 +18,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -99,8 +100,8 @@ public class AccountService implements Resettable, StoredResourceArns {
         information.setPhoneNumber(requirePattern(contact, "PhoneNumber", 1, 20, PRIMARY_CONTACT_PHONE));
         information.setCompanyName(optionalLength(contact, "CompanyName", 1, 50));
         information.setWebsiteUrl(optionalLength(contact, "WebsiteUrl", 1, 256));
-        if (information.getStateOrRegion() == null
-                && COUNTRIES_REQUIRING_STATE_OR_REGION.contains(information.getCountryCode())) {
+        if (information.getStateOrRegion() == null && COUNTRIES_REQUIRING_STATE_OR_REGION
+                .contains(information.getCountryCode().toUpperCase(Locale.ROOT))) {
             throw validation("StateOrRegion is required when CountryCode is "
                     + information.getCountryCode() + ".");
         }

@@ -92,6 +92,16 @@ class AccountContactInformationIntegrationTest {
     }
 
     @Test
+    void nonObjectRequestBodyReturnsSerializationException() {
+        String account = newAccount();
+        put(account, request()).statusCode(200);
+
+        get(account, "[]").statusCode(400).body("__type", equalTo("SerializationException"));
+        post(account, "/putContactInformation", "[]")
+                .statusCode(400).body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
     void rejectedPutKeepsThePreviousContact() {
         String account = newAccount();
         put(account, request()).statusCode(200);
@@ -161,13 +171,16 @@ class AccountContactInformationIntegrationTest {
     }
 
     private static ValidatableResponse put(String account, ObjectNode request) {
-        return given().contentType("application/json").header("Authorization", authorization(account))
-                .body(request.toString()).post("/putContactInformation").then();
+        return post(account, "/putContactInformation", request.toString());
     }
 
     private static ValidatableResponse get(String account, String body) {
+        return post(account, "/getContactInformation", body);
+    }
+
+    private static ValidatableResponse post(String account, String path, String body) {
         return given().contentType("application/json").header("Authorization", authorization(account))
-                .body(body).post("/getContactInformation").then();
+                .body(body).post(path).then();
     }
 
     private static String authorization(String account) {

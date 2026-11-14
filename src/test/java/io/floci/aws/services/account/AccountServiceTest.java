@@ -254,6 +254,17 @@ class AccountServiceTest {
     }
 
     @Test
+    void putContactInformationRequiresStateOrRegionForALowercaseCountryCode() {
+        ObjectNode request = contactInformationRequest();
+        ObjectNode contact = contactOf(request);
+        contact.put("CountryCode", "us");
+        contact.remove("StateOrRegion");
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putContactInformation(ACCOUNT_ID, request));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
     void putContactInformationAllowsNoStateOrRegionElsewhere() {
         ObjectNode request = contactInformationRequest();
         ObjectNode contact = contactOf(request);

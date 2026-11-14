@@ -77,12 +77,17 @@ public class AccountController {
     }
 
     private JsonNode readTree(String body) {
+        JsonNode request;
         try {
-            return objectMapper.reader()
+            request = objectMapper.reader()
                     .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
                     .readTree(body == null || body.isBlank() ? "{}" : body);
         } catch (Exception e) {
             throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
         }
+        if (!request.isObject()) {
+            throw new WebApplicationException(JsonErrorResponseUtils.createSerializationErrorResponse());
+        }
+        return request;
     }
 }
