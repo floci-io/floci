@@ -14,13 +14,13 @@ import io.floci.aws.services.stepfunctions.model.Execution;
 import io.floci.aws.services.stepfunctions.model.HistoryEvent;
 import io.floci.aws.services.stepfunctions.model.MockedTestCase;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
+import io.floci.aws.testutil.LogCapture;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
 
 import java.nio.file.Path;
-import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -235,9 +235,9 @@ class StepFunctionsServicePersistenceTest {
         List<LogRecord> warnings = warningsIn(logRecords);
         assertEquals(1, warnings.size(),
                 "expected one WARN record for the sweep, got: " + formattedAll(logRecords));
-        assertTrue(formatted(warnings.getFirst()).contains("1"),
+        assertTrue(LogCapture.formatted(warnings.getFirst()).contains("1"),
                 "expected the WARN record to name how many executions were aborted, got: "
-                        + formatted(warnings.getFirst()));
+                        + LogCapture.formatted(warnings.getFirst()));
 
         Optional<Execution> owned =
                 executions.getForAccount(OTHER_ACCOUNT, OTHER_ACCOUNT_EXECUTION_ARN);
@@ -326,7 +326,7 @@ class StepFunctionsServicePersistenceTest {
     }
 
     private static List<String> formattedAll(List<LogRecord> records) {
-        return records.stream().map(StepFunctionsServicePersistenceTest::formatted).toList();
+        return records.stream().map(LogCapture::formatted).toList();
     }
 
     /**
@@ -337,15 +337,6 @@ class StepFunctionsServicePersistenceTest {
         assertNotNull(stopDate);
         assertTrue(stopDate > EPOCH_SECONDS_2023_11_14 && stopDate < EPOCH_SECONDS_2100_01_01,
                 "stopDate is not a plausible epoch-seconds instant: " + stopDate);
-    }
-
-    /** The record as a reader sees it, whether the handler receives it formatted or as a pattern. */
-    private static String formatted(LogRecord record) {
-        Object[] parameters = record.getParameters();
-        if (parameters == null || parameters.length == 0) {
-            return String.valueOf(record.getMessage());
-        }
-        return MessageFormat.format(record.getMessage(), parameters);
     }
 
     private static Execution running(String executionArn) {

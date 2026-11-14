@@ -1,5 +1,6 @@
 package io.floci.aws.testutil;
 
+import java.text.MessageFormat;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +27,18 @@ public final class LogCapture {
             return null;
         });
         return records;
+    }
+
+    /**
+     * The record's text as a reader sees it. Which logging backend is in play decides whether the
+     * parameters are already substituted or still carried beside the pattern, so they are
+     * substituted here when they are still there.
+     */
+    public static String formatted(LogRecord record) {
+        Object[] parameters = record.getParameters();
+        return parameters == null || parameters.length == 0
+                ? record.getMessage()
+                : MessageFormat.format(record.getMessage(), parameters);
     }
 
     /** Runs the action with capture installed, then waits for a matching asynchronous record. */

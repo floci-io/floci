@@ -105,6 +105,16 @@ class LogCaptureTest {
     }
 
     @Test
+    void formattedSubstitutesTheParametersARecordStillCarries() {
+        LogRecord pattern = new LogRecord(Level.WARNING, "key {0} in account {1}");
+        pattern.setParameters(new Object[]{"AKIAEXAMPLE", "123456789012"});
+        LogRecord plain = new LogRecord(Level.WARNING, "the user's key {0}");
+
+        assertEquals("key AKIAEXAMPLE in account 123456789012", LogCapture.formatted(pattern));
+        assertEquals("the user's key {0}", LogCapture.formatted(plain));
+    }
+
+    @Test
     void awaitRestoresLoggerWhenActionThrows() {
         Logger logger = Logger.getLogger(LogCaptureTest.class.getName());
         Level originalLevel = logger.getLevel();

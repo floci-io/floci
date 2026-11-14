@@ -3,10 +3,10 @@ package io.floci.aws.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.text.MessageFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -3278,19 +3278,8 @@ class SamTransformProcessorTest {
                 + "left in the template for the CloudFormation provisioner.";
         assertTrue(logged.stream().anyMatch(r ->
                         r.getLevel().intValue() >= Level.WARNING.intValue()
-                                && expected.equals(text(r))),
+                                && expected.equals(LogCapture.formatted(r))),
                 "expected the unexpanded SAM type to be reported at warn, got: "
-                        + logged.stream().map(r -> r.getLevel() + " " + text(r)).toList());
-    }
-
-    /**
-     * The record's text. Which logging backend is in play decides whether the parameters are
-     * already substituted or still carried alongside the pattern.
-     */
-    private static String text(LogRecord record) {
-        Object[] parameters = record.getParameters();
-        return parameters == null || parameters.length == 0
-                ? record.getMessage()
-                : MessageFormat.format(record.getMessage(), parameters);
+                        + logged.stream().map(r -> r.getLevel() + " " + LogCapture.formatted(r)).toList());
     }
 }
