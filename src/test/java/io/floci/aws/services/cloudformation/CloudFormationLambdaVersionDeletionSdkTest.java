@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -37,6 +38,7 @@ import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -48,9 +50,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @Timeout(120)
 class CloudFormationLambdaVersionDeletionSdkTest {
     private static final String ACCOUNT = "815670000031";
-    private static final Set<String> TERMINAL = Set.of("CREATE_COMPLETE", "CREATE_FAILED",
-            "ROLLBACK_COMPLETE", "ROLLBACK_FAILED", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE",
-            "UPDATE_ROLLBACK_FAILED", "DELETE_COMPLETE", "DELETE_FAILED");
 
     @ParameterizedTest
     @ValueSource(strings = {"", "\"DeletionPolicy\":\"Delete\",\"UpdateReplacePolicy\":\"Retain\","})
@@ -220,8 +219,8 @@ class CloudFormationLambdaVersionDeletionSdkTest {
             int aliasComplete = eventIndex(deleted, "Alias", "DELETE_COMPLETE");
             int versionStarted = eventIndex(deleted, "Version", "DELETE_IN_PROGRESS");
             assertTrue(aliasComplete < versionStarted, deleted.toString());
-            missingLambda(assertThrows(LambdaException.class, () -> owned.lambda.getAlias(request ->
-                    request.functionName(owned.function).name("stack-alias"))));
+            assertAwsError("ResourceNotFoundException", 404, () -> owned.lambda.getAlias(request ->
+                    request.functionName(owned.function).name("stack-alias")));
             owned.assertVersionMissing(owned.function, version);
             owned.configuration(owned.function, owned.seedVersion);
         }
@@ -461,7 +460,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
         }
 
         private void assertVersionMissing(String name, String version) {
-            missingLambda(assertThrows(LambdaException.class, () -> configuration(name, version)));
+            assertAwsError("ResourceNotFoundException", 404, () -> configuration(name, version));
             assertFalse(versions(name).contains(version));
         }
 
@@ -476,26 +475,28 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
         private List<StackEvent> create(String template, String expected) {
             stackAttempted = true;
-            stackId = cfn.createStack(request -> request.stackName(marker).templateBody(template)).stackId();
-            return awaitEvents(Set.of(), expected);
+            stackId = CfnStackWaits.createStack(cfn, marker, template, expected).stackId();
+            return events();
         }
 
         private List<StackEvent> update(String template) {
             Set<String> before = ids(events());
-            cfn.updateStack(request -> request.stackName(stackId).templateBody(template));
-            return awaitEvents(before, "UPDATE_COMPLETE");
+            CfnStackWaits.updateStack(cfn, stackId, template, "UPDATE_COMPLETE");
+            return eventsAfter(before);
         }
 
         private List<StackEvent> delete(String expected) {
             Set<String> before = ids(events());
             cfn.deleteStack(request -> request.stackName(stackId));
-            List<StackEvent> result = awaitEvents(before, expected);
+            CfnStackWaits.awaitStatus(cfn, stackId, expected);
             if ("DELETE_COMPLETE".equals(expected)) {
-                missingStack(assertThrows(CloudFormationException.class, () ->
-                        cfn.describeStacks(request -> request.stackName(marker))), marker);
+                assertEquals("Stack with id " + marker + " does not exist",
+                        assertAwsError("ValidationError", 400, () ->
+                                cfn.describeStacks(request -> request.stackName(marker)))
+                                .awsErrorDetails().errorMessage());
                 stackDeleted = true;
             }
-            return result;
+            return eventsAfter(before);
         }
 
         private List<StackEvent> events() {
@@ -517,25 +518,8 @@ class CloudFormationLambdaVersionDeletionSdkTest {
             throw new AssertionError("Owned event history exceeded twenty pages");
         }
 
-        private List<StackEvent> awaitEvents(Set<String> before, String expected) {
-            long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
-            List<StackEvent> latest = List.of();
-            while (System.nanoTime() < deadline) {
-                latest = events().stream().filter(event -> !before.contains(event.eventId())).toList();
-                for (StackEvent event : latest) {
-                    if (stackId.equals(event.stackId()) && stackId.equals(event.physicalResourceId())
-                            && marker.equals(event.logicalResourceId())
-                            && "AWS::CloudFormation::Stack".equals(event.resourceType())
-                            && TERMINAL.contains(event.resourceStatusAsString())) {
-                        assertEquals(expected, event.resourceStatusAsString(), latest.toString());
-                        assertEquals(expected, cfn.describeStacks(request -> request.stackName(stackId))
-                                .stacks().getFirst().stackStatusAsString());
-                        return latest;
-                    }
-                }
-                pause();
-            }
-            throw new AssertionError("Owned stack did not reach " + expected + ": " + latest);
+        private List<StackEvent> eventsAfter(Set<String> before) {
+            return events().stream().filter(event -> !before.contains(event.eventId())).toList();
         }
 
         private void cleanupStack() {
@@ -544,29 +528,15 @@ class CloudFormationLambdaVersionDeletionSdkTest {
             }
             String lookup = stackId == null ? marker : stackId;
             try {
-                stackId = cfn.describeStacks(request -> request.stackName(lookup)).stacks().getFirst().stackId();
+                CfnStackWaits.deleteStack(cfn, lookup);
             } catch (CloudFormationException missing) {
-                missingStack(missing, lookup);
-                stackDeleted = true;
-                return;
+                assertAwsError("ValidationError", 400, missing);
+                assertEquals("Stack with id " + lookup + " does not exist", missing.awsErrorDetails().errorMessage());
             }
-            long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
-            while (System.nanoTime() < deadline) {
-                String status = cfn.describeStacks(request -> request.stackName(stackId))
-                        .stacks().getFirst().stackStatusAsString();
-                if (TERMINAL.contains(status)) {
-                    if ("DELETE_COMPLETE".equals(status)) {
-                        missingStack(assertThrows(CloudFormationException.class, () ->
-                                cfn.describeStacks(request -> request.stackName(marker))), marker);
-                        stackDeleted = true;
-                    } else {
-                        delete("DELETE_COMPLETE");
-                    }
-                    return;
-                }
-                pause();
-            }
-            throw new AssertionError("Owned stack remained in progress during cleanup");
+            assertEquals("Stack with id " + marker + " does not exist",
+                    assertAwsError("ValidationError", 400, () ->
+                            cfn.describeStacks(request -> request.stackName(marker))).awsErrorDetails().errorMessage());
+            stackDeleted = true;
         }
 
         @Override
@@ -578,7 +548,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
                         try {
                             lambda.deleteAlias(request -> request.functionName(function).name(alias));
                         } catch (LambdaException missing) {
-                            missingLambda(missing);
+                            assertAwsError("ResourceNotFoundException", 404, missing);
                         }
                     }, failures);
                 }
@@ -592,10 +562,10 @@ class CloudFormationLambdaVersionDeletionSdkTest {
                         try {
                             lambda.deleteFunction(request -> request.functionName(name));
                         } catch (LambdaException missing) {
-                            missingLambda(missing);
+                            assertAwsError("ResourceNotFoundException", 404, missing);
                         }
-                        missingLambda(assertThrows(LambdaException.class, () ->
-                                lambda.getFunction(request -> request.functionName(name))));
+                        assertAwsError("ResourceNotFoundException", 404, () ->
+                                lambda.getFunction(request -> request.functionName(name)));
                     }, failures);
                 }
             }
@@ -604,10 +574,9 @@ class CloudFormationLambdaVersionDeletionSdkTest {
                     try {
                         iam.deleteRole(request -> request.roleName(marker));
                     } catch (IamException missing) {
-                        missingRole(missing);
+                        assertAwsError("NoSuchEntity", 404, missing);
                     }
-                    missingRole(assertThrows(IamException.class, () ->
-                            iam.getRole(request -> request.roleName(marker))));
+                    assertAwsError("NoSuchEntity", 404, () -> iam.getRole(request -> request.roleName(marker)));
                 }, failures);
             }
             if (cfn != null) {
@@ -623,22 +592,6 @@ class CloudFormationLambdaVersionDeletionSdkTest {
                 throw failures;
             }
         }
-    }
-
-    private static void missingLambda(LambdaException failure) {
-        assertEquals(404, failure.statusCode());
-        assertEquals("ResourceNotFoundException", failure.awsErrorDetails().errorCode());
-    }
-
-    private static void missingRole(IamException failure) {
-        assertEquals(404, failure.statusCode());
-        assertEquals("NoSuchEntity", failure.awsErrorDetails().errorCode());
-    }
-
-    private static void missingStack(CloudFormationException failure, String lookup) {
-        assertEquals(400, failure.statusCode());
-        assertEquals("ValidationError", failure.awsErrorDetails().errorCode());
-        assertEquals("Stack with id " + lookup + " does not exist", failure.awsErrorDetails().errorMessage());
     }
 
     private static void cleanup(Runnable action, IllegalStateException failures) {
