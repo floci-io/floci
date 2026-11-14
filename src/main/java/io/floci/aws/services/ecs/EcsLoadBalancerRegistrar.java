@@ -90,11 +90,8 @@ public class EcsLoadBalancerRegistrar {
         if (taskArn == null || registered.size() == planned.size()) {
             return;
         }
-        if (registered.isEmpty()) {
-            ledger.delete(taskArn);
-        } else {
-            ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
-        }
+        // An empty record, rather than none, tells targetsHealthy the task has targets that never registered.
+        ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
     }
 
     /**
@@ -122,24 +119,30 @@ public class EcsLoadBalancerRegistrar {
     }
 
     /**
-     * Whether every target {@link #registerTask} recorded for the task reports {@code healthy}.
-     * A task that registered nothing, or whose target group is gone, has nothing to wait for.
+     * Whether every target {@link #registerTask} recorded for the task reports {@code healthy}. A
+     * task with no load-balanced container has nothing to wait for; one whose targets failed to
+     * register, or whose health cannot be read, is not healthy yet.
      */
     public boolean targetsHealthy(EcsTask task) {
         Optional<EcsRegisteredTargets> recorded = task.getTaskArn() == null
                 ? Optional.empty() : ledger.get(task.getTaskArn());
-        if (recorded.isEmpty() || recorded.get().targets() == null) {
+        if (recorded.isEmpty()) {
             return true;
         }
-        for (EcsRegisteredTargets.Target target : recorded.get().targets()) {
+        List<EcsRegisteredTargets.Target> targets = recorded.get().targets();
+        if (targets == null || targets.isEmpty()) {
+            return false;
+        }
+        for (EcsRegisteredTargets.Target target : targets) {
             try {
                 List<TargetHealth> health = elbV2Service.describeTargetHealth(recorded.get().region(),
                         target.targetGroupArn(), List.of(target.toDescription()));
-                if (health.stream().anyMatch(th -> !"healthy".equals(th.getState()))) {
+                if (health.isEmpty() || health.stream().anyMatch(th -> !"healthy".equals(th.getState()))) {
                     return false;
                 }
             } catch (Exception e) {
-                LOG.debugv("Could not read the health of {0}: {1}", target.targetGroupArn(), e.getMessage());
+                LOG.warnv("Could not read the health of {0}: {1}", target.targetGroupArn(), e.getMessage());
+                return false;
             }
         }
         return true;
@@ -228,12 +231,14 @@ public class EcsLoadBalancerRegistrar {
             LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
             return Duration.ZERO;
         }
-        String delay = elbV2Service.describeTargetGroupAttributes(region, tgArn)
-                .get("deregistration_delay.timeout_seconds");
+        String delay = null;
         try {
+            delay = elbV2Service.describeTargetGroupAttributes(region, tgArn)
+                    .get("deregistration_delay.timeout_seconds");
             return delay == null ? Duration.ZERO : Duration.ofSeconds(Long.parseLong(delay));
-        } catch (NumberFormatException e) {
-            LOG.warnv("Ignoring the deregistration delay {0} of target group {1}: not a number", delay, tgArn);
+        } catch (Exception e) {
+            LOG.warnv("Not draining target group {0}: could not read its deregistration delay {1}: {2}",
+                    tgArn, delay, e.getMessage());
             return Duration.ZERO;
         }
     }

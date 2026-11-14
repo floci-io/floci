@@ -4,6 +4,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
+import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsLoadBalancer;
@@ -11,12 +12,12 @@ import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -64,6 +65,7 @@ class EcsGracefulStopConcurrencyServiceTest {
     private final EcsContainerManager containerManager = mock(EcsContainerManager.class);
     private final EcsEventPublisher eventPublisher = mock(EcsEventPublisher.class);
     private final EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
+    private final MutableClock clock = new MutableClock();
     private final List<EcsService> services = new ArrayList<>();
     /** The task whose stop blocks until {@link #releaseSlowStop}; every other task stops at once. */
     private final AtomicReference<String> slowTaskArn = new AtomicReference<>();
@@ -339,8 +341,8 @@ class EcsGracefulStopConcurrencyServiceTest {
     }
 
     @Test
-    void aTaskBehindALoadBalancerKeepsRunningUntilItsTargetsHaveDrained() throws Exception {
-        Duration deregistrationDelay = Duration.ofSeconds(2);
+    void aTaskBehindALoadBalancerStaysDeactivatingUntilItsTargetsHaveDrained() throws Exception {
+        Duration deregistrationDelay = Duration.ofSeconds(300);
         when(lbRegistrar.deregisterTask(any(), any(), anyString())).thenReturn(deregistrationDelay);
         when(lbRegistrar.targetsHealthy(any())).thenReturn(true);
         EcsService service = newService();
@@ -353,17 +355,16 @@ class EcsGracefulStopConcurrencyServiceTest {
         tick(service);
         verify(lbRegistrar).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())), any(),
                 eq(REGION));
-        Instant deregisteredAt = Instant.now();
+        assertEquals("DEACTIVATING", lastStatus(service, old));
+
+        clock.advance(deregistrationDelay.minusSeconds(1));
         tick(service);
-        assertEquals("STOPPING", lastStatus(service, old));
+        assertEquals("DEACTIVATING", lastStatus(service, old));
         verify(containerManager, never()).stopTaskAndCollectExitCodes(handleOf(old));
 
-        await().atMost(deregistrationDelay.plus(TICK_BUDGET)).until(() -> {
-            tick(service);
-            return "STOPPED".equals(lastStatus(service, old));
-        });
-        assertTrue(Duration.between(deregisteredAt, Instant.now()).compareTo(deregistrationDelay) >= 0,
-                "the task stopped before its targets had drained");
+        clock.advance(Duration.ofSeconds(1));
+        tick(service);
+        await().atMost(TICK_BUDGET).until(() -> "STOPPED".equals(lastStatus(service, old)));
         verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handleOf(old));
     }
 
@@ -421,7 +422,8 @@ class EcsGracefulStopConcurrencyServiceTest {
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, lbRegistrar, new InMemoryStorageFactory("000000000000"), eventPublisher);
+                config, lbRegistrar, new InMemoryStorageFactory("000000000000"), eventPublisher,
+                new EcsExecSessionRegistry(), null, null, clock);
         service.initializeStorage();
         service.createCluster(CLUSTER, REGION);
         services.add(service);

@@ -62,8 +62,8 @@ public class EcsTask {
     private Instant executionStoppedAt;
     private Instant stoppingAt;
     /**
-     * When the load balancer targets this task was deregistered from finish draining, the
-     * earliest the service scheduler stops its containers. Internal: never serialized.
+     * When the load balancer targets of this DEACTIVATING task finish draining, the earliest the
+     * service scheduler stops its containers. Internal: never serialized.
      */
     private Instant targetsDrainedAt;
     private EphemeralStorage ephemeralStorage;

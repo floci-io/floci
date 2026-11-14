@@ -542,12 +542,12 @@ Known differences from AWS:
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
 - A rolling deployment of a service with `loadBalancers` stops a stale task only once every
-  replacement's targets report `healthy`, waiting at most the service's
-  `healthCheckGracePeriodSeconds`, or one minute without one.
-- A stale or scaled-in task of a service with `loadBalancers` stays `STOPPING`, its containers
-  still running, for the longest `deregistration_delay.timeout_seconds` of its target groups
-  (300 seconds by default), then is stopped on the next reconciler tick. A `StopTask` call does
-  not wait. The target leaves its target group at once rather than reporting `draining`.
+  replacement's targets report `healthy`. A replacement that never turns healthy holds the
+  deployment.
+- A stale or scaled-in task of a service with `loadBalancers` stays `DEACTIVATING`, its
+  containers still running, for the longest `deregistration_delay.timeout_seconds` of its target
+  groups (300 seconds by default), then turns `STOPPING` on the next reconciler tick. A `StopTask`
+  call does not wait. The target leaves its target group at once rather than reporting `draining`.
 - `updatedAt` starts at `createdAt` and advances when the deployment status changes.
 - `deploymentConfiguration` is stored and reported as given. The deployment circuit breaker
   counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,

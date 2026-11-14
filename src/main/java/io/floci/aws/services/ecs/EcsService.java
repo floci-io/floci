@@ -224,8 +224,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final int MAX_LIST_RESULTS = 100;
     /** How long a CloudFormation-provisioned service may take to reach a steady state. */
     private static final Duration SERVICE_STABLE_TIMEOUT = Duration.ofMinutes(5);
-    /** How long a rolling deployment waits for a replacement's targets to turn healthy without a grace period. */
-    private static final Duration TARGET_HEALTH_WAIT = Duration.ofMinutes(1);
     private static final long SERVICE_STABLE_POLL_MILLIS = 50;
     /**
      * Reconcile passes a steady-state wait runs at once instead of waiting for ticks. A pass
@@ -292,7 +290,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 execSessions, discoveryRegistrar, cloudWatchMetricsService, Clock.systemUTC());
     }
 
-    /** With the clock for Container Insights samples and task protection deadlines. */
+    /** With the clock for Container Insights samples, task protection deadlines and target drains. */
     EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
                EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar,
                StorageFactory storageFactory, EcsEventPublisher eventPublisher,
@@ -2257,15 +2255,29 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.bumpVersion();
             return task;
         }
-        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+        boolean deactivating = TaskStatus.DEACTIVATING.name().equals(task.getLastStatus());
+        if (!deactivating && !TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
             task.setDesiredStatus(TaskStatus.STOPPED.name());
-            task.setLastStatus(TaskStatus.STOPPING.name());
-            task.setStoppingAt(Instant.now());
             task.setStoppedReason(reason != null ? reason : "Stopped by user");
             task.setStopCode(stopCode);
-            task.bumpVersion();
-            task.setTargetsDrainedAt(task.getStoppingAt().plus(deregisterTaskFromLoadBalancers(task, region)));
+            Duration drain = deregisterTaskFromLoadBalancers(task, region);
             deregisterTaskFromServiceDiscovery(task, region);
+            if (inBackground && !drain.isZero()) {
+                // As on AWS, the task stays DEACTIVATING, serving its in-flight requests, until its
+                // targets have drained; the first reconciliation tick after that stops it.
+                task.setLastStatus(TaskStatus.DEACTIVATING.name());
+                task.setTargetsDrainedAt(clock.instant().plus(drain));
+                task.bumpVersion();
+                return task;
+            }
+        } else if (deactivating && inBackground && task.getTargetsDrainedAt() != null
+                && clock.instant().isBefore(task.getTargetsDrainedAt())) {
+            return task; // StopTask does not wait for the drain
+        }
+        if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+            task.setLastStatus(TaskStatus.STOPPING.name());
+            task.setStoppingAt(Instant.now());
+            task.bumpVersion();
         }
 
         if (!dockerMode) {
@@ -2274,12 +2286,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (taskStops.containsKey(task.getTaskArn())) {
             return task; // the stop already running for it lands it
-        }
-        if (inBackground && task.getTargetsDrainedAt() != null
-                && Instant.now().isBefore(task.getTargetsDrainedAt())) {
-            // As on AWS, the task keeps serving its in-flight requests until its targets have
-            // drained; the first reconciliation tick after that stops it. StopTask does not wait.
-            return task;
         }
         EcsTaskHandle handle = taskHandles.get(task.getTaskArn());
         if (handle == null) {
@@ -2899,19 +2905,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Whether a task's load balancer targets pass their health checks, as ECS waits for before it
-     * stops the task a rolling deployment replaces. The wait is bounded by the service's
-     * {@code healthCheckGracePeriodSeconds}, or {@link #TARGET_HEALTH_WAIT} without one, so a target
-     * that never turns healthy, or a target group with health checks off, does not hold the
-     * deployment for good.
+     * stops the task a rolling deployment replaces. As on AWS, a replacement that never turns
+     * healthy holds the deployment.
      */
     private boolean loadBalancerTargetsHealthy(EcsTask task, EcsServiceModel svc) {
         if (!dockerMode || lbRegistrar == null || svc.getLoadBalancers().isEmpty()) {
-            return true;
-        }
-        Integer gracePeriod = svc.getHealthCheckGracePeriodSeconds();
-        Duration wait = gracePeriod != null && gracePeriod > 0
-                ? Duration.ofSeconds(gracePeriod) : TARGET_HEALTH_WAIT;
-        if (task.getStartedAt() != null && !Instant.now().isBefore(task.getStartedAt().plus(wait))) {
             return true;
         }
         return lbRegistrar.targetsHealthy(task);
@@ -5403,7 +5401,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void reconcileTaskLocked(String taskArn, EcsTask task) {
-        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+        if (TaskStatus.STOPPING.name().equals(task.getLastStatus())
+                || TaskStatus.DEACTIVATING.name().equals(task.getLastStatus())) {
             // Never stopTask(...), which waits for a stop already running: that stop lands under
             // this task's monitor, held here.
             stopTaskLocked(task, task.getStoppedReason(), task.getStopCode(), taskRegion(task), true);

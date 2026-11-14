@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 
 /**
  * Component test for {@link EcsLoadBalancerRegistrar}: drives the register/deregister
@@ -133,6 +134,23 @@ class EcsLoadBalancerRegistrarTest {
         healthy.setState("healthy");
         doReturn(List.of(healthy)).when(elbV2Service).describeTargetHealth(eq(REGION), eq(tgArn), any());
         assertTrue(registrar.targetsHealthy(task));
+    }
+
+    @Test
+    void targetsHealthyIsFalseWhenTheTargetsFailedToRegisterOrTheirHealthCannotBeRead() {
+        String tgArn = createTargetGroup("reg-tg-health-unknown");
+        EcsTask failed = taskWithContainer("web", 8080, 34800);
+        doThrow(new IllegalStateException("registration refused"))
+                .when(elbV2Service).registerTargets(eq(REGION), eq(tgArn), any());
+        registrar.registerTask(failed, serviceWithLb(tgArn, "web", 8080), REGION);
+        assertFalse(registrar.targetsHealthy(failed), "a target that never registered never turns healthy");
+
+        String readTg = createTargetGroup("reg-tg-health-unread");
+        EcsTask unread = taskWithContainer("web", 8080, 34801);
+        registrar.registerTask(unread, serviceWithLb(readTg, "web", 8080), REGION);
+        doThrow(new IllegalStateException("health unavailable"))
+                .when(elbV2Service).describeTargetHealth(eq(REGION), eq(readTg), any());
+        assertFalse(registrar.targetsHealthy(unread));
     }
 
     @Test
