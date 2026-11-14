@@ -152,7 +152,8 @@ public class CodeArtifactPypiExternalConnectionImporter {
         if (externalConnectionName == null) {
             return List.of();
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "pypi", null, packageName)) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "pypi", null, packageName,
+                "EXTERNAL_UPSTREAM")) {
             return List.of();
         }
         JsonNode index = fetchSimpleIndexJson(externalConnectionName, packageName).orElse(null);
@@ -223,7 +224,8 @@ public class CodeArtifactPypiExternalConnectionImporter {
         if (packageName.isEmpty()) {
             return false;
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "pypi", null, packageName.get())) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "pypi", null, packageName.get(),
+                "EXTERNAL_UPSTREAM")) {
             return false;
         }
 
@@ -257,7 +259,7 @@ public class CodeArtifactPypiExternalConnectionImporter {
                 "pypi", null, packageName.get(), version.get());
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
                 domain, owner, repository, "pypi", null, packageName.get(), version.get(), externalConnectionName,
-                packageFenceSnapshot);
+                RetentionOriginKind.EXTERNAL_CONNECTION, packageFenceSnapshot);
         if (!claim.claimed()) {
             return false;
         }
@@ -351,7 +353,8 @@ public class CodeArtifactPypiExternalConnectionImporter {
             if (fenceStillMatched && !remainingSiblings.isEmpty()) {
                 CodeArtifactService.RetainedVersionOriginClaimOutcome backgroundClaim = service
                         .claimRetainedVersionOrigin(region, domain, owner, repository, "pypi", null,
-                                packageName.get(), version.get(), externalConnectionName, packageFenceSnapshot);
+                                packageName.get(), version.get(), externalConnectionName,
+                                RetentionOriginKind.EXTERNAL_CONNECTION, packageFenceSnapshot);
                 if (backgroundClaim.claimed()) {
                     List<JsonNode> siblingsToImport = remainingSiblings;
                     String resolvedPackageName = packageName.get();
