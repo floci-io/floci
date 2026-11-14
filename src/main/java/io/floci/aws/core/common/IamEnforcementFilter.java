@@ -869,7 +869,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
         String servingScope = servingCredentialScope(claimedScope, ctx);
         if (rest) {
-            return new ResolvedAuthorization(servingScope, routeAction(servingScope, ctx));
+            return authorizationForRoute(servingScope, ctx);
         }
         String targetOperation = IamActionRegistry.targetOperation(ctx);
         String action = actionRegistry.resolve(servingScope, ctx);
@@ -1011,16 +1011,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 .map(catalog::canonicalCredentialScope)
                 .distinct()
                 .sorted()
-                .map(scope -> new ResolvedAuthorization(scope, routeAction(scope, ctx)))
+                .map(scope -> authorizationForRoute(scope, ctx))
                 .filter(authorization -> authorization.action() != null)
                 .findFirst()
                 .orElse(null);
     }
 
+    private ResolvedAuthorization authorizationForRoute(String scope, ContainerRequestContext ctx) {
+        String action = routeAction(scope, ctx);
+        return new ResolvedAuthorization(scope, action, actionRegistry.operationForRoute(scope, action, ctx));
+    }
+
     /**
      * The scope and action a request is authorized as, and the operation it calls as
      * {@code <namespace>:<Operation>}, which differs from the action for one AWS authorizes under another name.
-     * A REST route maps straight to its action, which names the operation.
+     * A modeled REST route retains its operation when AWS authorizes it under another action name.
      */
     private record ResolvedAuthorization(String credentialScope, String action, String operation) {
         ResolvedAuthorization(String credentialScope, String action) {

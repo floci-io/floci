@@ -13,14 +13,11 @@ import software.amazon.awssdk.services.lambda.model.LambdaException;
 import software.amazon.awssdk.services.lambda.model.PublishLayerVersionResponse;
 import software.amazon.awssdk.services.lambda.model.ResourceNotFoundException;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.services.lambda.LambdaLayerFixtures.layerArchive;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -108,15 +105,5 @@ class LambdaLayerNameArnIntegrationTest {
                 client.deleteLayerVersion(request -> request.layerName(name).versionNumber(published.version()));
             }
         }
-    }
-
-    private static byte[] layerArchive() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("python/shared.py"));
-            zip.write("VALUE = 1".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
     }
 }

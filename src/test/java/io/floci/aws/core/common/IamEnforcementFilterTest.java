@@ -96,6 +96,7 @@ class IamEnforcementFilterTest {
         iamService = mock(IamService.class);
         evaluator = mock(IamPolicyEvaluator.class);
         actionRegistry = mock(IamActionRegistry.class);
+        when(actionRegistry.operationForRoute(any(), any(), any())).thenAnswer(inv -> inv.getArgument(1));
         arnBuilder = mock(ResourceArnBuilder.class);
         requestContext = new RequestContext();
         conditionContextResolver = mock(IamConditionContextResolver.class);

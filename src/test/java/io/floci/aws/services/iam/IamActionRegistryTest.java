@@ -510,6 +510,24 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void aRestOperationRetainsItsModeledNameWhenItsAuthorizedActionDiffers() {
+        MultivaluedHashMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("find", "LayerVersion");
+        ContainerRequestContext byArn = mockCtx("GET", "/2018-10-31/layers",
+                query, MediaType.APPLICATION_JSON_TYPE, "{}");
+        String action = registry.resolveRoute("lambda", byArn);
+        assertEquals("lambda:GetLayerVersion", action);
+        assertEquals("lambda:GetLayerVersionByArn", registry.operationForRoute("lambda", action, byArn));
+
+        ContainerRequestContext named = mockCtx("GET", "/2018-10-31/layers/shared/versions/1",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("lambda:GetLayerVersion",
+                registry.operationForRoute("lambda", registry.resolveRoute("lambda", named), named));
+        assertEquals("lambda:ListLayers", registry.operationForRoute("lambda", "lambda:ListLayers", byArn));
+        assertNull(registry.operationForRoute("lambda", null, byArn));
+    }
+
+    @Test
     void schedulerAndPipesTaggingIsCheckedOnBothTagRoutes() {
         for (String scope : List.of("scheduler", "pipes")) {
             for (String path : List.of("/tags/arn:aws:" + scope + ":us-east-1:000000000000:x", "/tags")) {

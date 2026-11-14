@@ -44,6 +44,15 @@ public interface StoredResourceArns {
     Optional<String> find(String type, List<String> names, String region);
 
     /**
+     * The resource resolved by an ARN in its own account and Region, without substituting the caller's
+     * coordinates. Empty when the service has no such resource or does not resolve ARN selectors this way.
+     * Used only for operations read by the generated request-resource table.
+     */
+    default Optional<String> resolveStoredArn(String arn) {
+        return Optional.empty();
+    }
+
+    /**
      * The ARNs of the resources the caller's resource named by {@code value} in {@code member}, as the table writes
      * the member's path, runs on, is in or reaches in the Region, which a request naming it acts on (the cluster or
      * workgroup of a Data API session, by its {@code SessionId}; the cluster of an instance group, by its

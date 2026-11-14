@@ -43,6 +43,35 @@ class RequestResourceMembersTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void modeledIntegerArnVariablesNormalizeOnlyTheirOwnValues() throws Exception {
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {
+                    "version": "arn:${Partition}:example:${Region}:${Account}:item:${Name}:${Version}"
+                  }},
+                  "integerVariables": {"example": {"version": ["Version"]}},
+                  "operations": {"example:Read": {"resources": []}}
+                }
+                """);
+        ArnFormat format = parse(document.toString()).formats().get("example").get("version");
+        String prefix = "arn:aws-cn:example:cn-north-1:000000000001:item:001:";
+        assertEquals(prefix + "1", format.checked(prefix + "01"));
+        assertEquals(prefix + "1", format.checked(prefix + "+1"));
+        for (String invalid : List.of("latest", "*", "9223372036854775808")) {
+            assertEquals(prefix + invalid, format.checked(prefix + invalid));
+        }
+        for (String invalid : List.of("[]", "{\"unknown\":{\"version\":[\"Version\"]}}",
+                "{\"example\":{\"unknown\":[\"Version\"]}}", "{\"example\":{\"version\":[\"Account\"]}}",
+                "{\"example\":{\"version\":\"Version\"}}", "{\"example\":{\"version\":[1]}}")) {
+            ObjectNode changed = document.deepCopy();
+            changed.set("integerVariables", MAPPER.readTree(invalid));
+            IllegalStateException failure = assertThrows(IllegalStateException.class, () -> parse(changed.toString()));
+            assertTrue(failure.getMessage().contains("integerVariables"), failure.getMessage());
+        }
+    }
+
+    @Test
     void generatedIdTargetsValidateTheirMemberWireNameAndDiscriminators() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode document = (ObjectNode) mapper.readTree("""
@@ -124,7 +153,7 @@ class RequestResourceMembersTest {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
         assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertEquals(Set.of("dynamodb", "lambda", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
         Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
                 "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
@@ -133,6 +162,8 @@ class RequestResourceMembersTest {
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("logs:PutDestination");
+        expected.add("lambda:GetLayerVersion");
+        expected.add("lambda:GetLayerVersionByArn");
         // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
         expected.add("dynamodb:ListTables");
         assertEquals(expected, table.operations().keySet().stream()

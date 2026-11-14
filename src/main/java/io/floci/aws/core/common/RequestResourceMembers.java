@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * The resources each operation's request names, for the namespaces whose ARNs {@code ResourceArnBuilder} does not
@@ -97,14 +98,19 @@ final class RequestResourceMembers {
      * follows the one variable the format ends in with an id it mints, {@code /<id>}, which the format leaves out
      * (EventBridge's {@code connection/<name>/<id>}).
      */
-    record ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted) {
+    record ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted, Pattern integers) {
+
+        ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted) {
+            this(format, pattern, unqualified, minted, null);
+        }
 
         ArnFormat(String format, Pattern pattern, boolean unqualified) {
             this(format, pattern, unqualified, false);
         }
 
-        /** The ARN as its service checks it: an unqualified type's without the qualifier it may carry. */
+        /** Normalize modeled integer variables and drop a qualifier only for an unqualified type. */
         String checked(String arn) {
+            arn = normalizeIntegers(arn);
             if (!unqualified) {
                 return arn;
             }
@@ -117,6 +123,29 @@ final class RequestResourceMembers {
                 }
             }
             return arn.substring(0, at);
+        }
+
+        private String normalizeIntegers(String arn) {
+            if (integers == null) {
+                return arn;
+            }
+            Matcher values = integers.matcher(arn);
+            if (!values.matches()) {
+                return arn;
+            }
+            StringBuilder normalized = new StringBuilder();
+            int at = 0;
+            for (int group = 1; group <= values.groupCount(); group++) {
+                String value = values.group(group);
+                try {
+                    value = Long.toString(Long.parseLong(value));
+                } catch (NumberFormatException ignored) {
+                    // Keep invalid selectors unchanged for the service's normal validation.
+                }
+                normalized.append(arn, at, values.start(group)).append(value);
+                at = values.end(group);
+            }
+            return normalized.append(arn.substring(at)).toString();
         }
 
         /**
@@ -284,6 +313,7 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " carries no operations");
         }
         Set<String> namespaces = Set.copyOf(document.path("namespaces").propertyStream().map(Map.Entry::getKey).toList());
+        validateIntegerVariables(document.path("integerVariables"), document.path("arnFormats"));
         Map<String, Map<String, ArnFormat>> formats = new LinkedHashMap<>();
         document.path("arnFormats").properties().forEach(namespace -> {
             Set<String> unqualified = names(document.path("unqualified").path(namespace.getKey()));
@@ -295,8 +325,9 @@ final class RequestResourceMembers {
                     throw new IllegalStateException(RESOURCE_NAME + " gives " + namespace.getKey() + "'s "
                             + type.getKey() + " no ARN format");
                 }
+                Set<String> integers = names(document.path("integerVariables").path(namespace.getKey()).path(type.getKey()));
                 types.put(type.getKey(), new ArnFormat(format, pattern(format), unqualified.contains(type.getKey()),
-                        minted.contains(type.getKey())));
+                        minted.contains(type.getKey()), integers.isEmpty() ? null : pattern(format, integers)));
             });
             formats.put(namespace.getKey(), Map.copyOf(types));
         });
@@ -730,21 +761,49 @@ final class RequestResourceMembers {
         return new Member(outer.name(), outer.list(), arnMember(operation, path.substring(dot + 1)), outer.map());
     }
 
-    /**
-     * What an ARN of the format matches: its literal parts, a partition, any Region and account, and anything for
-     * each other variable but nothing.
-     */
+    /** Reject integer metadata that does not identify a resource variable in a known ARN format. */
+    private static void validateIntegerVariables(JsonNode integers, JsonNode formats) {
+        if (integers.isMissingNode()) {
+            return;
+        }
+        if (!integers.isObject()) {
+            throw new IllegalStateException(RESOURCE_NAME + " integerVariables must be an object");
+        }
+        integers.properties().forEach(namespace -> {
+            if (!namespace.getValue().isObject() || !formats.has(namespace.getKey())) {
+                throw new IllegalStateException(RESOURCE_NAME + " integerVariables has no formats for " + namespace.getKey());
+            }
+            namespace.getValue().properties().forEach(type -> {
+                String format = formats.path(namespace.getKey()).path(type.getKey()).asText("");
+                Set<String> variables = VARIABLE.matcher(format).results().map(match -> match.group(1))
+                        .filter(name -> !Set.of("Partition", "Region", "Account").contains(name))
+                        .collect(Collectors.toSet());
+                JsonNode names = type.getValue();
+                if (!names.isArray() || names.isEmpty() || !names.valueStream().allMatch(
+                        name -> name.isTextual() && variables.contains(name.asText()))) {
+                    throw new IllegalStateException(RESOURCE_NAME + " integerVariables names no variables for "
+                            + namespace.getKey() + ":" + type.getKey());
+                }
+            });
+        });
+    }
+
     static Pattern pattern(String format) {
+        return pattern(format, Set.of());
+    }
+
+    private static Pattern pattern(String format, Set<String> integers) {
         StringBuilder regex = new StringBuilder("^");
         Matcher variable = VARIABLE.matcher(format);
         int at = 0;
         while (variable.find()) {
             regex.append(Pattern.quote(format.substring(at, variable.start())));
-            regex.append(switch (variable.group(1)) {
+            String value = switch (variable.group(1)) {
                 case "Partition" -> "[^:]+";
                 case "Region", "Account" -> "[^:]*";
                 default -> ".+";
-            });
+            };
+            regex.append(integers.contains(variable.group(1)) ? "(" + value + ")" : value);
             at = variable.end();
         }
         return Pattern.compile(regex.append(Pattern.quote(format.substring(at))).append('$').toString());

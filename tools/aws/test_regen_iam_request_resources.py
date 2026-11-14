@@ -383,6 +383,56 @@ def write_models(root, models: dict[str, dict]):
         (directory / "service-2.json").write_text(json.dumps(value), encoding="utf-8")
 
 
+def test_rest_arn_alternatives_and_integer_shapes_fill_versioned_resources(isolated, tmp_path):
+    formats = {
+        "product": "arn:${Partition}:svc:${Region}:${Account}:product:${ProductName}",
+        "productVersion": "arn:${Partition}:svc:${Region}:${Account}:product:${ProductName}:${ProductVersion}",
+    }
+    api = model({"GetProductVersion": {"ProductName": "ProductName", "VersionNumber": "ProductVersionNumber"},
+                 "GetProductVersionByArn": {"Arn": "String"}}, "rest-json")
+    api["shapes"]["ProductName"] = {
+        "type": "string", "pattern": "(arn:(aws[a-z-]*)?:svc:[a-z0-9-]+:[0-9]{12}:product:[a-z]+)|[a-z]+"}
+    api["shapes"]["ProductVersionNumber"] = {"type": "long"}
+    api["shapes"]["GetProductVersionIn"]["required"] = ["ProductName", "VersionNumber"]
+    api["operations"]["GetProductVersion"]["http"] = {
+        "method": "GET", "requestUri": "/products/{ProductName}/versions/{VersionNumber}"}
+    for name, member in api["shapes"]["GetProductVersionIn"]["members"].items():
+        member.update(location="uri", locationName=name)
+    api["operations"]["GetProductVersionByArn"]["http"] = {"method": "GET", "requestUri": "/products"}
+    api["shapes"]["GetProductVersionByArnIn"]["members"]["Arn"].update(location="querystring", locationName="Arn")
+    write_models(tmp_path, {"svc": api})
+    documents = [reference("svc", {"GetProductVersion": ["productVersion"],
+                                   "GetProductVersionByArn": ["productVersion"]}, formats)]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    entry = document["operations"]["svc:GetProductVersion"]
+    assert entry["resources"] == [{
+        "type": "productVersion", "fill": {"ProductName": "ProductName", "ProductVersion": "VersionNumber"},
+        "arnOf": {"ProductName": "product"}}]
+    assert entry["located"] == {"ProductName": "{ProductName}", "VersionNumber": "{VersionNumber}"}
+    assert document["operations"]["svc:GetProductVersionByArn"]["resources"] == [
+        {"types": ["productVersion"], "arn": "Arn"}]
+    assert document["integerVariables"] == {"svc": {"productVersion": ["ProductVersion"]}}
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    document["integerVariables"] = {}
+    assert any("integerVariables differ from botocore" in problem for problem in r.derive(document, tmp_path))
+    document["integerVariables"] = {"svc": {"productVersion": ["Account"]}}
+    assert r.validate(document) == ["integerVariables names no ARN variables for svc:productVersion"]
+
+
+def test_numeric_shapes_do_not_guess_between_members_or_accept_floats():
+    api = model({"UpdateThing": {"MinCapacity": "Capacity", "MaxCapacity": "Capacity",
+                                 "Weight": "WeightNumber"}})
+    api["shapes"]["Capacity"] = {"type": "integer"}
+    api["shapes"]["WeightNumber"] = {"type": "double"}
+    assert r.integer_members({"svc": api}, "UpdateThing") == {}
+
+
+def test_an_arn_alternative_requires_the_same_name_pattern():
+    shape = {"type": "string", "pattern": "(arn:aws:svc:us-east-1:123456789012:thing:[a-z]+)|[0-9]+"}
+    assert r._name_or_arn(shape) is None
+
+
 DOCUMENTS = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": FORMATS["thing"]}),
              reference("other", {"Op": ["x"]}, {"x": "arn:${Partition}:other:::x"}),
              reference("later", {"Op": ["y"]}, {"y": "arn:${Partition}:later:::y"})]
@@ -927,7 +977,10 @@ def test_the_vendored_file_is_well_formed():
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
     # A state machine's version or alias is checked on the state machine.
-    assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
+    assert document["unqualified"] == {"lambda": ["function"], "ssm": ["parameter"], "states": ["statemachine"]}
+    assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
+    assert {operation for operation in operations if operation.startswith("lambda:")} == {
+        "lambda:GetLayerVersion", "lambda:GetLayerVersionByArn"}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}

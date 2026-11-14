@@ -704,7 +704,7 @@ public final class RequestResources {
                         from.region().isEmpty() ? region : from.region(),
                         from.accountId().isEmpty() ? accountId : from.accountId())), format,
                         resource.types().getFirst(), filling.variables(), null, region), format.awsOwned(), partition,
-                        region, accountId, null);
+                        region, accountId, stored);
             }
         }
     }
@@ -872,10 +872,18 @@ public final class RequestResources {
      * the ARN's Region or the request's, whichever its handler acts on. An ARN with no account or Region keeps none,
      * and one of a type AWS owns ({@code awsOwned}) its account, {@code aws}, which is no caller's. One naming another
      * account whose resource {@code stored} says the service acts on there (an OAM sink a link is made to, a RAM
-     * invitation sent to the caller) is that resource alone.
+     * invitation sent to the caller) is that resource alone. When the service resolves the complete ARN to a stored
+     * resource in its own coordinates, that stored ARN alone is checked.
      */
     private static void addNamed(Set<String> arns, String arn, boolean awsOwned, String partition, String region,
                                  String accountId, StoredResourceArns stored) {
+        if (stored != null) {
+            Optional<String> resolved = stored.resolveStoredArn(arn);
+            if (resolved.isPresent()) {
+                arns.add(resolved.get());
+                return;
+            }
+        }
         arns.add(arn);
         if (!AwsArnUtils.isArn(arn)) {
             return;

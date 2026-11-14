@@ -18,13 +18,10 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.LambdaException;
 import software.amazon.awssdk.services.lambda.model.PublishLayerVersionResponse;
 
-import java.io.ByteArrayOutputStream;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.services.lambda.LambdaLayerFixtures.layerArchive;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -93,13 +90,16 @@ class LambdaLayerNameArnIamIntegrationTest {
                     }
                     """.formatted(resource));
             denied(reader, selector, published.version());
+            deniedByArn(reader, resource);
 
             policy(authorization, user, allow(resource));
             assertEquals(resource, reader.getLayerVersion(request -> request.layerName(selector)
                     .versionNumber(published.version())).layerVersionArn());
+            assertEquals(resource, reader.getLayerVersionByArn(request -> request.arn(resource)).layerVersionArn());
 
             policy(authorization, user, allow(resource + "-other"));
             denied(reader, selector, published.version());
+            deniedByArn(reader, resource);
         }
     }
 
@@ -129,13 +129,10 @@ class LambdaLayerNameArnIamIntegrationTest {
         assertTrue(denied.awsErrorDetails().errorCode().contains("AccessDenied"));
     }
 
-    private static byte[] layerArchive() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("python/shared.py"));
-            zip.write("VALUE = 1".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+    private static void deniedByArn(LambdaClient client, String arn) {
+        LambdaException denied = assertThrows(LambdaException.class,
+                () -> client.getLayerVersionByArn(request -> request.arn(arn)));
+        assertEquals(403, denied.statusCode());
+        assertTrue(denied.awsErrorDetails().errorCode().contains("AccessDenied"));
     }
 }

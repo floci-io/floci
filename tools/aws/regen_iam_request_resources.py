@@ -152,6 +152,10 @@ Beyond the members' names, botocore's shapes and documentation say what a member
 - a member whose documentation says its service uses its default for a request leaving it out ("If you do not
   specify a cluster, the default cluster is assumed") names that default then (`defaults`), when it fills the one
   variable of that type's format, rather than naming nothing.
+A URI or query member can carry the same name-or-ARN alternative as a body member. An integer shape
+whose name matches an otherwise unfilled ARN variable (optionally ending in `Number`) supplies that variable.
+`integerVariables` records these numeric identifiers so the reader canonicalizes leading zeroes even when the
+request gives the whole ARN; string identifiers retain their spelling.
 What a request names, this file alone says. A service only looks up what it holds where an entry asks it to
 (`StoredResourceArns`): the resource the members a `find` gives name, the ones a `through` member reaches, and the
 resource its handler uses for a member left out (Athena's `primary` workgroup, EventBridge's `default` bus, ECS's
@@ -270,6 +274,10 @@ READ_IN_HAND_BUILT: dict[str, str] = {
 READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
+for operation in ("GetLayerVersion", "GetLayerVersionByArn"):
+    READ_IN_HAND_BUILT[f"lambda:{operation}"] = (
+        "Lambda layer lookups name the version through modeled path and query members; "
+        "other Lambda resources retain their existing builders")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -1220,7 +1228,8 @@ def located_members(models: dict[str, dict], operation: str) -> dict[str, str]:
             continue
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
             where = _located(member)
-            if where is None or _strings(model, model["shapes"][member["shape"]]) != "":
+            shape = model["shapes"][member["shape"]]
+            if where is None or (_strings(model, shape) != "" and shape["type"] not in ("integer", "long")):
                 continue
             if found.setdefault(name, where) != where:
                 raise ValueError(f"{operation}'s {name} is {found[name]} in one client and {where} in {client}")
@@ -1318,7 +1327,7 @@ def name_or_arn_members(models: dict[str, dict], operation: str) -> dict[str, st
         if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
             continue
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
-            if member.get("location") not in BODY_LOCATIONS:
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
                 continue
             shape = model["shapes"][member["shape"]]
             word = _name_or_arn(shape)
@@ -1371,14 +1380,22 @@ def _documented_name_or_arn(documentation: str | None) -> str | None:
 
 def _name_or_arn(shape: dict) -> str | None:
     """The resource type word of the ARN a string shape's pattern takes before a name; None for another shape."""
-    match = NAME_OR_ARN_RE.match(shape.get("pattern") or "") if shape["type"] == "string" else None
-    return match.group(1) if match else None
+    if shape["type"] != "string":
+        return None
+    pattern = shape.get("pattern") or ""
+    match = NAME_OR_ARN_RE.match(pattern)
+    if match:
+        return match.group(1)
+    alternative = re.fullmatch(r"\(arn:.*:([A-Za-z][A-Za-z0-9-]*)[:/](.+)\)\|(.+)", pattern)
+    if alternative and alternative.group(2) == alternative.group(3):
+        return alternative.group(1)
+    return None
 
 
 def named_by(word: str, formats: dict[str, str]) -> str | None:
     """The type whose ARN format's resource is the word and one variable (`event-bus/${EventBusName}`)."""
     found = [kind for kind, arn in formats.items()
-             if re.fullmatch(r"arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:" + re.escape(word) + r"/\$\{\w+}", arn)]
+             if re.fullmatch(r"arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:" + re.escape(word) + r"[:/]\$\{\w+}", arn)]
     return found[0] if len(found) == 1 else None
 
 
@@ -1451,6 +1468,8 @@ def structure_account_members(models: dict[str, dict], operation: str, types: li
         accounts = [name for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items()
                     if member.get("location") in BODY_LOCATIONS and re.search(r"account$", name, re.IGNORECASE)
                     and model["shapes"][member["shape"]]["type"] == "string"]
+        if not accounts:
+            continue
         for kind in types:
             structures = [shape for name, shape in model["shapes"].items()
                           if shape.get("type") == "structure" and stem(name) == stem(kind)]
@@ -2104,6 +2123,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
     resources = with_typed_targets(resources, formats, typed_target_fields(models, name))
+    resources = with_integer_members(resources, formats, models, name)
     optional = optional_members(models, name)
     resources = with_absent_arn(resources, formats, optional)
     resources = with_absent_account(resources, formats, account_members(models, name), optional)
@@ -2157,6 +2177,41 @@ def with_typed_targets(resources: list[dict], formats: dict[str, str], typed: di
             continue
         found.append(dict(resource, fill=dict(sorted({**fill, variables[-1]: paths[0]}.items()))))
     return found
+
+
+def integer_members(models: dict[str, dict], operation: str) -> dict[str, str]:
+    """Unambiguous integer request members keyed by their shape name without a trailing Number."""
+    candidates: dict[str, set[str]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation, {})
+        if "input" not in spec or _reading(model) is None:
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            shape = model["shapes"][member["shape"]]
+            if shape["type"] not in ("integer", "long"):
+                continue
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
+                continue
+            variable = member["shape"].removesuffix("Number")
+            candidates.setdefault(variable, set()).add(name)
+    return {variable: next(iter(names)) for variable, names in candidates.items() if len(names) == 1}
+
+
+def with_integer_members(resources: list[dict], formats: dict[str, str], models: dict[str, dict],
+                         operation: str) -> list[dict]:
+    """Fill an otherwise unnamed ARN variable from the integer shape bearing its name."""
+    members = integer_members(models, operation)
+    result = []
+    for resource in resources:
+        if "fill" not in resource or resource.get("find"):
+            result.append(resource)
+            continue
+        variables = set(VARIABLE_RE.findall(formats[resource["type"]])) - KNOWN_VARIABLES
+        fill = dict(resource["fill"])
+        for variable in sorted(variables & members.keys()):
+            fill.setdefault(variable, members[variable])
+        result.append(dict(resource, fill=dict(sorted(fill.items()))))
+    return result
 
 
 def with_enum_named(operation: str, resources: list[dict], formats: dict[str, str],
@@ -2607,9 +2662,33 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
         "resourceTagKeys": resource_tag_keys(documents),
         "unqualified": unqualified,
         "mintedIds": minted,
+        "integerVariables": integer_variables(operations, namespaces, data),
         "forwardedActions": forwarded,
         "operations": operations,
     }
+
+
+def integer_variables(operations: dict[str, dict], namespaces: dict[str, list[str]],
+                      data: Path) -> dict[str, dict[str, list[str]]]:
+    """ARN variables filled by integer shapes, also normalized when a request supplies the whole ARN."""
+    found: dict[str, dict[str, set[str]]] = {}
+    loaded: dict[str, dict[str, dict]] = {}
+    for operation, entry in operations.items():
+        if not any(resource.get("fill") for resource in entry["resources"]):
+            continue
+        namespace, name = operation.split(":", 1)
+        if namespace not in loaded:
+            loaded[namespace] = load_models(data, set(namespaces[namespace]))
+        members = integer_members(loaded[namespace], name)
+        for resource in entry["resources"]:
+            for variable, member in resource.get("fill", {}).items():
+                if members.get(variable) == member:
+                    types = found.setdefault(namespace, {})
+                    types.setdefault(resource["type"], set()).add(variable)
+    result = {}
+    for namespace, types in sorted(found.items()):
+        result[namespace] = {kind: sorted(variables) for kind, variables in sorted(types.items())}
+    return result
 
 
 def unqualified_types(formats: dict[str, dict[str, str]], operations: dict[str, dict],
@@ -2711,7 +2790,7 @@ def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
     for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
-                "unqualified", "mintedIds", "forwardedActions"):
+                "unqualified", "mintedIds", "integerVariables", "forwardedActions"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
     operations = list(document["operations"].items())
@@ -2755,6 +2834,19 @@ def validate(document: dict) -> list[str]:
         return ["arnFormats is not an ARN format for each resource type of namespaces the file reads"]
     if list(operations) != sorted(operations):
         problems.append("operations is not sorted")
+    integers = document.get("integerVariables", {})
+    if not isinstance(integers, dict):
+        return ["integerVariables is not an object"]
+    for namespace, types in integers.items():
+        if namespace not in formats or not isinstance(types, dict):
+            return [f"integerVariables has no resource formats for {namespace}"]
+        for kind, variables in types.items():
+            available = set(VARIABLE_RE.findall(formats[namespace].get(kind, ""))) - KNOWN_VARIABLES
+            if not isinstance(variables, list) or not variables or not all(
+                    isinstance(variable, str) and variable in available for variable in variables):
+                return [f"integerVariables names no ARN variables for {namespace}:{kind}"]
+            if variables != sorted(set(variables)):
+                return [f"integerVariables repeats or misorders variables for {namespace}:{kind}"]
     tag_keys = document.get("resourceTagKeys", {})
     if not isinstance(tag_keys, dict) or any(
             not isinstance(kinds, dict) or any(kind not in formats.get(namespace, {})
@@ -2975,6 +3067,9 @@ def _created_problems(operation: str, created: object, types: set[str], formats:
 def derive(document: dict, data: Path) -> list[str]:
     """Where the resources the file gives differ from what botocore gives for its types and formats."""
     problems: list[str] = []
+    integers = integer_variables(document["operations"], document["namespaces"], data)
+    if document.get("integerVariables", {}) != integers:
+        problems.append(f"integerVariables differ from botocore: expected {json.dumps(integers)}")
     unqualified = unqualified_types(document["arnFormats"], document["operations"], document["namespaces"], data)
     if document["unqualified"] != unqualified:
         problems.append(f"the file checks {json.dumps(document['unqualified'])} without a qualifier, the reference "

@@ -1421,6 +1421,27 @@ class RequestResourcesTest {
         return RequestResources.created(operation, request, "aws", "us-east-1", "000000000000");
     }
 
+    @Test
+    void layerArnLookupsUseTheStoredCoordinatesAndNumericVersion() {
+        String layer = "arn:aws:lambda:us-west-2:000000000000:layer:shared";
+        String version = layer + ":1";
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.resolveStoredArn(version)).thenReturn(Optional.of(version));
+        ContainerRequestContext request = rest("GET", null, Map.of());
+        Map<String, String> labels = Map.of("LayerName", layer, "VersionNumber", "01");
+
+        assertEquals(List.of(version), RequestResources.of("lambda:GetLayerVersion", request,
+                "aws", "us-east-1", "000000000000", stored, labels));
+        assertEquals(List.of(version), RequestResources.of("lambda:GetLayerVersionByArn",
+                rest("GET", null, Map.of("Arn", layer + ":01")), "aws", "us-east-1",
+                "000000000000", stored, Map.of()));
+
+        when(stored.resolveStoredArn(version)).thenReturn(Optional.empty());
+        assertEquals(List.of(version, "arn:aws:lambda:us-east-1:000000000000:layer:shared:1"),
+                RequestResources.of("lambda:GetLayerVersion", request, "aws", "us-east-1",
+                        "000000000000", stored, labels));
+    }
+
     private static List<String> of(String operation, ContainerRequestContext request) {
         return RequestResources.of(operation, request, "aws", "us-east-1", "000000000000");
     }

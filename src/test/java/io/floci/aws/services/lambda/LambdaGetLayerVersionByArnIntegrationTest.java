@@ -6,12 +6,10 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.io.ByteArrayOutputStream;
 import java.util.Base64;
 import java.util.List;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
+import static io.floci.aws.services.lambda.LambdaLayerFixtures.layerArchive;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -29,16 +27,6 @@ class LambdaGetLayerVersionByArnIntegrationTest {
 
     private static final String LAYER_NAME = "by-arn-layer";
 
-    private static String layerZipBase64() throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("python/shared.py"));
-            zos.write("VALUE = 1".getBytes());
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
-    }
-
     private static String publishLayer() throws Exception {
         return given()
             .contentType("application/json")
@@ -50,7 +38,7 @@ class LambdaGetLayerVersionByArnIntegrationTest {
                     "Description": "resolved by arn",
                     "LicenseInfo": "Apache-2.0"
                 }
-                """.formatted(layerZipBase64()))
+                """.formatted(Base64.getEncoder().encodeToString(layerArchive())))
         .when()
             .post("/2018-10-31/layers/" + LAYER_NAME + "/versions")
         .then()
