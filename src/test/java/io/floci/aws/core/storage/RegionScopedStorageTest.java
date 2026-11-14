@@ -3,14 +3,12 @@ package io.floci.aws.core.storage;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.testing.StorageFactories;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -61,9 +59,12 @@ class RegionScopedStorageTest {
         }
     }
 
-    /** A key may hold a slash, as a Glue name may; only a Region and a slash at its start are refused. */
+    /**
+     * A key may hold a slash, as a Glue name may; only a Region and a slash at its start are refused. A
+     * label shaped like a Region that no partition admits ({@code my-cd-1}) is part of the key.
+     */
     @ParameterizedTest
-    @ValueSource(strings = {"memory", "persistent"})
+    @ValueSource(strings = {"memory", "persistent", "hybrid", "wal"})
     void aKeyWithASlashThatIsNotARegionStaysInItsRegion(String mode) {
         StorageFactory factory = StorageFactories.open(directory, mode, "000000000000");
         try {
@@ -74,33 +75,48 @@ class RegionScopedStorageTest {
             RegionScopedStorage<String> west = store(factory, "us-west-2");
 
             west.put("sales/2024:orders", "west");
+            west.put("my-cd-1/plan", "west-plan");
 
             assertEquals(Optional.of("west"), west.get("sales/2024:orders"));
+            assertEquals(Optional.of("west-plan"), west.get("my-cd-1/plan"));
             assertEquals(Optional.empty(), east.get("sales/2024:orders"));
-            assertEquals(Set.of("sales/2024:orders"), west.keys());
+            assertEquals(Set.of("sales/2024:orders", "my-cd-1/plan"), west.keys());
             assertEquals(Optional.of("legacy"), east.get("older/record"));
             assertEquals(Set.of("older/record"), east.keys());
             assertEquals(Optional.empty(), west.get("older/record"));
+            assertThrows(IllegalArgumentException.class, () -> west.put("eu-west-1/plan", "wrong"));
         } finally {
             factory.shutdownAll();
         }
     }
 
-    /** Batch writes and atomic deletions act in the request's Region only, as single ones do. */
-    @Test
-    void batchesStayInTheirRegion() {
-        StorageFactory factory = StorageFactories.open(directory, "wal", "000000000000");
+    /**
+     * A matching deletion acts in the request's Region only, in one commit; in the default Region it takes
+     * the regionless keys too.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"memory", "persistent", "hybrid", "wal"})
+    void matchingDeletionsStayInTheirRegion(String mode) {
+        StorageFactory factory = StorageFactories.open(directory, mode, "000000000000");
         try {
+            StorageBackend<String, String> legacy = factory.create(
+                    "appconfig", "records.json", new TypeReference<>() {});
+            legacy.put("older", "db");
             RegionScopedStorage<String> east = store(factory, "us-east-1");
             RegionScopedStorage<String> west = store(factory, "us-west-2");
+            east.put("a", "db");
+            east.put("kept", "other");
+            west.put("a", "db");
 
-            east.putAllAtomically(Map.of("a", "east-a", "b", "east-b"));
-            west.putAll(Map.of("a", "west-a"));
-            west.deleteAllAtomically(Set.of("a", "b"));
+            StorageOperations.deleteMatchingAtomically(west, "db"::equals);
 
-            assertEquals(Set.of("a", "b"), east.keys());
-            assertEquals(Optional.of("east-a"), east.get("a"));
             assertEquals(Set.of(), west.keys());
+            assertEquals(Set.of("a", "kept", "older"), east.keys());
+
+            StorageOperations.deleteMatchingAtomically(east, "db"::equals);
+
+            assertEquals(Set.of("kept"), east.keys());
+            assertEquals(Set.of("us-east-1/kept"), legacy.keys());
         } finally {
             factory.shutdownAll();
         }
