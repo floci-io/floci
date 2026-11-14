@@ -22,6 +22,9 @@ public class SAMLTrustPolicyEvaluator {
     public boolean allows(String document, String providerArn, Map<String, List<String>> claims) {
         try {
             JsonNode statements = mapper.readTree(document).path("Statement");
+            if (!TrustPolicyStatements.wellFormed(statements)) {
+                return false;
+            }
             if (statements.isArray()) {
                 boolean allowed = false;
                 for (JsonNode statement : statements) {
@@ -46,7 +49,7 @@ public class SAMLTrustPolicyEvaluator {
                 || !conditionsSatisfied(statement.get("Condition"), claims)) {
             return 0;
         }
-        return "Deny".equalsIgnoreCase(statement.path("Effect").asText()) ? -1 : 1;
+        return TrustPolicyStatements.denies(statement) ? -1 : 1;
     }
 
     private boolean conditionsSatisfied(JsonNode condition, Map<String, List<String>> claims) {
