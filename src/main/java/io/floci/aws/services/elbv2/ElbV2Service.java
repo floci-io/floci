@@ -1157,7 +1157,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
             th.setHealthCheckPort(String.valueOf(port));
-            if (hasFilterTargets && !isRegisteredTarget(tg, t, port)) {
+            if (hasFilterTargets && !isRegisteredTarget(tg, t)) {
                 th.setState("unused");
                 th.setReason("Target.NotRegistered");
                 th.setDescription("Target is not registered to the target group");
@@ -1171,10 +1171,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         }).collect(Collectors.toList());
     }
 
-    private static boolean isRegisteredTarget(TargetGroup targetGroup, TargetDescription candidate, int candidatePort) {
+    private static boolean isRegisteredTarget(TargetGroup targetGroup, TargetDescription candidate) {
         return targetGroup.getTargets().stream()
-                .anyMatch(registered -> Objects.equals(registered.getId(), candidate.getId())
-                        && ElbV2HealthChecker.effectivePort(registered, targetGroup) == candidatePort);
+                .anyMatch(registered -> ElbV2HealthChecker.sameTarget(registered, candidate, targetGroup));
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
