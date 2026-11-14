@@ -2,6 +2,7 @@ package io.floci.aws.services.apigatewayv2.proxy;
 
 import io.floci.aws.core.common.SsrfProtection;
 import io.floci.aws.services.apigatewayv2.model.Integration;
+import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.SSLContext;
@@ -48,6 +49,7 @@ import java.util.StringJoiner;
  * <p>If the backend is unreachable or times out, returns a 502 Bad Gateway
  * ProxyResult so the controller can relay a clean error to the original client.
  */
+@ApplicationScoped
 public class HttpProxyInvoker {
     private static final Logger LOG = Logger.getLogger(HttpProxyInvoker.class);
 

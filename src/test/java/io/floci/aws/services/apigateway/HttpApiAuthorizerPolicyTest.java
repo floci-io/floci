@@ -9,6 +9,7 @@ import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
 import io.floci.aws.services.apigatewayv2.model.Integration;
 import io.floci.aws.services.apigatewayv2.model.Route;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
@@ -182,7 +183,7 @@ class HttpApiAuthorizerPolicyTest {
         routeContext.routeToHttpApi("us-east-1");
         return new ApiGatewayExecuteController(null, null, gateway, lambda,
                 new RegionResolver("us-east-1", "000000000000"), mapper, null, null, null, null, null,
-                routeContext, null, null, null, null, new AuthorizerPolicyEvaluator(new IamPolicyEvaluator(mapper)), null);
+                routeContext, null, null, null, null, new AuthorizerPolicyEvaluator(new IamPolicyEvaluator(mapper)), null, new HttpProxyInvoker());
     }
 
     private InvokeResult result(String payload) {

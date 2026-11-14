@@ -3,6 +3,7 @@ package io.floci.aws.services.apigateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
@@ -48,7 +49,7 @@ class BuildV2AuthorizerEventTrailingSlashTest {
                 regionResolver, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null,
                 null, null
-        , null, null, null);
+        , null, null, null, new HttpProxyInvoker());
     }
 
     private JsonNode buildEvent(String normalizedPath, String rawRequestUri) throws Exception {
