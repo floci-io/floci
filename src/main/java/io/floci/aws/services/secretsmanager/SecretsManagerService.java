@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -54,7 +55,7 @@ import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SecretsManagerService implements ResourceProvider {
+public class SecretsManagerService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SecretsManagerService.class);
 
@@ -492,6 +493,21 @@ public class SecretsManagerService implements ResourceProvider {
     public Secret describeSecret(String secretId, String region) {
         Secret secret = resolveSecret(secretId, region);
         return secret;
+    }
+
+    @Override
+    public String namespace() {
+        return "secretsmanager";
+    }
+
+    /**
+     * What IAM asks Secrets Manager of a request's resources: the ARN, random suffix included, of the caller's secret
+     * a name or an ARN names, a partial one included ({@link #findArn}). Reads only.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return "Secret".equals(type) && names.size() == 1
+                ? findArn(regionResolver.getAccountId(), names.getFirst(), region) : Optional.empty();
     }
 
     /**

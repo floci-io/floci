@@ -1842,9 +1842,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("logs".equals(credentialScope)) {
             return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
         }
-        if ("secretsmanager".equals(credentialScope)) {
-            return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
-        }
         if ("kms".equals(credentialScope)) {
             return arnBuilder.buildKmsResources(action, ctx, region, accountId, requestPartition());
         }
@@ -1855,8 +1852,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 || "apigateway".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
-        String partition = "route53".equals(credentialScope) ? requestPartition() : AwsRegions.partitionFor(region);
-        return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, partition);
+        // ARNs the table renders take the request's partition, which a Region Floci does not know cannot be mapped to.
+        return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, requestPartition());
     }
 
     /**

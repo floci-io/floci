@@ -647,8 +647,12 @@ public final class RequestResources {
                 List<String> asArns = values.stream()
                         .filter(value -> !isArnOf(named, value)
                                 && format.pattern().matcher(value).matches()).toList();
-                asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
-                        accountId, stored));
+                // A type whose service mints characters after its name is the resource it stores under an ARN given
+                // without them, as a partial ARN is (a secret's, before its six characters).
+                asArns.forEach(value -> addNamed(arns,
+                        format.mintedSuffix() == null || stored == null ? format.checked(value)
+                                : stored.find(resource.types().getFirst(), List.of(value), region).orElse(value),
+                        format.awsOwned(), partition, region, accountId, stored));
                 values = values.stream().filter(value -> !asArns.contains(value)).toList();
                 if (values.isEmpty()) {
                     return;
@@ -791,7 +795,8 @@ public final class RequestResources {
      * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
      * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
      * alias points at. A type whose service follows its name with an id it mints has that id open when the service
-     * stores none, and any other type's is as rendered.
+     * stores none, one whose service follows it with characters it mints those characters open (a secret's
+     * {@code -??????}, as a create names the secret it makes), and any other type's is as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
@@ -801,7 +806,10 @@ public final class RequestResources {
                 return found.get();
             }
         }
-        return format.minted() ? arn + "/*" : arn;
+        if (format.minted()) {
+            return arn + "/*";
+        }
+        return format.mintedSuffix() != null ? arn + format.mintedSuffix() : arn;
     }
 
     /**

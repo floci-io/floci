@@ -237,11 +237,12 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
-              "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
+              "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty",
+              "secretsmanager")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
-              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "sts")
+              "resource-groups", "s3", "scheduler", "sns", "sqs", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
@@ -446,6 +447,12 @@ ALIAS_PATTERN_RE = re.compile(r"(?:^|[|(])\^?alias/")
 # its own an ARN pattern takes past that word when its service mints an id after the name (`\\/[...]+\\/[...]+$`).
 MINTED_WORD_RE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)/\$\{\w+}$")
 MINTED_TAIL = r"\\/(?:\[[^\]]*\][+*]|\([^()]*\)[+*]?)\\/(?:\[[^\]]*\][+*]|\([^()]*\)[+*]?)\$?$"
+# A create's member documented as the name its service follows with characters it mints: "Secrets Manager automatically
+# adds a hyphen and six random characters after the secret name at the end of the ARN".
+DOC_MINTED_SUFFIX_RE = re.compile(r"\badds an? (?P<separator>hyphen|dash|underscore|period) and (?P<count>\w+) random "
+                                  r"characters after the (?P<word>[a-z][a-z -]*?) name at the end of the arn\b")
+SEPARATORS = {"hyphen": "-", "dash": "-", "underscore": "_", "period": "."}
+COUNTS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
 STEM_SUFFIX_RE = re.compile(r"(arns|arn|names|name|identifiers|identifier|ids|id|config|s)$")
 # A bare member that names the resource of the type its operation acts on.
 BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
@@ -2011,6 +2018,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                             requested_members(models)),
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
+    resources = with_minted_names(operation, resources, formats, models)
     optional = optional_members(models, name)
     resources = with_absent_arn(resources, formats, optional)
     resources = with_absent_account(resources, formats, account_members(models, name), optional)
@@ -2024,6 +2032,24 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_optional_qualifier(resources, optional)
     # Two rules naming the same resource the same way name it once.
     return [resource for index, resource in enumerate(resources) if resource not in resources[:index]]
+
+
+def with_minted_names(operation: str, resources: list[dict], formats: dict[str, str],
+                      models: dict[str, dict]) -> list[dict]:
+    """The resources, the type a create makes named by the member its documentation gives as the name its service
+    follows with characters it mints (`CreateSecret`'s `Name`, of the secret), its one variable filled from it."""
+    name = operation.split(":", 1)[1]
+    said = [found for model in models.values() for found in documented_minted_suffixes(model, name)]
+    found = []
+    for resource in resources:
+        kind = resource.get("type")
+        named = [member for word, _, member in said if kind is not None and named_by_word(word, formats) == kind]
+        variables = [v for v in VARIABLE_RE.findall(formats.get(kind or "", "")) if v not in KNOWN_VARIABLES]
+        if len(named) == 1 and len(variables) == 1 and resource.get("fill") == {} \
+                and not {"find", "when", "unless", "default"} & set(resource):
+            resource = dict(resource, fill={variables[0]: named[0]})
+        found.append(resource)
+    return found
 
 
 def with_enum_named(operation: str, resources: list[dict], formats: dict[str, str],
@@ -2400,6 +2426,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                   for namespace in sorted(read_namespaces)}
     formats = arn_formats(documents, read_namespaces)
     minted = minted_types(formats, namespaces, data)
+    suffixes = minted_suffixes(formats, namespaces, data)
     check_forwarded(authorized_by(documents))
     forwarded = forwarded_actions(documents)
     operations = {}
@@ -2430,6 +2457,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
         "resourceTagKeys": resource_tag_keys(documents),
         "unqualified": unqualified,
         "mintedIds": minted,
+        "mintedSuffixes": suffixes,
         "forwardedActions": forwarded,
         "operations": operations,
     }
@@ -2491,6 +2519,47 @@ def minted_types(formats: dict[str, dict[str, str]], namespaces: dict[str, list[
     return found
 
 
+def minted_suffixes(formats: dict[str, dict[str, str]], namespaces: dict[str, list[str]],
+                    data: Path) -> dict[str, dict[str, str]]:
+    """The types of each namespace whose service follows the name their one variable takes with characters it mints,
+    which a request naming one by its name does not give, each with those characters as IAM matches them, one `?`
+    each after the separator: botocore documents a create's name member so ("Secrets Manager automatically adds a
+    hyphen and six random characters after the secret name at the end of the ARN": `-??????`)."""
+    found: dict[str, dict[str, str]] = {}
+    for namespace in sorted(formats):
+        for model in load_models(data, set(namespaces.get(namespace, []))).values():
+            for operation in model["operations"]:
+                for said in documented_minted_suffixes(model, operation):
+                    kind = named_by_word(said[0], formats[namespace])
+                    if kind is not None:
+                        found.setdefault(namespace, {})[kind] = said[1]
+    return {namespace: dict(sorted(kinds.items())) for namespace, kinds in sorted(found.items())}
+
+
+def documented_minted_suffixes(model: dict, operation: str) -> list[tuple[str, str, str]]:
+    """The members of a create's request documented as the name its service follows with characters it mints, each as
+    the type's word the documentation names, the characters as IAM matches them and the member: `("secret", "-??????",
+    "Name")` for Secrets Manager's `CreateSecret`."""
+    spec = model["operations"].get(operation)
+    if spec is None or "input" not in spec or not CREATING_RE.match(operation):
+        return []
+    found = []
+    for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+        said = DOC_MINTED_SUFFIX_RE.search(_lead_text(member.get("documentation")))
+        count = COUNTS.get(said.group("count")) if said else None
+        if said and count:
+            found.append((said.group("word").replace(" ", "-"), SEPARATORS[said.group("separator")] + "?" * count, name))
+    return found
+
+
+def named_by_word(word: str, formats: dict[str, str]) -> str | None:
+    """The one type whose format's resource is the word and one variable, after a `/` or a `:`
+    (`secret:${SecretId}`)."""
+    found = [kind for kind, arn in formats.items()
+             if re.fullmatch(re.escape(word) + r"[/:]\$\{\w+}", _resource(arn), re.IGNORECASE)]
+    return found[0] if len(found) == 1 else None
+
+
 def _resource(arn_format: str) -> str:
     """The resource part of an ARN format, past its fifth colon."""
     return arn_format.split(":", 5)[5]
@@ -2534,7 +2603,7 @@ def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
     for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
-                "unqualified", "mintedIds", "forwardedActions"):
+                "unqualified", "mintedIds", "mintedSuffixes", "forwardedActions"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
     operations = list(document["operations"].items())
@@ -2597,6 +2666,15 @@ def validate(document: dict) -> list[str]:
                                                       for kind in kinds) for namespace, kinds in minted.items()):
         problems.append("mintedIds is not resource types of each namespace the file reads whose ARN format ends in "
                         "its one variable")
+    suffixes = document.get("mintedSuffixes")
+    if not isinstance(suffixes, dict) or not all(
+            isinstance(kinds, dict) and kinds and all(
+                isinstance(kind, str) and kind in formats.get(namespace, {})
+                and ONE_VARIABLE_RE.match(_resource(formats[namespace][kind]))
+                and isinstance(suffix, str) and re.fullmatch(r"[-_.]\?+", suffix) for kind, suffix in kinds.items())
+            for namespace, kinds in suffixes.items()):
+        problems.append("mintedSuffixes is not resource types of each namespace the file reads whose ARN format ends "
+                        "in its one variable, each with a separator and the characters its service mints")
     for key in ("handBuilt", "otherNamespaces"):
         if not isinstance(document.get(key), list) or not all(isinstance(n, str) and NAMESPACE_RE.match(n)
                                                               for n in document[key]):
@@ -2796,6 +2874,10 @@ def derive(document: dict, data: Path) -> list[str]:
     if document["mintedIds"] != minted:
         problems.append(f"the file gives {json.dumps(document['mintedIds'])} a minted id, botocore's ARN patterns "
                         f"give {json.dumps(minted)}")
+    suffixes = minted_suffixes(document["arnFormats"], document["namespaces"], data)
+    if document.get("mintedSuffixes") != suffixes:
+        problems.append(f"the file gives {json.dumps(document.get('mintedSuffixes'))} a minted suffix, botocore's "
+                        f"documentation gives {json.dumps(suffixes)}")
     named = sorted({use["action"] for uses, _ in FORWARDED.values() for use in uses})
     if sorted(document["forwardedActions"]) != named:
         problems.append(f"the file records {sorted(document['forwardedActions'])} as forwarded actions, FORWARDED "

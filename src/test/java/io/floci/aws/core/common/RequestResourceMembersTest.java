@@ -29,6 +29,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -175,6 +176,9 @@ class RequestResourceMembersTest {
         assertTrue(events.get("connection").minted());
         assertTrue(events.get("api-destination").minted());
         assertFalse(events.get("event-bus").minted());
+        // A secret is followed by the six characters botocore documents Secrets Manager adding after its name.
+        assertEquals("-??????", RequestResourceMembers.table().formats().get("secretsmanager").get("Secret").mintedSuffix());
+        assertNull(events.get("event-bus").mintedSuffix());
     }
 
     @Test
@@ -416,7 +420,8 @@ class RequestResourceMembersTest {
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
                     String expected = resource.arn() != null || resource.through() != null || resource.byDefault() ? arn
-                            : expected(format.format(), resource, account) + (format.minted() ? "/*" : "");
+                            : expected(format.format(), resource, account) + (format.minted() ? "/*"
+                                    : format.mintedSuffix() != null && resource.fill().size() == 1 ? format.mintedSuffix() : "");
                     ObjectNode body = MAPPER.createObjectNode();
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
