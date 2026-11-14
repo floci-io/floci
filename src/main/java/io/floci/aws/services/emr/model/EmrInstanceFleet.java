@@ -13,6 +13,7 @@ public class EmrInstanceFleet {
     private String name;
     private String instanceFleetType;
     private List<String> instanceTypes = new ArrayList<>();
+    private String instanceTypeConfigs;
     private int targetOnDemandCapacity;
     private int targetSpotCapacity;
     private int provisionedOnDemandCapacity;
@@ -33,6 +34,10 @@ public class EmrInstanceFleet {
     /** The instance types of its InstanceTypeConfigs, in their order. */
     public List<String> getInstanceTypes() { return instanceTypes; }
     public void setInstanceTypes(List<String> instanceTypes) { this.instanceTypes = instanceTypes; }
+
+    /** Its InstanceTypeConfigs as given, raw JSON; null for a fleet stored before they were kept. */
+    public String getInstanceTypeConfigs() { return instanceTypeConfigs; }
+    public void setInstanceTypeConfigs(String instanceTypeConfigs) { this.instanceTypeConfigs = instanceTypeConfigs; }
 
     public int getTargetOnDemandCapacity() { return targetOnDemandCapacity; }
     public void setTargetOnDemandCapacity(int targetOnDemandCapacity) {
