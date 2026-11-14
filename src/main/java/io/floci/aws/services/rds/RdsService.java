@@ -856,6 +856,12 @@ public class RdsService implements Resettable, ResourceProvider {
                 }
             }
         }
+        try {
+            RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds, placement.vpcId());
+        } catch (RuntimeException | Error failure) {
+            releaseProxyPort(proxyPort);
+            throw failure;
+        }
 
         DbEndpoint endpoint;
         DbInstance instance;
@@ -3912,6 +3918,11 @@ public class RdsService implements Resettable, ResourceProvider {
             validateInstanceParameterGroup(dbParameterGroupName, engineName(instance),
                     instance.getEngineVersion(), effectiveRegion);
         }
+        // A new subnet group can move the instance to another VPC, so the groups are checked against that VPC.
+        DbSubnetGroup newSubnetGroup = isBlank(dbSubnetGroupName)
+                ? null : getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, vpcSecurityGroupIds,
+                newSubnetGroup != null ? newSubnetGroup.getVpcId() : instance.getVpcId());
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (changesParameterGroup) {
             instance.setParameterGroupName(dbParameterGroupName);
@@ -3947,9 +3958,9 @@ public class RdsService implements Resettable, ResourceProvider {
         if (iamEnabled != null) {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
-        if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
-            getDbSubnetGroup(dbSubnetGroupName, effectiveRegion);
+        if (newSubnetGroup != null) {
             instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setVpcId(newSubnetGroup.getVpcId());
         }
         if (vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty()) {
             instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
@@ -4068,6 +4079,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(instanceId, effectiveRegion);
         requireAvailableInstance(instance, instanceId);
+        RdsSecurityGroups.requireInVpc(ec2Service, effectiveRegion, groupIds, instance.getVpcId());
         instance.setVpcSecurityGroupIds(groupIds);
         putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
         LOG.infov("DB instance {0} security groups set to {1}", instanceId, groupIds);

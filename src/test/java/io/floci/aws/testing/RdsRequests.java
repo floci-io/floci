@@ -12,9 +12,11 @@ import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.RdsClientBuilder;
 import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.RdsException;
+import software.amazon.awssdk.services.rds.model.VpcSecurityGroupMembership;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -71,6 +73,12 @@ public final class RdsRequests {
             }
             createFailure.addSuppressed(cleanupFailure);
         }
+    }
+
+    /** The ids of the VPC security groups {@code DescribeDBInstances} reports for DB instance {@code id}. */
+    public static List<String> vpcSecurityGroupIds(RdsClient client, String id) {
+        return client.describeDBInstances(request -> request.dbInstanceIdentifier(id)).dbInstances().getFirst()
+                .vpcSecurityGroups().stream().map(VpcSecurityGroupMembership::vpcSecurityGroupId).toList();
     }
 
     private static RdsClientBuilder rdsClientBuilder(String region, String account) {

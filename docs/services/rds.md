@@ -457,6 +457,21 @@ Not emulated: Data API requests to a paused cluster wait for the resume, as the 
 describes, and never fail with `DatabaseResumingException`; logical or binlog replication does not
 keep a cluster awake; and parameter group changes do not resume one.
 
+## VPC security groups
+
+`CreateDBInstance` and `ModifyDBInstance` check each id in `VpcSecurityGroupIds` against EC2 before
+anything is stored or a container starts, and refuse the request the way RDS does:
+
+- An id that names no security group of the account and Region fails with `InvalidParameterValue`
+  (`Invalid security group , groupId= sg-..., groupName=.`).
+- A group outside the VPC of the instance's DB subnet group fails with `InvalidParameterCombination`
+  (`The DB instance and EC2 security group are in different VPCs. ...`).
+
+A modify that also names a new `DBSubnetGroupName` checks the groups against that subnet group's VPC.
+Snapshot and point-in-time restores, read replicas, the green instance of a Blue/Green deployment and
+a CloudFormation update of `VPCSecurityGroups` are checked the same way. A request that names no groups
+is not checked.
+
 ## Modifying a DB instance
 
 `ModifyDBInstance` applies `DBInstanceClass` and `AllocatedStorage`, and
