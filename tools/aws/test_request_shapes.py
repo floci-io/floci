@@ -30,6 +30,7 @@ import regen_eks_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
+import regen_config_shapes
 import regen_kinesis_shapes
 import regen_lambda_microvm_shapes
 import regen_organizations_shapes
@@ -269,6 +270,7 @@ CONSTRAINED_MODEL = {
 
 @pytest.mark.parametrize("script, model_path", [
     (regen_athena_shapes, "athena/2017-05-18"),
+    (regen_config_shapes, "config/2014-11-12"),
     (regen_kinesis_shapes, "kinesis/2013-12-02"),
     (regen_rekognition_shapes, "rekognition/2016-06-27"),
 ])
@@ -449,6 +451,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
     regen_kinesis_shapes,
+    regen_config_shapes,
     regen_rekognition_shapes,
     regen_athena_shapes,
     regen_cur_shapes,
@@ -567,6 +570,18 @@ def test_kinesis_shapes_keep_tag_bounds_and_leave_wire_types_to_handlers():
     assert "Data" in shapes["PutRecordInput"]["required"]
     assert "Data" in shapes["PutRecordsRequestEntry"]["required"]
     assert "Timestamp" not in shapes["GetShardIteratorInput"]["members"]
+
+
+def test_config_shapes_keep_arn_bounds_and_leave_timestamps_to_handlers():
+    doc = json.loads(regen_config_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert shapes["DescribeConfigurationRecordersRequest"]["members"]["Arn"] == "AmazonResourceName"
+    assert shapes["ListTagsForResourceRequest"]["members"]["ResourceArn"] == "AmazonResourceName"
+    assert shapes["AmazonResourceName"]["min"] == 1
+    assert shapes["AmazonResourceName"]["max"] == 1000
+    assert "OrderingTimestamp" not in shapes["Evaluation"]["members"]
+    assert "OrderingTimestamp" in shapes["Evaluation"]["required"]
 
 
 def test_securityhub_shapes_keep_required_findings_and_resource_strings():

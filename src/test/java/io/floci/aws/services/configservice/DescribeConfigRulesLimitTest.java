@@ -1,20 +1,19 @@
 package io.floci.aws.services.configservice;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import org.junit.jupiter.api.Test;
-
-import java.util.ArrayList;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * DescribeConfigRules' ConfigRuleNames member is modeled with {@code Maximum 25 items}
- * (confirmed against botocore's config service-2.json). Every other array-size limit this
- * PR touches (Scope.ComplianceResourceTypes, PutEvaluations, PutRetentionConfiguration's
- * day range) is enforced; this one was not.
+ * (confirmed against botocore's config service-2.json), which ConfigRequestShapes checks
+ * before the handler reads the names.
  */
 class DescribeConfigRulesLimitTest {
 
@@ -22,14 +21,17 @@ class DescribeConfigRulesLimitTest {
 
     @Test
     void rejectsMoreThanTwentyFiveRuleNames() {
-        AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, "000000000000"), null);
-        List<String> tooMany = new ArrayList<>();
+        ObjectMapper mapper = new ObjectMapper();
+        ConfigServiceJsonHandler handler = new ConfigServiceJsonHandler(
+                new AwsConfigService(new RegionResolver(REGION, "000000000000"), null), mapper);
+        ObjectNode request = mapper.createObjectNode();
+        ArrayNode tooMany = request.putArray("ConfigRuleNames");
         for (int i = 0; i < 26; i++) {
             tooMany.add("rule-" + i);
         }
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> service.describeConfigRules(REGION, tooMany));
-        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+                () -> handler.handle("DescribeConfigRules", request, REGION));
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 }
