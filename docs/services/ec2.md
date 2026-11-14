@@ -6,6 +6,9 @@
 
 With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.
 Policies can scope access to an exact instance ARN or use stored tags through `ec2:ResourceTag/<key>` and `aws:ResourceTag/<key>`.
+Creation-time `CreateNetworkInterface` tags also populate the regional IAM tag index.
+Later `CreateTags` and `DeleteTags` keep the ENI response and authorization tags in sync,
+and deleting the interface removes its indexed tags.
 A batch containing an unauthorized instance is denied in full, including when another instance in that batch is allowed.
 These checks also apply in EC2 mock mode.
 Target members and resource-tag condition keys come from generated AWS model and Service Reference data.

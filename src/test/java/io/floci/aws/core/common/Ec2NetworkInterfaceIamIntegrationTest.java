@@ -93,6 +93,44 @@ class Ec2NetworkInterfaceIamIntegrationTest {
         }
     }
 
+    @Test
+    void creationTagsAuthorizeLaterMutationsAndStayInSync() {
+        String user = "eni-tags-" + UUID.randomUUID();
+        UserCredentials credentials = EnforcementFixtures.createUser(cleanup, endpoint.getPort(),
+                auth("000000000000", "iam"), user);
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "000000000000", Region.US_EAST_1, endpoint);
+             Ec2Client client = AwsTestClients.create(Ec2Client.builder(), credentials.accessKeyId(),
+                     credentials.secretAccessKey(), Region.US_EAST_1, endpoint)) {
+            String vpc = admin.createVpc(r -> r.cidrBlock("10.204.0.0/16")).vpc().vpcId();
+            String subnet = admin.createSubnet(r -> r.vpcId(vpc).cidrBlock("10.204.1.0/24")).subnet().subnetId();
+            String eni = admin.createNetworkInterface(r -> r.subnetId(subnet)
+                    .tagSpecifications(tags("network-interface", "team-a"))).networkInterface().networkInterfaceId();
+            try {
+                policy(user, """
+                        {"Effect":"Allow","Action":["ec2:CreateTags","ec2:DeleteTags"],
+                         "Resource":"arn:aws:ec2:us-east-1:000000000000:network-interface/%s",
+                         "Condition":{"StringEquals":{"aws:ResourceTag/ManagedBy":"team-a"}}}
+                        """.formatted(eni));
+                client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("fixture")));
+                assertEquals(2, admin.describeNetworkInterfaces(r -> r.networkInterfaceIds(eni))
+                        .networkInterfaces().getFirst().tagSet().size());
+                client.createTags(r -> r.resources(eni).tags(t -> t.key("ManagedBy").value("team-b")));
+                assertEquals("team-b", admin.describeNetworkInterfaces(r -> r.networkInterfaceIds(eni))
+                        .networkInterfaces().getFirst().tagSet().stream().filter(t -> t.key().equals("ManagedBy"))
+                        .findFirst().orElseThrow().value());
+                denied(() -> client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("denied"))));
+                admin.createTags(r -> r.resources(eni).tags(t -> t.key("ManagedBy").value("team-a")));
+                client.deleteTags(r -> r.resources(eni).tags(t -> t.key("ManagedBy")));
+                denied(() -> client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("denied"))));
+            } finally {
+                admin.deleteNetworkInterface(r -> r.networkInterfaceId(eni));
+                assertEquals(0, admin.describeTags(r -> r.filters(f -> f.name("resource-id").values(eni))).tags().size());
+                admin.deleteSubnet(r -> r.subnetId(subnet));
+                admin.deleteVpc(r -> r.vpcId(vpc));
+            }
+        }
+    }
+
     private String create(Ec2Client client, String subnet, String group, String second, String owner) {
         return client.createNetworkInterface(r -> r.subnetId(subnet).groups(group, second)
                 .tagSpecifications(tags("network-interface", owner))).networkInterface().networkInterfaceId();
