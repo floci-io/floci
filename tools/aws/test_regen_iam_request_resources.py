@@ -372,6 +372,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "MEASURED", {})
+    monkeypatch.setattr(r, "FORWARDED", {})
     return monkeypatch
 
 
@@ -502,7 +503,8 @@ def test_redshift_serverless_account_inference_preserves_the_generated_resources
         if not operation.startswith("redshift-serverless:"):
             continue
         derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
-                              document["arnFormats"]["redshift-serverless"], models)
+                              document["arnFormats"]["redshift-serverless"], models, None,
+                              document["forwardedActions"])
         assert derived == entry, operation
         if r.account_members(models, operation.split(":", 1)[1]) == ["ownerAccount"]:
             account_operations.add(operation.split(":", 1)[1])
@@ -708,7 +710,7 @@ def good_document() -> dict:
     return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
-            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]},
+            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "forwardedActions": {},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
@@ -1006,6 +1008,125 @@ def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_pa
     isolated.setattr(r, "MEASURED", {"hand:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
     with pytest.raises(ValueError, match="MEASURED gives hand:Gone, which the file does not read"):
         r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
+
+
+GUIDE_SAYS = "the guide (https://example.com/guide) says 'restoring a thing needs keys:Decrypt on its key'"
+KEY_FORMAT = "arn:${Partition}:keys:${Region}:${Account}:key/${KeyId}"
+
+
+def keys_reference(resources: list[str] | None = None, condition_keys: list[str] | None = None) -> dict:
+    """A Service Reference document of a key service whose `Decrypt` acts on keys and takes its `ViaService` key."""
+    document = reference("keys", {"Decrypt": ["key"] if resources is None else resources}, {"key": KEY_FORMAT})
+    document["Actions"][0]["ActionConditionKeys"] = ["keys:ViaService"] if condition_keys is None else condition_keys
+    return document
+
+
+def forwarding_documents(tmp_path, record_member: str = "KeysKeyId", listed: bool = False,
+                         keys: dict | None = None) -> list[dict]:
+    """`svc`, whose `GetThing` restores a thing its record says a key of `keys` encrypts, and that key service."""
+    svc = model({"GetThing": {"ThingName": "String"}, "ListThings": {}})
+    svc["metadata"]["endpointPrefix"] = "svc"
+    svc["shapes"]["Thing"] = {"type": "structure", "members": {"ThingName": {"shape": "String"},
+                                                               record_member: {"shape": "String"}}}
+    write_models(tmp_path, {"svc": svc})
+    documents = [dict(DOCUMENTS[0]), *DOCUMENTS[1:], keys or keys_reference()]
+    if listed:
+        documents[0] = json.loads(json.dumps(DOCUMENTS[0]))
+        documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
+    return documents
+
+
+def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_holds(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+    # The member is the record's, named after the action's namespace and its type's variable, whatever its case.
+    assert document["operations"]["svc:GetThing"]["forwarded"] == [
+        {"action": "keys:Decrypt", "of": "thing", "member": "KeysKeyId", "endpoint": "svc"}]
+    assert document["forwardedActions"] == {
+        "keys:Decrypt": {"type": "key", "format": KEY_FORMAT, "viaService": "keys:ViaService"}}
+    assert "forwarded" not in document["operations"]["svc:ListThings"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    assert json.loads(r.render(document)) == document
+    # An action the reference gives no ViaService key carries none.
+    documents = forwarding_documents(tmp_path / "plain", keys=keys_reference(condition_keys=[]))
+    assert r.build(documents, "test", tmp_path / "plain", "botocore test")["forwardedActions"] == {
+        "keys:Decrypt": {"type": "key", "format": KEY_FORMAT}}
+
+
+@pytest.mark.parametrize("forwarded, change, problem", [
+    # No link to where AWS says it.
+    ((["keys:Decrypt", "thing"], "the guide says so"), {}, "no link to the evidence"),
+    # The reference lists the action for the operation: a rule reads it.
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"listed": True}, "which the Service Reference lists for it"),
+    # An action the reference does not list, or one acting on no one type.
+    ((["keys:Encrypt", "thing"], GUIDE_SAYS), {}, "which the Service Reference does not list"),
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"keys": keys_reference(resources=[])}, "not one resource type"),
+    # What a type the operation's action does not act on holds.
+    ((["keys:Decrypt", "group"], GUIDE_SAYS), {}, "no type its action acts on"),
+    # A record holding no member named after the action's namespace and its type's variable.
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"record_member": "EncryptionKey"}, "has no keysKeyId member"),
+])
+def test_a_forwarded_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say_and_is_read(
+        isolated, tmp_path, forwarded, change, problem):
+    (action, of), evidence = forwarded
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
+    with pytest.raises(ValueError, match=problem):
+        r.build(forwarding_documents(tmp_path, **change), "test", tmp_path, "botocore test")
+
+
+def test_a_forwarded_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    with pytest.raises(ValueError, match="FORWARDED gives svc:Gone, which the file does not read"):
+        r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+
+
+def forwarding_document() -> dict:
+    document = good_document()
+    document["forwardedActions"] = {"keys:Decrypt": {"type": "key", "format": KEY_FORMAT, "viaService": "keys:ViaService"}}
+    document["operations"]["svc:A"]["forwarded"] = [
+        {"action": "keys:Decrypt", "of": "thing", "member": "KeysKeyId", "endpoint": "svc"}]
+    return document
+
+
+@pytest.mark.parametrize("change, problem", [
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(action="keys:Encrypt"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(of="group"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(member="Keys[]"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].pop("endpoint"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"].update(forwarded=[]), "forwards no recorded action"),
+    (lambda d: d["forwardedActions"]["keys:Decrypt"].update(viaService="other:ViaService"), "forwardedActions is not"),
+    (lambda d: d["forwardedActions"]["keys:Decrypt"].update(format="arn:${Partition}:other:::key/${KeyId}"),
+     "forwardedActions is not"),
+    (lambda d: d.pop("forwardedActions"), "forwardedActions is not"),
+])
+def test_a_malformed_forwarded_entry_is_rejected(change, problem):
+    assert r.validate(forwarding_document()) == []
+    document = forwarding_document()
+    change(document)
+    assert any(problem in found for found in r.validate(document))
+
+
+def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists_it_for_the_operation(isolated):
+    isolated.setattr(r, "FORWARDED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = forwarding_document()
+    documents = [reference("svc", {"A": ["thing"]}, {"thing": FORMATS["thing"]}), keys_reference()]
+    assert r.verify_forwarded(document, documents) == []
+    assert r.verify_forwarded(document, [documents[0], keys_reference(condition_keys=[])]) == [
+        'AWS gives keys:Decrypt {"type": "key", "format": "' + KEY_FORMAT + '"}, not '
+        '{"type": "key", "format": "' + KEY_FORMAT + '", "viaService": "keys:ViaService"}']
+    documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
+    assert r.verify_forwarded(document, documents) == [
+        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so FORWARDED should not give them"]
+
+
+def test_check_fails_when_the_file_records_other_forwarded_actions_than_forwarded_names(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+    isolated.setattr(r, "FORWARDED", {})
+    document["operations"]["svc:GetThing"].pop("forwarded")
+    assert r.derive(document, tmp_path) == [
+        "the file records ['keys:Decrypt'] as forwarded actions, FORWARDED names []"]
 
 
 def test_a_variable_no_member_fills_takes_the_one_value_of_its_enum_the_operations_name_gives():
