@@ -92,7 +92,7 @@ public class CloudFormationQueryHandler {
             case "DescribeOrganizationsAccess" -> describeOrganizationsAccess();
             case "ActivateOrganizationsAccess" -> activateOrganizationsAccess();
             case "CreateStackSet" -> createStackSet(params);
-            case "DescribeStackSet" -> describeStackSet(params);
+            case "DescribeStackSet" -> describeStackSet(params, region);
             case "ListStackSets" -> listStackSets();
             case "UpdateStackSet" -> updateStackSet(params);
             case "DeleteStackSet" -> deleteStackSet(params);
@@ -922,7 +922,7 @@ public class CloudFormationQueryHandler {
         }
     }
 
-    private Response describeStackSet(MultivaluedMap<String, String> params) {
+    private Response describeStackSet(MultivaluedMap<String, String> params, String region) {
         try {
             StackSet ss = stackSetService.describeStackSet(params.getFirst("StackSetName"));
             XmlBuilder xml = new XmlBuilder()
@@ -931,6 +931,7 @@ public class CloudFormationQueryHandler {
                     .start("StackSet")
                     .elem("StackSetName", ss.getStackSetName())
                     .elem("StackSetId", ss.getStackSetId())
+                    .elem("StackSetARN", stackSetService.stackSetArn(ss, region))
                     .elem("Status", ss.getStatus())
                     .elem("Description", ss.getDescription())
                     .elem("TemplateBody", ss.getTemplateBody())

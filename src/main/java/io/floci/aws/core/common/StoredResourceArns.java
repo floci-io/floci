@@ -25,7 +25,8 @@ import java.util.Optional;
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
  * invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an ARN names,
- * random suffix included, and its tags); looked up lazily by {@code ResourceArnBuilder} and
+ * random suffix included, and its tags; EventBridge Scheduler, for its default schedule group; CloudFormation, for
+ * the stack or the stack set a name names, whose id it minted); looked up lazily by {@code ResourceArnBuilder} and
  * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
  * ARN is of, so IAM never depends on that service directly.</p>
  *

@@ -272,7 +272,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
               "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty",
-              "secretsmanager", "scheduler", "lambda")
+              "secretsmanager", "scheduler", "lambda", "cloudformation")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
@@ -390,7 +390,6 @@ NOT_COVERED: dict[str, str] = {
     "backup": _REST,
     "batch": _REST,
     "bedrock-agentcore": _REST,
-    "cloudformation": _LATER,
     "cloudhsm": "not read yet: its ARN formats end in ${CloudHsmClusterInstanceName} and "
                 "${CloudHsmBackupInstanceName}, names, while its requests give ClusterId and BackupId, ids, which the "
                 "rules do not fill a name from, so nearly every operation's resource would be left open",
@@ -1370,7 +1369,9 @@ def _nested_arns(model: dict, name: str, shape: dict) -> list[str]:
 
 
 def account_members(models: dict[str, dict], operation: str) -> list[str]:
-    """The top-level members of the operation's request whose shape is an account id, by name."""
+    """The top-level members of the operation's request whose shape is an account id, by name; not one naming the
+    account of another record of the service, by that record's shape name (CloudFormation's
+    `StackInstanceAccount`, the account of a `StackInstance`, not of the stack set it belongs to)."""
     found: set[str] = set()
     for model in models.values():
         spec = model["operations"].get(operation)
@@ -1388,7 +1389,10 @@ def account_members(models: dict[str, dict], operation: str) -> list[str]:
             # account of the resource that ARN names, not of one the request acts on.
             if name.endswith("Account") and name.removesuffix("Account") + "Arn" in request:
                 continue
-            if member.get("location") in BODY_LOCATIONS and shape["type"] == "string" \
+            qualifier = re.match(r"^(\w+?)Account(?:Id)?$", name[:1].upper() + name[1:])
+            of_another = qualifier is not None \
+                and model["shapes"].get(qualifier.group(1), {}).get("type") == "structure"
+            if member.get("location") in BODY_LOCATIONS and shape["type"] == "string" and not of_another \
                     and (shape.get("pattern") in ACCOUNT_ID_PATTERNS
                          or (name in account_names and not CREATING_RE.match(operation))):
                 found.add(name)
