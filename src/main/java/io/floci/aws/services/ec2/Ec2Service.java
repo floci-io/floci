@@ -6040,6 +6040,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         copy.setLaunchTime(source.getLaunchTime());
         copy.setAmiLaunchIndex(source.getAmiLaunchIndex());
         copy.setClientToken(source.getClientToken());
+        copy.setReservationId(source.getReservationId());
         copy.setMonitoring(source.getMonitoring());
         copy.setSourceDestCheck(source.isSourceDestCheck());
         copy.setEbsOptimized(source.isEbsOptimized());

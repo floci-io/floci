@@ -1,18 +1,14 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Instance;
 import software.amazon.awssdk.services.ec2.model.Reservation;
 import software.amazon.awssdk.services.ec2.model.RunInstancesResponse;
 
-import java.net.URI;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -24,11 +20,7 @@ class Ec2DescribeInstancesReservationIntegrationTest {
 
     @Test
     void instancesLaunchedTogetherShareTheReservationRunInstancesAnswered() {
-        try (Ec2Client client = Ec2Client.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).build()) {
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), "test", "test", Region.US_EAST_1)) {
             RunInstancesResponse run = client.runInstances(request -> request.imageId("ami-0abcdef1234567890")
                     .instanceType("t3.micro").minCount(3).maxCount(3));
             List<String> ids = run.instances().stream().map(Instance::instanceId).toList();
