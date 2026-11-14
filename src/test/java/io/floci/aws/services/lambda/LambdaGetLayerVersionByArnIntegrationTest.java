@@ -85,6 +85,34 @@ class LambdaGetLayerVersionByArnIntegrationTest {
     }
 
     @Test
+    @Order(8)
+    void getLayerVersionAcceptsTheUnversionedLayerArn() throws Exception {
+        String versionArn = publishLayer();
+        String layerArn = versionArn.substring(0, versionArn.lastIndexOf(':'));
+        String version = versionArn.substring(versionArn.lastIndexOf(':') + 1);
+        String expectedHash = given()
+            .queryParam("find", "LayerVersion").queryParam("Arn", versionArn)
+            .get("/2018-10-31/layers")
+            .then().statusCode(200).extract().path("Content.CodeSha256");
+
+        given().pathParam("layer", layerArn).pathParam("version", version)
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(200)
+            .body("LayerVersionArn", equalTo(versionArn))
+            .body("Content.CodeSha256", equalTo(expectedHash));
+        given().pathParam("layer", layerArn.replace(":000000000000:", ":017000801446:"))
+            .pathParam("version", version)
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(404);
+        given().pathParam("layer", layerArn).pathParam("version", "999999")
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(404);
+        given().pathParam("layer", versionArn).pathParam("version", version)
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(400);
+    }
+
+    @Test
     @Order(2)
     void matchesGetLayerVersionForTheSameVersion() throws Exception {
         String arn = publishLayer();
