@@ -33,6 +33,14 @@
 | `StopReplicationToReplica` | Promote a replica to a standalone primary |
 <!-- floci:actions:end -->
 
+## IAM resource tags
+
+With IAM enforcement enabled, secret-scoped operations read current stored tags
+for `aws:ResourceTag/<key>` and `secretsmanager:ResourceTag/<key>` conditions.
+Names and full ARNs resolve to the same stored secret before authorization.
+Retagging or removing a tag affects the next request; request tags cannot replace
+the stored tags during a write. Missing secrets contribute no stored tags.
+
 ## Secret write events
 
 Successful `PutSecretValue` and `UpdateSecret` API calls emit an EventBridge event with

@@ -154,7 +154,7 @@ class DynamoDbFacadeTest {
         IamConditionContextResolver resolver = new IamConditionContextResolver(dynamoDb,
                 mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                requestContext,
+                mock(Instance.class), requestContext,
                 mock(EmulatorConfig.class),
                 null, mock(io.floci.aws.core.common.ResolvedServiceCatalog.class));
         ContainerRequestContext request = mock(ContainerRequestContext.class);

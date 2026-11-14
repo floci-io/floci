@@ -518,6 +518,23 @@ public class SecretsManagerService implements ResourceProvider {
         return findArnByName(accountId, nameFromArn, arn.region());
     }
 
+    /** Current tags of the exact stored ARN, without reading a value or changing access timestamps. */
+    public Map<String, String> storedSecretTags(String resourceArn) {
+        AwsArnUtils.Arn arn = parseOrNull(resourceArn);
+        if (secretNameOrNull(arn) == null) {
+            return Map.of();
+        }
+        Secret secret = findByArnInAccount(resourceArn, arn);
+        if (secret == null || secret.getTags() == null) {
+            return Map.of();
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (Secret.Tag tag : secret.getTags()) {
+            tags.put(tag.key(), tag.value() == null ? "" : tag.value());
+        }
+        return tags;
+    }
+
     /** The full ARN of the secret with this name in the given account and region, or empty when there is none. */
     Optional<String> findArnByName(String accountId, String name, String region) {
         String key = regionKey(region, name);
