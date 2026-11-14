@@ -3,6 +3,7 @@ package io.floci.aws.testing;
 import io.restassured.RestAssured;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.client.builder.AwsClientBuilder;
 import software.amazon.awssdk.awscore.client.builder.AwsSyncClientBuilder;
@@ -49,6 +50,13 @@ public final class AwsTestClients {
     public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, AwsCredentials credentials, Region region, URI endpoint) {
         return create(builder, credentials, region, UrlConnectionHttpClient.builder(), endpoint);
+    }
+
+    /** Temporary credentials, as AssumeRole or GetSessionToken returns them, sent with their session token. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+            B builder, String accessKey, String secretKey, String sessionToken, Region region) {
+        return create(builder, AwsSessionCredentials.create(accessKey, secretKey, sessionToken), region,
+                UrlConnectionHttpClient.builder(), URI.create("http://localhost:" + RestAssured.port));
     }
 
     private static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(

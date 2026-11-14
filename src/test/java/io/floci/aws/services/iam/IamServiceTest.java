@@ -70,6 +70,13 @@ class IamServiceTest {
         iamService = iamService(false);
     }
 
+    // A session's caller is the long-term principal it acts as plus aws:TokenIssueTime, which the
+    // IAM User Guide includes "only when the principal uses temporary credentials".
+    private static void assertSessionCaller(IamService.CallerArns expected, IamService.CallerArns actual) {
+        assertNotNull(actual.tokenIssueTime());
+        assertEquals(expected.withTokenIssueTime(actual.tokenIssueTime()), actual);
+    }
+
     private static IamService iamService(boolean seedDeployerPrincipal) {
         return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
     }
@@ -499,7 +506,7 @@ class IamServiceTest {
         // The principal keys ride along from the same lookup: a role session is typed as an
         // assumed role, its aws:userid is the stored role-id:session-name, and it has no
         // aws:username, which the guide lists as not present for a role.
-        assertEquals(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
+        assertSessionCaller(new IamService.CallerArns("arn:aws:sts::123456789012:assumed-role/TestRole/s",
                         "arn:aws:iam::123456789012:role/team/TestRole",
                         IamService.CallerArns.TYPE_ASSUMED_ROLE, "AROATESTROLEID:s", null),
                 service.resolveCallerArns("ASIALIVESESSION").orElseThrow());
@@ -742,7 +749,7 @@ class IamServiceTest {
         assertNull(context.sessionPolicyDocument());
         // Acting as the user means carrying the user's principal keys, aws:username included:
         // the guide gives one to an IAM user and to no other principal.
-        assertEquals(new IamService.CallerArns(alice.getArn(), alice.getArn(),
+        assertSessionCaller(new IamService.CallerArns(alice.getArn(), alice.getArn(),
                         IamService.CallerArns.TYPE_USER, alice.getUserId(), "alice"),
                 service.resolveCallerArns("ASIASESSIONTOKEN").orElseThrow());
         assertEquals(alice.getUserId(), service.resolveCallerUserId("ASIASESSIONTOKEN", "token").orElseThrow());
@@ -760,7 +767,7 @@ class IamServiceTest {
         assertEquals(1, context.identityPolicies().size());
         // "aws:userid: AWS account ID" and no aws:username, which the guide lists as not
         // present for the account root.
-        assertEquals(new IamService.CallerArns("arn:aws:iam::000000000000:root",
+        assertSessionCaller(new IamService.CallerArns("arn:aws:iam::000000000000:root",
                         "arn:aws:iam::000000000000:root", IamService.CallerArns.TYPE_ACCOUNT,
                         "000000000000", null),
                 service.resolveCallerArns("ASIAROOTSESSION").orElseThrow());
@@ -871,7 +878,7 @@ class IamServiceTest {
         assertEquals(ALL_S3, withPolicy.sessionPolicyDocument());
         // The same aws:userid both ways, since one derivation now serves both readers, and no
         // aws:username: the guide lists it as not present for a federated user.
-        assertEquals(new IamService.CallerArns(federatedArn, federatedArn,
+        assertSessionCaller(new IamService.CallerArns(federatedArn, federatedArn,
                         IamService.CallerArns.TYPE_FEDERATED_USER, "000000000000:Bob", null),
                 service.resolveCallerArns("ASIAWITHPOLICY").orElseThrow());
         assertEquals("000000000000:Bob", service.resolveCallerUserId("ASIAWITHPOLICY", "token").orElseThrow());

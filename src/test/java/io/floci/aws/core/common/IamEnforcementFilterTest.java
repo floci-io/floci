@@ -41,6 +41,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
@@ -1276,7 +1278,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1284,7 +1286,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
                 .thenReturn(null);
@@ -1298,14 +1300,14 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000")));
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000")));
         verify(evaluator).evaluateResolvedResourcePolicy(
                 any(),
                 eq(ResourcePolicyDecision.NEUTRAL),
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000")));
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000")));
         verify(containerRequest, never()).abortWith(any());
     }
 
@@ -1334,7 +1336,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableA"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableA", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1342,7 +1344,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("dynamodb:BatchGetItem"),
                 eq("arn:aws:dynamodb:us-east-1:000000000000:table/TableB"),
-                eq(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
+                sameContext(globalContext(null, "arn:aws:dynamodb:us-east-1:000000000000:table/TableB", "000000000000"))))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
         when(conditionContextResolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest))
                 .thenReturn(null);
@@ -1425,7 +1427,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(conditions, "*", "222233334444"))))
+                sameContext(globalContext(conditions, "*", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
@@ -1436,7 +1438,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(conditions, "*", "222233334444")));
+                sameContext(globalContext(conditions, "*", "222233334444")));
         verify(containerRequest).abortWith(any(Response.class));
     }
 
@@ -1452,7 +1454,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(first, "*", "222233334444"))))
+                sameContext(globalContext(first, "*", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
         when(evaluator.evaluateResolvedResourcePolicy(
                 any(),
@@ -1460,7 +1462,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(second, "*", "222233334444"))))
+                sameContext(globalContext(second, "*", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.DENY);
 
         newFilter().filter(containerRequest);
@@ -1471,7 +1473,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("ec2:TerminateInstances"),
                 eq("*"),
-                eq(globalContext(second, "*", "222233334444")));
+                sameContext(globalContext(second, "*", "222233334444")));
         verify(containerRequest).abortWith(any(Response.class));
     }
 
@@ -1510,6 +1512,22 @@ class IamEnforcementFilterTest {
                                                             String resourceArn, String accountId) {
         return IamConditionContextResolver.withGlobalContext(
                 serviceContext, resourceArn, "us-east-1", accountId, null);
+    }
+
+    // aws:CurrentTime and aws:EpochTime are the time of the request, so an expected context built
+    // apart from it cannot carry the same values: both keys must be there, and the rest must match.
+    private static Map<String, List<String>> sameContext(Map<String, List<String>> expected) {
+        return argThat(actual -> actual != null
+                && actual.containsKey("aws:CurrentTime")
+                && actual.containsKey("aws:EpochTime")
+                && withoutRequestTime(actual).equals(withoutRequestTime(expected)));
+    }
+
+    private static Map<String, List<String>> withoutRequestTime(Map<String, List<String>> context) {
+        Map<String, List<String>> rest = new LinkedHashMap<>(context);
+        rest.remove("aws:CurrentTime");
+        rest.remove("aws:EpochTime");
+        return rest;
     }
 
     private void stubTaggedTerminate(ContainerRequestContext containerRequest,
@@ -1562,7 +1580,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::bucket"),
-                eq(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444"))))
+                sameContext(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444"))))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         IamEnforcementFilter filter = newFilter();
@@ -1575,7 +1593,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.SAME_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::bucket"),
-                eq(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444")));
+                sameContext(globalContext(conditions, "arn:aws:s3:::bucket", "222233334444")));
     }
 
     @Test
@@ -2613,7 +2631,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.CROSS_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::partner-bucket"),
-                eq(expected)))
+                sameContext(expected)))
                 .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
 
         filterWithBucketOwner("111111111111").filter(containerRequest);
@@ -2624,7 +2642,7 @@ class IamEnforcementFilterTest {
                 eq(ResourceAccountRelationship.CROSS_ACCOUNT),
                 eq("s3:ListBucket"),
                 eq("arn:aws:s3:::partner-bucket"),
-                eq(expected));
+                sameContext(expected));
     }
 
     /** Builds a filter whose only resource-policy provider reports the given bucket owner. */
