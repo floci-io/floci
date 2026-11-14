@@ -1633,9 +1633,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         } else {
             SparkJobRunner.Outcome outcome;
             StepProgress progress = new StepProgress(launch);
+            String image = null;
             try {
-                SparkJobRunner.Job running = releaseImage != null && !progress.cancelled()
-                        ? job.inImage(releaseImage.get()) : job;
+                image = releaseImage != null && !progress.cancelled() ? releaseImage.get() : null;
+                SparkJobRunner.Job running = image != null ? job.inImage(image) : job;
                 // The cluster's storage is there, its HDFS running, before its first step's container mounts it. A step
                 // a cancel, its cluster's end or a reset has passed does not start, so it makes none.
                 if (job.storage() != null && !progress.cancelled()) {
@@ -1655,6 +1656,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 } else {
                     LOG.warnv(e, "EMR step {0} could not run", launch.stepId());
                     outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
+                }
+            } finally {
+                // Its containers have come and gone, or never came, so a newer image of its kind may remove this one.
+                if (image != null) {
+                    releaseImages.released(image);
                 }
             }
             // A reset since the step started has swept the storage and wiped its cluster, so nothing would remove
@@ -1907,12 +1913,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         BooleanSupplier cancelled = () -> teardowns.get() != launch.teardownsBefore()
                 || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillBootstrapping(launch));
         BootstrapRunner.Outcome outcome;
+        String image = null;
         try {
-            outcome = bootstrapRunner.run(releaseImage != null && !cancelled.getAsBoolean()
-                    ? bootstrap.inImage(releaseImage.get()) : bootstrap, cancelled);
+            image = releaseImage != null && !cancelled.getAsBoolean() ? releaseImage.get() : null;
+            outcome = bootstrapRunner.run(image != null ? bootstrap.inImage(image) : bootstrap, cancelled);
         } catch (RuntimeException e) {
             LOG.warnv(e, "The bootstrap actions of EMR cluster {0} could not run", launch.clusterId());
             outcome = BootstrapRunner.Outcome.couldNotRun(e.getMessage());
+        } finally {
+            // An image it kept is built on this one, which Docker then keeps, so a newer one may remove it only as that
+            // image goes.
+            if (image != null) {
+                releaseImages.released(image);
+            }
         }
         BootstrapRunner.Outcome ended = outcome;
         // One that ended, however, after a teardown began ends as one Floci stopped, which starts no step: the

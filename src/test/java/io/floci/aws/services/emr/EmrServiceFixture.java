@@ -151,6 +151,8 @@ final class EmrServiceFixture {
         static final String IMAGE = "sha256:" + "3".repeat(64);
         // Each image asked for: its release, then the two it is made of, then whether it has Hive.
         final List<List<String>> asked = new ArrayList<>();
+        // Each image released, by id.
+        final List<String> released = new ArrayList<>();
         RuntimeException failure;
 
         @Override
@@ -160,6 +162,11 @@ final class EmrServiceFixture {
                 throw failure;
             }
             return IMAGE;
+        }
+
+        @Override
+        public void released(String imageId) {
+            released.add(imageId);
         }
     }
 

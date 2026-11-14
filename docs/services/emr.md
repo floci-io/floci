@@ -338,7 +338,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   another). Floci makes it the first time one of the release's clusters needs it: a container of the release's
   image, never started, gets the Hive image's folders, and is committed, as a bootstrap's is, as
   `floci-aws-emr-release:<release>-<hash>`, 0.6 GB more than the release's image, and kept for the release's next
-  cluster (`docker image rm` removes it); a newer pull of either image makes another. A failure to make it, a Hive
+  cluster (`docker image rm` removes it); a newer pull of either image makes another, which replaces the ones made
+  before from the same two image names for the same release and kind (with Hive or without): each is removed then,
+  unless a container still uses it, or a step or a bootstrap given it has yet to end, which keeps it until the next
+  newer one. Images of one kind are made one at a time, so one made of the older images never comes after the newer
+  one. One made before Floci labelled images with their kind is left. A failure to make it, a Hive
   image that cannot be pulled say, fails the step that needed it ("The step could not start: ..."), or, for a
   bootstrap, ends the cluster with `INTERNAL_ERROR`. The two images ship different builds of one goodies JAR under
   one name, so Tez keeps the Hive image's, and Hive runs with the Hive image's Hadoop configuration, which puts Tez
