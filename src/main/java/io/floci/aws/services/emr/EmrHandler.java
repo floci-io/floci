@@ -850,8 +850,78 @@ public class EmrHandler {
         node.put("TargetSpotCapacity", f.getTargetSpotCapacity());
         node.put("ProvisionedOnDemandCapacity", f.getProvisionedOnDemandCapacity());
         node.put("ProvisionedSpotCapacity", f.getProvisionedSpotCapacity());
+        if (f.getInstanceTypeSpecifications() != null) {
+            setRawJson(node, "InstanceTypeSpecifications", f.getInstanceTypeSpecifications());
+        } else {
+            // A fleet stored before its specifications were kept has only its instance types.
+            ArrayNode specifications = node.putArray("InstanceTypeSpecifications");
+            for (String instanceType : f.getInstanceTypes()) {
+                specifications.add(instanceTypeSpecification(
+                        objectMapper.createObjectNode().put("InstanceType", instanceType)));
+            }
+        }
         node.putObject("Status").put("State", f.getState());
         return node;
+    }
+
+    /**
+     * An InstanceTypeConfig as the InstanceTypeSpecification its fleet lists. The API reference gives the defaults:
+     * WeightedCapacity "Defaults to 1 if not specified", and "If neither BidPrice nor
+     * BidPriceAsPercentageOfOnDemandPrice is provided, BidPriceAsPercentageOfOnDemandPrice defaults to 100%". Its
+     * EbsConfiguration becomes an EbsBlockDevice for each volume of each EbsBlockDeviceConfig, on devices Floci
+     * names from /dev/sdb on.
+     */
+    private ObjectNode instanceTypeSpecification(JsonNode config) {
+        ObjectNode specification = objectMapper.createObjectNode();
+        copyText(config, "InstanceType", specification, "InstanceType");
+        if (hasValue(config.path("WeightedCapacity"))) {
+            specification.set("WeightedCapacity", config.path("WeightedCapacity"));
+        } else {
+            specification.put("WeightedCapacity", 1);
+        }
+        copyText(config, "BidPrice", specification, "BidPrice");
+        if (hasValue(config.path("BidPriceAsPercentageOfOnDemandPrice"))) {
+            specification.set("BidPriceAsPercentageOfOnDemandPrice",
+                    config.path("BidPriceAsPercentageOfOnDemandPrice"));
+        } else if (!specification.has("BidPrice")) {
+            specification.put("BidPriceAsPercentageOfOnDemandPrice", 100.0);
+        }
+        JsonNode configurations = config.path("Configurations");
+        if (configurations.isArray() && !configurations.isEmpty()) {
+            specification.set("Configurations", configurations);
+        }
+        JsonNode ebs = config.path("EbsConfiguration");
+        ArrayNode devices = objectMapper.createArrayNode();
+        for (JsonNode deviceConfig : ebs.path("EbsBlockDeviceConfigs")) {
+            JsonNode volumesPerInstance = deviceConfig.path("VolumesPerInstance");
+            int volumes = hasValue(volumesPerInstance) ? volumesPerInstance.asInt() : 1;
+            for (int volume = 0; volume < volumes; volume++) {
+                ObjectNode device = devices.addObject();
+                device.set("VolumeSpecification", deviceConfig.path("VolumeSpecification"));
+                device.put("Device", ebsDeviceName(devices.size() - 1));
+            }
+        }
+        if (!devices.isEmpty()) {
+            specification.set("EbsBlockDevices", devices);
+        }
+        if (hasValue(ebs.path("EbsOptimized"))) {
+            specification.set("EbsOptimized", ebs.path("EbsOptimized"));
+        }
+        copyText(config, "CustomAmiId", specification, "CustomAmiId");
+        if (hasValue(config.path("Priority"))) {
+            specification.set("Priority", config.path("Priority"));
+        }
+        return specification;
+    }
+
+    private static boolean hasValue(JsonNode node) {
+        return !node.isMissingNode() && !node.isNull();
+    }
+
+    /** /dev/sdb to /dev/sdz, then /dev/sdba on. */
+    private static String ebsDeviceName(int index) {
+        char last = (char) ('b' + index % 25);
+        return index < 25 ? "/dev/sd" + last : "/dev/sd" + (char) ('b' + index / 25 - 1) + last;
     }
 
     private ObjectNode syntheticInstanceNode(EmrCluster cluster, ListedInstances set, long index, long ordinal,
@@ -972,6 +1042,7 @@ public class EmrHandler {
             violations.add(SmithyValidationErrors.notNull(path + ".instanceFleetType"));
         }
         List<String> instanceTypes = new ArrayList<>();
+        ArrayNode specifications = objectMapper.createArrayNode();
         int position = 1;
         for (JsonNode config : f.path("InstanceTypeConfigs")) {
             String instanceType = config.path("InstanceType").asText(null);
@@ -980,9 +1051,11 @@ public class EmrHandler {
                         path + ".instanceTypeConfigs." + position + ".member.instanceType"));
             }
             instanceTypes.add(instanceType);
+            specifications.add(instanceTypeSpecification(config));
             position++;
         }
         fleet.setInstanceTypes(instanceTypes);
+        fleet.setInstanceTypeSpecifications(specifications.toString());
         fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
         fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
         return fleet;

@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.util.List;
 
 import static io.floci.aws.testing.EmrRequests.emr;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
@@ -447,6 +448,64 @@ class EmrResizeIntegrationTest {
                         + " Member must not be null"));
         emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("InstanceFleets", hasSize(1));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(16)
+    void aFleetListsTheInstanceTypeSpecificationsOfItsInstanceTypeConfigs() {
+        String id = emr("RunJobFlow", "{\"Name\":\"fleet-specifications\",\"Instances\":{"
+                + "\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceFleets\":["
+                + "{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]},"
+                + "{\"InstanceFleetType\":\"CORE\",\"TargetSpotCapacity\":4,\"InstanceTypeConfigs\":["
+                + "{\"InstanceType\":\"r5.2xlarge\",\"WeightedCapacity\":2,\"BidPrice\":\"0.25\",\"Priority\":1.0,"
+                + "\"CustomAmiId\":\"ami-0123456789abcdef0\","
+                + "\"Configurations\":[{\"Classification\":\"spark-defaults\","
+                + "\"Properties\":{\"spark.executor.memory\":\"2g\"}}],"
+                + "\"EbsConfiguration\":{\"EbsOptimized\":true,\"EbsBlockDeviceConfigs\":["
+                + "{\"VolumeSpecification\":{\"VolumeType\":\"gp3\",\"SizeInGB\":100,\"Iops\":3000,"
+                + "\"Throughput\":125},\"VolumesPerInstance\":2},"
+                + "{\"VolumeSpecification\":{\"VolumeType\":\"st1\",\"SizeInGB\":500}}]}},"
+                + "{\"InstanceType\":\"m5.2xlarge\",\"BidPriceAsPercentageOfOnDemandPrice\":80.5}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String task = emr("AddInstanceFleet", "{\"ClusterId\":\"" + id + "\",\"InstanceFleet\":"
+                + "{\"InstanceFleetType\":\"TASK\",\"TargetSpotCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"c5.xlarge\",\"WeightedCapacity\":3}]}}")
+                .then().statusCode(200).extract().path("InstanceFleetId");
+        String master = "InstanceFleets.find { it.InstanceFleetType == 'MASTER' }.InstanceTypeSpecifications";
+        String core = "InstanceFleets.find { it.InstanceFleetType == 'CORE' }.InstanceTypeSpecifications";
+        String added = "InstanceFleets.find { it.Id == '" + task + "' }.InstanceTypeSpecifications";
+
+        emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                // What the API reference gives a config that names neither: a weight of 1 and a bid of 100%.
+                .body(master, hasSize(1))
+                .body(master + "[0].InstanceType", equalTo("m5.xlarge"))
+                .body(master + "[0].WeightedCapacity", equalTo(1))
+                .body(master + "[0].BidPriceAsPercentageOfOnDemandPrice", equalTo(100.0f))
+                .body(master + "[0].containsKey('BidPrice')", equalTo(false))
+                .body(master + "[0].containsKey('EbsBlockDevices')", equalTo(false))
+                .body(core + ".InstanceType", equalTo(List.of("r5.2xlarge", "m5.2xlarge")))
+                .body(core + "[0].WeightedCapacity", equalTo(2))
+                .body(core + "[0].BidPrice", equalTo("0.25"))
+                .body(core + "[0].containsKey('BidPriceAsPercentageOfOnDemandPrice')", equalTo(false))
+                .body(core + "[0].Priority", equalTo(1.0f))
+                .body(core + "[0].CustomAmiId", equalTo("ami-0123456789abcdef0"))
+                .body(core + "[0].Configurations[0].Classification", equalTo("spark-defaults"))
+                .body(containsString("\"Properties\":{\"spark.executor.memory\":\"2g\"}"))
+                .body(core + "[0].EbsOptimized", equalTo(true))
+                // A device for each volume of each EbsBlockDeviceConfig.
+                .body(core + "[0].EbsBlockDevices.Device", equalTo(List.of("/dev/sdb", "/dev/sdc", "/dev/sdd")))
+                .body(core + "[0].EbsBlockDevices.VolumeSpecification.VolumeType",
+                        equalTo(List.of("gp3", "gp3", "st1")))
+                .body(core + "[0].EbsBlockDevices.VolumeSpecification.SizeInGB", equalTo(List.of(100, 100, 500)))
+                .body(core + "[0].EbsBlockDevices[0].VolumeSpecification.Iops", equalTo(3000))
+                .body(core + "[0].EbsBlockDevices[0].VolumeSpecification.Throughput", equalTo(125))
+                .body(core + "[1].WeightedCapacity", equalTo(1))
+                .body(core + "[1].BidPriceAsPercentageOfOnDemandPrice", equalTo(80.5f))
+                .body(added, hasSize(1))
+                .body(added + "[0].InstanceType", equalTo("c5.xlarge"))
+                .body(added + "[0].WeightedCapacity", equalTo(3));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
     }
 }

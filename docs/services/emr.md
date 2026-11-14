@@ -113,6 +113,13 @@ InstanceFleets parameters or InstanceGroups parameters, but not both.", the API 
 instance groups with `InvalidRequestException`, each saying the cluster uses the other kind; AWS's wording for these is
 not documented, so it is Floci's. A fleet without its `InstanceFleetType`, or with an `InstanceTypeConfigs` member
 without its `InstanceType`, both required, is refused with the framework's `ValidationException`.
+`ListInstanceFleets` gives each fleet its `InstanceTypeSpecifications`, one for each of the `InstanceTypeConfigs` it
+was created with, in their order: `InstanceType`, `WeightedCapacity`, `BidPrice`,
+`BidPriceAsPercentageOfOnDemandPrice`, `Configurations`, `CustomAmiId` and `Priority` as given, with the API
+reference's defaults, a `WeightedCapacity` of 1 and, for a config with neither bid, a
+`BidPriceAsPercentageOfOnDemandPrice` of 100. Its `EbsConfiguration` is listed as `EbsOptimized` and an
+`EbsBlockDevices` entry for each volume of each `EbsBlockDeviceConfigs` member, `VolumesPerInstance` of them and one
+when it is not given; the `Device` names, `/dev/sdb` onwards, are Floci's.
 
 A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
