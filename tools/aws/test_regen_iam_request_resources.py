@@ -737,9 +737,18 @@ def test_a_well_formed_document_validates():
         fill={"GroupName": "Group.Name"}, fixed={"GroupId": "g-1"}, made=True)
     document["operations"]["svc:A"]["resources"][0]["made"] = True
     assert r.validate(document) == []
-    # A type whose ARN is all an id its service mints, found by the members naming it.
+    # A type whose ARN is all an id its service mints, found by the members naming it, or each value of one list.
     document = good_document()
     document["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace", "Id"])
+    assert r.validate(document) == []
+    document["operations"]["svc:B"]["resources"][0].update(find=["Ids[]"])
+    assert r.validate(document) == []
+    # A member filling the one variable of another type's format names that type's default when left out.
+    document = good_document()
+    document["arnFormats"]["svc"]["service"] = "arn:${Partition}:svc:${Region}:${Account}:service/${ThingName}/${Name}"
+    document["operations"]["svc:A"]["types"] = ["service"]
+    document["operations"]["svc:A"]["resources"] = [{"type": "service", "fill": {"ThingName": "thing", "Name": "Names[]"},
+                                                     "defaults": {"thing": "thing"}}]
     assert r.validate(document) == []
     # A resource named through a member naming another of its service's own, which it runs on, or through each
     # value of a list's field when another member is absent.
@@ -820,7 +829,11 @@ def with_a_create() -> dict:
     (lambda d: d.pop("mintedIds"), "mintedIds"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(find=["Namespace"]), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=[]), "beside a fill"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]"]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]", "Namespace"]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults={"Names[]": "thing"}), "defaults of types"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults={"Other": "thing"}), "defaults of types"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults={}), "defaults of types"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults=["thing"]), "defaults of types"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find="Namespace"), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], fixed={"GroupId": "g"}),
      "beside a fill"),
@@ -1682,6 +1695,117 @@ def test_a_resource_one_optional_member_qualifies_is_named_only_when_the_request
     assert r.with_optional_qualifier(resources, {"ClusterIdentifier", "DbName"}) == [
         dict(resources[0], unless={"DbName": [None]}), resources[1]]
     assert r.with_optional_qualifier(resources, {"ClusterIdentifier"}) == resources
+
+
+CLUSTERS = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterName}",
+            "service": "arn:${Partition}:svc:${Region}:${Account}:service/${ClusterName}/${ServiceName}",
+            "task-definition": "arn:${Partition}:svc:${Region}:${Account}:task-definition/"
+                               "${TaskDefinitionFamilyName}:${TaskDefinitionRevisionNumber}"}
+
+
+def cluster_model(operation: str, docs: dict[str, str], required: tuple[str, ...] = ()) -> dict[str, dict]:
+    """A JSON model whose operation takes `docs`' members, `Names` lists for those ending in `s`, others strings."""
+    shapes = {"String": {"type": "string"}, "Names": {"type": "list", "member": {"shape": "String"}},
+              "In": {"type": "structure", "required": list(required), "members": {
+                  name: {"shape": "Names" if name.endswith("s") else "String", "documentation": doc}
+                  for name, doc in docs.items()}}}
+    return {"svc": {"metadata": {"protocol": "json"}, "operations": {operation: {"input": {"shape": "In"}}},
+                    "shapes": shapes}}
+
+
+CLUSTER_DOC = ("<p>The short name or full Amazon Resource Name (ARN) of the cluster that hosts the service to describe. "
+               "If you do not specify a cluster, the default cluster is assumed.</p>")
+
+
+def test_a_member_whose_service_uses_its_default_when_left_out_names_that_default():
+    # ECS: "If you do not specify a cluster, the default cluster is assumed", or "default is used".
+    assert r.defaulted_members(cluster_model("DescribeServices", {"cluster": CLUSTER_DOC}), "DescribeServices") == {
+        "cluster": "cluster"}
+    assert r.defaulted_members(cluster_model("ListThings", {"cluster": "<p>If you don't specify a cluster, default is "
+                                                                       "used.</p>"}), "ListThings") == {"cluster": "cluster"}
+    assert r.defaulted_members(cluster_model("DescribeClusters", {"clusters": "<p>A list of up to 100 cluster names. If "
+                                                                              "you do not specify a cluster, the default "
+                                                                              "cluster is assumed.</p>"}),
+                               "DescribeClusters") == {"clusters[]": "cluster"}
+    # A required member is never left out, and one documenting no default names none.
+    assert r.defaulted_members(cluster_model("DeleteCluster", {"cluster": CLUSTER_DOC}, ("cluster",)),
+                               "DeleteCluster") == {}
+    assert r.defaulted_members(cluster_model("DescribeThing", {"cluster": "<p>The name of the cluster.</p>"}),
+                               "DescribeThing") == {}
+    service = {"type": "service", "fill": {"ClusterName": "cluster", "ServiceName": "services[]"}}
+    defaulted = dict(service, defaults={"cluster": "cluster"})
+    assert r.with_documented_defaults([service], CLUSTERS, {"cluster": "cluster"}) == [defaulted]
+    # Only the default of the type whose format is that variable alone, named by the documentation's word.
+    assert r.with_documented_defaults([service], CLUSTERS, {"cluster": "pool"}) == [service]
+    assert r.with_documented_defaults([service], CLUSTERS, {"serviceName": "service"}) == [service]
+    # Named then, not only when the request gives it.
+    assert r.with_optional_qualifier([defaulted], {"cluster"}) == [defaulted]
+    assert r.with_optional_qualifier([service], {"cluster"}) == [dict(service, unless={"cluster": [None]})]
+
+
+def test_a_member_documented_as_a_name_or_an_arn_of_another_type_may_give_that_types_arn():
+    for doc in (CLUSTER_DOC, "<p>The short name or full ARN of the cluster that hosts the task.</p>",
+                # AWS's own typo, the "of" left out.
+                "<p>The short name or full Amazon Resource Name (ARN)the cluster that hosts the service to describe.</p>",
+                # The two the other way round, and the type before them past the first sentence.
+                "<p>The Amazon Resource Name (ARN) or short name of the cluster the task is running in.</p>",
+                "<p>The cluster that hosts the service. This can either be the cluster name or ARN.</p>"):
+        assert r.documented_name_or_arn_members(cluster_model("DescribeServices", {"cluster": doc}),
+                                                "DescribeServices") == {"cluster": "cluster"}
+    assert r.documented_name_or_arn_members(cluster_model("DescribeServices", {"cluster": "<p>The name of the cluster."
+                                                                                          "</p>"}), "DescribeServices") == {}
+    service = {"type": "service", "fill": {"ClusterName": "cluster", "ServiceName": "service"}}
+    cluster = {"type": "cluster", "fill": {"ClusterName": "cluster"}}
+    assert r.with_arn_of([service, cluster], CLUSTERS, {}, {"cluster": "cluster"}) == [
+        dict(service, arnOf={"cluster": "cluster"}), cluster]
+    # A pattern taking the ARN says so of the resource's own type too.
+    assert r.with_arn_of([cluster], CLUSTERS, {"cluster": "cluster"}) == [dict(cluster, arnOf={"cluster": "cluster"})]
+
+
+def test_each_elements_id_whose_target_type_is_one_type_fills_that_types_last_variable():
+    shapes = {"String": {"type": "string"}, "TargetType": {"type": "string", "enum": ["container-instance"]},
+              "Attribute": {"type": "structure", "members": {"name": {"shape": "String"},
+                                                             "targetType": {"shape": "TargetType"},
+                                                             "targetId": {"shape": "String"}}},
+              "Attributes": {"type": "list", "member": {"shape": "Attribute"}},
+              "In": {"type": "structure", "members": {"cluster": {"shape": "String"},
+                                                      "attributes": {"shape": "Attributes"}}}}
+    models = {"svc": {"metadata": {"protocol": "json"}, "operations": {"PutAttributes": {"input": {"shape": "In"}}},
+                      "shapes": shapes}}
+    typed = r.typed_target_fields(models, "PutAttributes")
+    assert typed == {"attributes[].targetId": ["container-instance"]}
+    formats = {"container-instance": "arn:${Partition}:svc:${Region}:${Account}:container-instance/${ClusterName}/"
+                                     "${ContainerInstanceId}"}
+    instance = {"type": "container-instance", "fill": {"ClusterName": "cluster"}}
+    assert r.with_typed_targets([instance], formats, typed) == [
+        {"type": "container-instance", "fill": {"ClusterName": "cluster",
+                                                "ContainerInstanceId": "attributes[].targetId"}}]
+    # Not a type the enum does not name alone, nor a variable a member fills already.
+    assert r.with_typed_targets([instance], formats, {"attributes[].targetId": ["container-instance", "task"]}) == [
+        instance]
+    filled = {"type": "container-instance", "fill": {"ClusterName": "cluster", "ContainerInstanceId": "instance"}}
+    assert r.with_typed_targets([filled], formats, typed) == [filled]
+
+
+def test_a_type_of_two_variables_its_documentation_spells_is_found_by_its_service():
+    assert r.spelled("task-definition", CLUSTERS["task-definition"]) == "(family:revision)"
+    assert r.spelled("service", CLUSTERS["service"]) is None
+    assert r.spelled("cluster", CLUSTERS["cluster"]) is None
+    run = cluster_model("RunTask", {"taskDefinition": "<p>The <code>family</code> and <code>revision</code> (<code>"
+                                                      "family:revision</code>) or full ARN of the task definition to "
+                                                      "run.</p>"})
+    # Read neither as an ARN alone nor left unnamed: its service resolves a family to its latest revision.
+    assert r.with_documented("svc:RunTask", ["task-definition"], CLUSTERS, run, []) == [
+        {"type": "task-definition", "fill": {}, "find": ["taskDefinition"]}]
+    delete = cluster_model("DeleteTaskDefinitions", {"taskDefinitions": "<p>The family and revision (family:revision)"
+                                                                        " or full Amazon Resource Name (ARN) of the "
+                                                                        "task definition to delete.</p>"})
+    assert r.with_documented("svc:DeleteTaskDefinitions", ["task-definition"], CLUSTERS, delete, []) == [
+        {"type": "task-definition", "fill": {}, "find": ["taskDefinitions[]"]}]
+    # A member holding the ARN alone still names it as one.
+    by_arn = cluster_model("RunTask", {"definition": "<p>The full ARN of the task definition to run.</p>"})
+    assert r.with_documented("svc:RunTask", ["task-definition"], CLUSTERS, by_arn, []) == [
+        {"types": ["task-definition"], "arn": "definition"}]
 
 
 def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():

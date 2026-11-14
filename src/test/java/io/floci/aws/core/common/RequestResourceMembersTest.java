@@ -192,8 +192,9 @@ class RequestResourceMembersTest {
         assertEquals(List.of(new Member("Namespace", false), new Member("Dimension", false)), parseUnchecked(document(
                 formats, "{\"type\":\"target\",\"fill\":{},\"find\":[\"Namespace\",\"Dimension\"]}"))
                 .operations().get("a:Op").getFirst().find());
-        // No members, a list, members beside one filling it, no list of them, or beside members reading it otherwise.
-        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\"]",
+        // No members, a list beside another, members beside one filling it, no list of them, or beside members
+        // reading it otherwise.
+        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\",\"Namespace\"]",
                 "\"fill\":{\"Id\":\"Id\"},\"find\":[\"Namespace\"]", "\"fill\":{},\"find\":\"Namespace\"",
                 "\"fill\":{},\"find\":{\"a\":\"Namespace\"}",
                 "\"fill\":{},\"find\":[\"Namespace\"],\"absent\":{\"Namespace\":\"ecs\"}")) {
@@ -392,6 +393,33 @@ class RequestResourceMembersTest {
         assertEquals("A{}.Name", each.path());
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A{}.B{}.Name\"}}")));
+    }
+
+    /**
+     * A member filling the one variable of another type's format names that type's default for a request leaving it
+     * out ({@code defaults}: an ECS service on the default cluster), and a type its service finds may be found by each
+     * value of one list member; a default for a member filling no such variable, or none, and a list beside another
+     * member to find by, fail to load.
+     */
+    @Test
+    void aDefaultAMemberNamesWhenLeftOutAndAFindByOneListAreReadAsWritten() {
+        String formats = "\"arnFormats\":{\"a\":{"
+                + "\"cluster\":\"arn:${Partition}:a:${Region}:${Account}:cluster/${ClusterName}\","
+                + "\"service\":\"arn:${Partition}:a:${Region}:${Account}:service/${ClusterName}/${ServiceName}\"}}";
+        String fill = "\"fill\":{\"ClusterName\":\"cluster\",\"ServiceName\":\"services[]\"}";
+        assertEquals(Map.of("cluster", "cluster"), parseUnchecked(document(formats, "{\"type\":\"service\"," + fill
+                + ",\"defaults\":{\"cluster\":\"cluster\"}}")).operations().get("a:Op").getFirst().defaults());
+        assertEquals(Map.of(), parseUnchecked(document(formats, "{\"type\":\"service\"," + fill + "}"))
+                .operations().get("a:Op").getFirst().defaults());
+        for (String bad : List.of("{\"services[]\":\"cluster\"}", "{\"other\":\"cluster\"}", "{\"cluster\":\"service\"}",
+                "{\"cluster\":\"none\"}", "{}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"type\":\"service\"," + fill
+                    + ",\"defaults\":" + bad + "}")), bad);
+        }
+        assertEquals(List.of(new Member("names", true)), parseUnchecked(document(formats,
+                "{\"type\":\"service\",\"fill\":{},\"find\":[\"names[]\"]}")).operations().get("a:Op").getFirst().find());
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"type\":\"service\",\"fill\":{},\"find\":[\"names[]\",\"cluster\"]}")));
     }
 
     /**

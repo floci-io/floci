@@ -10,7 +10,6 @@ import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
-import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.iam.ResourceArnBuilder;
@@ -90,19 +89,20 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
      *
      * @param redshiftData finds the workgroup or the session target a Data API request names; without it a
      *                     workgroup is any workgroup and a session names nothing
-     * @param ecs          finds the task definition revision or the service a request reaches, reading only; without
-     *                     it such a request names nothing
+     * @param ecs          finds the task definition revision a reference resolves to and the default cluster, reading
+     *                     only; without it a family names any revision and a request naming no cluster any cluster
      * @param callback     whether the state's resource ended in {@code .waitForTaskToken}, which {@code integration}
      *                     no longer shows: EMR and EMR Serverless have no such form, so theirs stays unsupported
      */
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
-                                        StoredResourceArns redshiftData, EcsService ecs, boolean callback) {
+                                        StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback) {
         if (integration.isAnySuffix("ecs", "runTask")
                 && (integration.suffix().isEmpty() || ".sync".equals(integration.suffix()))) {
-            return Optional.of(ecsRunTask(input, machine, ecs));
+            return Optional.of(accessDenied(ECS_OPTIMIZED_PREFIX, ecs("RunTask", input, machine, ecs)));
         }
         if (integration.isSdkService("ecs") && SdkManagementTaskInvoker.supports(integration)) {
-            return Optional.of(ecsSdk(integration.api(), input, machine, ecs));
+            return Optional.of(accessDenied(ECS_SDK_PREFIX,
+                    ecs(AslExecutor.capitalizeFirst(integration.api()), input, machine, ecs)));
         }
         if (!callback && integration.isOptimizedService("elasticmapreduce") && EmrTaskInvoker.serves(integration)) {
             return Optional.of(emr(integration.api(), input, machine));
@@ -327,45 +327,26 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
     }
 
     /**
-     * {@code ecs:RunTask} on the revision the task would run, as {@code EcsService.runTask} resolves the reference, so
-     * a family and the revision it stands for are the same resource. A definition ECS does not have names nothing, so
-     * ECS answers it.
+     * The ECS call an API makes, checked as the vendored request resources check the same call made directly, on what
+     * its request names, its members read in either casing as the integration recases them: {@code RunTask} on the
+     * revision ECS resolves its task definition to, a family alone being its latest, and a service on the cluster the
+     * request names, or the default one. {@code ListServices} acts on no resource type. A request that is no object is
+     * answered by the service.
      */
-    private static TaskPermissions ecsRunTask(JsonNode input, StateMachine machine, EcsService ecs) {
-        String taskDefinition = input.path("TaskDefinition").asText(null);
-        if (ecs == null || taskDefinition == null) {
-            return accessDenied(ECS_OPTIMIZED_PREFIX, List.of());
-        }
-        return accessDenied(ECS_OPTIMIZED_PREFIX, ecs.taskDefinitionArn(taskDefinition, regionOf(machine))
-                .map(arn -> List.of(new Permission("ecs:RunTask", arn))).orElse(List.of()));
-    }
-
-    /**
-     * The ECS action on the service each request reaches, read as the handler reads its members, either casing being
-     * recased for it, and resolved as the handler resolves them: a service ECS does not have names nothing, so ECS
-     * answers it. {@code ListServices} has no resource type in the service reference.
-     */
-    private static TaskPermissions ecsSdk(String api, JsonNode input, StateMachine machine, EcsService ecs) {
-        String action = "ecs:" + AslExecutor.capitalizeFirst(api);
-        if ("listServices".equals(api)) {
-            return accessDenied(ECS_SDK_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
-        }
+    private static List<Permission> ecs(String operation, JsonNode input, StateMachine machine,
+                                        StoredResourceArns ecs) {
+        String namedAs = "ecs:" + operation;
+        String action = IamAuthorizedActions.actionFor("ecs", operation);
         JsonNode request = AslExecutor.recaseKeys(MAPPER, input, false);
-        if (ecs == null || !request.isObject()) {
-            return accessDenied(ECS_SDK_PREFIX, List.of());
+        if (!request.isObject() || !RequestResources.reads(namedAs)) {
+            return List.of();
         }
-        String cluster = request.has("cluster") ? request.path("cluster").asText() : null;
-        String region = regionOf(machine);
-        Set<String> services = new LinkedHashSet<>();
-        if ("updateService".equals(api)) {
-            ecs.updatedServiceArn(cluster, request.path("service").asText(), region).ifPresent(services::add);
-        } else if (request.path("services").isArray()) {
-            for (JsonNode service : request.path("services")) {
-                ecs.describedServiceArn(cluster, service.asText(), region).ifPresent(services::add);
-            }
+        if (RequestResources.actsOnNoResource(namedAs)) {
+            return List.of(new Permission(action, ANY_RESOURCE));
         }
-        return accessDenied(ECS_SDK_PREFIX,
-                services.stream().map(service -> new Permission(action, service)).toList());
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        return RequestResources.ofBody(namedAs, request, owner.partition(), owner.region(), owner.accountId(), ecs)
+                .stream().map(resource -> new Permission(action, resource)).toList();
     }
 
     /**
@@ -426,10 +407,6 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
         return accessDenied(EMR_SERVERLESS_PREFIX, RequestChecks.of("emr-serverless:" + AslExecutor.capitalizeFirst(api),
                         request, owner.partition(), owner.region(), owner.accountId(), null).stream()
                 .map(check -> new Permission(check.action(), check.resource(), check.context())).toList());
-    }
-
-    private static String regionOf(StateMachine machine) {
-        return AwsArnUtils.parse(machine.getStateMachineArn()).region();
     }
 
     /** The value when it is the non-blank string an id has to be, as the integrations require of one. */

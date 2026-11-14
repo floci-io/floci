@@ -3,7 +3,6 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.StoredResourceArns;
-import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
 import org.junit.jupiter.api.Test;
@@ -29,6 +28,7 @@ class TaskPermissionsTest {
     private static final String ENDPOINT = "arn:aws:sns:eu-west-1:111122223333:endpoint/GCM/app/id";
     private static final String TASK_DEFINITION = "arn:aws:ecs:eu-west-1:111122223333:task-definition/orders:7";
     private static final String SERVICE = "arn:aws:ecs:eu-west-1:111122223333:service/c/s";
+    private static final String ANY_REVISION = "arn:aws:ecs:eu-west-1:111122223333:task-definition/*:*";
     private static final String EMR_CLUSTER = "arn:aws:elasticmapreduce:eu-west-1:111122223333:cluster/j-1";
     private static final String APPLICATION = "arn:aws:emr-serverless:eu-west-1:111122223333:/applications/a";
 
@@ -400,79 +400,68 @@ class TaskPermissionsTest {
         assertEquals(Optional.empty(), TaskPermissions.of(integration("aws-sdk:redshiftdata:executeStatement.sync"), json("{}"), machine("aws")));
     }
 
-    /** Whatever names it, the check is on the revision {@code EcsService} finds, which is the one it would run. */
+    /** Whatever names it, the check is on the revision ECS resolves it to, which is the one it would run. */
     @ParameterizedTest
     @ValueSource(strings = {"ecs:runTask", "ecs:runTask.sync"})
-    void runTaskIsCheckedOnTheRevisionEcsFinds(String tail) throws Exception {
-        EcsService ecs = mock(EcsService.class);
-        when(ecs.taskDefinitionArn("orders", "eu-west-1")).thenReturn(Optional.of(TASK_DEFINITION));
-
-        assertEquals(TaskPermissions.accessDenied("ECS.", List.of(new Permission("ecs:RunTask", TASK_DEFINITION))),
-                ecsPermissions(tail, "{\"TaskDefinition\":\"orders\"}", ecs));
+    void runTaskIsCheckedOnTheRevisionEcsResolves(String tail) throws Exception {
+        for (String reference : List.of("orders", "orders:7", TASK_DEFINITION)) {
+            assertEquals(TaskPermissions.accessDenied("ECS.", List.of(new Permission("ecs:RunTask", TASK_DEFINITION))),
+                    ecsPermissions(tail, "{\"TaskDefinition\":\"" + reference + "\"}", ecs()), reference);
+        }
     }
 
     /** A form the integration does not serve is left to its unsupported-mode answer, whatever the role. */
     @Test
     void aRunTaskFormEcsDoesNotServeStaysUnchecked() throws Exception {
         assertEquals(Optional.empty(), TaskPermissions.of(integration("ecs:runTask.sync:2"),
-                json("{\"TaskDefinition\":\"orders\"}"), machine("aws"), null, mock(EcsService.class), false));
+                json("{\"TaskDefinition\":\"orders\"}"), machine("aws"), null, ecs(), false));
     }
 
     /** {@code executeTaskState} strips the suffix, so this is a {@code .waitForTaskToken} as the dispatch sees it. */
     @Test
     void runTaskWithATokenIsChecked() throws Exception {
-        EcsService ecs = mock(EcsService.class);
-        when(ecs.taskDefinitionArn("orders", "eu-west-1")).thenReturn(Optional.of(TASK_DEFINITION));
-
         assertEquals(List.of(new Permission("ecs:RunTask", TASK_DEFINITION)),
                 TaskPermissions.of(integration("ecs:runTask"), json("{\"TaskDefinition\":\"orders\"}"), machine("aws"),
-                        null, ecs, true).orElseThrow().permissions());
+                        null, ecs(), true).orElseThrow().permissions());
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"{}", "{\"TaskDefinition\":null}", "{\"TaskDefinition\":\"no-such\"}"})
-    void aTaskDefinitionEcsDoesNotFindNeedsNoPermission(String request) throws Exception {
-        assertEquals(TaskPermissions.accessDenied("ECS.", List.of()),
-                ecsPermissions("ecs:runTask", request, mock(EcsService.class)));
-    }
-
+    /** A request naming no definition is answered by ECS; one naming a definition ECS does not have, any revision. */
     @Test
-    void runTaskWithoutEcsNamesNothing() throws Exception {
-        assertEquals(TaskPermissions.accessDenied("ECS.", List.of()), TaskPermissions.of(integration("ecs:runTask"),
-                json("{\"TaskDefinition\":\"orders\"}"), machine("aws")).orElseThrow());
+    void aTaskDefinitionEcsDoesNotHaveIsCheckedWithAnyRevision() throws Exception {
+        for (String request : List.of("{}", "{\"TaskDefinition\":null}")) {
+            assertEquals(TaskPermissions.accessDenied("ECS.", List.of()), ecsPermissions("ecs:runTask", request, ecs()),
+                    request);
+        }
+        assertEquals(List.of(new Permission("ecs:RunTask", ANY_REVISION)),
+                ecsPermissions("ecs:runTask", "{\"TaskDefinition\":\"no-such\"}", ecs()).permissions());
+        assertEquals(List.of(new Permission("ecs:RunTask", ANY_REVISION)), TaskPermissions.of(integration("ecs:runTask"),
+                json("{\"TaskDefinition\":\"orders\"}"), machine("aws")).orElseThrow().permissions());
     }
 
     /** The members are read in either casing, as the SDK form recases them for the handler. */
     @ParameterizedTest
-    @ValueSource(strings = {"{\"Cluster\":\"c\",\"Service\":\"s\"}", "{\"cluster\":\"c\",\"service\":\"s\"}"})
-    void updateServiceIsCheckedOnTheServiceEcsFinds(String request) throws Exception {
-        EcsService ecs = mock(EcsService.class);
-        when(ecs.updatedServiceArn("c", "s", "eu-west-1")).thenReturn(Optional.of(SERVICE));
-
+    @ValueSource(strings = {"{\"Cluster\":\"c\",\"Service\":\"s\"}", "{\"cluster\":\"c\",\"service\":\"s\"}",
+            "{\"Cluster\":\"arn:aws:ecs:eu-west-1:111122223333:cluster/c\",\"Service\":\"s\"}"})
+    void updateServiceIsCheckedOnTheServiceItNames(String request) throws Exception {
         assertEquals(TaskPermissions.accessDenied("Ecs.", List.of(new Permission("ecs:UpdateService", SERVICE))),
-                ecsPermissions("aws-sdk:ecs:updateService", request, ecs));
+                ecsPermissions("aws-sdk:ecs:updateService", request, ecs()));
     }
 
     @Test
-    void updateServiceWithNoClusterAsksForTheDefault() throws Exception {
-        EcsService ecs = mock(EcsService.class);
-        when(ecs.updatedServiceArn(null, "s", "eu-west-1")).thenReturn(Optional.of(SERVICE));
-
-        assertEquals(List.of(new Permission("ecs:UpdateService", SERVICE)),
-                ecsPermissions("aws-sdk:ecs:updateService", "{\"Service\":\"s\"}", ecs).permissions());
+    void updateServiceWithNoClusterIsOnTheDefaultCluster() throws Exception {
+        assertEquals(List.of(new Permission("ecs:UpdateService", "arn:aws:ecs:eu-west-1:111122223333:service/default/s")),
+                ecsPermissions("aws-sdk:ecs:updateService", "{\"Service\":\"s\"}", ecs()).permissions());
     }
 
+    /** Each service named, a name in the request's cluster and an ARN as given, whether ECS has it or not. */
     @Test
-    void describeServicesIsCheckedOnEachDistinctServiceEcsFinds() throws Exception {
-        EcsService ecs = mock(EcsService.class);
-        when(ecs.describedServiceArn("c", "a", "eu-west-1")).thenReturn(Optional.of(SERVICE));
-        when(ecs.describedServiceArn("c", SERVICE, "eu-west-1")).thenReturn(Optional.of(SERVICE));
-        when(ecs.describedServiceArn("c", "b", "eu-west-1")).thenReturn(Optional.of(SERVICE + "b"));
-
+    void describeServicesIsCheckedOnEachServiceItNames() throws Exception {
+        String inC = "arn:aws:ecs:eu-west-1:111122223333:service/c/";
         assertEquals(List.of(new Permission("ecs:DescribeServices", SERVICE),
-                        new Permission("ecs:DescribeServices", SERVICE + "b")),
+                        new Permission("ecs:DescribeServices", inC + "a"),
+                        new Permission("ecs:DescribeServices", inC + "missing")),
                 ecsPermissions("aws-sdk:ecs:describeServices",
-                        "{\"Cluster\":\"c\",\"Services\":[\"a\",\"" + SERVICE + "\",\"missing\",\"b\"]}", ecs)
+                        "{\"Cluster\":\"c\",\"Services\":[\"a\",\"" + SERVICE + "\",\"missing\",\"a\"]}", ecs())
                         .permissions());
     }
 
@@ -618,8 +607,30 @@ class TaskPermissionsTest {
                         .orElseThrow().permissions());
     }
 
-    private static TaskPermissions ecsPermissions(String tail, String request, EcsService ecs) throws Exception {
+    private static TaskPermissions ecsPermissions(String tail, String request, StoredResourceArns ecs) throws Exception {
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, ecs, false).orElseThrow();
+    }
+
+    /** What ECS answers IAM: the revision {@code orders} and {@code orders:7} resolve to, and its default cluster. */
+    private static StoredResourceArns ecs() {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "ecs";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "task-definition".equals(type) && List.of(List.of("orders"), List.of("orders:7"),
+                        List.of(TASK_DEFINITION)).contains(names) ? Optional.of(TASK_DEFINITION) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "cluster".equals(type) ? Optional.of("arn:aws:ecs:" + region + ":111122223333:cluster/default")
+                        : Optional.empty();
+            }
+        };
     }
 
     private static List<Permission> sdkPermissions(String api, String request) throws Exception {

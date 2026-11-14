@@ -907,6 +907,22 @@ with `maxResults` (1 to 100) and `nextToken`.
 | `SubmitAttachmentStateChanges` | Agent callback stub |
 | `DiscoverPollEndpoint` | Returns the agent polling endpoint |
 
+## IAM Enforcement
+
+With IAM enforcement on, each ECS request is checked on the resources it names, from the generated request
+resources: a cluster, service, task, container instance, task set or capacity provider by its name or its ARN; a
+service, task or container instance in the request's `cluster`, given by name or ARN, or in the `default` cluster
+when the request names none, as ECS does; an attribute on the container instance its `targetId` names; a service
+deployment or revision by its ARN, which Floci mints under its service as AWS does
+(`service-deployment/<cluster>/<service>/<id>`); and a task definition as the revision ECS resolves its reference to, a
+family alone being its latest revision, so `web`, `web:3` and the revision's ARN are the same resource. A service or
+task given by its ARN is checked on that ARN and, when the request's cluster is another, on the one of its name in
+that cluster too, which `UpdateService` acts on. A task definition ECS does not have is checked on any revision,
+`task-definition/*:*`. An operation whose action has no
+resource type in the Service Authorization Reference (`ListClusters`, `ListServices`, `DescribeTaskDefinition`,
+`DeregisterTaskDefinition`, the account settings) is checked on `*`. The roles a request passes are checked as
+`iam:PassRole` and the tags it sets as `ecs:TagResource`.
+
 ## Configuration
 
 Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, a Docker-backed task's containers additionally share one protected network namespace built around that ENI, and packets are filtered against its security groups. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state, including the ENI, and does not enforce packet filtering.
