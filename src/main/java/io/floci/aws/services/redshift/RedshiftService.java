@@ -1138,6 +1138,19 @@ public class RedshiftService implements ManagedSecretRotator {
         return clusters.scan(k -> true);
     }
 
+    /**
+     * The Region of the account's cluster {@code clusterIdentifier}, the one it was created in, for work done outside a
+     * request on the cluster's behalf, such as Redshift Spectrum reading that Region's Glue catalog over JDBC.
+     */
+    public Optional<String> clusterRegion(String accountId, String clusterIdentifier) {
+        return clusters.getForAccount(accountId, clusterIdentifier).map(this::clusterRegion);
+    }
+
+    /** The Region the cluster was created in; the default Region for a cluster stored before clusters kept one. */
+    private String clusterRegion(Cluster cluster) {
+        return cluster.getSnapshotRegion() == null ? regionResolver.getDefaultRegion() : cluster.getSnapshotRegion();
+    }
+
     /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in this Region. */
     public Optional<Cluster> findClusterByArn(String clusterArn) {
         if (!AwsArnUtils.looksLikeArn(clusterArn)) {
