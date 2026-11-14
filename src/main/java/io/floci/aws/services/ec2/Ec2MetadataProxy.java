@@ -161,6 +161,10 @@ public final class Ec2MetadataProxy {
                 LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
                 "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo"));
+        lines.add("is_socat_listener() {");
+        lines.add("  [ \"$(cat \"/proc/$1/comm\" 2>/dev/null)\" = socat ]"
+                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$1/cmdline\" | grep -Fq \"$2\"");
+        lines.add("}");
 
         // The writable-layer PID file survives a container restart, so verify the process name and
         // listener arguments before reusing it or retiring a pre-upgrade TCP/80 listener.
@@ -188,9 +192,7 @@ public final class Ec2MetadataProxy {
             lines.add("}");
             lines.add("cleanup_new_proxy() {");
             lines.add("  if [ -n \"$new_pid\" ]; then");
-            lines.add("    if [ \"$(cat \"/proc/$new_pid/comm\" 2>/dev/null)\" = socat ]"
-                    + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$new_pid/cmdline\""
-                    + " | grep -q '" + listener + "'; then");
+            lines.add("    if is_socat_listener \"$new_pid\" '" + listener + "'; then");
             lines.add("      kill \"$new_pid\" 2>/dev/null || true");
             lines.add("    fi");
             lines.add("    if [ \"$(cat " + pidFile + " 2>/dev/null)\" = \"$new_pid\" ]; then");
@@ -208,9 +210,7 @@ public final class Ec2MetadataProxy {
             lines.add("    nft delete chain ip floci_imds output 2>/dev/null || true");
             lines.add("  fi");
             lines.add("  if [ -n \"$legacy_new_pid\" ]; then");
-            lines.add("    if [ \"$(cat \"/proc/$legacy_new_pid/comm\" 2>/dev/null)\" = socat ]"
-                    + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$legacy_new_pid/cmdline\""
-                    + " | grep -q 'TCP-LISTEN:80,bind=" + bindIp + ",'; then");
+            lines.add("    if is_socat_listener \"$legacy_new_pid\" 'TCP-LISTEN:80,bind=" + bindIp + ",'; then");
             lines.add("      kill \"$legacy_new_pid\" 2>/dev/null || true");
             lines.add("    fi");
             lines.add("    if [ \"$(cat " + legacyPidFile + " 2>/dev/null)\" = \"$legacy_new_pid\" ]; then");
@@ -299,16 +299,11 @@ public final class Ec2MetadataProxy {
         if (routeImdsPort) {
             lines.add("  if (" + probeCommand + "); then");
             lines.add("    if [ \"$fallback_legacy\" -eq 0 ] && [ -n \"$legacy_pid\" ]"
-                    + " && [ \"$(cat \"/proc/$legacy_pid/comm\" 2>/dev/null)\" = socat ]"
-                    + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$legacy_pid/cmdline\""
-                    + " | grep -q 'TCP-LISTEN:80,bind=" + bindIp + ",'; then");
+                    + " && is_socat_listener \"$legacy_pid\" 'TCP-LISTEN:80,bind=" + bindIp + ",'; then");
             lines.add("      kill \"$legacy_pid\" 2>/dev/null || true");
             lines.add("      if [ \"$(cat " + legacyPidFile + " 2>/dev/null)\" = \"$legacy_pid\" ]; then");
             lines.add("        rm -f " + legacyPidFile);
             lines.add("      fi");
-            lines.add("    fi");
-            lines.add("    if [ \"$rule_backend\" = nft ] && [ \"$rule_added\" -eq 1 ]; then");
-            lines.add("      remove_nft_rule " + nftRuleMarker + " || true");
             lines.add("    fi");
             lines.add("    exit 0");
             lines.add("  fi");
@@ -327,9 +322,7 @@ public final class Ec2MetadataProxy {
 
     private static String socatPidCheck(String pidFile, String listener) {
         return "if [ -f " + pidFile + " ] && pid=\"$(cat " + pidFile + ")\""
-                + " && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
-                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\""
-                + " | grep -q '" + listener + "'; then";
+                + " && is_socat_listener \"$pid\" '" + listener + "'; then";
     }
 
     public static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {

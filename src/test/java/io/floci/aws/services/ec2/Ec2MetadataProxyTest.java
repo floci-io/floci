@@ -114,8 +114,9 @@ class Ec2MetadataProxyTest {
         // Attaches address if missing
         assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo"));
         // Idempotent when pid file exists and process is alive
-        assertTrue(script.contains("if [ -f /tmp/floci-imds-proxy.pid ] && pid=\"$(cat /tmp/floci-imds-proxy.pid)\" && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
-                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\" | grep -q 'TCP-LISTEN:80,bind=169.254.169.254,'; then\n  exit 0\nfi"));
+        assertTrue(script.contains("is_socat_listener() {"), script);
+        assertTrue(script.contains("is_socat_listener \"$pid\" 'TCP-LISTEN:80,bind=169.254.169.254,'; then"
+                + "\n  exit 0\nfi"), script);
         // Targets configured Floci host and IMDS port
         assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:10.0.0.1:9169 >/tmp/floci-imds-proxy.log 2>&1 &"));
         // Verifies through an IMDSv2 token even when tokenless access is refused.
@@ -140,6 +141,18 @@ class Ec2MetadataProxyTest {
     }
 
     @Test
+    void imdsStartUsesOneSocatListenerCheckAndNoObsoleteRuleCleanup() {
+        String script = Ec2ContainerManager.metadataProxyStartCommand("10.0.0.1", 9169)[2];
+
+        assertTrue(script.contains("is_socat_listener() {"), script);
+        assertEquals(1L, script.lines().filter(line -> line.contains("/comm")).count(), script);
+        assertEquals(1L, script.lines().filter(line -> line.contains("/cmdline")).count(), script);
+        assertEquals(5L, script.lines().filter(line -> line.contains("is_socat_listener ")).count(), script);
+        assertTrue(script.contains("remove_nft_rule \"$nft_rule_marker\" || true"), script);
+        assertFalse(script.contains("remove_nft_rule floci-imds-relay-42169"), script);
+    }
+
+    @Test
     void podIdentityStartCommandAttachesAddressIdempotentlyAndTargetsHostAndPort() {
         String[] command = Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566);
         assertEquals(3, command.length);
@@ -148,8 +161,8 @@ class Ec2MetadataProxyTest {
 
         String script = command[2];
         assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.170.23/32' || ip addr add 169.254.170.23/32 dev lo"));
-        assertTrue(script.contains("if [ -f /tmp/floci-pod-identity-proxy.pid ] && pid=\"$(cat /tmp/floci-pod-identity-proxy.pid)\" && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
-                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\" | grep -q 'TCP-LISTEN:80,bind=169.254.170.23,'; then\n  exit 0\nfi"));
+        assertTrue(script.contains("is_socat_listener \"$pid\" 'TCP-LISTEN:80,bind=169.254.170.23,'; then"
+                + "\n  exit 0\nfi"), script);
         assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.170.23,fork,reuseaddr TCP:10.0.0.1:4566 >/tmp/floci-pod-identity-proxy.log 2>&1 &"));
         assertTrue(script.contains("http://169.254.170.23/v1/credentials"));
     }

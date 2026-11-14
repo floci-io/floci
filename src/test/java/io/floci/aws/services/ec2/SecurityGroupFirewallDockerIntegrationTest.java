@@ -164,10 +164,7 @@ class SecurityGroupFirewallDockerIntegrationTest {
             ContainerExec.Result otherRule = ContainerExec.runMerged(docker, namespace.helperId(),
                     new String[]{"sh", "-c", "printf '%s\\n'"
                             + " 'add rule ip floci_imds output ip daddr 192.0.2.1 counter"
-                            + " comment \"guest-preserved\"'"
-                            + " 'add rule ip floci_imds output ip daddr 169.254.169.254"
-                            + " tcp dport 80 dnat to 169.254.169.254:42170"
-                            + " comment \"floci-imds-relay-42169\"' | nft -f -"}, 5);
+                            + " comment \"guest-preserved\"' | nft -f -"}, 5);
             assertEquals(0, otherRule.exitCode(), otherRule.summary());
             ContainerExec.Result repaired = ContainerExec.runMerged(docker, namespace.helperId(), start, 30);
             assertEquals(0, repaired.exitCode(), "A stale nft table was not repaired: " + repaired.summary());
@@ -177,7 +174,6 @@ class SecurityGroupFirewallDockerIntegrationTest {
             assertEquals(1L, rules.stdout().lines()
                     .filter(line -> line.contains("floci-imds-relay-42169")
                             && line.contains("169.254.169.254:42169")).count());
-            assertFalse(rules.stdout().contains("169.254.169.254:42170"), rules.summary());
             assertTrue(rules.stdout().contains("guest-preserved"), rules.summary());
             assertTrue(Boolean.TRUE.equals(docker.inspectContainerCmd(worker).exec().getState().getRunning()));
         } finally {
