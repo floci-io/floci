@@ -1,0 +1,1215 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_eks_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "ActivateCertificateAuthority": "ActivateCertificateAuthorityRequest",
+    "AssociateAccessPolicy": "AssociateAccessPolicyRequest",
+    "AssociateEncryptionConfig": "AssociateEncryptionConfigRequest",
+    "AssociateIdentityProviderConfig": "AssociateIdentityProviderConfigRequest",
+    "CancelUpdate": "CancelUpdateRequest",
+    "CreateAccessEntry": "CreateAccessEntryRequest",
+    "CreateAddon": "CreateAddonRequest",
+    "CreateCapability": "CreateCapabilityRequest",
+    "CreateCertificateAuthority": "CreateCertificateAuthorityRequest",
+    "CreateCluster": "CreateClusterRequest",
+    "CreateEksAnywhereSubscription": "CreateEksAnywhereSubscriptionRequest",
+    "CreateFargateProfile": "CreateFargateProfileRequest",
+    "CreateNodegroup": "CreateNodegroupRequest",
+    "CreatePodIdentityAssociation": "CreatePodIdentityAssociationRequest",
+    "DeleteAccessEntry": "DeleteAccessEntryRequest",
+    "DeleteAddon": "DeleteAddonRequest",
+    "DeleteCapability": "DeleteCapabilityRequest",
+    "DeleteCertificateAuthority": "DeleteCertificateAuthorityRequest",
+    "DeleteCluster": "DeleteClusterRequest",
+    "DeleteEksAnywhereSubscription": "DeleteEksAnywhereSubscriptionRequest",
+    "DeleteFargateProfile": "DeleteFargateProfileRequest",
+    "DeleteNodegroup": "DeleteNodegroupRequest",
+    "DeletePodIdentityAssociation": "DeletePodIdentityAssociationRequest",
+    "DeregisterCluster": "DeregisterClusterRequest",
+    "DescribeAccessEntry": "DescribeAccessEntryRequest",
+    "DescribeAddon": "DescribeAddonRequest",
+    "DescribeAddonConfiguration": "DescribeAddonConfigurationRequest",
+    "DescribeAddonVersions": "DescribeAddonVersionsRequest",
+    "DescribeCapability": "DescribeCapabilityRequest",
+    "DescribeCertificateAuthority": "DescribeCertificateAuthorityRequest",
+    "DescribeCluster": "DescribeClusterRequest",
+    "DescribeClusterVersions": "DescribeClusterVersionsRequest",
+    "DescribeEksAnywhereSubscription": "DescribeEksAnywhereSubscriptionRequest",
+    "DescribeFargateProfile": "DescribeFargateProfileRequest",
+    "DescribeIdentityProviderConfig": "DescribeIdentityProviderConfigRequest",
+    "DescribeInsight": "DescribeInsightRequest",
+    "DescribeInsightsRefresh": "DescribeInsightsRefreshRequest",
+    "DescribeNodegroup": "DescribeNodegroupRequest",
+    "DescribePodIdentityAssociation": "DescribePodIdentityAssociationRequest",
+    "DescribeUpdate": "DescribeUpdateRequest",
+    "DisassociateAccessPolicy": "DisassociateAccessPolicyRequest",
+    "DisassociateIdentityProviderConfig": "DisassociateIdentityProviderConfigRequest",
+    "ListAccessEntries": "ListAccessEntriesRequest",
+    "ListAccessPolicies": "ListAccessPoliciesRequest",
+    "ListAddons": "ListAddonsRequest",
+    "ListAssociatedAccessPolicies": "ListAssociatedAccessPoliciesRequest",
+    "ListCapabilities": "ListCapabilitiesRequest",
+    "ListCertificateAuthorities": "ListCertificateAuthoritiesRequest",
+    "ListClusters": "ListClustersRequest",
+    "ListEksAnywhereSubscriptions": "ListEksAnywhereSubscriptionsRequest",
+    "ListFargateProfiles": "ListFargateProfilesRequest",
+    "ListIdentityProviderConfigs": "ListIdentityProviderConfigsRequest",
+    "ListInsights": "ListInsightsRequest",
+    "ListNodegroups": "ListNodegroupsRequest",
+    "ListPodIdentityAssociations": "ListPodIdentityAssociationsRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "ListUpdates": "ListUpdatesRequest",
+    "RegisterCluster": "RegisterClusterRequest",
+    "StartInsightsRefresh": "StartInsightsRefreshRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateAccessEntry": "UpdateAccessEntryRequest",
+    "UpdateAddon": "UpdateAddonRequest",
+    "UpdateCapability": "UpdateCapabilityRequest",
+    "UpdateClusterConfig": "UpdateClusterConfigRequest",
+    "UpdateClusterVersion": "UpdateClusterVersionRequest",
+    "UpdateEksAnywhereSubscription": "UpdateEksAnywhereSubscriptionRequest",
+    "UpdateNodegroupConfig": "UpdateNodegroupConfigRequest",
+    "UpdateNodegroupVersion": "UpdateNodegroupVersionRequest",
+    "UpdatePodIdentityAssociation": "UpdatePodIdentityAssociationRequest"
+  },
+  "shapes": {
+    "AMITypes": {
+      "type": "string"
+    },
+    "AccessScope": {
+      "type": "structure",
+      "members": {
+        "type": "AccessScopeType",
+        "namespaces": "StringList"
+      }
+    },
+    "AccessScopeType": {
+      "type": "string"
+    },
+    "AckConfigRequest": {
+      "type": "structure",
+      "members": {
+        "enableCrossNamespace": "BoxedBoolean",
+        "disabledServices": "AckDisabledServicesList"
+      }
+    },
+    "AckDisabledServicesList": {
+      "type": "list",
+      "member": "AckServiceName"
+    },
+    "AckServiceName": {
+      "type": "string"
+    },
+    "ActivateCertificateAuthorityRequest": {
+      "type": "structure",
+      "members": {
+        "clientRequestToken": "String"
+      }
+    },
+    "AddonNamespaceConfigRequest": {
+      "type": "structure",
+      "members": {
+        "namespace": "namespace"
+      }
+    },
+    "AddonPodIdentityAssociations": {
+      "type": "structure",
+      "members": {
+        "serviceAccount": "String",
+        "roleArn": "String"
+      }
+    },
+    "AddonPodIdentityAssociationsList": {
+      "type": "list",
+      "member": "AddonPodIdentityAssociations"
+    },
+    "ArgoCdAwsIdcConfigRequest": {
+      "type": "structure",
+      "members": {
+        "idcInstanceArn": "String",
+        "idcRegion": "String"
+      }
+    },
+    "ArgoCdConfigRequest": {
+      "type": "structure",
+      "members": {
+        "namespace": "String",
+        "awsIdc": "ArgoCdAwsIdcConfigRequest",
+        "rbacRoleMappings": "ArgoCdRoleMappingList",
+        "networkAccess": "ArgoCdNetworkAccessConfigRequest",
+        "endpointPrefix": "ArgoCdEndpointPrefix"
+      }
+    },
+    "ArgoCdEndpointPrefix": {
+      "type": "string"
+    },
+    "ArgoCdNetworkAccessConfigRequest": {
+      "type": "structure",
+      "members": {
+        "vpceIds": "StringList"
+      }
+    },
+    "ArgoCdRole": {
+      "type": "string"
+    },
+    "ArgoCdRoleMapping": {
+      "type": "structure",
+      "members": {
+        "role": "ArgoCdRole",
+        "identities": "SsoIdentityList"
+      }
+    },
+    "ArgoCdRoleMappingList": {
+      "type": "list",
+      "member": "ArgoCdRoleMapping"
+    },
+    "AssociateAccessPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "policyArn": "String",
+        "accessScope": "AccessScope"
+      }
+    },
+    "AssociateEncryptionConfigRequest": {
+      "type": "structure",
+      "members": {
+        "encryptionConfig": "EncryptionConfigList",
+        "clientRequestToken": "String"
+      }
+    },
+    "AssociateIdentityProviderConfigRequest": {
+      "type": "structure",
+      "members": {
+        "oidc": "OidcIdentityProviderConfigRequest",
+        "tags": "TagMap",
+        "clientRequestToken": "String"
+      }
+    },
+    "AuthenticationMode": {
+      "type": "string"
+    },
+    "BlockStorage": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "BoxedBoolean": {
+      "type": "boolean"
+    },
+    "BoxedInteger": {
+      "type": "integer"
+    },
+    "CancelUpdateRequest": {
+      "type": "structure",
+      "members": {
+        "clientRequestToken": "String"
+      }
+    },
+    "CapabilityConfigurationRequest": {
+      "type": "structure",
+      "members": {
+        "argoCd": "ArgoCdConfigRequest",
+        "ack": "AckConfigRequest"
+      }
+    },
+    "CapabilityDeletePropagationPolicy": {
+      "type": "string"
+    },
+    "CapabilityType": {
+      "type": "string"
+    },
+    "Capacity": {
+      "type": "integer"
+    },
+    "CapacityTypes": {
+      "type": "string"
+    },
+    "Category": {
+      "type": "string"
+    },
+    "CategoryList": {
+      "type": "list",
+      "member": "Category"
+    },
+    "ClusterName": {
+      "type": "string"
+    },
+    "ComputeConfigRequest": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean",
+        "nodePools": "StringList",
+        "nodeRoleArn": "String"
+      }
+    },
+    "ConnectorConfigProvider": {
+      "type": "string"
+    },
+    "ConnectorConfigRequest": {
+      "type": "structure",
+      "members": {
+        "roleArn": "String",
+        "provider": "ConnectorConfigProvider"
+      }
+    },
+    "ControlPlaneEgressModeType": {
+      "type": "string"
+    },
+    "ControlPlanePlacementRequest": {
+      "type": "structure",
+      "members": {
+        "groupName": "String",
+        "spreadLevel": "SpreadLevel"
+      }
+    },
+    "ControlPlaneScalingConfig": {
+      "type": "structure",
+      "members": {
+        "tier": "ProvisionedControlPlaneTier"
+      }
+    },
+    "CreateAccessConfigRequest": {
+      "type": "structure",
+      "members": {
+        "bootstrapClusterCreatorAdminPermissions": "BoxedBoolean",
+        "authenticationMode": "AuthenticationMode"
+      }
+    },
+    "CreateAccessEntryRequest": {
+      "type": "structure",
+      "members": {
+        "principalArn": "String",
+        "kubernetesGroups": "StringList",
+        "tags": "TagMap",
+        "clientRequestToken": "String",
+        "username": "String",
+        "type": "String"
+      }
+    },
+    "CreateAddonRequest": {
+      "type": "structure",
+      "members": {
+        "addonName": "String",
+        "addonVersion": "String",
+        "serviceAccountRoleArn": "RoleArn",
+        "resolveConflicts": "ResolveConflicts",
+        "clientRequestToken": "String",
+        "tags": "TagMap",
+        "configurationValues": "String",
+        "podIdentityAssociations": "AddonPodIdentityAssociationsList",
+        "namespaceConfig": "AddonNamespaceConfigRequest"
+      }
+    },
+    "CreateCapabilityRequest": {
+      "type": "structure",
+      "members": {
+        "capabilityName": "String",
+        "clientRequestToken": "String",
+        "type": "CapabilityType",
+        "roleArn": "String",
+        "configuration": "CapabilityConfigurationRequest",
+        "tags": "TagMap",
+        "deletePropagationPolicy": "CapabilityDeletePropagationPolicy"
+      }
+    },
+    "CreateCertificateAuthorityRequest": {
+      "type": "structure",
+      "members": {
+        "clientRequestToken": "String"
+      }
+    },
+    "CreateClusterRequest": {
+      "type": "structure",
+      "members": {
+        "name": "ClusterName",
+        "version": "String",
+        "roleArn": "String",
+        "resourcesVpcConfig": "VpcConfigRequest",
+        "kubernetesNetworkConfig": "KubernetesNetworkConfigRequest",
+        "logging": "Logging",
+        "clientRequestToken": "String",
+        "tags": "TagMap",
+        "encryptionConfig": "EncryptionConfigList",
+        "outpostConfig": "OutpostConfigRequest",
+        "accessConfig": "CreateAccessConfigRequest",
+        "bootstrapSelfManagedAddons": "BoxedBoolean",
+        "upgradePolicy": "UpgradePolicyRequest",
+        "zonalShiftConfig": "ZonalShiftConfigRequest",
+        "remoteNetworkConfig": "RemoteNetworkConfigRequest",
+        "computeConfig": "ComputeConfigRequest",
+        "storageConfig": "StorageConfigRequest",
+        "deletionProtection": "BoxedBoolean",
+        "controlPlaneScalingConfig": "ControlPlaneScalingConfig",
+        "kubeApiServerConfig": "KubeApiServerConfigRequest",
+        "kubeSchedulerConfig": "KubeSchedulerConfigRequest",
+        "kubeControllerManagerConfig": "KubeControllerManagerConfigRequest"
+      }
+    },
+    "CreateEksAnywhereSubscriptionRequest": {
+      "type": "structure",
+      "members": {
+        "name": "EksAnywhereSubscriptionName",
+        "term": "EksAnywhereSubscriptionTerm",
+        "licenseQuantity": "Integer",
+        "licenseType": "EksAnywhereSubscriptionLicenseType",
+        "autoRenew": "Boolean",
+        "clientRequestToken": "String",
+        "tags": "TagMap"
+      }
+    },
+    "CreateFargateProfileRequest": {
+      "type": "structure",
+      "members": {
+        "fargateProfileName": "String",
+        "podExecutionRoleArn": "String",
+        "subnets": "StringList",
+        "selectors": "FargateProfileSelectors",
+        "clientRequestToken": "String",
+        "tags": "TagMap"
+      }
+    },
+    "CreateNodegroupRequest": {
+      "type": "structure",
+      "members": {
+        "nodegroupName": "String",
+        "scalingConfig": "NodegroupScalingConfig",
+        "diskSize": "BoxedInteger",
+        "subnets": "StringList",
+        "instanceTypes": "StringList",
+        "amiType": "AMITypes",
+        "remoteAccess": "RemoteAccessConfig",
+        "nodeRole": "String",
+        "labels": "labelsMap",
+        "taints": "taintsList",
+        "tags": "TagMap",
+        "clientRequestToken": "String",
+        "launchTemplate": "LaunchTemplateSpecification",
+        "updateConfig": "NodegroupUpdateConfig",
+        "nodeRepairConfig": "NodeRepairConfig",
+        "capacityType": "CapacityTypes",
+        "version": "String",
+        "releaseVersion": "String",
+        "warmPoolConfig": "WarmPoolConfig"
+      }
+    },
+    "CreatePodIdentityAssociationRequest": {
+      "type": "structure",
+      "members": {
+        "namespace": "String",
+        "serviceAccount": "String",
+        "roleArn": "String",
+        "clientRequestToken": "String",
+        "tags": "TagMap",
+        "disableSessionTags": "BoxedBoolean",
+        "targetRoleArn": "String",
+        "policy": "String"
+      }
+    },
+    "DeleteAccessEntryRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteAddonRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteCapabilityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteCertificateAuthorityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteClusterRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteEksAnywhereSubscriptionRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteFargateProfileRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeleteNodegroupRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeletePodIdentityAssociationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DeregisterClusterRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeAccessEntryRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeAddonConfigurationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeAddonRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeAddonVersionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeCapabilityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeCertificateAuthorityRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeClusterRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeClusterVersionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeEksAnywhereSubscriptionRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeFargateProfileRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeIdentityProviderConfigRequest": {
+      "type": "structure",
+      "members": {
+        "identityProviderConfig": "IdentityProviderConfig"
+      }
+    },
+    "DescribeInsightRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeInsightsRefreshRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeNodegroupRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribePodIdentityAssociationRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DescribeUpdateRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DisassociateAccessPolicyRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "DisassociateIdentityProviderConfigRequest": {
+      "type": "structure",
+      "members": {
+        "identityProviderConfig": "IdentityProviderConfig",
+        "clientRequestToken": "String"
+      }
+    },
+    "EksAnywhereSubscriptionLicenseType": {
+      "type": "string"
+    },
+    "EksAnywhereSubscriptionName": {
+      "type": "string"
+    },
+    "EksAnywhereSubscriptionTerm": {
+      "type": "structure",
+      "members": {
+        "duration": "Integer",
+        "unit": "EksAnywhereSubscriptionTermUnit"
+      }
+    },
+    "EksAnywhereSubscriptionTermUnit": {
+      "type": "string"
+    },
+    "ElasticLoadBalancing": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean"
+      }
+    },
+    "EncryptionConfig": {
+      "type": "structure",
+      "members": {
+        "resources": "StringList",
+        "provider": "Provider"
+      }
+    },
+    "EncryptionConfigList": {
+      "type": "list",
+      "member": "EncryptionConfig"
+    },
+    "EtcdPlacementRequest": {
+      "type": "structure",
+      "members": {
+        "spreadLevel": "SpreadLevel"
+      }
+    },
+    "FargateProfileLabel": {
+      "type": "map",
+      "value": "String"
+    },
+    "FargateProfileSelector": {
+      "type": "structure",
+      "members": {
+        "namespace": "String",
+        "labels": "FargateProfileLabel"
+      }
+    },
+    "FargateProfileSelectors": {
+      "type": "list",
+      "member": "FargateProfileSelector"
+    },
+    "HorizontalPodAutoscalerControllerConfigRequest": {
+      "type": "structure",
+      "members": {
+        "horizontalPodAutoscalerSyncPeriod": "String"
+      }
+    },
+    "IdentityProviderConfig": {
+      "type": "structure",
+      "members": {
+        "type": "String",
+        "name": "String"
+      }
+    },
+    "InsightStatusValue": {
+      "type": "string"
+    },
+    "InsightStatusValueList": {
+      "type": "list",
+      "member": "InsightStatusValue"
+    },
+    "InsightsFilter": {
+      "type": "structure",
+      "members": {
+        "categories": "CategoryList",
+        "kubernetesVersions": "StringList",
+        "statuses": "InsightStatusValueList"
+      }
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "IpFamily": {
+      "type": "string"
+    },
+    "KubeApiServerConfigRequest": {
+      "type": "structure",
+      "members": {
+        "eventTtl": "String",
+        "serviceNodePortRange": "ServiceNodePortRange"
+      }
+    },
+    "KubeControllerManagerConfigRequest": {
+      "type": "structure",
+      "members": {
+        "podGcControllerConfig": "PodGcControllerConfigRequest",
+        "horizontalPodAutoscalerControllerConfig": "HorizontalPodAutoscalerControllerConfigRequest"
+      }
+    },
+    "KubeSchedulerConfigRequest": {
+      "type": "structure",
+      "members": {
+        "nodeResourcesFit": "NodeResourcesFitConfig"
+      }
+    },
+    "KubernetesNetworkConfigRequest": {
+      "type": "structure",
+      "members": {
+        "serviceIpv4Cidr": "String",
+        "ipFamily": "IpFamily",
+        "elasticLoadBalancing": "ElasticLoadBalancing"
+      }
+    },
+    "LaunchTemplateSpecification": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "version": "String",
+        "id": "String"
+      }
+    },
+    "ListAccessEntriesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListAccessPoliciesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListAddonsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListAssociatedAccessPoliciesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListCapabilitiesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListCertificateAuthoritiesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListClustersRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListEksAnywhereSubscriptionsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListFargateProfilesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListIdentityProviderConfigsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListInsightsMaxResults": {
+      "type": "integer"
+    },
+    "ListInsightsRequest": {
+      "type": "structure",
+      "members": {
+        "filter": "InsightsFilter",
+        "maxResults": "ListInsightsMaxResults",
+        "nextToken": "String"
+      }
+    },
+    "ListNodegroupsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListPodIdentityAssociationsRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "ListUpdatesRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "LogSetup": {
+      "type": "structure",
+      "members": {
+        "types": "LogTypes",
+        "enabled": "BoxedBoolean"
+      }
+    },
+    "LogSetups": {
+      "type": "list",
+      "member": "LogSetup"
+    },
+    "LogType": {
+      "type": "string"
+    },
+    "LogTypes": {
+      "type": "list",
+      "member": "LogType"
+    },
+    "Logging": {
+      "type": "structure",
+      "members": {
+        "clusterLogging": "LogSetups"
+      }
+    },
+    "NodeRepairConfig": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean",
+        "maxUnhealthyNodeThresholdCount": "NonZeroInteger",
+        "maxUnhealthyNodeThresholdPercentage": "PercentCapacity",
+        "maxParallelNodesRepairedCount": "NonZeroInteger",
+        "maxParallelNodesRepairedPercentage": "PercentCapacity",
+        "nodeRepairConfigOverrides": "NodeRepairConfigOverridesList"
+      }
+    },
+    "NodeRepairConfigOverrides": {
+      "type": "structure",
+      "members": {
+        "nodeMonitoringCondition": "String",
+        "nodeUnhealthyReason": "String",
+        "minRepairWaitTimeMins": "NonZeroInteger",
+        "repairAction": "RepairAction"
+      }
+    },
+    "NodeRepairConfigOverridesList": {
+      "type": "list",
+      "member": "NodeRepairConfigOverrides"
+    },
+    "NodeResourcesFitConfig": {
+      "type": "structure",
+      "members": {
+        "scoringStrategy": "ScoringStrategy"
+      }
+    },
+    "NodegroupScalingConfig": {
+      "type": "structure",
+      "members": {
+        "minSize": "ZeroCapacity",
+        "maxSize": "Capacity",
+        "desiredSize": "ZeroCapacity"
+      }
+    },
+    "NodegroupUpdateConfig": {
+      "type": "structure",
+      "members": {
+        "maxUnavailable": "NonZeroInteger",
+        "maxUnavailablePercentage": "PercentCapacity",
+        "updateStrategy": "NodegroupUpdateStrategies"
+      }
+    },
+    "NodegroupUpdateStrategies": {
+      "type": "string"
+    },
+    "NonZeroInteger": {
+      "type": "integer"
+    },
+    "OidcIdentityProviderConfigRequest": {
+      "type": "structure",
+      "members": {
+        "identityProviderConfigName": "String",
+        "issuerUrl": "String",
+        "clientId": "String",
+        "usernameClaim": "String",
+        "usernamePrefix": "String",
+        "groupsClaim": "String",
+        "groupsPrefix": "String",
+        "requiredClaims": "requiredClaimsMap"
+      }
+    },
+    "OutpostConfigRequest": {
+      "type": "structure",
+      "members": {
+        "outpostArns": "StringList",
+        "controlPlaneInstanceType": "String",
+        "controlPlanePlacement": "ControlPlanePlacementRequest",
+        "etcdInstanceType": "String",
+        "etcdPlacement": "EtcdPlacementRequest"
+      }
+    },
+    "PercentCapacity": {
+      "type": "integer"
+    },
+    "PodGcControllerConfigRequest": {
+      "type": "structure",
+      "members": {
+        "terminatedPodGcThreshold": "TerminatedPodGcThresholdValue"
+      }
+    },
+    "Provider": {
+      "type": "structure",
+      "members": {
+        "keyArn": "String"
+      }
+    },
+    "ProvisionedControlPlaneTier": {
+      "type": "string"
+    },
+    "RegisterClusterRequest": {
+      "type": "structure",
+      "members": {
+        "name": "ClusterName",
+        "connectorConfig": "ConnectorConfigRequest",
+        "clientRequestToken": "String",
+        "tags": "TagMap"
+      }
+    },
+    "RemoteAccessConfig": {
+      "type": "structure",
+      "members": {
+        "ec2SshKey": "String",
+        "sourceSecurityGroups": "StringList"
+      }
+    },
+    "RemoteNetworkConfigRequest": {
+      "type": "structure",
+      "members": {
+        "remoteNodeNetworks": "RemoteNodeNetworkList",
+        "remotePodNetworks": "RemotePodNetworkList"
+      }
+    },
+    "RemoteNodeNetwork": {
+      "type": "structure",
+      "members": {
+        "cidrs": "StringList"
+      }
+    },
+    "RemoteNodeNetworkList": {
+      "type": "list",
+      "member": "RemoteNodeNetwork"
+    },
+    "RemotePodNetwork": {
+      "type": "structure",
+      "members": {
+        "cidrs": "StringList"
+      }
+    },
+    "RemotePodNetworkList": {
+      "type": "list",
+      "member": "RemotePodNetwork"
+    },
+    "RepairAction": {
+      "type": "string"
+    },
+    "ResolveConflicts": {
+      "type": "string"
+    },
+    "ResourceWeight": {
+      "type": "structure",
+      "members": {
+        "name": "ResourceWeightName",
+        "weight": "ResourceWeightValue"
+      }
+    },
+    "ResourceWeightList": {
+      "type": "list",
+      "member": "ResourceWeight"
+    },
+    "ResourceWeightName": {
+      "type": "string"
+    },
+    "ResourceWeightValue": {
+      "type": "integer"
+    },
+    "RoleArn": {
+      "type": "string"
+    },
+    "RollbackConfig": {
+      "type": "structure",
+      "members": {
+        "timeoutMinutes": "BoxedInteger"
+      }
+    },
+    "ScoringStrategy": {
+      "type": "structure",
+      "members": {
+        "type": "ScoringStrategyType",
+        "resources": "ResourceWeightList"
+      }
+    },
+    "ScoringStrategyType": {
+      "type": "string"
+    },
+    "ServiceNodePortRange": {
+      "type": "structure",
+      "members": {
+        "minPort": "Integer",
+        "maxPort": "Integer"
+      }
+    },
+    "SpreadLevel": {
+      "type": "string"
+    },
+    "SsoIdentity": {
+      "type": "structure",
+      "members": {
+        "id": "String",
+        "type": "SsoIdentityType"
+      }
+    },
+    "SsoIdentityList": {
+      "type": "list",
+      "member": "SsoIdentity"
+    },
+    "SsoIdentityType": {
+      "type": "string"
+    },
+    "StartInsightsRefreshRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "StorageConfigRequest": {
+      "type": "structure",
+      "members": {
+        "blockStorage": "BlockStorage"
+      }
+    },
+    "String": {
+      "type": "string"
+    },
+    "StringList": {
+      "type": "list",
+      "member": "String"
+    },
+    "SupportType": {
+      "type": "string"
+    },
+    "TagMap": {
+      "type": "map",
+      "value": "TagValue"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "members": {
+        "tags": "TagMap"
+      }
+    },
+    "TagValue": {
+      "type": "string"
+    },
+    "Taint": {
+      "type": "structure",
+      "members": {
+        "key": "taintKey",
+        "value": "taintValue",
+        "effect": "TaintEffect"
+      }
+    },
+    "TaintEffect": {
+      "type": "string"
+    },
+    "TerminatedPodGcThresholdValue": {
+      "type": "integer"
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "UpdateAccessConfigRequest": {
+      "type": "structure",
+      "members": {
+        "authenticationMode": "AuthenticationMode"
+      }
+    },
+    "UpdateAccessEntryRequest": {
+      "type": "structure",
+      "members": {
+        "kubernetesGroups": "StringList",
+        "clientRequestToken": "String",
+        "username": "String"
+      }
+    },
+    "UpdateAckConfig": {
+      "type": "structure",
+      "members": {
+        "enableCrossNamespace": "BoxedBoolean",
+        "disabledServices": "AckDisabledServicesList"
+      }
+    },
+    "UpdateAddonRequest": {
+      "type": "structure",
+      "members": {
+        "addonVersion": "String",
+        "serviceAccountRoleArn": "RoleArn",
+        "resolveConflicts": "ResolveConflicts",
+        "clientRequestToken": "String",
+        "configurationValues": "String",
+        "podIdentityAssociations": "AddonPodIdentityAssociationsList"
+      }
+    },
+    "UpdateArgoCdConfig": {
+      "type": "structure",
+      "members": {
+        "rbacRoleMappings": "UpdateRoleMappings",
+        "networkAccess": "ArgoCdNetworkAccessConfigRequest"
+      }
+    },
+    "UpdateCapabilityConfiguration": {
+      "type": "structure",
+      "members": {
+        "argoCd": "UpdateArgoCdConfig",
+        "ack": "UpdateAckConfig"
+      }
+    },
+    "UpdateCapabilityRequest": {
+      "type": "structure",
+      "members": {
+        "roleArn": "String",
+        "configuration": "UpdateCapabilityConfiguration",
+        "clientRequestToken": "String",
+        "deletePropagationPolicy": "CapabilityDeletePropagationPolicy"
+      }
+    },
+    "UpdateClusterConfigRequest": {
+      "type": "structure",
+      "members": {
+        "resourcesVpcConfig": "VpcConfigRequest",
+        "logging": "Logging",
+        "clientRequestToken": "String",
+        "accessConfig": "UpdateAccessConfigRequest",
+        "upgradePolicy": "UpgradePolicyRequest",
+        "zonalShiftConfig": "ZonalShiftConfigRequest",
+        "computeConfig": "ComputeConfigRequest",
+        "kubernetesNetworkConfig": "KubernetesNetworkConfigRequest",
+        "storageConfig": "StorageConfigRequest",
+        "remoteNetworkConfig": "RemoteNetworkConfigRequest",
+        "deletionProtection": "BoxedBoolean",
+        "controlPlaneScalingConfig": "ControlPlaneScalingConfig",
+        "kubeApiServerConfig": "KubeApiServerConfigRequest",
+        "kubeSchedulerConfig": "KubeSchedulerConfigRequest",
+        "kubeControllerManagerConfig": "KubeControllerManagerConfigRequest"
+      }
+    },
+    "UpdateClusterVersionRequest": {
+      "type": "structure",
+      "members": {
+        "version": "String",
+        "clientRequestToken": "String",
+        "force": "Boolean",
+        "rollbackConfig": "RollbackConfig"
+      }
+    },
+    "UpdateEksAnywhereSubscriptionRequest": {
+      "type": "structure",
+      "members": {
+        "autoRenew": "Boolean",
+        "clientRequestToken": "String"
+      }
+    },
+    "UpdateLabelsPayload": {
+      "type": "structure",
+      "members": {
+        "addOrUpdateLabels": "labelsMap",
+        "removeLabels": "labelsKeyList"
+      }
+    },
+    "UpdateNodegroupConfigRequest": {
+      "type": "structure",
+      "members": {
+        "labels": "UpdateLabelsPayload",
+        "taints": "UpdateTaintsPayload",
+        "scalingConfig": "NodegroupScalingConfig",
+        "updateConfig": "NodegroupUpdateConfig",
+        "nodeRepairConfig": "NodeRepairConfig",
+        "warmPoolConfig": "WarmPoolConfig",
+        "clientRequestToken": "String"
+      }
+    },
+    "UpdateNodegroupVersionRequest": {
+      "type": "structure",
+      "members": {
+        "version": "String",
+        "releaseVersion": "String",
+        "launchTemplate": "LaunchTemplateSpecification",
+        "force": "Boolean",
+        "clientRequestToken": "String"
+      }
+    },
+    "UpdatePodIdentityAssociationRequest": {
+      "type": "structure",
+      "members": {
+        "roleArn": "String",
+        "clientRequestToken": "String",
+        "disableSessionTags": "BoxedBoolean",
+        "targetRoleArn": "String",
+        "policy": "String"
+      }
+    },
+    "UpdateRoleMappings": {
+      "type": "structure",
+      "members": {
+        "addOrUpdateRoleMappings": "ArgoCdRoleMappingList",
+        "removeRoleMappings": "ArgoCdRoleMappingList"
+      }
+    },
+    "UpdateTaintsPayload": {
+      "type": "structure",
+      "members": {
+        "addOrUpdateTaints": "taintsList",
+        "removeTaints": "taintsList"
+      }
+    },
+    "UpgradePolicyRequest": {
+      "type": "structure",
+      "members": {
+        "supportType": "SupportType"
+      }
+    },
+    "VpcConfigRequest": {
+      "type": "structure",
+      "members": {
+        "subnetIds": "StringList",
+        "securityGroupIds": "StringList",
+        "endpointPublicAccess": "BoxedBoolean",
+        "endpointPrivateAccess": "BoxedBoolean",
+        "publicAccessCidrs": "StringList",
+        "controlPlaneEgressMode": "ControlPlaneEgressModeType"
+      }
+    },
+    "WarmPoolConfig": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean",
+        "minSize": "ZeroCapacity",
+        "maxGroupPreparedCapacity": "BoxedInteger",
+        "poolState": "WarmPoolState",
+        "reuseOnScaleIn": "BoxedBoolean"
+      }
+    },
+    "WarmPoolState": {
+      "type": "string"
+    },
+    "ZeroCapacity": {
+      "type": "integer"
+    },
+    "ZonalShiftConfigRequest": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean"
+      }
+    },
+    "labelValue": {
+      "type": "string"
+    },
+    "labelsKeyList": {
+      "type": "list",
+      "member": "String"
+    },
+    "labelsMap": {
+      "type": "map",
+      "value": "labelValue"
+    },
+    "namespace": {
+      "type": "string"
+    },
+    "requiredClaimsMap": {
+      "type": "map",
+      "value": "requiredClaimsValue"
+    },
+    "requiredClaimsValue": {
+      "type": "string"
+    },
+    "taintKey": {
+      "type": "string"
+    },
+    "taintValue": {
+      "type": "string"
+    },
+    "taintsList": {
+      "type": "list",
+      "member": "Taint"
+    }
+  }
+}

@@ -3,6 +3,8 @@ package io.floci.aws.services.glue;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.ExecutionProperty;
@@ -60,9 +62,11 @@ public class GlueJobRunService {
     private final Clock clock;
 
     @Inject
-    public GlueJobRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config) {
-        this(storageFactory.create("glue", "job_runs.json", new TypeReference<>() {}),
-                storageFactory.create("glue", "job_run_bookkeeping.json", new TypeReference<>() {}),
+    public GlueJobRunService(StorageFactory storageFactory, GlueService glueService, EmulatorConfig config,
+                             RegionResolver regionResolver) {
+        this(new RegionScopedStorage<>(storageFactory, regionResolver, "glue", "job_runs.json", new TypeReference<>() {}),
+                new RegionScopedStorage<>(storageFactory, regionResolver,
+                        "glue", "job_run_bookkeeping.json", new TypeReference<>() {}),
                 glueService, config.services().glue().jobRunDurationSeconds(), Clock.systemUTC());
     }
 

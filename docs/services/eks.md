@@ -5,6 +5,26 @@
 
 EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
 
+## Cluster request IAM conditions
+
+With IAM enforcement enabled, `CreateCluster` evaluates `eks:authenticationMode`,
+`eks:bootstrapClusterCreatorAdminPermissions`, `eks:endpointPrivateAccess`, and
+`eks:endpointPublicAccess` from the request's `accessConfig` and `resourcesVpcConfig`.
+The generated metadata also maps those keys for `UpdateClusterConfig`, except the
+create-only bootstrap flag; this does not implement the currently unsupported
+update API. Its extraction is covered by resolver tests, not an SDK update lifecycle.
+The action-to-key mappings come from AWS's Service Reference and the request paths from
+botocore. Omitted attributes remain absent from the IAM context; stored cluster settings
+and service defaults do not supply missing request conditions. Generic request-tag
+conditions continue to apply alongside these EKS-specific keys.
+
+A `CreateCluster` body is checked against botocore's EKS request shapes, vendored by
+`tools/aws/regen_eks_shapes.py`, before it is read. A boolean member given anything but a JSON
+boolean or the text `true` or `false`, such as `"endpointPublicAccess": 1`, is refused with
+`SerializationException`, so it cannot reach a cluster as `true` while its condition key carries
+no value. A structure, list or map of the wrong kind is refused the same way. EKS's own wording
+for this error has not been measured; Floci answers as the REST JSON services it was measured on do.
+
 ## Supported Operations
 
 | Operation | Description |
@@ -454,7 +474,13 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
 - A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
   started in place, keeping its published API server port and data volume: deployments come
   back as they were.
-- A missing container is recreated. Its named k3s data volume (`floci-aws-eks-<name>`; for a
+- A missing container, or a survivor that cannot be adopted, is recreated on the API server port
+  the cluster's endpoint names, so existing kubeconfigs stay valid. Only when that port is in use
+  (by another process, another container or another cluster), or it is outside the configured
+  range, does the cluster move to the first free port, which changes its endpoint; Floci logs a
+  warning when a port in use moves it. A `network` mode endpoint names the container itself, so it
+  stays the same whatever host port the container gets.
+  Its named k3s data volume (`floci-aws-eks-<name>`; for a
   [non-default account](../configuration/multi-account.md), `floci-aws-eks-<account>.<name>`) is
   reused if it survived; volumes follow the global prune policy
   (`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`, default `false`), so they are retained when the

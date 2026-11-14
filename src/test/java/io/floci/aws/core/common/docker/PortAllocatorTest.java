@@ -4,8 +4,10 @@ import io.floci.aws.testing.StartGate;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.ServerSocket;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.ConcurrentHashMap;
@@ -73,6 +75,23 @@ class PortAllocatorTest {
         } finally {
             ports.forEach(allocator::release);
         }
+    }
+
+    @Test
+    void allocateIfFreeHandsOutThatPortOnlyWhileNothingHoldsIt() throws Exception {
+        PortAllocator allocator = new PortAllocator();
+        int port = allocator.allocate(19900, 19999);
+        allocator.release(port);
+
+        assertEquals(OptionalInt.of(port), allocator.allocateIfFree(port));
+        // Reserved now, as allocate leaves a port it hands out.
+        assertEquals(OptionalInt.empty(), allocator.allocateIfFree(port));
+        allocator.release(port);
+        try (ServerSocket bound = new ServerSocket(port)) {
+            assertEquals(OptionalInt.empty(), allocator.allocateIfFree(port));
+        }
+        assertEquals(OptionalInt.of(port), allocator.allocateIfFree(port));
+        allocator.release(port);
     }
 
     @Test

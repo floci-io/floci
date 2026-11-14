@@ -89,6 +89,17 @@ public final class CfnRollback {
     public static final String TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupTargetsUpdateSnapshot";
 
     /**
+     * Holds what an update that kept an ELBv2 listener certificate resource changed on its listener:
+     * the certificates it added that the listener's list did not hold, the ones it removed, and the
+     * certificates the resource declared before, so a failed stack update can put them back. Written
+     * by {@code ElbV2CfnProvisioner} between its AddListenerCertificates and RemoveListenerCertificates
+     * and spent by the undo of a failed provision or by its {@code rollbackUpdate}, retained across a
+     * failed put back.
+     */
+    public static final String LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR =
+            "__FlociListenerCertificatesUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent

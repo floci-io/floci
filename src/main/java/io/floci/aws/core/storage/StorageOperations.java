@@ -17,12 +17,23 @@ public final class StorageOperations {
 
     /** Deletes matching values in one commit, preserving account ownership of legacy keys. */
     public static <V> void deleteMatchingAtomically(StorageBackend<String, V> store, Predicate<V> valueFilter) {
+        deleteMatchingAtomically(store, key -> true, valueFilter);
+    }
+
+    /**
+     * As above; with {@code keyFilter}, only among the keys it accepts, each as {@code store} names it: a
+     * Region view's logical key, an account store's account-relative key or unprefixed legacy key.
+     */
+    public static <V> void deleteMatchingAtomically(StorageBackend<String, V> store, Predicate<String> keyFilter,
+                                                    Predicate<V> valueFilter) {
         if (store instanceof AccountAwareStorageBackend<V> accountAware) {
-            accountAware.deleteMatchingIncludingLegacyAtomically(valueFilter);
+            accountAware.deleteMatchingIncludingLegacyAtomically(keyFilter, valueFilter);
+        } else if (store instanceof RegionScopedStorage<V> regional) {
+            regional.deleteMatchingAtomically(keyFilter, valueFilter);
         } else {
             Set<String> keys = new LinkedHashSet<>();
             for (String key : store.keys()) {
-                if (store.get(key).filter(valueFilter).isPresent()) {
+                if (keyFilter.test(key) && store.get(key).filter(valueFilter).isPresent()) {
                     keys.add(key);
                 }
             }

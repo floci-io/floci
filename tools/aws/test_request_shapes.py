@@ -1,6 +1,6 @@
 """Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes, regen_apigateway_shapes,
-regen_ecs_shapes, regen_organizations_shapes and regen_emr_serverless_shapes, and of the constraints
-regen_resource_groups_shapes, regen_ecr_shapes, regen_iam_shapes and regen_sts_shapes vendor.
+regen_ecs_shapes, regen_eks_shapes, regen_organizations_shapes and regen_emr_serverless_shapes, and of the
+constraints regen_resource_groups_shapes, regen_ecr_shapes, regen_iam_shapes and regen_sts_shapes vendor.
 
 Each generator names a model, an output and, for the constraints flavour, its operations, and hands
 the rest here, so what any one of them does differently is a constant and what they all do is
@@ -26,6 +26,7 @@ import regen_cur_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
+import regen_eks_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
@@ -226,6 +227,7 @@ def test_load_model_without_a_service_model_exits(tmp_path):
     (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json", {}),
     (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json", {}),
     (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json", {}),
+    (regen_eks_shapes, "eks/2017-11-01", "eks-request-shapes.json", {}),
     (regen_organizations_shapes, "organizations/2016-11-28", "organizations-request-shapes.json", {}),
 ])
 def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, options, monkeypatch):

@@ -100,10 +100,9 @@ class RedshiftServerlessSnapshotSharingIamEnforcementIntegrationTest {
                    "Action":"redshift-serverless:GetSnapshot"}
                 ]}
                 """.formatted(CALLER, CALLER);
-        call(OWNER, "CreateNamespace", Map.of("namespaceName", namespace, "adminUsername", "admin")).statusCode(200);
-        String arn = call(OWNER, "CreateSnapshot", Map.of("snapshotName", snapshot, "namespaceName", namespace))
-                .statusCode(200).extract().path("snapshot.snapshotArn");
-        call(OWNER, "CreateSnapshot", Map.of("snapshotName", privateSnapshot, "namespaceName", namespace)).statusCode(200);
+        createNamespace(OWNER, namespace, Map.of());
+        String arn = createSnapshot(snapshot, namespace);
+        createSnapshot(privateSnapshot, namespace);
         Map<String, String> byName = Map.of("snapshotName", snapshot, "ownerAccount", OWNER);
         Map<String, String> byArn = Map.of("snapshotArn", arn, "ownerAccount", OWNER);
         Map<String, String> list = Map.of("ownerAccount", OWNER);
@@ -152,16 +151,11 @@ class RedshiftServerlessSnapshotSharingIamEnforcementIntegrationTest {
         String unprivilegedKey = user(CALLER, "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Action\":\"redshift-serverless:GetNamespace\",\"Resource\":\"*\"}]}");
 
-        call(OWNER, "CreateNamespace", Map.of("namespaceName", sourceNamespace, "adminUsername", "admin"))
-                .statusCode(200);
-        String snapshotArn = call(OWNER, "CreateSnapshot",
-                Map.of("snapshotName", snapshot, "namespaceName", sourceNamespace))
-                .statusCode(200).extract().path("snapshot.snapshotArn");
+        createNamespace(OWNER, sourceNamespace, Map.of());
+        String snapshotArn = createSnapshot(snapshot, sourceNamespace);
         for (String account : List.of(CALLER, STRANGER)) {
-            call(account, "CreateNamespace", Map.of("namespaceName", namespace, "adminUsername", "admin"))
-                    .statusCode(200);
-            call(account, "CreateWorkgroup", Map.of("workgroupName", workgroup, "namespaceName", namespace))
-                    .statusCode(200);
+            createNamespace(account, namespace, Map.of());
+            createWorkgroup(account, workgroup, namespace);
         }
         Map<String, String> byName = Map.of("namespaceName", namespace, "workgroupName", workgroup,
                 "snapshotName", snapshot, "ownerAccount", OWNER);
@@ -267,16 +261,38 @@ class RedshiftServerlessSnapshotSharingIamEnforcementIntegrationTest {
         String workgroup = "kms-wg-" + suffix;
         String key = kms(OWNER, "CreateKey", Map.of("Description", "snapshot key")).statusCode(200)
                 .extract().path(keyField);
-        call(OWNER, "CreateNamespace", Map.of("namespaceName", sourceNamespace, "adminUsername", "admin",
-                "kmsKeyId", key)).statusCode(200);
-        String snapshotArn = call(OWNER, "CreateSnapshot",
-                Map.of("snapshotName", snapshot, "namespaceName", sourceNamespace))
-                .statusCode(200).extract().path("snapshot.snapshotArn");
-        call(restoringAccount, "CreateNamespace", Map.of("namespaceName", namespace, "adminUsername", "admin"))
-                .statusCode(200);
-        call(restoringAccount, "CreateWorkgroup", Map.of("workgroupName", workgroup, "namespaceName", namespace))
-                .statusCode(200);
+        cleanup.register(() -> scheduleKeyDeletion(key));
+        createNamespace(OWNER, sourceNamespace, Map.of("kmsKeyId", key));
+        String snapshotArn = createSnapshot(snapshot, sourceNamespace);
+        createNamespace(restoringAccount, namespace, Map.of());
+        createWorkgroup(restoringAccount, workgroup, namespace);
         return new EncryptedSnapshot(key, snapshot, snapshotArn, namespace, workgroup);
+    }
+
+    /**
+     * A namespace of {@code account}'s with {@code settings}, deleted after the test as the workgroups and snapshots
+     * below are: every {@code @QuarkusTest} class shares one emulator.
+     */
+    private void createNamespace(String account, String namespace, Map<String, String> settings) {
+        Map<String, String> request = new HashMap<>(settings);
+        request.put("namespaceName", namespace);
+        request.put("adminUsername", "admin");
+        call(account, "CreateNamespace", request).statusCode(200);
+        cleanup.register(() -> call(account, "DeleteNamespace", Map.of("namespaceName", namespace)).statusCode(200));
+    }
+
+    private void createWorkgroup(String account, String workgroup, String namespace) {
+        call(account, "CreateWorkgroup", Map.of("workgroupName", workgroup, "namespaceName", namespace))
+                .statusCode(200);
+        cleanup.register(() -> call(account, "DeleteWorkgroup", Map.of("workgroupName", workgroup)).statusCode(200));
+    }
+
+    /** The owner's snapshot of {@code namespace}, deleted after the test; its ARN. */
+    private String createSnapshot(String snapshot, String namespace) {
+        String arn = call(OWNER, "CreateSnapshot", Map.of("snapshotName", snapshot, "namespaceName", namespace))
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+        cleanup.register(() -> call(OWNER, "DeleteSnapshot", Map.of("snapshotName", snapshot)).statusCode(200));
+        return arn;
     }
 
     /** An encrypted snapshot, its key as the namespace was given it, and where it is restored. */
@@ -307,6 +323,15 @@ class RedshiftServerlessSnapshotSharingIamEnforcementIntegrationTest {
                 + "\"Action\":\"kms:*\",\"Resource\":\"*\"},"
                 + "{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::" + account + ":root\"},"
                 + "\"Action\":\"kms:Decrypt\",\"Resource\":\"*\"" + condition + "}]}";
+    }
+
+    /** Schedules {@code keyId}'s deletion, which is how KMS removes a key, unless a test has scheduled it already. */
+    private void scheduleKeyDeletion(String keyId) {
+        String state = kms(OWNER, "DescribeKey", Map.of("KeyId", keyId)).statusCode(200)
+                .extract().path("KeyMetadata.KeyState");
+        if (!"PendingDeletion".equals(state)) {
+            kms(OWNER, "ScheduleKeyDeletion", Map.of("KeyId", keyId, "PendingWindowInDays", "7")).statusCode(200);
+        }
     }
 
     private void putKeyPolicy(String keyId, String policy) {

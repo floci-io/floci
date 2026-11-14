@@ -288,6 +288,7 @@ AWS::ECS::TaskDefinition	PidMode	accepted and ignored
 AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
 AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
 AWS::ECS::TaskDefinition	Tags	accepted and ignored
+AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
 AWS::ECS::TaskDefinition	Volumes	accepted and ignored
 AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
 AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
@@ -404,11 +405,13 @@ AWS::Lambda::EventSourceMapping	Queues	accepted and ignored
 AWS::Lambda::EventSourceMapping	SelfManagedKafkaEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	TumblingWindowInSeconds	documented as ignored (docs/services/cloudformation.md, Lambda)
+AWS::Lambda::Function	AcceleratorConfig	accepted and ignored
 AWS::Lambda::Function	CapacityProviderConfig	accepted and ignored
 AWS::Lambda::Function	FunctionScalingConfig	accepted and ignored
 AWS::Lambda::Function	KmsKeyArn	accepted and ignored
 AWS::Lambda::Function	PublishToLatestPublished	accepted and ignored
 AWS::Lambda::Function	RecursiveLoop	accepted and ignored
+AWS::Lambda::Function	RuntimeConfig	accepted and ignored
 AWS::Lambda::Function	RuntimeManagementConfig	accepted and ignored
 AWS::Lambda::Function	SnapStart	accepted and ignored
 AWS::Lambda::Function	TenancyConfig	accepted and ignored

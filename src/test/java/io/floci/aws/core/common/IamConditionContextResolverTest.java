@@ -79,6 +79,26 @@ class IamConditionContextResolverTest {
     private IamConditionContextResolver resolver;
     private ResolvedServiceCatalog serviceCatalog;
 
+    @Test
+    void eksRequestConditionsUseModeledPathsAndLeaveOmissionsAbsent() {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"accessConfig":{"authenticationMode":"API","bootstrapClusterCreatorAdminPermissions":false},
+                 "resourcesVpcConfig":{"endpointPrivateAccess":true,"endpointPublicAccess":false}}"""));
+        Map<String, List<String>> create = resolver.resolve("eks", "eks:CreateCluster", request);
+        assertEquals(Map.of("eks:authenticationMode", List.of("API"),
+                "eks:bootstrapClusterCreatorAdminPermissions", List.of("false"),
+                "eks:endpointPrivateAccess", List.of("true"), "eks:endpointPublicAccess", List.of("false")), create);
+        Map<String, List<String>> update = resolver.resolve("eks", "eks:UpdateClusterConfig", request);
+        assertEquals(3, update.size());
+        assertFalse(update.containsKey("eks:bootstrapClusterCreatorAdminPermissions"));
+        assertNull(resolver.resolve("eks", "eks:DescribeCluster", request));
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"accessConfig":{"authenticationMode":null},"resourcesVpcConfig":{"endpointPrivateAccess":[]}}"""));
+        assertNull(resolver.resolve("eks", "eks:CreateCluster", request));
+        assertNull(resolver.resolve("eks", "eks:UpdateClusterConfig", request));
+    }
+
     @SuppressWarnings("unchecked")
     @BeforeEach
     void setUp() {

@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.elbv2.ElbV2HealthChecker;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.elbv2.ElbV2Service.ListenerCertificate;
 import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.AvailabilityZone;
 import io.floci.aws.services.elbv2.model.Listener;
@@ -23,6 +24,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -31,8 +33,9 @@ import java.util.UUID;
 
 /**
  * CloudFormation provisioning for the Elastic Load Balancing v2 types,
- * {@code AWS::ElasticLoadBalancingV2::LoadBalancer}, {@code TargetGroup}, {@code Listener} and
- * {@code ListenerRule}, moved out of the former CloudFormation monolith's switch.
+ * {@code AWS::ElasticLoadBalancingV2::LoadBalancer}, {@code TargetGroup}, {@code Listener},
+ * {@code ListenerRule} and {@code ListenerCertificate}, the first four moved out of the former
+ * CloudFormation monolith's switch.
  */
 @ApplicationScoped
 public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
@@ -43,6 +46,14 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     private static final String TARGET_GROUP = "AWS::ElasticLoadBalancingV2::TargetGroup";
     private static final String LISTENER = "AWS::ElasticLoadBalancingV2::Listener";
     private static final String LISTENER_RULE = "AWS::ElasticLoadBalancingV2::ListenerRule";
+    private static final String LISTENER_CERTIFICATE = "AWS::ElasticLoadBalancingV2::ListenerCertificate";
+    /**
+     * Each listener certificate physical id's record, a JSON object of physical id to its Region, the
+     * certificates it declares and the ones it added to its listener. A delete removes exactly the
+     * added ones, and an id a replacement displaced keeps its entry until its own removal, once the
+     * update commits or when the replacement is rolled back.
+     */
+    private static final String LISTENER_CERTIFICATES_ATTR = "__FlociListenerCertificates";
     /** Prefixes one uses attribute per subnet a load balancer is on, numbered from 1. */
     private static final String USED_SUBNET_ATTR_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Subnet.";
     /**
@@ -57,6 +68,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     private static final CreateOnlyInputs DECLARED_TARGETS = new CreateOnlyInputs(
             "__FlociTargetGroupTargets", "__FlociTargetGroupTargetsPrior");
     private static final TypeReference<List<TargetDescription>> TARGET_LIST = new TypeReference<>() { };
+    private static final TypeReference<List<String>> CERTIFICATE_LIST = new TypeReference<>() { };
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final ElbV2Service elbV2Service;
@@ -68,19 +80,21 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(LOAD_BALANCER, TARGET_GROUP, LISTENER, LISTENER_RULE);
+        return Set.of(LOAD_BALANCER, TARGET_GROUP, LISTENER, LISTENER_RULE, LISTENER_CERTIFICATE);
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         r.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        r.getAttributes().remove(CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case LOAD_BALANCER -> provisionLoadBalancer(r, props, ctx);
             case TARGET_GROUP -> provisionTargetGroup(r, props, ctx, attributesBefore);
             case LISTENER -> provisionListener(r, props, ctx);
             case LISTENER_RULE -> provisionListenerRule(r, props, ctx);
+            case LISTENER_CERTIFICATE -> provisionListenerCertificate(r, props, ctx);
             default -> throw new IllegalStateException("ElbV2CfnProvisioner cannot handle " + r.getResourceType());
         }
         // A provision that left the resource with a new physical id replaced the entity: the
@@ -112,6 +126,23 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * A listener certificate resource is removed from its record of what it added, which the id
+     * alone does not carry; every other type is deleted by its id.
+     */
+    @Override
+    public void delete(StackResource resource, String region) {
+        deleteOwnedBy(resource, resource.getResourceType(), resource.getPhysicalId(), region);
+    }
+
+    private void deleteOwnedBy(StackResource resource, String resourceType, String physicalId, String region) {
+        if (LISTENER_CERTIFICATE.equals(resourceType)) {
+            removeListenerCertificates(resource, physicalId, region);
+        } else {
+            delete(resourceType, physicalId, region);
+        }
+    }
+
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
         return ReplacementCleanup.hasReplacement(resource);
@@ -128,7 +159,8 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             resource.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         }
         clearTargetUpdateRecords(resource);
-        return ReplacementCleanup.complete(resource, this::delete);
+        return ReplacementCleanup.complete(resource,
+                (type, physicalId, region) -> deleteOwnedBy(resource, type, physicalId, region));
     }
 
     @Override
@@ -140,20 +172,27 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     private static void clearTargetUpdateRecords(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
         DECLARED_TARGETS.clearPrior(resource);
     }
 
     /**
-     * Keeps the snapshot of a target group update whose own undo did not complete. The engine restores
-     * the previous resource and reports the rollback failure once; with the snapshot, a
-     * ContinueUpdateRollback puts back the registrations the update started from, instead of finding
-     * nothing to undo.
+     * Keeps the snapshot of a target group or listener certificate update whose own undo did not
+     * complete. The engine restores the previous resource and reports the rollback failure once; with
+     * the snapshot, a ContinueUpdateRollback puts back the registrations or certificates the update
+     * started from, instead of finding nothing to undo.
      */
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        String snapshot = attempted.getAttributes().get(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
-        if (snapshot != null && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
-            previous.getAttributes().put(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR, snapshot);
+        if (!attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            return;
+        }
+        for (String attr : List.of(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR,
+                CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR)) {
+            String snapshot = attempted.getAttributes().get(attr);
+            if (snapshot != null) {
+                previous.getAttributes().put(attr, snapshot);
+            }
         }
     }
 
@@ -162,7 +201,8 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      * targets goes back with it, even when deleting the replacement fails. Without a cleanup record, a
      * load balancer is moved back to the subnets an update took it off, and a target group gets back
      * the registrations the update changed; otherwise neither has anything to put back: an update that
-     * kept the name changed nothing else, the way the switch did. A listener or rule without a record
+     * kept the name changed nothing else, the way the switch did. A listener certificate resource gets
+     * back the certificates the update changed on its listener. A listener or rule without a record
      * was modified in place, and putting that back needs a snapshot this provisioner does not keep, so
      * the engine reports it as not rolled back, as it did for the switch.
      */
@@ -170,7 +210,8 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     public boolean rollbackUpdate(StackResource resource) {
         boolean replaced;
         try {
-            replaced = ReplacementCleanup.rollback(resource, this::delete);
+            replaced = ReplacementCleanup.rollback(resource,
+                    (type, physicalId, region) -> deleteOwnedBy(resource, type, physicalId, region));
         } finally {
             DECLARED_TARGETS.restorePrior(resource);
         }
@@ -182,6 +223,10 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         }
         if (TARGET_GROUP.equals(resource.getResourceType())) {
             restorePriorRegistrations(resource);
+            return true;
+        }
+        if (LISTENER_CERTIFICATE.equals(resource.getResourceType())) {
+            restorePriorCertificates(resource);
             return true;
         }
         return false;
@@ -549,6 +594,200 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(rule.getRuleArn());
         r.getAttributes().put("RuleArn", rule.getRuleArn());
         r.getAttributes().put("IsDefault", String.valueOf(rule.isDefault()));
+    }
+
+    /**
+     * Adds the template's certificates to the listener's certificate list, which is how a listener
+     * gets certificates beyond its default one. The physical id is {@code <ListenerArn>|<suffix>},
+     * CloudFormation publishing no format for it. Certificates updates in place, see
+     * {@link #changeListenerCertificates}. ListenerArn is create-only: moving the resource to another
+     * listener adds the certificates there under a new physical id, and the ones it added to the
+     * displaced listener are removed once the stack update commits.
+     *
+     * <p>The record kept per physical id holds the stack's Region, the certificates the template
+     * declares, and the ones the resource added: a certificate the listener's list already held when
+     * it was declared was not added by the resource, so neither its removal from the template nor the
+     * resource's delete takes it off the listener.
+     */
+    private void provisionListenerCertificate(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String listenerArn = ctx.resolveOptional(props, "ListenerArn");
+        if (listenerArn == null || listenerArn.isBlank()) {
+            throw new AwsException("ValidationError", LISTENER_CERTIFICATE + " requires ListenerArn", 400);
+        }
+        List<String> certificates = List.copyOf(new LinkedHashSet<>(parseCertificates(props, ctx)));
+        if (certificates.isEmpty()) {
+            throw new AwsException("ValidationError", LISTENER_CERTIFICATE + " requires Certificates", 400);
+        }
+        String region = ctx.region();
+        ObjectNode records = certificateRecords(r.getAttributes());
+        String prior = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
+        JsonNode priorRecord = prior == null ? null : records.get(prior);
+        boolean kept = priorRecord != null && listenerArn.equals(certificateListener(prior));
+        List<String> held = heldCertificates(region, listenerArn);
+        List<String> added;
+        if (kept) {
+            r.setPhysicalId(prior);
+            List<String> previous = certificateList(priorRecord.path("declared"));
+            List<String> previouslyAdded = certificateList(priorRecord.path("added"));
+            List<String> add = certificates.stream().filter(arn -> !previous.contains(arn)).toList();
+            List<String> remove = droppedAndAdded(previous, certificates, previouslyAdded);
+            List<String> newlyAdded = add.stream().filter(arn -> !held.contains(arn)).toList();
+            List<String> nextAdded = new ArrayList<>(previouslyAdded);
+            nextAdded.removeAll(remove);
+            nextAdded.addAll(newlyAdded);
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> restorePriorCertificates(r),
+                    () -> changeListenerCertificates(r, region, listenerArn, add, remove, newlyAdded, priorRecord));
+            added = nextAdded;
+        } else {
+            elbV2Service.addListenerCertificates(region, listenerArn, certificates);
+            r.setPhysicalId(listenerArn + "|" + UUID.randomUUID().toString().replace("-", "").substring(0, 12));
+            added = certificates.stream().filter(arn -> !held.contains(arn)).toList();
+        }
+        records.set(r.getPhysicalId(), certificateRecord(region, certificates, added));
+        writeCertificateRecords(r, records);
+        r.getAttributes().put("Id", r.getPhysicalId());
+    }
+
+    /** The certificates {@code previous} declared, {@code declared} no longer does, and the resource added. */
+    private static List<String> droppedAndAdded(List<String> previous, List<String> declared, List<String> added) {
+        return previous.stream().filter(arn -> !declared.contains(arn) && added.contains(arn)).toList();
+    }
+
+    /** The listener's certificate list, the default certificate aside. */
+    private List<String> heldCertificates(String region, String listenerArn) {
+        return elbV2Service.describeListenerCertificates(region, listenerArn).stream()
+                .filter(certificate -> !certificate.isDefault())
+                .map(ListenerCertificate::certificateArn)
+                .toList();
+    }
+
+    /**
+     * Adds the certificates the template declares and the resource did not, then removes the ones the
+     * resource added that the template no longer declares. AddListenerCertificates checks every
+     * certificate before adding any, so a refused one leaves the listener as it was. Once it has taken
+     * them, what the update changed is saved before the removal, with the record it started from, and
+     * {@link #restorePriorCertificates} puts it back from that.
+     */
+    private void changeListenerCertificates(StackResource r, String region, String listenerArn, List<String> add,
+                                            List<String> remove, List<String> newlyAdded, JsonNode priorRecord) {
+        if (add.isEmpty() && remove.isEmpty()) {
+            return;
+        }
+        if (!add.isEmpty()) {
+            elbV2Service.addListenerCertificates(region, listenerArn, add);
+        }
+        ObjectNode saved = MAPPER.createObjectNode();
+        saved.set("added", MAPPER.valueToTree(newlyAdded));
+        saved.set("removed", MAPPER.valueToTree(remove));
+        saved.set("prior", priorRecord.deepCopy());
+        r.getAttributes().put(CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR, saved.toString());
+        if (!remove.isEmpty()) {
+            elbV2Service.removeListenerCertificates(region, listenerArn, remove);
+        }
+    }
+
+    /**
+     * Removes the certificates the update added and adds back the ones it removed, in the Region the
+     * resource was provisioned in, and the resource's record is the one it had before again. A failed
+     * call propagates, so the engine reports its reason, and the snapshot stays until a put back
+     * succeeds.
+     */
+    private void restorePriorCertificates(StackResource resource) {
+        JsonNode saved = CfnRollback.updateSnapshot(resource, CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
+        String listenerArn = certificateListener(resource.getPhysicalId());
+        if (saved == null || listenerArn == null) {
+            return;
+        }
+        JsonNode prior = saved.path("prior");
+        String region = recordRegion(prior, listenerArn, null);
+        List<String> added = certificateList(saved.path("added"));
+        List<String> removed = certificateList(saved.path("removed"));
+        if (!added.isEmpty()) {
+            elbV2Service.removeListenerCertificates(region, listenerArn, added);
+        }
+        if (!removed.isEmpty()) {
+            elbV2Service.addListenerCertificates(region, listenerArn, removed);
+        }
+        ObjectNode records = certificateRecords(resource.getAttributes());
+        records.set(resource.getPhysicalId(), prior.deepCopy());
+        writeCertificateRecords(resource, records);
+        resource.getAttributes().remove(CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /**
+     * Removes from its listener the certificates {@code physicalId} added, in the Region it was
+     * provisioned in, and drops its record. A listener already gone took them with it; an id with no
+     * record names nothing this stack added.
+     */
+    private void removeListenerCertificates(StackResource resource, String physicalId, String region) {
+        String listenerArn = physicalId == null ? null : certificateListener(physicalId);
+        if (listenerArn == null) {
+            return;
+        }
+        ObjectNode records = certificateRecords(resource.getAttributes());
+        JsonNode record = records.get(physicalId);
+        List<String> added = record == null ? List.of() : certificateList(record.path("added"));
+        if (!added.isEmpty()) {
+            String recordedRegion = recordRegion(record, listenerArn, region);
+            CfnDeletes.safeDelete("listener certificates", physicalId,
+                    () -> elbV2Service.removeListenerCertificates(recordedRegion, listenerArn, added),
+                    "ListenerNotFound");
+        }
+        records.remove(physicalId);
+        writeCertificateRecords(resource, records);
+    }
+
+    /** The listener a listener certificate physical id names, or null when the id is no such id. */
+    private static String certificateListener(String physicalId) {
+        int bar = physicalId.indexOf('|');
+        if (bar <= 0) {
+            return null;
+        }
+        String listenerArn = physicalId.substring(0, bar);
+        return AwsArnUtils.isArn(listenerArn) ? listenerArn : null;
+    }
+
+    /** The Region a record was provisioned in, else {@code fallback}, else the listener ARN's. */
+    private static String recordRegion(JsonNode record, String listenerArn, String fallback) {
+        String recorded = record == null ? null : record.path("region").asText(null);
+        if (recorded != null) {
+            return recorded;
+        }
+        return fallback != null ? fallback : AwsArnUtils.parse(listenerArn).region();
+    }
+
+    private static ObjectNode certificateRecord(String region, List<String> declared, List<String> added) {
+        ObjectNode record = MAPPER.createObjectNode();
+        record.put("region", region);
+        record.set("declared", MAPPER.valueToTree(declared));
+        record.set("added", MAPPER.valueToTree(added));
+        return record;
+    }
+
+    private static List<String> certificateList(JsonNode node) {
+        return node.isArray() ? MAPPER.convertValue(node, CERTIFICATE_LIST) : List.of();
+    }
+
+    private static ObjectNode certificateRecords(Map<String, String> attributes) {
+        String recorded = attributes.get(LISTENER_CERTIFICATES_ATTR);
+        if (recorded == null) {
+            return MAPPER.createObjectNode();
+        }
+        try {
+            JsonNode parsed = MAPPER.readTree(recorded);
+            return parsed.isObject() ? (ObjectNode) parsed : MAPPER.createObjectNode();
+        } catch (JsonProcessingException e) {
+            LOG.warnv("Ignoring unreadable listener certificates record ({0}): {1}", e.getMessage(), recorded);
+            return MAPPER.createObjectNode();
+        }
+    }
+
+    private static void writeCertificateRecords(StackResource r, ObjectNode records) {
+        if (records.isEmpty()) {
+            r.getAttributes().remove(LISTENER_CERTIFICATES_ATTR);
+        } else {
+            r.getAttributes().put(LISTENER_CERTIFICATES_ATTR, records.toString());
+        }
     }
 
     /** The listener the stack points at, or null when it was removed out of band (then create). */
