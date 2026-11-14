@@ -17,8 +17,7 @@ final class DynamoDbReservedWords {
     // and should not be treated as attribute name tokens.
     private static final Set<String> CLAUSE_KEYWORDS = Set.of(
         "SET", "REMOVE", "ADD", "DELETE",
-        "AND", "OR", "NOT", "BETWEEN", "IN",
-        "TRUE", "FALSE"
+        "AND", "OR", "NOT", "BETWEEN", "IN"
     );
 
     // DynamoDB reserved words list (uppercase). DynamoDB documents SIZE too, but accepts it as an attribute name.
@@ -128,7 +127,7 @@ final class DynamoDbReservedWords {
     static AwsException reservedWord(String expressionType, String ident) {
         return new AwsException("ValidationException",
                 "Invalid " + expressionType + ": Attribute name is a reserved keyword; "
-                + "reserved word: " + ident, 400);
+                + "reserved keyword: " + ident, 400);
     }
 
     private static List<String> extractBareIdentifiers(String expr) {
