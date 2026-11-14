@@ -12,7 +12,7 @@ import java.util.Set;
 final class ExtendedQuerySession {
 
     private final Map<String, PreparedSql> statements = new LinkedHashMap<>();
-    private final Map<String, String> portals = new LinkedHashMap<>();
+    private final Map<String, BoundPortal> portals = new LinkedHashMap<>();
     private final List<JournalEntry> journal = new ArrayList<>();
     private long nextMutationId = 1;
 
@@ -22,21 +22,21 @@ final class ExtendedQuerySession {
 
     synchronized Mutation stageParse(String statementName, CopyStatementParser.S3Statement statement, String sql) {
         Map<String, PreparedSql> statementsBefore = new LinkedHashMap<>(statements);
-        Map<String, String> portalsBefore = new LinkedHashMap<>(portals);
+        Map<String, BoundPortal> portalsBefore = new LinkedHashMap<>(portals);
         if (statement == null && sql == null) {
             statements.remove(statementName);
         } else {
             statements.put(statementName, new PreparedSql(statement, sql));
         }
-        portals.entrySet().removeIf(entry -> entry.getValue().equals(statementName));
+        portals.entrySet().removeIf(entry -> entry.getValue().statementName().equals(statementName));
         return record(statementsBefore, portalsBefore);
     }
 
     synchronized Mutation stageBind(String portalName, String statementName) {
         Map<String, PreparedSql> statementsBefore = new LinkedHashMap<>(statements);
-        Map<String, String> portalsBefore = new LinkedHashMap<>(portals);
+        Map<String, BoundPortal> portalsBefore = new LinkedHashMap<>(portals);
         if (statements.containsKey(statementName)) {
-            portals.put(portalName, statementName);
+            portals.put(portalName, new BoundPortal(statementName, nextMutationId));
         } else {
             portals.remove(portalName);
         }
@@ -49,10 +49,10 @@ final class ExtendedQuerySession {
         }
 
         Map<String, PreparedSql> statementsBefore = new LinkedHashMap<>(statements);
-        Map<String, String> portalsBefore = new LinkedHashMap<>(portals);
+        Map<String, BoundPortal> portalsBefore = new LinkedHashMap<>(portals);
         if (targetType == 'S') {
             statements.remove(name);
-            portals.entrySet().removeIf(entry -> entry.getValue().equals(name));
+            portals.entrySet().removeIf(entry -> entry.getValue().statementName().equals(name));
         } else {
             portals.remove(name);
         }
@@ -90,8 +90,18 @@ final class ExtendedQuerySession {
         revertUnchangedSince(portals, rejected.portalsBefore(), rejected.portalsAfter());
         // A statement this mutation defined may just have been reverted away; drop any portal now
         // pointing at a statement that no longer exists, the same cleanup stageClose('S', ...) does.
-        portals.entrySet().removeIf(entry -> !statements.containsKey(entry.getValue()));
+        portals.entrySet().removeIf(entry -> !statements.containsKey(entry.getValue().statementName()));
 
+        // Later rollbacks must not restore a binding this rejection has invalidated.
+        for (int i = rejectedIndex + 1; i < journal.size(); i++) {
+            JournalEntry entry = journal.get(i);
+            Map<String, BoundPortal> portalsBefore = new LinkedHashMap<>(entry.portalsBefore());
+            Map<String, BoundPortal> portalsAfter = new LinkedHashMap<>(entry.portalsAfter());
+            revertUnchangedSince(portalsBefore, rejected.portalsBefore(), rejected.portalsAfter());
+            revertUnchangedSince(portalsAfter, rejected.portalsBefore(), rejected.portalsAfter());
+            journal.set(i, new JournalEntry(entry.mutation(), entry.statementsBefore(), portalsBefore,
+                    entry.statementsAfter(), portalsAfter));
+        }
         journal.remove(rejectedIndex);
     }
 
@@ -126,12 +136,13 @@ final class ExtendedQuerySession {
     }
 
     synchronized Optional<CopyStatementParser.S3Statement> portal(String portalName) {
-        String statementName = portals.get(portalName);
-        return Optional.ofNullable(statementName).map(statements::get).map(PreparedSql::statement);
+        return Optional.ofNullable(portals.get(portalName)).map(BoundPortal::statementName)
+                .map(statements::get).map(PreparedSql::statement);
     }
 
     synchronized Optional<String> portalSql(String portalName) {
-        return Optional.ofNullable(portals.get(portalName)).map(statements::get).map(PreparedSql::sql);
+        return Optional.ofNullable(portals.get(portalName)).map(BoundPortal::statementName)
+                .map(statements::get).map(PreparedSql::sql);
     }
 
     synchronized void clearPortals() {
@@ -144,11 +155,11 @@ final class ExtendedQuerySession {
             return;
         }
 
-        Map<String, String> expiredPortals = journal.get(0).portalsBefore();
+        Map<String, BoundPortal> expiredPortals = journal.get(0).portalsBefore();
         removeUnchangedExpiredPortals(portals, expiredPortals);
         for (int i = 0; i < journal.size(); i++) {
             JournalEntry entry = journal.get(i);
-            Map<String, String> portalsBefore = new LinkedHashMap<>(entry.portalsBefore());
+            Map<String, BoundPortal> portalsBefore = new LinkedHashMap<>(entry.portalsBefore());
             removeUnchangedExpiredPortals(portalsBefore, expiredPortals);
             journal.set(i, new JournalEntry(entry.mutation(), entry.statementsBefore(), portalsBefore,
                     entry.statementsAfter(), entry.portalsAfter()));
@@ -169,7 +180,7 @@ final class ExtendedQuerySession {
      * stale once an earlier {@link #rejectFrom} has already run its own cascading portal cleanup.
      */
     private Mutation record(Map<String, PreparedSql> statementsBefore,
-                            Map<String, String> portalsBefore) {
+                            Map<String, BoundPortal> portalsBefore) {
         Mutation mutation = new Mutation(nextMutationId++);
         journal.add(new JournalEntry(
                 mutation,
@@ -180,8 +191,8 @@ final class ExtendedQuerySession {
         return mutation;
     }
 
-    private static void removeUnchangedExpiredPortals(Map<String, String> candidates,
-            Map<String, String> expiredPortals) {
+    private static void removeUnchangedExpiredPortals(Map<String, BoundPortal> candidates,
+            Map<String, BoundPortal> expiredPortals) {
         candidates.entrySet().removeIf(entry -> expiredPortals.containsKey(entry.getKey())
                 && Objects.equals(expiredPortals.get(entry.getKey()), entry.getValue()));
     }
@@ -189,13 +200,16 @@ final class ExtendedQuerySession {
     record Mutation(long id) {
     }
 
+    // Rebinding the same name to the same statement still creates a new portal lifetime.
+    private record BoundPortal(String statementName, long bindingId) { }
+
     private record PreparedSql(CopyStatementParser.S3Statement statement, String sql) { }
 
     private record JournalEntry(
             Mutation mutation,
             Map<String, PreparedSql> statementsBefore,
-            Map<String, String> portalsBefore,
+            Map<String, BoundPortal> portalsBefore,
             Map<String, PreparedSql> statementsAfter,
-            Map<String, String> portalsAfter) {
+            Map<String, BoundPortal> portalsAfter) {
     }
 }
