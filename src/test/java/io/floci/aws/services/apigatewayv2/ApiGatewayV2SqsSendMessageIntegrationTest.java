@@ -28,7 +28,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -469,6 +471,33 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
                     assertThat(message.messageAttributes().get("Stage").stringValue(), equalTo("test"));
                     assertThat(message.messageAttributes().get("Route").stringValue(), equalTo("POST /send"));
                     assertThat(message.messageAttributes().get("Path").stringValue(), equalTo("/test/send"));
+                });
+    }
+
+    @Test
+    void invokeResolvesAccountDomainRequestIdAndRequestTimeContextVariables() {
+        String attributes = "{\"Account\":{\"DataType\":\"String\",\"StringValue\":\"${context.accountId}\"},"
+                + "\"Domain\":{\"DataType\":\"String\",\"StringValue\":\"${context.domainName}\"},"
+                + "\"Prefix\":{\"DataType\":\"String\",\"StringValue\":\"${context.domainPrefix}\"},"
+                + "\"Request\":{\"DataType\":\"String\",\"StringValue\":\"${context.requestId}\"},"
+                + "\"Extended\":{\"DataType\":\"String\",\"StringValue\":\"${context.extendedRequestId}\"},"
+                + "\"Time\":{\"DataType\":\"String\",\"StringValue\":\"${context.requestTime}\"}}";
+        withSendMessageRoute("sqs-invoke-context-host",
+                queueUrl -> Map.of("QueueUrl", queueUrl, "MessageBody", "$context.requestTimeEpoch",
+                        "MessageAttributes", attributes),
+                (sqs, queueUrl, api) -> {
+                    long before = System.currentTimeMillis();
+                    given().post("/execute-api/" + api + "/test/send").then().statusCode(200);
+                    Message message = onlyMessage(sqs, queueUrl);
+                    assertThat(Long.parseLong(message.body()), greaterThanOrEqualTo(before - 1000));
+                    assertThat(message.messageAttributes().get("Account").stringValue(), equalTo("000000000000"));
+                    assertThat(message.messageAttributes().get("Domain").stringValue(), equalTo("localhost"));
+                    assertThat(message.messageAttributes().get("Prefix").stringValue(), equalTo("localhost"));
+                    String requestId = message.messageAttributes().get("Request").stringValue();
+                    assertThat(requestId, matchesPattern(".+"));
+                    assertThat(message.messageAttributes().get("Extended").stringValue(), equalTo(requestId));
+                    assertThat(message.messageAttributes().get("Time").stringValue(),
+                            matchesPattern("\\d{2}/[A-Z][a-z]{2}/\\d{4}:\\d{2}:\\d{2}:\\d{2} \\+0000"));
                 });
     }
 

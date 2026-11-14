@@ -847,6 +847,25 @@ authorizer's context into request headers, query strings, and paths. For a retur
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
 
+HTTP API `HTTP_PROXY` header, query string and path mappings also read `$request.body`,
+`$request.body.<JSONPath>`, `$stageVariables.<name>` and the `$context` variables `accountId`,
+`apiId`, `domainName`, `domainPrefix`, `extendedRequestId`, `httpMethod`, `path`, `protocol`,
+`requestTime`, `requestTimeEpoch`, `routeKey` and `stage`, alongside `requestId`,
+`identity.sourceIp` and the authorizer values above. A JSONPath that selects a scalar maps its text,
+and one that selects an object or array maps its JSON. A missing field, an empty body or a body
+that is not JSON resolves to nothing, so that header or query mapping is skipped, and the same
+expression embedded in an `overwrite:path` value such as `/orders/$request.body.order.id` becomes
+an empty string. Floci evaluates the whole body, where AWS reads only its first 100 KB.
+An expression embedded in a path is read whole before it is resolved: a body JSONPath takes dotted
+names, `[n]` indexes and `['key']` selectors, so `/orders/$request.body.items[0].id` selects the
+first item's `id`, a stage variable name ends at the first character that is not a letter, digit or
+underscore, and a `$request.path`, `$request.header` or `$request.querystring` name ends at the next
+`.`, so `/files/$request.path.name.json` keeps its `.json` suffix. A header value mapped from any
+source, including the whole `$request.body`, is rejected when it contains CR, LF, NUL or any other
+control character besides tab, as is a mapped `Host`: the request never reaches the backend and the
+caller receives `502` with
+`{"message":"Bad Gateway: invalid request header value for <name>"}`.
+
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
 `SQS-PurgeQueue`, `AppConfig-GetConfiguration`, `Kinesis-PutRecord`,
@@ -884,8 +903,10 @@ expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<n
 `$context` variables: `accountId`, `apiId`, `domainName`, `domainPrefix`, `extendedRequestId`,
 `httpMethod`, `path`, `protocol`, `requestTime`, `requestTimeEpoch`, `routeKey`, `stage`,
 `requestId`, `identity.sourceIp`, `authorizer.<key>` and `authorizer.claims.<claim>`. `requestId`
-and `domainName` are the values the rest of the gateway reports for the request, and `path`
-starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
+and `domainName` are the values the rest of the gateway reports for the request,
+`extendedRequestId` is the same value as `requestId`, as AWS documents for HTTP APIs and as
+`HTTP_PROXY` mappings also resolve it (an `HTTP_PROXY` response returns that id as `x-amzn-RequestId`,
+in place of any the backend sent, and a valid UUID sent in `x-amzn-RequestId` replaces it), and `path` starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
 with any other source is rejected with `400 BadRequestException` on create, update and import,
 including one embedded as `${...}` or inside a JSON parameter's string values. A `$` inside static
 text without braces, as in `price $5`, stays literal. A `$context` variable outside the list

@@ -7,15 +7,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
-import com.jayway.jsonpath.Configuration;
-import com.jayway.jsonpath.JsonPath;
-import com.jayway.jsonpath.JsonPathException;
-import com.jayway.jsonpath.spi.json.JacksonJsonNodeJsonProvider;
-import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.apigatewayv2.model.IntegrationSubtype;
 
-import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,10 +22,8 @@ import java.util.regex.Pattern;
  *
  * <p>A parameter value is a static string, a whole source expression such as
  * {@code $request.body}, or a string with source expressions embedded as {@code ${request.header.X}}.
- * Beyond the sources {@link ContextValueResolver} reads, it resolves {@code $request.body},
- * {@code $request.body.<JSONPath>}, {@code $stageVariables.<name>} and the {@code $context.<name>}
- * values the caller supplies. An embedded expression that resolves to nothing is replaced by the
- * empty string.
+ * Expressions resolve through {@link ContextValueResolver}. An embedded expression that resolves to
+ * nothing is replaced by the empty string.
  */
 public class AwsServiceIntegrationMapper {
 
@@ -45,15 +37,11 @@ public class AwsServiceIntegrationMapper {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final ObjectMapper objectMapper;
-    private final Configuration jsonPathConfiguration;
-    private final ContextValueResolver contextValueResolver = new ContextValueResolver();
+    private final ContextValueResolver contextValueResolver;
 
     public AwsServiceIntegrationMapper(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
-        this.jsonPathConfiguration = Configuration.builder()
-                .jsonProvider(new JacksonJsonNodeJsonProvider(objectMapper))
-                .mappingProvider(new JacksonMappingProvider(objectMapper))
-                .build();
+        this.contextValueResolver = new ContextValueResolver(objectMapper);
     }
 
     /**
@@ -61,20 +49,17 @@ public class AwsServiceIntegrationMapper {
      * whose value is a JSON object is parsed before anything is resolved, and expressions are
      * resolved only inside its string values, so a request value cannot add or change members. A
      * JSON parameter that is neither a whole source expression nor a JSON object is an
-     * {@code InvalidParameterValue} error. {@code contextVariables} holds the
-     * {@code $context.<name>} values of this request.
+     * {@code InvalidParameterValue} error.
      */
     public Map<String, String> resolveParameters(IntegrationSubtype subtype, Map<String, String> parameters,
-                                                 RequestContext ctx, Map<String, String> stageVariables,
-                                                 Map<String, String> contextVariables) {
+                                                 RequestContext ctx) {
         Map<String, String> resolved = new LinkedHashMap<>();
         if (parameters == null) {
             return resolved;
         }
-        Sources sources = new Sources(ctx, stageVariables, contextVariables);
         parameters.forEach((name, value) -> {
             if (!subtype.isJsonParameter(name) || value == null || isWholeExpression(value)) {
-                resolved.put(name, resolveValue(value, sources));
+                resolved.put(name, resolveValue(value, ctx));
                 return;
             }
             JsonNode template = jsonTemplate(value);
@@ -82,7 +67,7 @@ public class AwsServiceIntegrationMapper {
                 throw new AwsException("InvalidParameterValue",
                         "Value for parameter " + name + " is invalid. Reason: Must be a JSON object.", 400);
             }
-            resolved.put(name, resolveLeaves(template, sources).toString());
+            resolved.put(name, resolveLeaves(template, ctx).toString());
         });
         return resolved;
     }
@@ -152,9 +137,6 @@ public class AwsServiceIntegrationMapper {
                 || EMBEDDED_EXPRESSION.matcher(value).matches();
     }
 
-    private record Sources(RequestContext ctx, Map<String, String> stageVariables,
-                           Map<String, String> contextVariables) {}
-
     private static JsonNode jsonTemplate(String value) {
         try {
             JsonNode node = TEMPLATE_READER.readTree(value);
@@ -164,82 +146,39 @@ public class AwsServiceIntegrationMapper {
         }
     }
 
-    private JsonNode resolveLeaves(JsonNode node, Sources sources) {
+    private JsonNode resolveLeaves(JsonNode node, RequestContext ctx) {
         if (node.isTextual()) {
-            String resolved = resolveValue(node.asText(), sources);
+            String resolved = resolveValue(node.asText(), ctx);
             return TextNode.valueOf(resolved != null ? resolved : "");
         }
         if (node.isObject()) {
             ObjectNode copy = objectMapper.createObjectNode();
-            node.properties().forEach(e -> copy.set(e.getKey(), resolveLeaves(e.getValue(), sources)));
+            node.properties().forEach(e -> copy.set(e.getKey(), resolveLeaves(e.getValue(), ctx)));
             return copy;
         }
         if (node.isArray()) {
             ArrayNode copy = objectMapper.createArrayNode();
-            node.forEach(element -> copy.add(resolveLeaves(element, sources)));
+            node.forEach(element -> copy.add(resolveLeaves(element, ctx)));
             return copy;
         }
         return node;
     }
 
-    private String resolveValue(String value, Sources sources) {
+    private String resolveValue(String value, RequestContext ctx) {
         if (value == null) {
             return null;
         }
         if (value.startsWith("$") && !value.startsWith("${")) {
-            return resolveExpression(value, sources);
+            return contextValueResolver.resolve(value, ctx);
         }
         Matcher m = EMBEDDED_EXPRESSION.matcher(value);
         StringBuilder out = new StringBuilder();
         while (m.find()) {
-            String resolved = resolveExpression("$" + m.group(1), sources);
+            String resolved = contextValueResolver.resolve("$" + m.group(1), ctx);
             m.appendReplacement(out, Matcher.quoteReplacement(resolved != null ? resolved : ""));
         }
         m.appendTail(out);
         return out.toString();
-    }
-
-    private String resolveExpression(String expression, Sources sources) {
-        RequestContext ctx = sources.ctx();
-        if (expression.equals(BODY)) {
-            return bodyText(ctx);
-        }
-        if (expression.startsWith(BODY + ".")) {
-            return bodyPath(ctx, expression.substring(BODY.length() + 1));
-        }
-        if (expression.startsWith(STAGE_VARIABLES)) {
-            Map<String, String> stageVariables = sources.stageVariables();
-            return stageVariables == null ? null : stageVariables.get(expression.substring(STAGE_VARIABLES.length()));
-        }
-        if (expression.startsWith(CONTEXT) && sources.contextVariables() != null) {
-            String value = sources.contextVariables().get(expression.substring(CONTEXT.length()));
-            if (value != null) {
-                return value;
-            }
-        }
-        return contextValueResolver.resolve(expression, ctx);
-    }
-
-    private static String bodyText(RequestContext ctx) {
-        return ctx.body() == null ? "" : new String(ctx.body(), StandardCharsets.UTF_8);
-    }
-
-    private String bodyPath(RequestContext ctx, String path) {
-        String body = bodyText(ctx);
-        if (body.isBlank()) {
-            return null;
-        }
-        JsonNode value;
-        try {
-            Object read = JsonPath.using(jsonPathConfiguration).parse(body).read("$." + path);
-            value = read instanceof JsonNode node ? node : objectMapper.valueToTree(read);
-        } catch (JsonPathException | IllegalArgumentException | ClassCastException e) {
-            return null;
-        }
-        if (value == null || value.isNull() || value.isMissingNode()) {
-            return null;
-        }
-        return value.isValueNode() ? value.asText() : value.toString();
     }
 
     /**

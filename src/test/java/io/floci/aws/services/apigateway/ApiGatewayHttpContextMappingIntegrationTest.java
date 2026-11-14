@@ -369,6 +369,34 @@ class ApiGatewayHttpContextMappingIntegrationTest {
         }
     }
 
+    @Test
+    void requestTemplateReadsTheSameContextValuesAsParameterMappings() throws Exception {
+        configureAuthorizer(0);
+        Map<String, String> parameters = new LinkedHashMap<>();
+        parameters.put("integration.request.header.X-Extended", "context.extendedRequestId");
+        parameters.put("integration.request.header.X-Epoch", "context.requestTimeEpoch");
+        parameters.put("integration.request.path.principal", "context.authorizer.principalId");
+        parameters.put("integration.request.path.proxy", "method.request.path.proxy");
+        configureIntegration("HTTP", "GET", parameters, "{\"accountId\":\"$context.accountId\","
+                + "\"domainName\":\"$context.domainName\",\"domainPrefix\":\"$context.domainPrefix\","
+                + "\"extendedRequestId\":\"$context.extendedRequestId\",\"requestTime\":\"$context.requestTime\","
+                + "\"requestTimeEpoch\":\"$context.requestTimeEpoch\"}");
+        deploy();
+        Response response = given().header("Authorization", "Bearer allowed")
+                .get("/execute-api/" + apiId + "/test/orders/42").then().statusCode(200).extract().response();
+        JsonNode echoed = MAPPER.readTree(response.asByteArray());
+        JsonNode rendered = MAPPER.readTree(echoed.path("body").asText());
+        assertEquals("000000000000", rendered.path("accountId").asText());
+        assertEquals("localhost", rendered.path("domainName").asText());
+        assertEquals("localhost", rendered.path("domainPrefix").asText());
+        assertEquals(response.header("x-amz-apigw-id"), rendered.path("extendedRequestId").asText());
+        assertEquals(echoed.path("headers").path("x-extended").path(0).asText(),
+                rendered.path("extendedRequestId").asText());
+        assertEquals(echoed.path("headers").path("x-epoch").path(0).asText(),
+                rendered.path("requestTimeEpoch").asText());
+        assertFalse(rendered.path("requestTime").asText().isEmpty());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"bad_host", "bad_host:8080"})
     void malformedHostDoesNotBreakMappingOrGatewayErrors(String host) throws Exception {
@@ -631,13 +659,18 @@ class ApiGatewayHttpContextMappingIntegrationTest {
     }
 
     private void configureIntegration(String type, String method, Map<String, String> parameters) {
+        configureIntegration(type, method, parameters, "{\"requestId\":\"$context.requestId\"}");
+    }
+
+    private void configureIntegration(String type, String method, Map<String, String> parameters,
+                                      String requestTemplate) {
         // POST makes the HTTP integration's rendered request body observable at the echo backend.
         String integrationMethod = "HTTP".equals(type) && "GET".equals(method) ? "POST" : method;
         given().contentType(ContentType.JSON)
                 .body(Map.of("type", type, "httpMethod", integrationMethod,
                         "uri", "http://127.0.0.1:" + backend.getAddress().getPort() + "/users/{principal}/{proxy}",
                         "requestParameters", parameters, "requestTemplates", Map.of("application/json",
-                                "{\"requestId\":\"$context.requestId\"}")))
+                                requestTemplate)))
                 .put(methodPath + method + "/integration").then().statusCode(201);
     }
 
