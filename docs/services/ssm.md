@@ -34,6 +34,9 @@ the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDoc
 `ResourceType` and `ResourceId` name: `document/<name>`, `association/<id>` or `parameter/<name>`
 without its leading `/`. `CreateDocument` is checked against `document/<name>`.
 
+`GetParameters` returns successful parameters alphabetically by `Name`, preserving
+the selected versions and labels.
+
 `DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
 `GetParameter`. This applies to filtered and paginated results as well.
 

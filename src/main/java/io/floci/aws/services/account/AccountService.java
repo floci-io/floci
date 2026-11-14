@@ -10,6 +10,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.account.model.AlternateContact;
+import io.floci.aws.services.account.model.ContactInformation;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationAccount;
@@ -17,6 +18,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -29,14 +31,20 @@ public class AccountService implements Resettable, StoredResourceArns {
     private static final Pattern EMAIL = Pattern.compile("\\s*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+\\s*");
     private static final Pattern PHONE = Pattern.compile("[\\s0-9()+-]+");
     private static final Set<String> CONTACT_TYPES = Set.of("BILLING", "OPERATIONS", "SECURITY");
+    private static final Set<String> COUNTRIES_REQUIRING_STATE_OR_REGION =
+            Set.of("US", "CA", "GB", "DE", "JP", "IN", "BR");
+    private static final String PRIMARY_CONTACT_KEY = "primary";
 
     private final AccountAwareStorageBackend<AlternateContact> contacts;
+    private final AccountAwareStorageBackend<ContactInformation> contactInformation;
     private final OrganizationsService organizationsService;
 
     @Inject
     public AccountService(StorageFactory storageFactory, OrganizationsService organizationsService) {
         this.contacts = storageFactory.create("account", "account-alternate-contacts.json",
                 new TypeReference<Map<String, AlternateContact>>() {});
+        this.contactInformation = storageFactory.create("account", "account-contact-information.json",
+                new TypeReference<Map<String, ContactInformation>>() {});
         this.organizationsService = organizationsService;
     }
 
@@ -66,6 +74,39 @@ public class AccountService implements Resettable, StoredResourceArns {
             throw notFound();
         }
         contacts.deleteForAccount(targetAccountId, type);
+    }
+
+    public void putContactInformation(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("PutContactInformation", request);
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        JsonNode contact = request.get("ContactInformation");
+        ContactInformation information = new ContactInformation();
+        information.setFullName(text(contact, "FullName"));
+        information.setAddressLine1(text(contact, "AddressLine1"));
+        information.setAddressLine2(text(contact, "AddressLine2"));
+        information.setAddressLine3(text(contact, "AddressLine3"));
+        information.setCity(text(contact, "City"));
+        information.setStateOrRegion(text(contact, "StateOrRegion"));
+        information.setDistrictOrCounty(text(contact, "DistrictOrCounty"));
+        information.setPostalCode(text(contact, "PostalCode"));
+        information.setCountryCode(text(contact, "CountryCode"));
+        information.setPhoneNumber(text(contact, "PhoneNumber"));
+        information.setCompanyName(text(contact, "CompanyName"));
+        information.setWebsiteUrl(text(contact, "WebsiteUrl"));
+        // Only the API reference states this rule, so the vendored model cannot check it.
+        if (information.getStateOrRegion() == null && COUNTRIES_REQUIRING_STATE_OR_REGION
+                .contains(information.getCountryCode().toUpperCase(Locale.ROOT))) {
+            throw validation("StateOrRegion is required when CountryCode is "
+                    + information.getCountryCode() + ".");
+        }
+        contactInformation.putForAccount(targetAccountId, PRIMARY_CONTACT_KEY, information);
+    }
+
+    public ContactInformation getContactInformation(String callerAccountId, JsonNode request) {
+        AccountRequestShapes.check("GetContactInformation", request);
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        return contactInformation.getForAccount(targetAccountId, PRIMARY_CONTACT_KEY)
+                .orElseThrow(AccountService::contactInformationNotFound);
     }
 
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
@@ -118,6 +159,7 @@ public class AccountService implements Resettable, StoredResourceArns {
     @Override
     public void clear() {
         contacts.clear();
+        contactInformation.clear();
     }
 
     /** The namespace of the resource types this service finds, as the request-resources table names it. */
@@ -186,5 +228,10 @@ public class AccountService implements Resettable, StoredResourceArns {
     private static AwsException notFound() {
         return new AwsException("ResourceNotFoundException",
                 "The alternate contact does not exist for the specified account and contact type.", 404);
+    }
+
+    private static AwsException contactInformationNotFound() {
+        return new AwsException("ResourceNotFoundException",
+                "The contact information does not exist for the specified account.", 404);
     }
 }

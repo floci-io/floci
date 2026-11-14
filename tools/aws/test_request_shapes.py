@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+import regen_account_shapes
 import regen_apigateway_documentation_shapes
 import regen_apigateway_shapes
 import regen_athena_shapes
@@ -390,6 +391,7 @@ def test_build_constraints_output_is_stable():
     (regen_iam_shapes, "iam/2010-05-08", "iam-request-shapes.json",
      {"prepare": regen_iam_shapes.prepare}),
     (regen_sts_shapes, "sts/2011-06-15", "sts-request-shapes.json", {}),
+    (regen_account_shapes, "account/2021-02-01", "account-request-shapes.json", {}),
     (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
      {"prepare": regen_securityhub_shapes.prepare}),
 ])
@@ -449,6 +451,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_athena_shapes,
     regen_cur_shapes,
     regen_lambda_microvm_shapes,
+    regen_account_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))

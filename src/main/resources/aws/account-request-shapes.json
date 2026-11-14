@@ -1,0 +1,108 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_account_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "GetContactInformation": "GetContactInformationRequest",
+    "PutContactInformation": "PutContactInformationRequest"
+  },
+  "shapes": {
+    "AccountId": {
+      "type": "string",
+      "pattern": "\\d{12}"
+    },
+    "AddressLine": {
+      "type": "string",
+      "min": 1,
+      "max": 60
+    },
+    "City": {
+      "type": "string",
+      "min": 1,
+      "max": 50
+    },
+    "CompanyName": {
+      "type": "string",
+      "min": 1,
+      "max": 50
+    },
+    "ContactInformation": {
+      "type": "structure",
+      "required": [
+        "FullName",
+        "AddressLine1",
+        "City",
+        "PostalCode",
+        "CountryCode",
+        "PhoneNumber"
+      ],
+      "members": {
+        "FullName": "FullName",
+        "AddressLine1": "AddressLine",
+        "AddressLine2": "AddressLine",
+        "AddressLine3": "AddressLine",
+        "City": "City",
+        "StateOrRegion": "StateOrRegion",
+        "DistrictOrCounty": "DistrictOrCounty",
+        "PostalCode": "PostalCode",
+        "CountryCode": "CountryCode",
+        "PhoneNumber": "ContactInformationPhoneNumber",
+        "CompanyName": "CompanyName",
+        "WebsiteUrl": "WebsiteUrl"
+      }
+    },
+    "ContactInformationPhoneNumber": {
+      "type": "string",
+      "min": 1,
+      "max": 20,
+      "pattern": "[+][\\s0-9()-]+"
+    },
+    "CountryCode": {
+      "type": "string",
+      "min": 2,
+      "max": 2
+    },
+    "DistrictOrCounty": {
+      "type": "string",
+      "min": 1,
+      "max": 50
+    },
+    "FullName": {
+      "type": "string",
+      "min": 1,
+      "max": 50
+    },
+    "GetContactInformationRequest": {
+      "type": "structure",
+      "members": {
+        "AccountId": "AccountId"
+      }
+    },
+    "PostalCode": {
+      "type": "string",
+      "min": 1,
+      "max": 20
+    },
+    "PutContactInformationRequest": {
+      "type": "structure",
+      "required": [
+        "ContactInformation"
+      ],
+      "members": {
+        "ContactInformation": "ContactInformation",
+        "AccountId": "AccountId"
+      }
+    },
+    "StateOrRegion": {
+      "type": "string",
+      "min": 1,
+      "max": 50
+    },
+    "WebsiteUrl": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    }
+  }
+}

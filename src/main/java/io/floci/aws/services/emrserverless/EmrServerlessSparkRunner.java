@@ -559,6 +559,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // application's capacity with them.
             if (executors != null) {
                 executors.removeAll();
+            }
+            if (capacity != null) {
                 leaveCapacity(job.executors().application(), capacity);
             }
             String unclaimed = launches.end(job.runId(), launch);

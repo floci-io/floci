@@ -312,7 +312,7 @@ public class DurableExecutionService implements Resettable {
             indexed.add(new Cursored<>(String.format("%010d", i), operations.get(i)));
         }
         PaginatedResult<DurableOperation> page = paginate(indexed, pageSize(maxItems), marker, "durable-state");
-        return new StatePage(page.items(), page.nextToken() != null ? page.nextToken() : "");
+        return new StatePage(page.items(), page.nextToken());
     }
 
     /** Stopping a closed execution changes nothing and reports the time it closed. */

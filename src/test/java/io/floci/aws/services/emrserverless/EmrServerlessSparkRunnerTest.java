@@ -548,6 +548,31 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aDriverWhoseAddressLookupFailsLeavesItsApplicationsCapacity() {
+        String application = "arn:aws:emr-serverless:eu-west-1:123456789012:/app/failed-driver";
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveDockerNetwork(Optional.of("floci-network"))).thenReturn(Optional.of("floci-network"));
+        EmrServerlessSparkRunner runner = runner(builder);
+        NotFoundException addressFailure = new NotFoundException("driver disappeared during address lookup");
+        when(lifecycle.resolveContainerNetworkIp("driver", "floci-network")).thenThrow(addressFailure);
+        SparkJobRunner.Job job = executorsJob(Map.of()).withExecutors(
+                new SparkJobRunner.Executors(2, null, 0, 0, 0, application));
+        SparkJobRunner.Outcome outcome = runner.run(job, progress);
+
+        assertEquals(SparkJobRunner.Outcome.couldNotStart(addressFailure.getMessage()), outcome);
+        verify(progress).started();
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+        verify(lifecycle, never()).createAndStart(any());
+        SparkExecutors.Capacity firstAfterFailure = runner.joinCapacity(application);
+        runner.leaveCapacity(application, firstAfterFailure);
+        SparkExecutors.Capacity secondAfterFailure = runner.joinCapacity(application);
+        assertNotSame(firstAfterFailure, secondAfterFailure,
+                "a balanced subsequent membership must retire its capacity object");
+    }
+
+    @Test
     void theReleasesImageForARunsExecutorsIsPulledWhenMissingBeforeTheDriverStarts() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);

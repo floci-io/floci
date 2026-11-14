@@ -664,7 +664,7 @@ public class IamPolicyEvaluator {
             for (PolicyStatement stmt : parsed.statements()) {
                 if (stmt.isDeny()) {
                     denials.add(stmt);
-                } else {
+                } else if (stmt.isAllow()) {
                     allows.add(stmt);
                 }
             }
@@ -1873,7 +1873,12 @@ public class IamPolicyEvaluator {
     }
 
     private PolicyStatement parseStatement(JsonNode stmt, String version) {
-        String effect = stmt.path("Effect").asText("Allow");
+        // A statement states one of the two effects the policy language defines or it states
+        // nothing. An Effect that is absent, is not a string, or names neither is read as neither:
+        // the statement grants nothing, denies nothing, and leaves the request to the rest of the
+        // document. Reading an absent Effect as an Allow would grant on a statement that describes
+        // no permission.
+        String effect = stmt.path("Effect").isTextual() ? stmt.get("Effect").asText() : "";
         Map<String, List<String>> principals = parsePrincipals(stmt.get("Principal"));
         Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
         // Action names are case-insensitive on AWS, so they are lowercased once here instead of

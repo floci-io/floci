@@ -31,6 +31,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -185,7 +186,8 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        List<Parameter> orderedParameters = params.stream().sorted(Comparator.comparing(Parameter::getName)).toList();
+        for (Parameter p : orderedParameters) {
             parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);

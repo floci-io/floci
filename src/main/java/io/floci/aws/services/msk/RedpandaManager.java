@@ -262,9 +262,7 @@ public class RedpandaManager {
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
             String hostDataPath = legacyCompatibleHostPath(cluster).toAbsolutePath().toString();
-            if (!containerDetector.isRunningInContainer()) {
-                ContainerStorageHelper.ensureHostDir(hostDataPath);
-            }
+            ContainerStorageHelper.ensureHostDir(containerDetector, hostDataPath);
             specBuilder.withBind(hostDataPath, "/var/lib/redpanda/data");
         }
 

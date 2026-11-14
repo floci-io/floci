@@ -10,7 +10,7 @@ import java.util.Map;
  */
 public class PolicyStatement {
 
-    private final String effect;            // "Allow" or "Deny"
+    private final String effect;            // "Allow", "Deny", or neither, which states nothing
     private final Map<String, List<String>> principals;    // Principal patterns by type; null when not set
     private final Map<String, List<String>> notPrincipals; // NotPrincipal patterns by type; null when not set
     private final List<String> actions;     // IAM action patterns; null when notActions is set

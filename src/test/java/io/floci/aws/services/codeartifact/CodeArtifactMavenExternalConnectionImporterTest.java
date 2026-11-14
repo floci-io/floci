@@ -17,6 +17,7 @@ import java.util.function.Predicate;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -68,7 +69,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         // Unstubbed by default: the claim succeeds, matching the common case of a first or
         // same-connection retry. Tests for a conflicting claim override this per call.
         when(service.claimMavenRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(), any(),
-                anyString(), anyString(), anyString(), anyLong()))
+                anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong()))
                 .thenReturn(new CodeArtifactService.MavenClaimOutcome(true, EPISODE_ID));
         // Unstubbed by default: a constant snapshot, so a version-fence mismatch only ever
         // happens where a test deliberately stubs deployMavenAssetUnderVersionFence to report
@@ -130,7 +131,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
                 .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
         when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false)))
                 .thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
@@ -154,7 +155,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
                 .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
         when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false)))
                 .thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
@@ -162,7 +163,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
         assertTrue(imported);
         verify(service).mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any());
+                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false));
     }
 
     /**
@@ -181,7 +182,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
                 .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
         when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any(), eq(false)))
                 .thenReturn(true);
         doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
                 .when(service).requireContainerBackedVersionDownloadable(OWNER, REGION, DOMAIN, REPOSITORY, "maven",
@@ -192,7 +193,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         ArgumentCaptor<Predicate<String>> captor = ArgumentCaptor.forClass(Predicate.class);
         verify(service).mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
                 eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes),
-                captor.capture());
+                captor.capture(), eq(false));
         Predicate<String> versionAllowed = captor.getValue();
         assertFalse(versionAllowed.test("1.0-disposed"));
         assertTrue(versionAllowed.test("1.0"));
@@ -208,7 +209,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).mergeMavenMetadataUnderPackageFence(any(), any(), any(), any(), any(), any(),
-                anyLong(), any(), any(), any(), any());
+                anyLong(), any(), any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -234,7 +235,8 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     @Test
     void doesNothingForMavenMetadataWhenUpstreamRetentionIsBlocked() {
         when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
-                "widget")).thenReturn(true);
+                "widget",
+                "EXTERNAL_UPSTREAM")).thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/maven-metadata.xml");
@@ -266,7 +268,8 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     @Test
     void doesNothingWhenUpstreamRetentionIsBlocked() {
         when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
-                "widget")).thenReturn(true);
+                "widget",
+                "EXTERNAL_UPSTREAM")).thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/1.0/widget-1.0.jar");
@@ -280,7 +283,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         // The real service refuses the claim outright when a different connection already holds
         // it (see claimMavenRetainedVersionOrigin's own javadoc); the mock stands in for that here.
         when(service.claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example", "widget",
-                "1.0", "public:maven-central", 42L))
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L))
                 .thenReturn(new CodeArtifactService.MavenClaimOutcome(false, 0L));
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
@@ -314,7 +317,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
                 anyString(), anyString(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(),
                 anyString(), eq("com/example/widget/1.0/widget-1.0-javadoc.jar"), any(), anyLong());
         verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example", "widget",
-                "1.0", "public:maven-central", 42L);
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L);
         verify(service).ensureRetainedPackageOriginDefault(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
                 "widget", 42L);
         verify(service).finishMavenRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "com.example",
@@ -340,7 +343,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
         order.verify(service).currentContainerBackedVersionFence(REGION, DOMAIN, OWNER, REPOSITORY, "maven",
                 "com.example", "widget", "1.0");
         order.verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example",
-                "widget", "1.0", "public:maven-central", 42L);
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L);
     }
 
     @Test
@@ -359,7 +362,7 @@ class CodeArtifactMavenExternalConnectionImporterTest {
 
         assertTrue(imported);
         verify(service).claimMavenRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "com.example", "widget",
-                "1.0", "public:maven-central", 42L);
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, 42L);
         // Something was genuinely retained (the idempotent match is still a real asset present
         // either way), so the claim is finished as confirmed, not released. Whether the
         // idempotent match itself double-counts bytes is deployMavenAssetUnderVersionFence's own
