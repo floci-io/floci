@@ -12,16 +12,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.Tag;
 
 import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -74,8 +73,10 @@ class Ec2NetworkTagsIamIntegrationTest {
                 assertEquals(4, admin.describeTags(r -> r.filters(f -> f.name("resource-id").values(ids)))
                         .tags().stream().filter(t -> "Owner".equals(t.key()) && "owner".equals(t.value())).count());
                 admin.createTags(r -> r.resources(eni).tags(owner("foreign")));
-                denied(() -> client.createTags(r -> r.resources(ids).tags(owner("owner"))));
-                denied(() -> client.deleteTags(r -> r.resources(ids).tags(owner("owner"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.createTags(r -> r.resources(ids).tags(owner("owner"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.deleteTags(r -> r.resources(ids).tags(owner("owner"))));
                 assertEquals(4, admin.describeTags(r -> r.filters(f -> f.name("resource-id").values(ids)))
                         .tags().stream().filter(t -> "Owner".equals(t.key())).count());
                 admin.createTags(r -> r.resources(eni).tags(owner("owner")));
@@ -83,11 +84,14 @@ class Ec2NetworkTagsIamIntegrationTest {
                         {"Effect":"Deny","Action":["ec2:CreateTags","ec2:DeleteTags"],
                          "Resource":"arn:aws:ec2:us-east-1:000000000000:network-interface/%s"}
                         """.formatted(eni));
-                denied(() -> client.createTags(r -> r.resources(ids).tags(owner("owner"))));
-                denied(() -> client.deleteTags(r -> r.resources(ids).tags(owner("owner"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.createTags(r -> r.resources(ids).tags(owner("owner"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.deleteTags(r -> r.resources(ids).tags(owner("owner"))));
                 policy(user, grant);
                 // A resource type not covered by the grants must not borrow a preceding target's ARN.
-                denied(() -> client.createTags(r -> r.resources(group, vpc).tags(owner("owner"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.createTags(r -> r.resources(group, vpc).tags(owner("owner"))));
                 client.deleteTags(r -> r.resources(ids).tags(owner("owner")));
                 assertTrue(admin.describeTags(r -> r.filters(f -> f.name("resource-id").values(ids))).tags().stream()
                         .noneMatch(t -> "Owner".equals(t.key())));
@@ -106,9 +110,5 @@ class Ec2NetworkTagsIamIntegrationTest {
 
     private static Tag owner(String value) {
         return Tag.builder().key("Owner").value(value).build();
-    }
-
-    private static void denied(Runnable operation) {
-        assertEquals(403, assertThrows(Ec2Exception.class, operation::run).statusCode());
     }
 }

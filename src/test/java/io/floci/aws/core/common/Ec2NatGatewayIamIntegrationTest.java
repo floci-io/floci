@@ -12,16 +12,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.Tag;
 import software.amazon.awssdk.services.ec2.model.TagSpecification;
 
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -64,17 +62,17 @@ class Ec2NatGatewayIamIntegrationTest {
                     """;
             try {
                 policy(name, created + "," + parents + "," + tag);
-                denied(() -> create(client, subnet, allocation));
+                assertAwsError("UnauthorizedOperation", 403, () -> create(client, subnet, allocation));
                 admin.createTags(r -> r.resources(allocation).tags(Tag.builder().key("Owner").value("owner").build()));
                 policy(name, created + "," + tag);
-                denied(() -> create(client, subnet, allocation));
+                assertAwsError("UnauthorizedOperation", 403, () -> create(client, subnet, allocation));
                 policy(name, created + "," + parents);
-                denied(() -> create(client, subnet, allocation));
+                assertAwsError("UnauthorizedOperation", 403, () -> create(client, subnet, allocation));
                 policy(name, created + "," + parents + "," + tag + "," + """
                         {"Effect":"Deny","Action":"ec2:CreateNatGateway",
                          "Resource":"arn:aws:ec2:us-east-1:000000000000:elastic-ip/%s"}
                         """.formatted(allocation));
-                denied(() -> create(client, subnet, allocation));
+                assertAwsError("UnauthorizedOperation", 403, () -> create(client, subnet, allocation));
                 policy(name, created + "," + parents + "," + tag);
                 create(client, subnet, allocation);
             } finally {
@@ -100,9 +98,5 @@ class Ec2NatGatewayIamIntegrationTest {
     private static TagSpecification tags(String type, String owner) {
         return TagSpecification.builder().resourceType(type)
                 .tags(Tag.builder().key("Owner").value(owner).build()).build();
-    }
-
-    private static void denied(Runnable operation) {
-        assertEquals(403, assertThrows(Ec2Exception.class, operation::run).statusCode());
     }
 }

@@ -12,16 +12,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.NetworkInterface;
 import software.amazon.awssdk.services.ec2.model.TagSpecification;
 
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -64,17 +63,18 @@ class Ec2NetworkInterfaceIamIntegrationTest {
             Runnable request = () -> create(client, subnet, group, second, "integration-test");
             try {
                 policy(user, create + "," + subnetGrant + "," + firstGrant + "," + secondGrant);
-                denied(request);
+                assertAwsError("UnauthorizedOperation", 403, request::run);
                 policy(user, create + "," + tag + "," + firstGrant + "," + secondGrant);
-                denied(request);
+                assertAwsError("UnauthorizedOperation", 403, request::run);
                 policy(user, create + "," + tag + "," + subnetGrant + "," + firstGrant);
-                denied(request);
+                assertAwsError("UnauthorizedOperation", 403, request::run);
                 policy(user, all.replace("subnet-owner", "group-owner"));
-                denied(request);
+                assertAwsError("UnauthorizedOperation", 403, request::run);
                 policy(user, all + "," + secondGrant.replace("Allow", "Deny"));
-                denied(request);
+                assertAwsError("UnauthorizedOperation", 403, request::run);
                 policy(user, all);
-                denied(() -> create(client, subnet, group, second, "wrong-owner"));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> create(client, subnet, group, second, "wrong-owner"));
                 String eni = create(client, subnet, group, second, "integration-test");
                 assertEquals(2, admin.describeNetworkInterfaces(r -> r.networkInterfaceIds(eni))
                         .networkInterfaces().getFirst().groups().size());
@@ -119,10 +119,12 @@ class Ec2NetworkInterfaceIamIntegrationTest {
                 assertEquals("team-b", admin.describeNetworkInterfaces(r -> r.networkInterfaceIds(eni))
                         .networkInterfaces().getFirst().tagSet().stream().filter(t -> t.key().equals("ManagedBy"))
                         .findFirst().orElseThrow().value());
-                denied(() -> client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("denied"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("denied"))));
                 admin.createTags(r -> r.resources(eni).tags(t -> t.key("ManagedBy").value("team-a")));
                 client.deleteTags(r -> r.resources(eni).tags(t -> t.key("ManagedBy")));
-                denied(() -> client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("denied"))));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.createTags(r -> r.resources(eni).tags(t -> t.key("Purpose").value("denied"))));
             } finally {
                 admin.deleteNetworkInterface(r -> r.networkInterfaceId(eni));
                 assertEquals(0, admin.describeTags(r -> r.filters(f -> f.name("resource-id").values(eni))).tags().size());
@@ -152,11 +154,5 @@ class Ec2NetworkInterfaceIamIntegrationTest {
     private void policy(String user, String statements) {
         EnforcementFixtures.putUserPolicy(endpoint.getPort(), auth("000000000000", "iam"), user,
                 "network", "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}");
-    }
-
-    private void denied(Runnable request) {
-        Ec2Exception error = assertThrows(Ec2Exception.class, request::run);
-        assertEquals(403, error.statusCode());
-        assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
     }
 }

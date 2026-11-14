@@ -14,16 +14,15 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.Tag;
 import software.amazon.awssdk.services.ec2.model.TagSpecification;
 
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -56,7 +55,8 @@ class Ec2NetworkCreateIamIntegrationTest {
                     """.formatted(second);
             try {
                 policy(user, allow + "," + deny);
-                denied(() -> client.createVpcEndpoint(r -> r.vpcId(vpc).vpcEndpointType("Gateway")
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.createVpcEndpoint(r -> r.vpcId(vpc).vpcEndpointType("Gateway")
                         .serviceName("com.amazonaws.us-east-1.s3").routeTableIds(first, second)));
                 policy(user, allow);
                 String id = client.createVpcEndpoint(r -> r.vpcId(vpc).vpcEndpointType("Gateway")
@@ -101,25 +101,31 @@ class Ec2NetworkCreateIamIntegrationTest {
                     """.formatted(action, parentArn);
             try {
                 policy(name, create + "," + parent);
-                denied(() -> create(client, action, type, vpc, "integration-test"));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> create(client, action, type, vpc, "integration-test"));
                 policy(name, create + "," + tags + "," + parent);
-                denied(() -> create(client, action, type, vpc, "wrong-owner"));
+                assertAwsError("UnauthorizedOperation", 403, () -> create(client, action, type, vpc, "wrong-owner"));
                 String id = create(client, action, type, vpc, "integration-test");
                 assertEquals("integration-test", admin.describeTags(r -> r.filters(f -> f.name("resource-id")
                         .values(id))).tags().stream().filter(t -> t.key().equals("ManagedBy")).findFirst()
                         .orElseThrow().value());
                 delete(admin, action, id);
                 policy(name, create + "," + tags + "," + parent + "," + create.replace("Allow", "Deny"));
-                denied(() -> create(client, action, type, vpc, "integration-test"));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> create(client, action, type, vpc, "integration-test"));
                 policy(name, create.replace(":000000000000:", ":111122223333:") + "," + tags + "," + parent);
-                denied(() -> create(client, action, type, vpc, "integration-test"));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> create(client, action, type, vpc, "integration-test"));
                 if (!action.equals("CreateInternetGateway") && !action.equals("AllocateAddress")) {
                     policy(name, create + "," + tags);
-                    denied(() -> create(client, action, type, vpc, "integration-test"));
+                    assertAwsError("UnauthorizedOperation", 403,
+                            () -> create(client, action, type, vpc, "integration-test"));
                     policy(name, create + "," + tags + "," + parent.replace("parent-owner", "integration-test"));
-                    denied(() -> create(client, action, type, vpc, "integration-test"));
+                    assertAwsError("UnauthorizedOperation", 403,
+                            () -> create(client, action, type, vpc, "integration-test"));
                     policy(name, create + "," + tags + "," + parent + "," + parent.replace("Allow", "Deny"));
-                    denied(() -> create(client, action, type, vpc, "integration-test"));
+                    assertAwsError("UnauthorizedOperation", 403,
+                            () -> create(client, action, type, vpc, "integration-test"));
                 } else {
                     policy(name, create + "," + tags);
                     delete(admin, action, create(client, action, type, vpc, "integration-test"));
@@ -166,11 +172,6 @@ class Ec2NetworkCreateIamIntegrationTest {
                 .tags(Tag.builder().key("ManagedBy").value(owner).build()).build();
     }
 
-    private void denied(Runnable request) {
-        Ec2Exception error = assertThrows(Ec2Exception.class, request::run);
-        assertEquals(403, error.statusCode());
-        assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
-    }
 
     private void policy(String name, String statements) {
         EnforcementFixtures.putUserPolicy(endpoint.getPort(), auth("000000000000", "iam"), name,

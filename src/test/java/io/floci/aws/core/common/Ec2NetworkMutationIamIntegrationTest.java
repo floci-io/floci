@@ -21,9 +21,8 @@ import software.amazon.awssdk.services.ec2.model.TagSpecification;
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -115,11 +114,11 @@ class Ec2NetworkMutationIamIntegrationTest {
                     """.formatted(action);
             try {
                 policy(user, grant.replace("integration-test", "wrong-owner") + rules);
-                denied(mutate);
+                assertAwsError("UnauthorizedOperation", 403, mutate::run);
                 policy(user, grant.replace(":000000000000:", ":111122223333:") + rules);
-                denied(mutate);
+                assertAwsError("UnauthorizedOperation", 403, mutate::run);
                 policy(user, grant + rules + "," + grant.replace("Allow", "Deny"));
-                denied(mutate);
+                assertAwsError("UnauthorizedOperation", 403, mutate::run);
                 policy(user, grant + rules);
                 mutate.run();
                 if (action.equals("ModifySubnetAttribute")) {
@@ -150,11 +149,6 @@ class Ec2NetworkMutationIamIntegrationTest {
         return TagSpecification.builder().resourceType(type).tags(t -> t.key("Owner").value("integration-test")).build();
     }
 
-    private void denied(Runnable request) {
-        Ec2Exception error = assertThrows(Ec2Exception.class, request::run);
-        assertEquals(403, error.statusCode());
-        assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
-    }
 
     private void remove(Runnable cleanup) {
         try {

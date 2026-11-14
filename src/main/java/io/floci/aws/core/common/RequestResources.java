@@ -858,12 +858,6 @@ public final class RequestResources {
         }
     }
 
-    /**
-     * The non-empty strings a request gives a member, read as its handler reads them: a form's parameter, or its
-     * list numbered under {@code member} from 1 to the first missing, or a body's value, as text whether a string,
-     * a number, a boolean or a null, and a list member's only from a list, a single value giving none. A member
-     * with a field gives that field of its structure, or of each of its list's structures.
-     */
     /** Normalize only generated EC2 wire members; JSON task inputs keep their SDK names. */
     private static Map<String, String> ec2Query(RequestResourceMembers.Table table, String operation,
                                                Map<String, String> sent) {
@@ -886,6 +880,12 @@ public final class RequestResources {
         return form;
     }
 
+    /**
+     * The non-empty strings a request gives a member, read as its handler reads them: a form's parameter, or its
+     * list numbered under {@code member} from 1 to the first missing, or a body's value, as text whether a string,
+     * a number, a boolean or a null, and a list member's only from a list, a single value giving none. A member
+     * with a field gives that field of its structure, or of each of its list's structures.
+     */
     private static List<String> values(Map<String, String> form, JsonNode body, RequestResourceMembers.Member member) {
         List<String> values = new ArrayList<>();
         if (!form.isEmpty()) {

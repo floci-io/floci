@@ -13,7 +13,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.ResourceType;
 import software.amazon.awssdk.services.ec2.model.Tag;
 import software.amazon.awssdk.services.ec2.model.TagSpecification;
@@ -22,9 +21,8 @@ import software.amazon.awssdk.services.ec2.model.VpcAttributeName;
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -84,10 +82,8 @@ class Ec2VpcResourceTagsIntegrationTest {
     }
 
     private void denied(Ec2Client client, String vpcId) {
-        Ec2Exception error = assertThrows(Ec2Exception.class,
+        assertAwsError("UnauthorizedOperation", 403,
                 () -> client.modifyVpcAttribute(r -> r.vpcId(vpcId).enableDnsHostnames(a -> a.value(true))));
-        assertEquals(403, error.statusCode());
-        assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
     }
 
     private void policy(String user, String statements) {

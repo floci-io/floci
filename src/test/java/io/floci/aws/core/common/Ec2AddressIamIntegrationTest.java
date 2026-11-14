@@ -16,16 +16,15 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Address;
 import software.amazon.awssdk.services.ec2.model.AssociateAddressRequest;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.TagSpecification;
 
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -68,17 +67,17 @@ class Ec2AddressIamIntegrationTest {
             AssociateAddressRequest request = builder.build();
             try {
                 policy(user, addressGrant + "," + targetGrant);
-                denied(() -> client.associateAddress(request));
+                assertAwsError("UnauthorizedOperation", 403, () -> client.associateAddress(request));
                 assertNull(admin.describeAddresses(r -> r.allocationIds(allocation)).addresses().getFirst().associationId());
                 admin.createTags(r -> r.resources(target).tags(t -> t.key("Owner").value("target")));
                 policy(user, addressGrant);
-                denied(() -> client.associateAddress(request));
+                assertAwsError("UnauthorizedOperation", 403, () -> client.associateAddress(request));
                 policy(user, targetGrant);
-                denied(() -> client.associateAddress(request));
+                assertAwsError("UnauthorizedOperation", 403, () -> client.associateAddress(request));
                 policy(user, addressGrant + "," + targetGrant + "," + targetGrant.replace("Allow", "Deny"));
-                denied(() -> client.associateAddress(request));
+                assertAwsError("UnauthorizedOperation", 403, () -> client.associateAddress(request));
                 policy(user, addressGrant + "," + targetGrant + "," + addressGrant.replace("Allow", "Deny"));
-                denied(() -> client.associateAddress(request));
+                assertAwsError("UnauthorizedOperation", 403, () -> client.associateAddress(request));
                 policy(user, addressGrant + "," + targetGrant);
                 String association = client.associateAddress(request).associationId();
                 Address result = admin.describeAddresses(r -> r.allocationIds(allocation)).addresses().getFirst();
@@ -114,12 +113,15 @@ class Ec2AddressIamIntegrationTest {
             String grant = grant("ReleaseAddress", "elastic-ip/" + allocation, "address");
             try {
                 policy(user, grant);
-                denied(() -> client.releaseAddress(r -> r.allocationId(allocation)));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.releaseAddress(r -> r.allocationId(allocation)));
                 admin.createTags(r -> r.resources(allocation).tags(t -> t.key("Owner").value("address")));
                 policy(user, grant + "," + grant.replace("Allow", "Deny"));
-                denied(() -> client.releaseAddress(r -> r.allocationId(allocation)));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.releaseAddress(r -> r.allocationId(allocation)));
                 policy(user, grant.replace(allocation, "eipalloc-other"));
-                denied(() -> client.releaseAddress(r -> r.allocationId(allocation)));
+                assertAwsError("UnauthorizedOperation", 403,
+                        () -> client.releaseAddress(r -> r.allocationId(allocation)));
                 policy(user, grant);
                 client.releaseAddress(r -> r.allocationId(allocation));
             } finally {
@@ -144,11 +146,5 @@ class Ec2AddressIamIntegrationTest {
 
     private static TagSpecification tags(String type, String owner) {
         return TagSpecification.builder().resourceType(type).tags(t -> t.key("Owner").value(owner)).build();
-    }
-
-    private static void denied(Runnable operation) {
-        Ec2Exception error = assertThrows(Ec2Exception.class, operation::run);
-        assertEquals(403, error.statusCode());
-        assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
     }
 }
