@@ -8,6 +8,7 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -26,6 +27,8 @@ import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -84,6 +87,33 @@ class EksClusterConditionsIntegrationTest {
         }
     }
 
+    /**
+     * A number for a boolean member is refused rather than read as {@code true}, which the condition key of the
+     * same member would not carry; the boolean and its text both carry it, so the deny holds for either.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"1", "true", "\"true\""})
+    void aBooleanMemberIsCheckedAsTheClusterReadsIt(String value) {
+        try (Fixture f = new Fixture()) {
+            f.policy("""
+                    {"Effect":"Allow","Action":"eks:CreateCluster","Resource":"*"},
+                    {"Effect":"Deny","Action":"eks:CreateCluster","Resource":"*",
+                     "Condition":{"Bool":{"eks:endpointPublicAccess":"true"}}}""");
+            String name = "condition-" + UUID.randomUUID();
+            ValidatableResponse response = given().port(endpoint.getPort())
+                    .header("Authorization", auth(f.accessKeyId, "eks")).contentType("application/json")
+                    .body("{\"name\":\"%s\",\"roleArn\":\"%s\",\"resourcesVpcConfig\":{\"endpointPublicAccess\":%s}}"
+                            .formatted(name, f.role, value))
+                    .post("/clusters").then();
+            if ("1".equals(value)) {
+                response.statusCode(400).body(containsString("SerializationException"));
+            } else {
+                response.statusCode(403);
+            }
+            assertFalse(f.admin.listClusters(r -> { }).clusters().contains(name));
+        }
+    }
+
     private static CreateClusterRequest changed(CreateClusterRequest request, String field, boolean omit) {
         return switch (field) {
             case "authenticationMode" -> request.toBuilder().accessConfig(request.accessConfig().toBuilder()
@@ -113,6 +143,7 @@ class EksClusterConditionsIntegrationTest {
     private final class Fixture implements AutoCloseable {
         final String user = "eks-condition-" + UUID.randomUUID();
         final String role;
+        final String accessKeyId;
         final EksClient admin;
         final EksClient client;
         final List<String> clusters = new ArrayList<>();
@@ -120,11 +151,17 @@ class EksClusterConditionsIntegrationTest {
         Fixture() {
             UserCredentials credentials = EnforcementFixtures.createUser(cleanup, endpoint.getPort(),
                     auth(ACCOUNT, "iam"), user);
+            accessKeyId = credentials.accessKeyId();
             role = EnforcementFixtures.createRole(cleanup, endpoint.getPort(), ACCOUNT, "/", user,
                     EMPTY_POLICY_DOCUMENT);
             admin = AwsTestClients.create(EksClient.builder(), ACCOUNT, Region.US_EAST_1, endpoint);
-            client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(), credentials.secretAccessKey(),
-                    Region.US_EAST_1, endpoint);
+            try {
+                client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                        credentials.secretAccessKey(), Region.US_EAST_1, endpoint);
+            } catch (RuntimeException e) {
+                admin.close();
+                throw e;
+            }
         }
 
         void policy(String statements) {

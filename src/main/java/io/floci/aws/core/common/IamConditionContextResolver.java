@@ -164,25 +164,12 @@ public class IamConditionContextResolver {
         return switch (credentialScope) {
             case "s3" -> s3ConditionContext(action, ctx);
             case "ec2" -> ec2ConditionContext(action, ctx);
-            case "eks" -> eksConditionContext(action, ctx);
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
             default -> requestMemberConditions(action, ctx);
         };
-    }
-
-    /** Explicit request attributes only: omitted update fields must not inherit the cluster's stored values. */
-    private Map<String, List<String>> eksConditionContext(String action, ContainerRequestContext ctx) {
-        if (RequestConditionKeys.requestKeys(action).isEmpty()) {
-            return null;
-        }
-        JsonNode body = bufferedJsonBody(ctx);
-        return body == null ? null : requestConditions(action, member -> {
-            JsonNode value = body.at("/" + member.replace('.', '/'));
-            return value.isTextual() || value.isBoolean() ? value.asText() : null;
-        });
     }
 
     /** Logs tag operations and group mutations use the handler's resource and request scope. */
@@ -348,10 +335,11 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser or the record names
-     * of a Route 53 change batch, read as its namespace's protocol carries them (a Query form, an XML body), from the
-     * table in {@code request-condition-keys.json}; null when it carries none, or is sent in a protocol no reader here
-     * reads yet.
+     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser, the record names
+     * of a Route 53 change batch or an EKS cluster's endpoint access, read as its namespace's protocol carries them
+     * (a Query form, an XML or JSON body), from the table in {@code request-condition-keys.json}; null when it
+     * carries none, or is sent in a protocol no reader here reads yet. A member left out, or given a JSON null, names
+     * nothing, so an update takes no value from what the resource already has.
      */
     private Map<String, List<String>> requestMemberConditions(String action, ContainerRequestContext ctx) {
         List<String> keys = RequestConditionKeys.requestKeys(action);
@@ -373,10 +361,37 @@ public class IamConditionContextResolver {
                 return null;
             }
             values = member -> read.getOrDefault(member, List.of());
+        } else if ("json".equals(protocol) || "rest-json".equals(protocol)) {
+            JsonNode body = PassedRoles.jsonBody(ctx);
+            if (body == null) {
+                return null;
+            }
+            values = member -> jsonValues(body, member.split("\\."), 0, new ArrayList<>());
         } else {
             return null;
         }
         return requestConditions(action, values, requestConditionSpelling(namespace));
+    }
+
+    /**
+     * The scalar values at {@code path} in a JSON body, a member path as the table writes it, {@code *} stepping into
+     * every element of a list or map; a JSON null, a structure or a list where the path ends names nothing.
+     */
+    private static List<String> jsonValues(JsonNode node, String[] path, int step, List<String> found) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return found;
+        }
+        if (step == path.length) {
+            if (node.isValueNode()) {
+                found.add(node.asText());
+            }
+            return found;
+        }
+        if ("*".equals(path[step])) {
+            node.forEach(element -> jsonValues(element, path, step + 1, found));
+            return found;
+        }
+        return jsonValues(node.get(path[step]), path, step + 1, found);
     }
 
     /**

@@ -18,6 +18,13 @@ botocore. Omitted attributes remain absent from the IAM context; stored cluster 
 and service defaults do not supply missing request conditions. Generic request-tag
 conditions continue to apply alongside these EKS-specific keys.
 
+A `CreateCluster` body is checked against botocore's EKS request shapes, vendored by
+`tools/aws/regen_eks_shapes.py`, before it is read. A boolean member given anything but a JSON
+boolean or the text `true` or `false`, such as `"endpointPublicAccess": 1`, is refused with
+`SerializationException`, so it cannot reach a cluster as `true` while its condition key carries
+no value. A structure, list or map of the wrong kind is refused the same way. EKS's own wording
+for this error has not been measured; Floci answers as the REST JSON services it was measured on do.
+
 ## Supported Operations
 
 | Operation | Description |
