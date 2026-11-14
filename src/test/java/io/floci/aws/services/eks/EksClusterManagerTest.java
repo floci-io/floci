@@ -14,6 +14,7 @@ import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
@@ -2086,6 +2087,83 @@ class EksClusterManagerTest {
                                     && String.valueOf(record.getMessage()).contains("Resolver rules will not apply")),
                     "the cluster must say why its rules stopped applying, got: "
                             + logs.stream().map(LogRecord::getMessage).toList());
+        }
+
+        @Test
+        void aRegisteredNodeIsReachedAtItsPrivateAddress() {
+            Cluster cluster = new Cluster();
+            cluster.setName("reach-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-reach");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("container-reach", node.getDockerContainerId());
+            assertEquals("172.17.0.2", node.getPrivateIpAddress());
+            assertEquals("172.17.0.2", node.getContainerBridgeIp());
+        }
+
+        @Test
+        void aNodeOnSeveralNetworksIsReachedAtThePrivateAddressItsContainerHolds() {
+            // The first network that isn't the default bridge, the one EC2 would pick, is Floci's own here, but the
+            // node reports its VPC address, and that is where an instance target's traffic goes.
+            InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
+            InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+            NetworkSettings settings = Mockito.mock(NetworkSettings.class);
+            Map<String, ContainerNetwork> networks = new LinkedHashMap<>();
+            networks.put("floci_default", new ContainerNetwork().withIpv4Address("172.18.0.4"));
+            networks.put("floci-vpc", new ContainerNetwork().withIpv4Address("10.10.0.3"));
+            when(dockerClient.inspectContainerCmd(anyString())).thenReturn(inspect);
+            when(inspect.exec()).thenReturn(response);
+            when(response.getNetworkSettings()).thenReturn(settings);
+            when(settings.getNetworks()).thenReturn(networks);
+            Cluster cluster = new Cluster();
+            cluster.setName("vpc-cluster");
+            cluster.setNodePrivateIp("10.10.0.3");
+
+            manager.registerClusterNodeInstance(cluster, "container-vpc");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("10.10.0.3", node.getPrivateIpAddress());
+            assertEquals("10.10.0.3", node.getContainerBridgeIp());
+        }
+
+        @Test
+        void aNodeWhosePrivateAddressItsContainerDoesNotHoldIsReachedAtTheContainersAddress() {
+            Cluster cluster = new Cluster();
+            cluster.setName("moved-cluster");
+            cluster.setNodePrivateIp("10.10.0.9");
+
+            manager.registerClusterNodeInstance(cluster, "container-moved");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("10.10.0.9", node.getPrivateIpAddress());
+            assertEquals("172.17.0.2", node.getContainerBridgeIp());
+        }
+
+        @Test
+        void aNodeWhoseAddressesCannotBeDeterminedRecordsNoneToReachItAt() {
+            when(dockerClient.inspectContainerCmd(anyString()))
+                    .thenThrow(new RuntimeException("docker is unreachable"));
+            Cluster cluster = new Cluster();
+            cluster.setName("unknown-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-unknown");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("10.0.0.1", node.getPrivateIpAddress());
+            assertNull(node.getContainerBridgeIp());
+        }
+
+        @Test
+        void theMetadataEndpointRecordsANodeItRegistersAsRegistrationDoes() {
+            Cluster cluster = new Cluster();
+            cluster.setName("imds-first-cluster");
+
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("container-42", node.getDockerContainerId());
+            assertEquals("172.17.0.2", node.getContainerBridgeIp());
         }
 
         @Test
