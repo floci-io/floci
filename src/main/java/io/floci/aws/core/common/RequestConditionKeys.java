@@ -47,4 +47,16 @@ final class RequestConditionKeys {
         TABLE.path("members").path(action).properties().forEach(key -> keys.add(key.getKey()));
         return keys;
     }
+
+    /** The protocol a namespace's requests are sent in, as botocore gives it ({@code rest-xml}); null without one. */
+    static String protocol(String namespace) {
+        JsonNode protocol = TABLE.path("protocols").path(namespace);
+        return protocol.isTextual() ? protocol.asText() : null;
+    }
+
+    /** The botocore shape of the request member at {@code member} of {@code action}; null when the table has none. */
+    static String shape(String action, String member) {
+        JsonNode shape = TABLE.path("memberShapes").path(action).path(member);
+        return shape.isTextual() ? shape.asText() : null;
+    }
 }

@@ -127,7 +127,7 @@ class IamConditionContextResolverTest {
         resolver = new IamConditionContextResolver(
                 dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
                 crossAccountServiceInstance, iamServiceInstance,
-                lambdaWebServiceInstance,
+                lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()),
                 requestContext, config,
                 null, serviceCatalog);
     }
@@ -167,6 +167,42 @@ class IamConditionContextResolverTest {
                 webRequest("/2025-03-07/web-functions/app", "")));
         assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
                 webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
+    }
+
+    /**
+     * A change batch carries the keys the generated table names for its action, read from the elements its members
+     * name and spelled by the namespace's service for each member's shape; an element of the same name elsewhere is
+     * not read.
+     */
+    @Test
+    void aChangeBatchCarriesTheKeysItsMembersNameSpelledByShape() {
+        String body = """
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch><Changes>
+                    <Change><Action>UPSERT</Action><ResourceRecordSet><Name>Probe.Example.test</Name><Type>A</Type>
+                      <GeoLocation><Name>elsewhere.example.test</Name></GeoLocation></ResourceRecordSet></Change>
+                    <Change><Action>DELETE</Action><ResourceRecordSet><Name>second.example.test.</Name>
+                      <Type>TXT</Type></ResourceRecordSet></Change>
+                  </Changes></ChangeBatch>
+                </ChangeResourceRecordSetsRequest>""";
+
+        assertEquals(Map.of(
+                "route53:ChangeResourceRecordSetsActions", List.of("ChangeAction:UPSERT", "ChangeAction:DELETE"),
+                "route53:ChangeResourceRecordSetsRecordTypes", List.of("RRType:A", "RRType:TXT"),
+                "route53:ChangeResourceRecordSetsNormalizedRecordNames",
+                List.of("DNSName:Probe.Example.test", "DNSName:second.example.test.")),
+                resolver.resolve("route53", "route53:ChangeResourceRecordSets", xmlRequest(body)));
+        assertNull(resolver.resolve("route53", "route53:ChangeResourceRecordSets",
+                xmlRequest("<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>")), "a body that does not parse");
+        assertNull(resolver.resolve("route53", "route53:ListResourceRecordSets", xmlRequest(body)));
+    }
+
+    @Test
+    void aQueryRequestCarriesTheKeysItsMembersNameAsGiven() {
+        assertEquals(Map.of("redshift:DbUser", List.of("analyst")), resolver.resolve("redshift",
+                "redshift:GetClusterCredentials", formRequest("Action=GetClusterCredentials&DbUser=analyst")));
+        assertNull(resolver.resolve("redshift", "redshift:GetClusterCredentials",
+                formRequest("Action=GetClusterCredentials")));
     }
 
     @Test
@@ -216,6 +252,35 @@ class IamConditionContextResolverTest {
         when(containerRequest.getEntityStream())
                 .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
         return containerRequest;
+    }
+
+    /** An XML request whose body can be read again, as a real request's restored stream can. */
+    private static ContainerRequestContext xmlRequest(String body) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        when(containerRequest.getEntityStream())
+                .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return containerRequest;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Instance<RequestConditionSpelling> spellings(RequestConditionSpelling... spellings) {
+        Instance<RequestConditionSpelling> instance = mock(Instance.class);
+        when(instance.isUnsatisfied()).thenReturn(spellings.length == 0);
+        when(instance.iterator()).thenAnswer(invocation -> List.of(spellings).iterator());
+        return instance;
+    }
+
+    /** Spells each Route 53 member as its shape and value, so a test sees which shape each value was read with. */
+    private static final class ShapeNamingSpelling implements RequestConditionSpelling {
+        @Override
+        public String namespace() {
+            return "route53";
+        }
+
+        @Override
+        public String spell(String shape, String value) {
+            return shape + ":" + value;
+        }
     }
 
     private ContainerRequestContext webRequest(String path, String body) throws Exception {
@@ -721,7 +786,7 @@ class IamConditionContextResolverTest {
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                requestContext, config, null,
+                spellings(), requestContext, config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 

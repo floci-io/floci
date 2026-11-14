@@ -6165,6 +6165,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         copy.setStateReasonMessage(source.getStateReasonMessage());
         copy.setRegion(source.getRegion());
         copy.setDockerContainerId(source.getDockerContainerId());
+        copy.setContainerBridgeIp(source.getContainerBridgeIp());
         copy.setRootVolumeId(source.getRootVolumeId());
         copy.setDisableApiStop(source.isDisableApiStop());
         copy.setDisableApiTermination(source.isDisableApiTermination());
@@ -6551,18 +6552,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         synchronized (attachmentTopologyLock(region)) {
-            if (token != null) {
-                for (EgressOnlyInternetGateway existing : egressOnlyInternetGateways.scan(
-                        k -> k.startsWith(region + "::"))) {
-                    if (token.equals(existing.getClientToken())) {
-                        if (!vpcId.equals(existing.getAttachments().get(0).getVpcId())
-                                || !tagMap(tagList).equals(tagMap(existing.getCreationTags()))) {
-                            throw new AwsException("IdempotentParameterMismatch",
-                                    "The client token '" + token + "' was already used with different parameters", 400);
-                        }
-                        return existing;
-                    }
-                }
+            Optional<EgressOnlyInternetGateway> replay = Ec2ClientTokens.replay(token,
+                    () -> egressOnlyInternetGateways.scan(k -> k.startsWith(region + "::")).stream(),
+                    EgressOnlyInternetGateway::getClientToken,
+                    first -> vpcId.equals(first.getAttachments().get(0).getVpcId())
+                            && tagMap(tagList).equals(tagMap(first.getCreationTags())),
+                    "The client token '" + token + "' was already used with different parameters");
+            if (replay.isPresent()) {
+                return replay.get();
             }
             getRequiredVpc(region, vpcId);
             EgressOnlyInternetGateway eigw = new EgressOnlyInternetGateway();
@@ -8448,67 +8445,80 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * prefix list, and the whole permission only once nothing is left in it. Matching on protocol
      * and ports alone would take out an unrelated rule that happens to share them.
      */
-    private boolean removeRecordedPermission(List<IpPermission> perms, SecurityGroupRule rule) {
-        String referencedGroupId = rule.getReferencedGroupInfo() == null
-                ? null : rule.getReferencedGroupInfo().getGroupId();
-        for (IpPermission perm : perms) {
-            if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
-                    || !Objects.equals(perm.getFromPort(), rule.getFromPort())
-                    || !Objects.equals(perm.getToPort(), rule.getToPort())) {
+    private boolean removeRecordedPermission(List<IpPermission> permissions, SecurityGroupRule rule) {
+        RecordedPermission match = findRecordedPermission(permissions, rule);
+        if (match == null) {
+            return false;
+        }
+        match.removeSource();
+        dropIfEmpty(permissions, match.permission());
+        return true;
+    }
+
+    /** Locates a source while the caller holds the group lock through its subsequent mutation. */
+    private RecordedPermission findRecordedPermission(List<IpPermission> permissions, SecurityGroupRule rule) {
+        for (IpPermission permission : permissions) {
+            if (!Objects.equals(permission.getIpProtocol(), rule.getIpProtocol())
+                    || !Objects.equals(permission.getFromPort(), rule.getFromPort())
+                    || !Objects.equals(permission.getToPort(), rule.getToPort())) {
                 continue;
             }
             if (rule.getCidrIpv6() != null) {
-                Ipv6Range match6 = perm.getIpv6Ranges().stream()
-                        .filter(r -> rule.getCidrIpv6().equals(r.getCidrIpv6()))
-                        .findFirst().orElse(null);
-                if (match6 == null) {
-                    continue;
+                for (int index = 0; index < permission.getIpv6Ranges().size(); index++) {
+                    if (rule.getCidrIpv6().equals(permission.getIpv6Ranges().get(index).getCidrIpv6())) {
+                        return new RecordedPermission(permission, PermissionSource.IPV6, index);
+                    }
                 }
-                perm.getIpv6Ranges().remove(match6);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            if (rule.getReferencedGroupInfo() != null) {
-                // A reference by a name that matched no group was recorded without an id.
-                UserIdGroupPair matchPair = perm.getUserIdGroupPairs().stream()
-                        .filter(pair -> Objects.equals(referencedGroupId, pair.getGroupId()))
-                        .findFirst().orElse(null);
-                if (matchPair == null) {
-                    continue;
+            } else if (rule.getReferencedGroupInfo() != null) {
+                ReferencedSecurityGroup reference = rule.getReferencedGroupInfo();
+                for (int index = 0; index < permission.getUserIdGroupPairs().size(); index++) {
+                    UserIdGroupPair pair = permission.getUserIdGroupPairs().get(index);
+                    if (Objects.equals(reference.getGroupId(), pair.getGroupId())
+                            && Objects.equals(reference.getUserId(), pair.getUserId())) {
+                        return new RecordedPermission(permission, PermissionSource.GROUP, index);
+                    }
                 }
-                perm.getUserIdGroupPairs().remove(matchPair);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            if (rule.getCidrIpv4() != null) {
-                IpRange match = perm.getIpRanges().stream()
-                        .filter(r -> rule.getCidrIpv4().equals(r.getCidrIp()))
-                        .findFirst().orElse(null);
-                if (match == null) {
-                    continue;
+            } else if (rule.getCidrIpv4() != null) {
+                for (int index = 0; index < permission.getIpRanges().size(); index++) {
+                    if (rule.getCidrIpv4().equals(permission.getIpRanges().get(index).getCidrIp())) {
+                        return new RecordedPermission(permission, PermissionSource.IPV4, index);
+                    }
                 }
-                perm.getIpRanges().remove(match);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            if (rule.getPrefixListId() != null) {
-                PrefixListId matchList = perm.getPrefixListIds().stream()
-                        .filter(l -> rule.getPrefixListId().equals(l.getPrefixListId()))
-                        .findFirst().orElse(null);
-                if (matchList == null) {
-                    continue;
+            } else if (rule.getPrefixListId() != null) {
+                for (int index = 0; index < permission.getPrefixListIds().size(); index++) {
+                    if (rule.getPrefixListId().equals(permission.getPrefixListIds().get(index).getPrefixListId())) {
+                        return new RecordedPermission(permission, PermissionSource.PREFIX_LIST, index);
+                    }
                 }
-                perm.getPrefixListIds().remove(matchList);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            // A record naming no peer matches only a permission that names none either.
-            if (!hasSources(perm)) {
-                perms.remove(perm);
-                return true;
+            } else if (!hasSources(permission)) {
+                return new RecordedPermission(permission, PermissionSource.EMPTY, -1);
             }
         }
-        return false;
+        return null;
+    }
+
+    private enum PermissionSource { IPV4, IPV6, GROUP, PREFIX_LIST, EMPTY }
+
+    private record RecordedPermission(IpPermission permission, PermissionSource source, int index) {
+        private void removeSource() {
+            switch (source) {
+                case IPV4 -> permission.getIpRanges().remove(index);
+                case IPV6 -> permission.getIpv6Ranges().remove(index);
+                case GROUP -> permission.getUserIdGroupPairs().remove(index);
+                case PREFIX_LIST -> permission.getPrefixListIds().remove(index);
+                case EMPTY -> { }
+            }
+        }
+
+        private void setDescription(String description) {
+            switch (source) {
+                case IPV4 -> permission.getIpRanges().get(index).setDescription(description);
+                case IPV6 -> permission.getIpv6Ranges().get(index).setDescription(description);
+                case GROUP -> permission.getUserIdGroupPairs().get(index).setDescription(description);
+                case PREFIX_LIST -> permission.getPrefixListIds().get(index).setDescription(description);
+                case EMPTY -> { }
+            }
+        }
     }
 
     private void dropIfEmpty(List<IpPermission> perms, IpPermission perm) {
@@ -8608,17 +8618,48 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public void modifySecurityGroupRules(String region, String groupId, List<Map<String, String>> ruleUpdates) {
         ensureDefaultResources(region);
-        // Update description on matching rules
-        for (Map<String, String> update : ruleUpdates) {
-            String ruleId = update.get("SecurityGroupRuleId");
-            String desc = update.get("Description");
-            if (ruleId != null) {
-                SecurityGroupRule rule = securityGroupRules.get(key(region, ruleId)).orElse(null);
-                if (rule != null && desc != null) {
-                    rule.setDescription(desc);
-                    securityGroupRules.put(key(region, ruleId), rule);
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (lockFor(key(region, groupId))) {
+                SecurityGroup group = getRequiredSecurityGroup(region, groupId);
+                List<RuleDescriptionUpdate> updates = requireRuleDescriptionUpdates(region, groupId, ruleUpdates);
+                for (RuleDescriptionUpdate update : updates) {
+                    SecurityGroupRule rule = update.rule();
+                    rule.setDescription(update.description());
+                    updatePermissionDescription(group, rule);
+                    securityGroupRules.put(key(region, rule.getSecurityGroupRuleId()), rule);
+                }
+                if (!updates.isEmpty()) {
+                    securityGroups.put(key(region, groupId), group);
                 }
             }
+        }
+    }
+
+    private List<RuleDescriptionUpdate> requireRuleDescriptionUpdates(String region, String groupId,
+                                                                    List<Map<String, String>> ruleUpdates) {
+        List<RuleDescriptionUpdate> updates = new ArrayList<>();
+        for (Map<String, String> update : ruleUpdates) {
+            String ruleId = update.get("SecurityGroupRuleId");
+            SecurityGroupRule rule = securityGroupRules.get(key(region, ruleId)).orElse(null);
+            if (rule == null || !groupId.equals(rule.getGroupId())) {
+                throw new AwsException("InvalidSecurityGroupRuleId.NotFound",
+                        "The security group rule ID '" + ruleId + "' does not exist", 400);
+            }
+            String description = update.get("Description");
+            if (description != null) {
+                updates.add(new RuleDescriptionUpdate(rule, description));
+            }
+        }
+        return updates;
+    }
+
+    private record RuleDescriptionUpdate(SecurityGroupRule rule, String description) {}
+
+    private void updatePermissionDescription(SecurityGroup group, SecurityGroupRule rule) {
+        List<IpPermission> permissions = rule.isEgress() ? group.getIpPermissionsEgress() : group.getIpPermissions();
+        RecordedPermission match = findRecordedPermission(permissions, rule);
+        if (match != null) {
+            match.setDescription(rule.getDescription());
         }
     }
 
@@ -10971,6 +11012,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         RouteTable rt = routeTables.get(storeKey).orElse(null);
         if (rt != null) { rt.setTags(new ArrayList<>(tagList)); routeTables.put(storeKey, rt); return; }
+        NetworkInterface networkInterface = networkInterfaces.get(storeKey).orElse(null);
+        if (networkInterface != null) {
+            networkInterface.getTagSet().clear();
+            networkInterface.getTagSet().addAll(tagList);
+            networkInterfaces.put(storeKey, networkInterface);
+            return;
+        }
         KeyPair kp = keyPairs.get(storeKey).orElse(null);
         if (kp != null) { kp.setTags(new ArrayList<>(tagList)); keyPairs.put(storeKey, kp); return; }
         LaunchTemplate lt = launchTemplates.get(storeKey).orElse(null);
@@ -11643,19 +11691,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     String.valueOf(ephemeralStorage), endDateType, String.valueOf(endDate), instanceMatchCriteria,
                     outpostArn, placementGroupArn, String.valueOf(startDate), String.valueOf(commitmentDuration),
                     deliveryPreference);
-            if (isSet(clientToken)) {
-                for (CapacityReservation existing : capacityReservations.scan(k -> k.startsWith(region + "::"))) {
-                    if (clientToken.equals(existing.getClientToken()) && callerAccountId().equals(existing.getOwnerId())) {
-                        if (!parameters.equals(existing.getRequestParameters())
-                                || !requestTags.equals(existing.getRequestTags())) {
-                            throw new AwsException("IdempotentParameterMismatch",
-                                    "Parameters differ from the previous request with this ClientToken.", 400);
-                        }
-                        reconcileCapacityMembership(region);
-                        return new CapacityReservation(getRequiredCapacityReservation(region,
-                                existing.getCapacityReservationId()));
-                    }
-                }
+            Optional<CapacityReservation> replay = Ec2ClientTokens.replay(clientToken,
+                    () -> capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
+                            .filter(existing -> callerAccountId().equals(existing.getOwnerId())),
+                    CapacityReservation::getClientToken,
+                    first -> parameters.equals(first.getRequestParameters())
+                            && requestTags.equals(first.getRequestTags()),
+                    "Parameters differ from the previous request with this ClientToken.");
+            if (replay.isPresent()) {
+                reconcileCapacityMembership(region);
+                return new CapacityReservation(getRequiredCapacityReservation(region,
+                        replay.get().getCapacityReservationId()));
             }
             Instant now = capacityReservationNow();
             validateCapacityReservationSchedule(startDate, commitmentDuration, deliveryPreference, endDate, now);
@@ -13302,23 +13348,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw dryRunOperation();
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
-        if (token != null) {
-            // Compared after defaults are applied, so a retry that omits a defaulted parameter the
-            // first call also omitted still matches.
-            Optional<InstanceConnectEndpoint> replay = instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"))
-                    .stream().filter(existing -> token.equals(existing.getClientToken())).findFirst();
-            if (replay.isPresent()) {
-                InstanceConnectEndpoint first = replay.get();
-                if (!subnetId.equals(first.getSubnetId())
-                        || !new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
-                        || !type.equals(first.getIpAddressType())
-                        || Boolean.TRUE.equals(preserveClientIp) != first.isPreserveClientIp()
-                        || !tagMap(tagList).equals(tagMap(first.getCreationTags()))) {
-                    throw new AwsException("IdempotentParameterMismatch",
-                            "The client token '" + token + "' was already used with different parameters", 400);
-                }
-                return withTags(first);
-            }
+        // Compared after defaults are applied, so a retry that omits a defaulted parameter the
+        // first call also omitted still matches.
+        Optional<InstanceConnectEndpoint> replay = Ec2ClientTokens.replay(token,
+                () -> instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream(),
+                InstanceConnectEndpoint::getClientToken,
+                first -> subnetId.equals(first.getSubnetId())
+                        && new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
+                        && type.equals(first.getIpAddressType())
+                        && Boolean.TRUE.equals(preserveClientIp) == first.isPreserveClientIp()
+                        && tagMap(tagList).equals(tagMap(first.getCreationTags())),
+                "The client token '" + token + "' was already used with different parameters");
+        if (replay.isPresent()) {
+            return withTags(replay.get());
         }
 
         String id = "eice-" + randomHex(17);
@@ -14955,20 +14997,60 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public Volume createVolume(String region, String availabilityZone, String volumeType,
                                int size, boolean encrypted, String kmsKeyId, int iops, Integer throughput,
                                String snapshotId, List<Tag> volumeTags) {
-        ensureDefaultResources(region);
-        Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops, throughput,
-                snapshotId);
-        String volumeId = vol.getVolumeId();
-        if (volumeTags != null) {
-            vol.setTags(new ArrayList<>(volumeTags));
-            // Tags on create are tags like any other: DescribeTags lists them in this region.
-            putTags(region, vol.getVolumeId(), new ArrayList<>(volumeTags));
-        }
-        volumes.put(key(region, volumeId), vol);
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
-        }
-        return vol;
+        return createVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops, throughput,
+                snapshotId, volumeTags, null);
+    }
+
+    /**
+     * As above, honouring {@code clientToken}: a replay in the same Availability Zone returns the
+     * volume the first call created, and the same token with another volume parameter or other
+     * creation tags fails with IdempotentParameterMismatch. The EC2 idempotency guide exempts the
+     * Availability Zone from that check, so the same token in another zone gets that zone's own volume.
+     * Parameters are compared as requested, so a later ModifyVolume or CreateTags does not turn a
+     * retry into a mismatch.
+     */
+    public Volume createVolume(String region, String availabilityZone, String volumeType,
+                               int size, boolean encrypted, String kmsKeyId, int iops, Integer throughput,
+                               String snapshotId, List<Tag> volumeTags, String clientToken) {
+        String token = isSet(clientToken) ? clientToken : null;
+        // Held from the replay scan to the save, so two creates with one token see each other.
+        return withResourceLock(volumeClientTokenLocks,
+                token == null ? null : callerAccountId() + "::" + key(region, token), () -> {
+            ensureDefaultResources(region);
+            Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops,
+                    throughput, snapshotId);
+            List<String> parameters = Arrays.asList(volumeType, String.valueOf(size), String.valueOf(encrypted),
+                    kmsKeyId, String.valueOf(iops), String.valueOf(throughput), snapshotId);
+            Map<String, String> requestTags = tagMap(volumeTags);
+            // The zone's volume with this token, settled as a read would settle it, so the answer is
+            // the same whether or not something read the volume since its instance terminated.
+            Optional<Volume> replay = Ec2ClientTokens.replay(token,
+                    () -> volumes.scan(k -> k.startsWith(region + "::")).stream()
+                            .filter(existing -> vol.getAvailabilityZone().equals(existing.getAvailabilityZone())
+                                    && token.equals(existing.getClientToken()))
+                            .flatMap(existing -> settleEndedHolders(region, existing).stream()),
+                    Volume::getClientToken,
+                    first -> parameters.equals(first.getRequestParameters())
+                            && requestTags.equals(first.getRequestTags()),
+                    "Parameters differ from the previous request with this ClientToken.");
+            if (replay.isPresent()) {
+                return replay.get();
+            }
+            vol.setClientToken(token);
+            vol.setRequestParameters(parameters);
+            vol.setRequestTags(requestTags);
+            String volumeId = vol.getVolumeId();
+            if (volumeTags != null) {
+                vol.setTags(new ArrayList<>(volumeTags));
+                // Tags on create are tags like any other: DescribeTags lists them in this region.
+                putTags(region, vol.getVolumeId(), new ArrayList<>(volumeTags));
+            }
+            volumes.put(key(region, volumeId), vol);
+            if (volumeBlockDeviceManager != null) {
+                volumeBlockDeviceManager.createVolume(volumeId, vol.getSize());
+            }
+            return vol;
+        });
     }
 
     /**
@@ -15070,6 +15152,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RefCountedLock> volumeClientTokenLocks = new ConcurrentHashMap<>();
     private final Set<VolumeDevice> pendingVolumeAttachments = ConcurrentHashMap.newKeySet();
 
     private record VolumeDevice(String accountId, String region, String instanceId, String device) {}
@@ -15869,6 +15952,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 ni.setPrivateIpAddresses(ipList);
 
                 networkInterfaces.put(key(region, eniId), ni);
+                putTags(region, eniId, new ArrayList<>(ni.getTagSet()));
                 return ni;
             }
         }
@@ -15890,6 +15974,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             releaseInterfaceAddresses(region, networkInterfaceId, true);
             networkInterfaces.delete(key(region, networkInterfaceId));
+            removeTags(region, networkInterfaceId);
             releasePrivateIps(region, ni.getSubnetId(), List.of(ni.getPrivateIpAddress()));
         }
     }

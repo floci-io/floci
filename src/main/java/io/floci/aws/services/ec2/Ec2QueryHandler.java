@@ -3775,7 +3775,7 @@ public class Ec2QueryHandler {
             if (ruleId == null) break;
             Map<String, String> update = new LinkedHashMap<>();
             update.put("SecurityGroupRuleId", ruleId);
-            String desc = p.getFirst("SecurityGroupRule." + i + ".SecurityGroupRuleRequest.Description");
+            String desc = p.getFirst("SecurityGroupRule." + i + ".SecurityGroupRule.Description");
             if (desc != null) update.put("Description", desc);
             updates.add(update);
         }
@@ -6790,7 +6790,7 @@ public class Ec2QueryHandler {
         checkDryRun(p);
 
         Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
-                encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags);
+                encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags, p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVolumeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
