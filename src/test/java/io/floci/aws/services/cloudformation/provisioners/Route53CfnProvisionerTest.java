@@ -1629,7 +1629,6 @@ class Route53CfnProvisionerTest {
     /** A zone the stack made from {@code oldProps}, then an update that applies {@code newProps}. */
     private StackResource updatedZone(Route53Service service, Route53CfnProvisioner owner, String oldProps,
                                       String newProps) throws Exception {
-        ObjectMapper mapper = new ObjectMapper();
         HostedZone old = new HostedZone("ZOLD", "old.example.test.", "dns-stack/Zone", null, (VpcAssociation) null);
         HostedZone created = new HostedZone("ZNEW", "new.example.test.", "dns-stack/Zone", null,
                 (VpcAssociation) null);
@@ -1638,15 +1637,9 @@ class Route53CfnProvisionerTest {
         when(service.createHostedZone(any(), any(), any(), any()))
                 .thenReturn(new Route53Service.CreateZoneResult(created, null));
         when(service.getAssignedNameServers(any())).thenReturn(List.of("ns-1.example"));
-        StackResource resource = new StackResource();
-        resource.setLogicalId("Zone");
-        resource.setResourceType(ZONE);
-        resource.setPhysicalId("ZOLD");
-        resource.getAttributes().put("Id", "ZOLD");
-        ProvisionContext context = new ProvisionContext(zoneEngine(), "us-east-1", "000000000000", "dns-stack",
-                "ZOLD", event -> { }, mapper.readTree(oldProps));
+        StackResource resource = trackedZone();
 
-        owner.provision(resource, mapper.readTree(newProps), context);
+        owner.provision(resource, MAPPER.readTree(newProps), zoneUpdateContext(oldProps));
         return resource;
     }
 
@@ -1770,6 +1763,27 @@ class Route53CfnProvisionerTest {
         assertEquals("ZOLD", resource.getPhysicalId());
         assertEquals("ZOLD", resource.getAttributes().get("Id"));
         assertEquals("ns-old", resource.getAttributes().get("NameServers"));
+    }
+
+    @Test
+    void aReplacementWhoseNameServerLookupFailsDeletesTheNewZoneAndPutsBackThePriorOne() throws Exception {
+        Route53Service service = serviceWithOldZone();
+        HostedZone created = new HostedZone("ZNEW", "new.example.test.", "caller", null, (VpcAssociation) null);
+        when(service.createHostedZone(any(), any(), any(), any()))
+                .thenReturn(new Route53Service.CreateZoneResult(created, null));
+        when(service.getAssignedNameServers("ZNEW")).thenThrow(new AwsException("NoSuchHostedZone", "gone", 404));
+        StackResource resource = trackedZone();
+
+        assertThrows(AwsException.class, () -> new Route53CfnProvisioner(service).provision(resource,
+                MAPPER.readTree("{\"Name\":\"new.example.test\"}"),
+                zoneUpdateContext("{\"Name\":\"old.example.test\"}")));
+
+        verify(service).deleteHostedZone("ZNEW");
+        verify(service, never()).deleteHostedZone("ZOLD");
+        assertEquals("ZOLD", resource.getPhysicalId());
+        assertEquals("ZOLD", resource.getAttributes().get("Id"));
+        assertEquals("ns-old", resource.getAttributes().get("NameServers"));
+        assertEquals("true", resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
     }
 
     @Test
