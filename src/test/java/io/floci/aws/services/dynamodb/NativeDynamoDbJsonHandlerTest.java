@@ -480,6 +480,84 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void putResourcePolicyAttachesTheFirstPolicyWhenNoPolicyIsExpected() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", "{}");
+        putRequest.put("ExpectedRevisionId", "NO_POLICY");
+
+        Response putResponse = handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+        assertEquals(200, putResponse.getStatus());
+        JsonNode putBody = mapper.convertValue(putResponse.getEntity(), JsonNode.class);
+        String revisionId = putBody.get("RevisionId").asText();
+        assertFalse(revisionId.isBlank());
+
+        ObjectNode getRequest = mapper.createObjectNode();
+        getRequest.put("ResourceArn", tableArn);
+        JsonNode getBody = mapper.convertValue(
+                handler.handle("GetResourcePolicy", getRequest, "eu-west-1").getEntity(), JsonNode.class);
+        assertEquals(revisionId, getBody.get("RevisionId").asText());
+    }
+
+    @Test
+    void putResourcePolicyRejectsNoPolicyWhenAPolicyIsAttached() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.put("ResourceArn", tableArn);
+        putRequest.put("Policy", "{}");
+        handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+
+        putRequest.put("ExpectedRevisionId", "NO_POLICY");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutResourcePolicy", putRequest, "eu-west-1"));
+        assertEquals("PolicyNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void putResourcePolicyLetsOneConcurrentNoPolicyAttachSucceed() throws Exception {
+        TableDefinition table = createUsersTable("eu-west-1");
+        String tableArn = table.getTableArn();
+        int callers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(callers);
+        try {
+            List<Future<Boolean>> attempts = new ArrayList<>();
+            for (int i = 0; i < callers; i++) {
+                attempts.add(executor.submit(() -> {
+                    ObjectNode putRequest = mapper.createObjectNode();
+                    putRequest.put("ResourceArn", tableArn);
+                    putRequest.put("Policy", "{}");
+                    putRequest.put("ExpectedRevisionId", "NO_POLICY");
+                    start.await();
+                    try {
+                        handler.handle("PutResourcePolicy", putRequest, "eu-west-1");
+                        return true;
+                    } catch (AwsException expected) {
+                        // The losing callers find the winner's policy already attached.
+                        assertEquals("PolicyNotFoundException", expected.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int attached = 0;
+            for (Future<Boolean> attempt : attempts) {
+                if (attempt.get()) {
+                    attached++;
+                }
+            }
+            assertEquals(1, attached);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void putResourcePolicyRejectsInvalidResourceArn() {
         ObjectNode putRequest = mapper.createObjectNode();
         putRequest.put("ResourceArn", "not-an-arn");

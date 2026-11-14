@@ -136,6 +136,8 @@ public class DynamoDbService {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
     // Held from an account quota check until the capacity it allowed is stored.
     private final Object capacityLock = new Object();
+    // Held from a resource policy revision check until the policy it allowed is stored.
+    private final Object resourcePolicyLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -3441,20 +3443,26 @@ public class DynamoDbService {
     /** Result of a successful GetResourcePolicy call: the raw policy document and its revision id. */
     public record ResourcePolicyResult(String policy, String revisionId) {}
 
+    private static final String NO_POLICY_REVISION_ID = "NO_POLICY";
+
     public String putResourcePolicy(String resourceArn, String policy, String expectedRevisionId, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (expectedRevisionId != null
-                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
-            throw new AwsException("PolicyNotFoundException",
-                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+        synchronized (resourcePolicyLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            boolean revisionMatches = NO_POLICY_REVISION_ID.equals(expectedRevisionId)
+                    ? table.getResourcePolicy() == null
+                    : expectedRevisionId == null || expectedRevisionId.equals(table.getResourcePolicyRevisionId());
+            if (!revisionMatches) {
+                throw new AwsException("PolicyNotFoundException",
+                        "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+            }
+            String revisionId = UUID.randomUUID().toString();
+            table.setResourcePolicy(policy);
+            table.setResourcePolicyRevisionId(revisionId);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
+            LOG.debugv("Put resource policy: {0}", resourceArn);
+            return revisionId;
         }
-        String revisionId = UUID.randomUUID().toString();
-        table.setResourcePolicy(policy);
-        table.setResourcePolicyRevisionId(revisionId);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
-        LOG.debugv("Put resource policy: {0}", resourceArn);
-        return revisionId;
     }
 
     public ResourcePolicyResult getResourcePolicy(String resourceArn, String region) {
@@ -3467,23 +3475,25 @@ public class DynamoDbService {
     }
 
     public String deleteResourcePolicy(String resourceArn, String expectedRevisionId, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getResourcePolicy() == null) {
-            throw new AwsException("PolicyNotFoundException",
-                    "No resource policy found for: " + resourceArn, 400);
+        synchronized (resourcePolicyLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            if (table.getResourcePolicy() == null) {
+                throw new AwsException("PolicyNotFoundException",
+                        "No resource policy found for: " + resourceArn, 400);
+            }
+            if (expectedRevisionId != null
+                    && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
+                throw new AwsException("PolicyNotFoundException",
+                        "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+            }
+            String revisionId = table.getResourcePolicyRevisionId();
+            table.setResourcePolicy(null);
+            table.setResourcePolicyRevisionId(null);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
+            LOG.debugv("Deleted resource policy: {0}", resourceArn);
+            return revisionId;
         }
-        if (expectedRevisionId != null
-                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
-            throw new AwsException("PolicyNotFoundException",
-                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
-        }
-        String revisionId = table.getResourcePolicyRevisionId();
-        table.setResourcePolicy(null);
-        table.setResourcePolicyRevisionId(null);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
-        LOG.debugv("Deleted resource policy: {0}", resourceArn);
-        return revisionId;
     }
 
     private TableDefinition findTableByArn(String arn, String region) {
