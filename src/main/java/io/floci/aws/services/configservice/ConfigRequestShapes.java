@@ -13,7 +13,7 @@ import java.util.Set;
  * input that fails validation. A {@code Limit} out of range answers {@code InvalidLimitException} instead
  * where the operation models it.
  */
-final class ConfigRequestShapes {
+public final class ConfigRequestShapes {
 
     private static final Set<String> MODELED_LIMITS = Set.of(
             "DescribeAggregationAuthorizations.Limit", "DescribeConformancePacks.Limit",
@@ -55,7 +55,7 @@ final class ConfigRequestShapes {
     private ConfigRequestShapes() {
     }
 
-    static void check(String operation, JsonNode request) {
+    public static void check(String operation, JsonNode request) {
         if (CHECK.hasOperation(operation)) {
             CHECK.check(operation, request);
         }

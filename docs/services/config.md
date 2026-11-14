@@ -214,7 +214,9 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       `tools/aws/regen_config_shapes.py` vendors every operation's input constraints;
       `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. A
       violation answers `ValidationException`, or `InvalidLimitException` for a `Limit` out of
-      range where the operation models that error, in Floci's own wording.
+      range where the operation models that error, in Floci's own wording. CloudFormation
+      checks an `AWS::Config::ConfigRule` against `PutConfigRule`'s constraints the same way,
+      so a property outside them fails the resource with that message.
     - `PutConfigRule`, `PutAggregationAuthorization` and `PutConfigurationRecorder` reject more
       than 50 `Tags`, a `Key` outside 1-128 characters or a `Value` over 256 characters with
       `ValidationException`, and a tag without a `Key` with the operation's modelled error

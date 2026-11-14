@@ -26,7 +26,6 @@ import io.floci.aws.services.configservice.model.EvaluationResult;
 import io.floci.aws.services.configservice.model.EvaluationResultIdentifier;
 import io.floci.aws.services.configservice.model.EvaluationResultQualifier;
 import io.floci.aws.services.configservice.model.RetentionConfiguration;
-import io.floci.aws.services.configservice.model.SourceDetail;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,7 +37,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
@@ -53,20 +51,6 @@ public class AwsConfigService {
     private static final String INVALID_NEXT_TOKEN_MESSAGE =
             "The specified next token is not valid. Specify the nextToken string that was returned "
                     + "in the previous response to get the next page of results.";
-    /** Enum shapes from the Config model (config/2014-11-12/service-2.json). */
-    private static final Set<String> VALID_RULE_OWNERS =
-            Set.of("CUSTOM_LAMBDA", "AWS", "CUSTOM_POLICY");
-    private static final Set<String> VALID_EXECUTION_FREQUENCIES =
-            Set.of("One_Hour", "Three_Hours", "Six_Hours", "Twelve_Hours", "TwentyFour_Hours");
-    private static final Set<String> VALID_RULE_STATES =
-            Set.of("ACTIVE", "DELETING", "DELETING_RESULTS", "EVALUATING");
-    private static final Set<String> VALID_EVALUATION_MODES = Set.of("DETECTIVE", "PROACTIVE");
-    private static final Set<String> VALID_EVENT_SOURCES = Set.of("aws.config");
-    private static final Set<String> VALID_MESSAGE_TYPES = Set.of(
-            "ConfigurationItemChangeNotification", "ConfigurationSnapshotDeliveryCompleted",
-            "ScheduledNotification", "OversizedConfigurationItemChangeNotification");
-    /** {@code Scope.ComplianceResourceTypes} is {@code max: 100}. */
-    private static final int MAX_COMPLIANCE_RESOURCE_TYPES = 100;
     private static final int RULE_CONTRIBUTOR_CAP = 25;
     private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
@@ -193,44 +177,11 @@ public class AwsConfigService {
      *  the tags alone, which TagResource/UntagResource change instead. The get-then-put runs under
      *  the lock delete takes, so a delete cannot land between them and orphan the creation tags. */
     public ConfigRule putConfigRule(String region, ConfigRule requested, List<Map<String, String>> tagList) {
-        if (requested == null || isBlank(requested.configRuleName())) {
+        String ruleName = requested.configRuleName();
+        if (ruleName == null) {
             throw new AwsException("InvalidParameterValueException",
                     "ConfigRuleName must be specified.", 400);
         }
-        if (requested.source() == null || isBlank(requested.source().owner())) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Source with Owner must be specified.", 400);
-        }
-        // The whole modeled ConfigRule is stored and echoed back, so every enum-typed member
-        // it keeps is checked here rather than accepted verbatim.
-        requireEnum(requested.source().owner(), VALID_RULE_OWNERS, "Source.Owner");
-        requireEnum(requested.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
-                "MaximumExecutionFrequency");
-        requireEnum(requested.configRuleState(), VALID_RULE_STATES, "ConfigRuleState");
-        if (requested.source().sourceDetails() != null) {
-            for (SourceDetail detail : requested.source().sourceDetails()) {
-                if (detail == null) {
-                    continue;
-                }
-                requireEnum(detail.eventSource(), VALID_EVENT_SOURCES, "SourceDetails.EventSource");
-                requireEnum(detail.messageType(), VALID_MESSAGE_TYPES, "SourceDetails.MessageType");
-                requireEnum(detail.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
-                        "SourceDetails.MaximumExecutionFrequency");
-            }
-        }
-        if (requested.scope() != null && requested.scope().complianceResourceTypes() != null
-                && requested.scope().complianceResourceTypes().size() > MAX_COMPLIANCE_RESOURCE_TYPES) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Scope.ComplianceResourceTypes accepts at most "
-                            + MAX_COMPLIANCE_RESOURCE_TYPES + " values.", 400);
-        }
-        if (requested.evaluationModes() != null) {
-            for (EvaluationModeConfiguration mode : requested.evaluationModes()) {
-                requireEnum(mode == null ? null : mode.mode(), VALID_EVALUATION_MODES,
-                        "EvaluationModes.Mode");
-            }
-        }
-        String ruleName = requested.configRuleName();
         synchronized (lockFor(ruleKey(region, ruleName))) {
             return storeConfigRule(region, requested, ruleName, tagList);
         }
@@ -605,18 +556,6 @@ public class AwsConfigService {
 
     private static boolean matchesComplianceFilter(List<String> complianceTypes, String complianceType) {
         return complianceTypes == null || complianceTypes.isEmpty() || complianceTypes.contains(complianceType);
-    }
-
-    /** Rejects a non-blank value that is not a member of the shape's enum; a null/blank value is left alone. */
-    private static void requireEnum(String value, Set<String> allowed, String memberName) {
-        if (isBlank(value) || allowed.contains(value)) {
-            return;
-        }
-        throw new AwsException("InvalidParameterValueException",
-                "Value '" + value + "' at '" + memberName + "' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: ["
-                        + allowed.stream().sorted().collect(Collectors.joining(", ")) + "]",
-                400);
     }
 
     private ComplianceContributorCount contributorCount(long count, int cap) {
