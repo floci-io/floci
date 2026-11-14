@@ -30,8 +30,12 @@ public class RedshiftDbIdentityProvisioner {
     /**
      * {@code backendPassword} is the password to log in as {@code databaseRole}, or {@code null}
      * when the role is the connection's own master user, which logs in with the master password.
+     * {@code restorePassword} puts the role's own password back and is called once the backend login
+     * has completed; {@code releaseLease} ends the whole identity (it restores the password too, if
+     * that has not happened yet) and is called when the session closes.
      */
-    public record PreparedIdentity(String databaseRole, String backendPassword, Runnable releaseLease) { }
+    public record PreparedIdentity(String databaseRole, String backendPassword,
+                                   Runnable restorePassword, Runnable releaseLease) { }
 
     @FunctionalInterface
     public interface ConnectionSupplier {
@@ -93,7 +97,9 @@ public class RedshiftDbIdentityProvisioner {
             releaseGroups(groupLease, roleName, adminConnectionFactory);
             releasePassword(heldPassword, roleName, adminConnectionFactory);
         };
-        return new PreparedIdentity(roleName, heldPassword == null ? null : heldPassword.password(), releaseHandle);
+        Runnable restorePassword = () -> releasePassword(heldPassword, roleName, adminConnectionFactory);
+        return new PreparedIdentity(roleName, heldPassword == null ? null : heldPassword.password(),
+                restorePassword, releaseHandle);
     }
 
     private record RoleInfo(boolean canLogin, boolean currentUser) { }

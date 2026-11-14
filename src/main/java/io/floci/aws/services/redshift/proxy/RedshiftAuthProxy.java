@@ -367,7 +367,8 @@ public class RedshiftAuthProxy {
                         () -> openAdminConnection(database));
                 leaseCloser.set(prepared.releaseLease());
                 return new PostgresProtocolHandler.HandoverOutcome(
-                        prepared.databaseRole(), prepared.backendPassword(), prepared.releaseLease());
+                        prepared.databaseRole(), prepared.backendPassword(),
+                        prepared.restorePassword(), prepared.releaseLease());
             }
         };
     }

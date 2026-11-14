@@ -15,8 +15,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * switch to another user, whatever SQL it runs, because PostgreSQL authorizes
  * {@code SET SESSION AUTHORIZATION} against the authenticated user.
  *
- * <p>The first session of a role stores the role's current password hash and installs a random
- * password; later concurrent sessions share it; the last one restores the stored hash. A failed
+ * <p>The first login of a role stores the role's current password hash and installs a random
+ * password; logins in flight at the same time share it; the last one to finish restores the stored
+ * hash. Callers release the lease as soon as their backend login completes, so the role's own
+ * password works again while the session is open. A failed
  * restore keeps the stored hash so the next session does not mistake the temporary password for
  * the role's own.
  */
@@ -74,12 +76,15 @@ public class TempRolePasswordTracker implements Resettable {
 
     private final SecureRandom random = new SecureRandom();
     private final ConcurrentHashMap<Key, Entry> entries = new ConcurrentHashMap<>();
+    // Khóa theo key, không bị xóa khi entry bị gỡ: acquire và release luôn cùng khóa nên một login
+    // đang chờ không thể chạy tiếp trên entry đã bị release cuối cùng gỡ khỏi map.
+    private final ConcurrentHashMap<Key, Object> keyLocks = new ConcurrentHashMap<>();
 
     public Lease acquire(String backendKey, String roleName, PasswordReader reader,
                          PasswordWriter writer) throws SQLException {
         Key key = new Key(backendKey, roleName);
-        Entry entry = entries.computeIfAbsent(key, ignored -> new Entry());
-        synchronized (entry) {
+        synchronized (lockFor(key)) {
+            Entry entry = entries.computeIfAbsent(key, ignored -> new Entry());
             if (entry.active == 0) {
                 if (entry.temporaryPassword == null) {
                     entry.storedHash = reader.read();
@@ -94,11 +99,11 @@ public class TempRolePasswordTracker implements Resettable {
     }
 
     private void release(Key key, PasswordWriter restore) {
-        Entry entry = entries.get(key);
-        if (entry == null) {
-            return;
-        }
-        synchronized (entry) {
+        synchronized (lockFor(key)) {
+            Entry entry = entries.get(key);
+            if (entry == null) {
+                return;
+            }
             entry.active--;
             if (entry.active > 0) {
                 return;
@@ -107,7 +112,7 @@ public class TempRolePasswordTracker implements Resettable {
                 restore.write(entry.storedHash);
                 entry.temporaryPassword = null;
                 entry.storedHash = null;
-                entries.remove(key, entry);
+                entries.remove(key);
             } catch (SQLException | RuntimeException failure) {
                 // Keep the stored hash and temporary marker: the next acquire must restore the
                 // original, not store the temporary password as if it were the role's own.
@@ -124,12 +129,18 @@ public class TempRolePasswordTracker implements Resettable {
         return sb.toString();
     }
 
+    private Object lockFor(Key key) {
+        return keyLocks.computeIfAbsent(key, ignored -> new Object());
+    }
+
     public void revokeBackend(String backendKey) {
         entries.keySet().removeIf(k -> k.backendKey().equals(backendKey));
+        keyLocks.keySet().removeIf(k -> k.backendKey().equals(backendKey));
     }
 
     @Override
     public void clear() {
         entries.clear();
+        keyLocks.clear();
     }
 }

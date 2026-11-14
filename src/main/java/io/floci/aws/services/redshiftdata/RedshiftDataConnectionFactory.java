@@ -43,7 +43,14 @@ class RedshiftDataConnectionFactory {
             // The session authenticates as the role itself, so PostgreSQL refuses any switch to
             // another user and loads the role's own ALTER USER ... SET defaults.
             String password = prepared.backendPassword() != null ? prepared.backendPassword() : target.password();
-            Connection connection = openRaw(target, prepared.databaseRole(), password);
+            Connection connection;
+            try {
+                connection = openRaw(target, prepared.databaseRole(), password);
+            } finally {
+                // Redshift keeps a user's own password working beside temporary credentials, so
+                // put it back as soon as the login is done instead of when the session closes.
+                prepared.restorePassword().run();
+            }
             return wrapWithRelease(connection, prepared.releaseLease());
         } catch (SQLException | RuntimeException failure) {
             prepared.releaseLease().run();

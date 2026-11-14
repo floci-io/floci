@@ -86,8 +86,16 @@ public class PostgresProtocolHandler {
     /**
      * {@code backendPassword} is the password the backend session logs in as {@code databaseRole}
      * with; {@code null} means the cluster master password, for the master user itself.
+     * {@code onBackendLogin} runs once that login has finished, whether it succeeded or not, so the
+     * role's own password can be restored while the session stays open; {@code onClose} runs when the
+     * session ends or the login is refused.
      */
-    public record HandoverOutcome(String databaseRole, String backendPassword, Runnable onClose) { }
+    public record HandoverOutcome(String databaseRole, String backendPassword,
+                                  Runnable onBackendLogin, Runnable onClose) {
+        public HandoverOutcome(String databaseRole, String backendPassword, Runnable onClose) {
+            this(databaseRole, backendPassword, null, onClose);
+        }
+    }
 
     /** The username/password the proxy opens the backend PostgreSQL connection with. */
     record BackendLogin(String user, String password) {}
@@ -348,8 +356,15 @@ public class PostgresProtocolHandler {
             } else {
                 backendParameters = startup.parameters();
             }
-            byte[] backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
-                    effectiveDbName, backendParameters);
+            byte[] backendRejection;
+            try {
+                backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
+                        effectiveDbName, backendParameters);
+            } finally {
+                if (handoverOutcome != null && handoverOutcome.onBackendLogin() != null) {
+                    handoverOutcome.onBackendLogin().run();
+                }
+            }
             if (backendRejection != null) {
                 handoverClose.run();
                 clientOut.write(backendRejection);
