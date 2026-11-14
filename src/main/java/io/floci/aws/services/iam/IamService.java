@@ -5052,7 +5052,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return removed;
     }
 
-    /** Registers an ECS task-role session, outside request scope. */
+    /**
+     * Registers a session served at the container credentials endpoint, an ECS task's role or a
+     * CodeBuild build's service role, outside request scope.
+     */
     public void registerEcsTaskRoleSession(SessionCredential session) {
         if (session.getOriginAccountId() == null || session.getOriginAccountId().isBlank()
                 || session.getEcsTaskArn() == null || session.getEcsTaskArn().isBlank()) {
@@ -5065,7 +5068,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
-    /** No ECS task survives a Floci restart; discard credentials from the previous process. */
+    /**
+     * No ECS task or CodeBuild build survives a Floci restart; discard credentials from the
+     * previous process.
+     */
     public int sweepOrphanedEcsTaskRoleSessions() {
         List<SessionCredential> stored = sessions instanceof AccountAwareStorageBackend<SessionCredential> aware
                 ? aware.scanAllAccounts() : sessions.scan(key -> true);

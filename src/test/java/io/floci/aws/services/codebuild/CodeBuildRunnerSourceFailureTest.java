@@ -85,7 +85,7 @@ class CodeBuildRunnerSourceFailureTest {
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("container", Map.of()));
         CountDownLatch finished = new CountDownLatch(1);
         doAnswer(invocation -> { finished.countDown(); return null; })
-                .when(lifecycle).stopAndRemove(eq("container"), nullable(Closeable.class));
+                .when(lifecycle).stopAndRemoveStrict(eq("container"), nullable(Closeable.class));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.attach(eq("container"), anyString(), anyString(), anyString(), anyString()))
@@ -103,8 +103,11 @@ class CodeBuildRunnerSourceFailureTest {
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.port()).thenReturn(4566);
 
+        CodeBuildRoleCredentials roleCredentials = mock(CodeBuildRoleCredentials.class);
+        when(roleCredentials.provision(anyString(), anyString(), nullable(String.class), anyString(), any()))
+                .thenReturn(new CodeBuildRoleCredentials.BuildCredentials(Map.of(), null));
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
-                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint));
+                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint, roleCredentials));
         doReturn(CodeBuildRunner.PhaseResult.ofSuccess()).when(runner)
                 .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
 

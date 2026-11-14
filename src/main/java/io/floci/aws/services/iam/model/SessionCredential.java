@@ -29,7 +29,11 @@ public class SessionCredential {
     private boolean lambdaExecutionRole;
     private String ec2InstanceId;
     private String ec2RoleId;
-    /** Exact ECS task ARN this session was minted for, when this is a task-role session. */
+    /**
+     * Exact ARN of the workload this session was minted for and is served to at the container
+     * credentials endpoint: an ECS task's, for a task-role session, or a CodeBuild build's, for a
+     * build's service-role session.
+     */
     private String ecsTaskArn;
     /** Exact object action and ARN for an internally generated S3 presigned URL. */
     private String presignedAction;

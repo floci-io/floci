@@ -72,6 +72,19 @@ Each `StartBuild` call:
 
 Source injection and artifact extraction both use the Docker API's archive copy endpoints — no bind mounts are required. This works correctly when Floci itself runs inside a Docker container (Docker-in-Docker).
 
+## The Build's Credentials
+
+A build runs as its project's `serviceRole`, as CodeBuild uses the service role for every operation it performs on the account's behalf. Floci mints a session of that role in the project's account, named `AWSCodeBuild-<build id after the project's name>`, so `aws sts get-caller-identity` inside the build answers `arn:aws:sts::<account>:assumed-role/<role name>/AWSCodeBuild-<id>`, and with `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` the role's policies decide what the build may call. Floci puts no access keys of its own in the build's environment.
+
+How the session reaches the build depends on the Docker network the build joins, `FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK`, else `FLOCI_SERVICES_DOCKER_NETWORK`, else Floci's own when Floci runs in a container:
+
+- **On a user-defined network**, the session is served the way CodeBuild serves it: the build gets `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` and none of `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_CONTAINER_CREDENTIALS_FULL_URI` or `AWS_CONTAINER_AUTHORIZATION_TOKEN`, and the AWS SDKs and CLI read the role's credentials at `http://169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, with no code change. Floci serves that address with the same credentials server and per-network proxy container ECS task roles use (see [ECS](ecs.md#task-iam-role-credentials)), and gives the build's container its own address in `169.254.0.0/16` so it can reach it. Reads near expiry return a fresh session at the same path, and the path answers nothing once the build has ended.
+- **On Docker's default bridge**, where no container can hold a link-local address, the same session is handed as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, so the build still runs as the role; these keys are not renewed during the build, and they expire after `FLOCI_SERVICES_ECS_TASK_ROLE_CREDENTIALS_TTL_SECONDS` (6 hours by default), which a build on the bridge should not outlive.
+
+A project whose role does not exist in its account builds as builds ran before they had a role: with the placeholder keys `AWS_ACCESS_KEY_ID=test` and `AWS_SECRET_ACCESS_KEY=test`, no session, and a warning in Floci's log, as an ECS task whose role cannot be resolved starts without credentials. A build on a user-defined network whose endpoint cannot be served, as where the Docker runtime does not honour link-local addresses, is handed its session as the three keys instead, with a warning. A variable of any of these names that the project, the buildspec or `StartBuild` sets still reaches the build.
+
+Unlike CodeBuild, Floci does not evaluate the role's trust policy: a role that does not trust `codebuild.amazonaws.com` is still assumed.
+
 ## Buildspec Support
 
 Floci parses the `buildspec.yml` embedded in the project or provided via `buildspecOverride`. Supported fields:
