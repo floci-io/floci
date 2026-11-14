@@ -3135,13 +3135,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // Tags are per account and per region, so each side keeps its own; both go with the attachment.
             TransitGatewayPeeringAttachment.TgwInfo requester = attachment.getRequesterTgwInfo();
             TransitGatewayPeeringAttachment.TgwInfo accepter = attachment.getAccepterTgwInfo();
-            if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount) {
-                tagsByAccount.deleteForAccount(requester.getOwnerId(), key(requester.getRegion(), attachmentId));
-                tagsByAccount.deleteForAccount(accepter.getOwnerId(), key(accepter.getRegion(), attachmentId));
-            } else {
-                removeTags(requester.getRegion(), attachmentId);
-                removeTags(accepter.getRegion(), attachmentId);
-            }
+            removeTags(requester.getOwnerId(), requester.getRegion(), attachmentId);
+            removeTags(accepter.getOwnerId(), accepter.getRegion(), attachmentId);
             attachment.setState("deleted");
             return attachment;
         }
@@ -12912,11 +12907,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (side == null || side.getRegion() == null) {
                 continue;
             }
-            if (tags instanceof AccountAwareStorageBackend<?> tagsByAccount && side.getOwnerId() != null) {
-                tagsByAccount.deleteForAccount(side.getOwnerId(), key(side.getRegion(), id));
-            } else {
-                removeTags(side.getRegion(), id);
-            }
+            removeTags(side.getOwnerId(), side.getRegion(), id);
         }
     }
 
