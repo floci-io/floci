@@ -469,18 +469,37 @@
     }
 
     // ── Connect ──────────────────────────────────────────
-    var SNIPPETS = {
-      shell: "export AWS_ENDPOINT_URL=" + endpoint + "\nexport AWS_ACCESS_KEY_ID=test\nexport AWS_SECRET_ACCESS_KEY=test\nexport AWS_DEFAULT_REGION=us-east-1",
-      cli: "aws --endpoint-url " + endpoint + " s3 mb s3://demo\naws --endpoint-url " + endpoint + " s3 ls",
-      boto3: 'import boto3\n\ns3 = boto3.client(\n    "s3",\n    endpoint_url="' + endpoint + '",\n    region_name="us-east-1",\n    aws_access_key_id="test",\n    aws_secret_access_key="test",\n)'
-    };
+    var activeSnippet = "shell";
+    var connectRegion = "us-east-1";
+
+    function renderSnippet() {
+      var snippets = {
+        shell: "export AWS_ENDPOINT_URL=" + endpoint + "\nexport AWS_ACCESS_KEY_ID=test\nexport AWS_SECRET_ACCESS_KEY=test\nexport AWS_DEFAULT_REGION=" + connectRegion,
+        cli: "aws --endpoint-url " + endpoint + " s3 mb s3://demo\naws --endpoint-url " + endpoint + " s3 ls",
+        boto3: 'import boto3\n\ns3 = boto3.client(\n    "s3",\n    endpoint_url="' + endpoint + '",\n    region_name="' + connectRegion + '",\n    aws_access_key_id="test",\n    aws_secret_access_key="test",\n)'
+      };
+      $("snippet").textContent = snippets[activeSnippet];
+    }
+
+    function renderConnect(info) {
+      var defaults = info && info.defaults;
+      if (!defaults) { return; }
+      if (defaults.account_id) { $("f-account").textContent = defaults.account_id; }
+      if (defaults.region && defaults.region !== connectRegion) {
+        connectRegion = defaults.region;
+        $("f-region").textContent = connectRegion;
+        renderSnippet();
+      }
+    }
+
     $("f-endpoint").textContent = endpoint;
-    $("snippet").textContent = SNIPPETS.shell;
+    renderSnippet();
 
     document.querySelectorAll(".tab").forEach(function (tab) {
       tab.addEventListener("click", function () {
         document.querySelectorAll(".tab").forEach(function (t) { t.setAttribute("aria-selected", String(t === tab)); });
-        $("snippet").textContent = SNIPPETS[tab.dataset.snippet];
+        activeSnippet = tab.dataset.snippet;
+        renderSnippet();
       });
     });
 
@@ -633,7 +652,11 @@
     function refresh() {
       if (refreshing) { return; }
       refreshing = true;
-      Promise.allSettled([getJson("/_floci/health"), getJson("/_floci/init"), getJson("/_floci/info"), getJson("/_floci/ui/status")])
+      var info = getJson("/_floci/info").then(function (manifest) {
+        renderConnect(manifest);
+        return manifest;
+      });
+      Promise.allSettled([getJson("/_floci/health"), getJson("/_floci/init"), info, getJson("/_floci/ui/status")])
               .then(function (results) {
                 var v = results.map(function (r) { return r.status === "fulfilled" ? r.value : null; });
                 var health = v[0], init = v[1];

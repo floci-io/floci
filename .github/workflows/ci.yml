@@ -70,6 +70,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Test dashboard Connect panel
+        if: matrix.shard == 1
+        run: node --test .github/ci/dashboard-connect.test.cjs
+
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           java-version: '25'
