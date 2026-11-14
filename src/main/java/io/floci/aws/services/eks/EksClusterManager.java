@@ -2705,7 +2705,7 @@ public class EksClusterManager
             String region = clusterRegion(cluster);
             ContainerIps containerIps = resolveContainerIps(containerId);
             Instance nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
-            nodeInstance.setDockerContainerId(containerId);
+            recordNodeContainer(nodeInstance, containerId, containerIps);
             clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
             registerClusterNodeVpc(cluster, accountId, region, containerIps.allIps());
             for (Consumer<Instance> listener : nodeRegistrationListeners) {
@@ -2734,10 +2734,10 @@ public class EksClusterManager
                 String accountId = resolveClusterAccountId(cluster);
                 String region = clusterRegion(cluster);
                 nodeInstance = synthesizeClusterNodeInstance(cluster, containerIps.primaryIp(), region, accountId);
-                nodeInstance.setDockerContainerId(containerId);
+                recordNodeContainer(nodeInstance, containerId, containerIps);
                 clusterNodeInstances.put(clusterResourceName(cluster), new ClusterNodeRecord(accountId, region, nodeInstance));
             } else if (nodeInstance.getDockerContainerId() == null) {
-                nodeInstance.setDockerContainerId(containerId);
+                recordNodeContainer(nodeInstance, containerId, containerIps);
             }
 
             if (metadataServer != null) {
@@ -3501,7 +3501,25 @@ public class EksClusterManager
         }
     }
 
+    /**
+     * A node container's addresses: {@code primaryIp} is the one EC2 would pick for a container it runs
+     * ({@link Ec2MetadataProxy#preferredMetadataSourceIp}), or null when inspecting the container found none.
+     */
     record ContainerIps(String primaryIp, Set<String> allIps) {}
+
+    /**
+     * Records the container behind a cluster's node on the node's instance, as EC2 does for the containers it runs:
+     * the container, and the address Floci reaches it at, which an ELB instance target or health check naming the
+     * node connects to. That address is the node's private IP when its container holds it, since AWS sends an
+     * instance target's traffic to the instance's primary private IP, and otherwise the container's primary
+     * address. No address is recorded when inspecting the container found none.
+     */
+    static void recordNodeContainer(Instance nodeInstance, String containerId, ContainerIps containerIps) {
+        nodeInstance.setDockerContainerId(containerId);
+        String privateIp = nodeInstance.getPrivateIpAddress();
+        nodeInstance.setContainerBridgeIp(containerIps.allIps().contains(privateIp)
+                ? privateIp : containerIps.primaryIp());
+    }
 
     ContainerIps resolveContainerIps(String containerId) {
         Set<String> ips = new LinkedHashSet<>();
@@ -3529,7 +3547,7 @@ public class EksClusterManager
         } catch (Exception e) {
             LOG.warnv("Could not inspect container {0} for IPs: {1}", containerId, e.getMessage());
         }
-        return new ContainerIps(preferred != null ? preferred : "10.0.0.1", ips);
+        return new ContainerIps(preferred, ips);
     }
 
     Instance getRegisteredClusterNodeInstance(Cluster cluster) {
