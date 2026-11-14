@@ -457,6 +457,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Re-claims a Docker-backed subnet address a persisted container (such as an EKS cluster node)
+     * already holds across a restart.
+     */
+    public boolean reserveVpcPrivateIp(String region, String subnetId, String address) {
+        if (vpcNetworkManager == null || subnetId == null || address == null) {
+            return false;
+        }
+        synchronized (privateIpAllocationLock) {
+            if (!vpcNetworkManager.reservePrivateIp(region, subnetId, address)) {
+                return false;
+            }
+            containerPrivateIps.computeIfAbsent(key(region, subnetId), ignored -> new HashSet<>()).add(address);
+            return true;
+        }
+    }
+
+    public void detachContainerFromVpc(String region, String vpcId, String containerId) {
+        if (vpcNetworkManager != null) {
+            vpcNetworkManager.detach(region, vpcId, containerId);
+        }
+    }
+
     public boolean isVpcNetworkEnabled() {
         return vpcNetworkManager != null && vpcNetworkManager.enabled();
     }
