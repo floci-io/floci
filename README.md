@@ -775,6 +775,20 @@ def test_s3_create_bucket():
 
 </details>
 
+## Java test heap
+
+The Surefire test JVM defaults to a 6 GiB maximum heap. For a large suite on a
+machine with sufficient memory, override it explicitly:
+
+```bash
+./mvnw -Dtest.jvm.heap=32g test
+```
+
+This controls the forked test JVM, not Maven's own JVM. Leave memory for Maven,
+native allocations, and any Docker services used by the tests.
+The property deliberately sits outside `floci.*`, which is reserved for validated
+application settings.
+
 ## Compatibility Testing
 
 The [`compatibility-tests`](./compatibility-tests/) directory validates Floci across SDKs and tooling workflows.
