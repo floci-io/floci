@@ -487,8 +487,11 @@ HTTP resolver callbacks use separate batches so independent query fields can run
 root mutation fields retain their selection order.
 
 Unsigned requests support public HTTP(S) endpoints and local development services on localhost
-or private container networks. Floci rejects link-local and cloud metadata addresses, including
-a hostname with any such DNS answer, and connects using the validated DNS snapshot.
+or private container networks. Floci rejects IPv4 and IPv6 link-local addresses
+(`169.254.0.0/16` and `fe80::/10`) and the AWS IPv6 metadata address (`fd00:ec2::254`),
+including IPv4-mapped equivalents and hostnames with any such DNS answer. It connects using
+the validated DNS snapshot. This shared policy does not block Alibaba metadata at
+`100.100.100.200`; that address remains reachable if the host can route to it.
 Unsigned HTTP data sources do not require a service role. Transport capacity is bounded to
 four active requests and sixteen queued requests. The caller deadline also covers DNS lookup,
 but system DNS can ignore cancellation: a stuck lookup retains its worker until it returns.

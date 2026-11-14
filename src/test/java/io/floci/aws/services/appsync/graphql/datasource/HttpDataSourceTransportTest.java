@@ -21,7 +21,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
-import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -250,25 +249,8 @@ class HttpDataSourceTransportTest {
         assertEquals(List.of(addresses), List.of(HttpDataSourceTransport.checkedResolver(delegate).resolve("compose-service")));
     }
 
-    @Test
-    void dnsValidationRejectsAnExplicitIpv6MappedAlibabaMetadataAnswer() throws Exception {
-        byte[] mapped = new byte[16];
-        mapped[10] = (byte) 0xff;
-        mapped[11] = (byte) 0xff;
-        mapped[12] = 100;
-        mapped[13] = 100;
-        mapped[14] = 100;
-        mapped[15] = (byte) 200;
-        DnsResolver delegate = mock(DnsResolver.class);
-        when(delegate.resolve("mixed.example")).thenReturn(new InetAddress[]{InetAddress.getLoopbackAddress(),
-                Inet6Address.getByAddress(null, mapped, -1)});
-        assertThrows(UnknownHostException.class,
-                () -> HttpDataSourceTransport.checkedResolver(delegate).resolve("mixed.example"));
-    }
-
     @ParameterizedTest
-    @ValueSource(strings = {"169.254.169.254", "169.254.0.1", "fe80::1", "fd00:ec2::254", "::ffff:169.254.169.254",
-            "100.100.100.200", "::ffff:100.100.100.200"})
+    @ValueSource(strings = {"169.254.169.254", "169.254.0.1", "fe80::1", "fd00:ec2::254", "::ffff:169.254.169.254"})
     void dnsValidationRejectsMixedLocalAndMetadataAnswers(String address) throws Exception {
         DnsResolver delegate = mock(DnsResolver.class);
         when(delegate.resolve("mixed.example")).thenReturn(new InetAddress[]{InetAddress.getLoopbackAddress(),

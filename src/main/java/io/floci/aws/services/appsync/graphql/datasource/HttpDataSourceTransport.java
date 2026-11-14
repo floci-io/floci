@@ -24,7 +24,6 @@ import org.jboss.logging.Logger;
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
@@ -93,14 +92,6 @@ class HttpDataSourceTransport implements AutoCloseable {
         return new ValidatingDnsResolver(delegate, (host, addresses) -> {
             try {
                 SsrfProtection.rejectMetadataAddresses(addresses, host);
-                // Keep this additional metadata exclusion local to AppSync's unsigned HTTP transport.
-                for (InetAddress address : addresses) {
-                    byte[] bytes = InetAddress.getByAddress(address.getAddress()).getAddress();
-                    if (bytes.length == 4 && bytes[0] == 100 && bytes[1] == 100 && bytes[2] == 100
-                            && Byte.toUnsignedInt(bytes[3]) == 200) {
-                        throw new UnknownHostException("HTTP data source endpoint resolves to a metadata address");
-                    }
-                }
             } catch (IOException e) {
                 UnknownHostException failure = new UnknownHostException("HTTP data source endpoint resolves to a metadata address");
                 failure.initCause(e);
