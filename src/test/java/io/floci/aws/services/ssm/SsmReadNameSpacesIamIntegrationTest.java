@@ -9,6 +9,8 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.ssm.SsmClient;
@@ -21,6 +23,7 @@ import java.util.UUID;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -66,6 +69,73 @@ class SsmReadNameSpacesIamIntegrationTest {
                             assertEquals("AccessDeniedException", error.awsErrorDetails().errorCode());
                         }
                     }
+                } finally {
+                    root.deleteParameter(request -> request.name(denied));
+                }
+            } finally {
+                root.deleteParameter(request -> request.name(allowed));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GetParameterHistory", "LabelParameterVersion", "GetParametersByPath"})
+    void paddedHistoryLabelsAndPathsKeepExactPermissions(String operation) {
+        String prefix = "/iam-extra-spaces-" + UUID.randomUUID();
+        String allowedPath = prefix + "/allowed";
+        String deniedPath = prefix + "/denied";
+        String allowed = allowedPath + "/value";
+        String denied = deniedPath + "/value";
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            root.putParameter(request -> request.name(allowed).type("String").value("allowed-value"));
+            try {
+                root.putParameter(request -> request.name(denied).type("String").value("denied-value"));
+                try {
+                    String allowedArn = root.getParameter(request -> request.name(allowed)).parameter().arn();
+                    String resource = "GetParametersByPath".equals(operation)
+                            ? allowedArn.substring(0, allowedArn.lastIndexOf('/')) : allowedArn;
+                    EnforcementFixtures.UserCredentials credentials = user("""
+                            {
+                              "Version": "2012-10-17",
+                              "Statement": [
+                                {
+                                  "Effect": "Allow",
+                                  "Action": "ssm:%s",
+                                  "Resource": "%s"
+                                }
+                              ]
+                            }
+                            """.formatted(operation, resource));
+                    try (SsmClient caller = caller(credentials)) {
+                        switch (operation) {
+                            case "GetParameterHistory" -> assertEquals("allowed-value",
+                                    caller.getParameterHistory(request -> request.name(" " + allowed + " "))
+                                            .parameters().getFirst().value());
+                            case "LabelParameterVersion" -> assertEquals(1L,
+                                    caller.labelParameterVersion(request -> request.name(" " + allowed + " ")
+                                            .parameterVersion(1L).labels("stable")).parameterVersion());
+                            case "GetParametersByPath" -> assertEquals(List.of(allowed),
+                                    caller.getParametersByPath(request -> request.path(" " + allowedPath + " "))
+                                            .parameters().stream().map(Parameter::name).toList());
+                            default -> throw new AssertionError(operation);
+                        }
+                        SsmException error = assertThrows(SsmException.class, () -> {
+                            switch (operation) {
+                                case "GetParameterHistory" -> caller.getParameterHistory(request -> request
+                                        .name(" " + denied + " "));
+                                case "LabelParameterVersion" -> caller.labelParameterVersion(request -> request
+                                        .name(" " + denied + " ").parameterVersion(1L).labels("stable"));
+                                case "GetParametersByPath" -> caller.getParametersByPath(request -> request
+                                        .path(" " + deniedPath + " "));
+                                default -> throw new AssertionError(operation);
+                            }
+                        });
+                        assertEquals("AccessDeniedException", error.awsErrorDetails().errorCode());
+                    }
+                    assertTrue(root.getParameterHistory(request -> request.name(denied))
+                            .parameters().getFirst().labels().isEmpty());
+                    assertEquals("denied-value", root.getParameter(request -> request.name(denied))
+                            .parameter().value());
                 } finally {
                     root.deleteParameter(request -> request.name(denied));
                 }
