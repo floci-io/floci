@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
@@ -339,15 +340,17 @@ class CloudFormationLambdaVersionDeletionSdkTest {
         private Owned(String account, Region region, String sharedFunction) {
             function = sharedFunction == null ? marker : sharedFunction;
             try {
-                cfn = AwsTestClients.create(CloudFormationClient.builder().overrideConfiguration(config ->
-                        config.apiCallTimeout(Duration.ofSeconds(15)).apiCallAttemptTimeout(Duration.ofSeconds(10))
-                                .retryPolicy(RetryPolicy.none())), account, region);
-                lambda = AwsTestClients.create(LambdaClient.builder().overrideConfiguration(config ->
-                        config.apiCallTimeout(Duration.ofSeconds(15)).apiCallAttemptTimeout(Duration.ofSeconds(10))
-                                .retryPolicy(RetryPolicy.none())), account, region);
-                iam = AwsTestClients.create(IamClient.builder().overrideConfiguration(config ->
-                        config.apiCallTimeout(Duration.ofSeconds(15)).apiCallAttemptTimeout(Duration.ofSeconds(10))
-                                .retryPolicy(RetryPolicy.none())), account, region);
+                ClientOverrideConfiguration clientConfiguration = ClientOverrideConfiguration.builder()
+                        .apiCallTimeout(Duration.ofSeconds(15))
+                        .apiCallAttemptTimeout(Duration.ofSeconds(10))
+                        .retryPolicy(RetryPolicy.none())
+                        .build();
+                cfn = AwsTestClients.create(CloudFormationClient.builder()
+                        .overrideConfiguration(clientConfiguration), account, region);
+                lambda = AwsTestClients.create(LambdaClient.builder()
+                        .overrideConfiguration(clientConfiguration), account, region);
+                iam = AwsTestClients.create(IamClient.builder()
+                        .overrideConfiguration(clientConfiguration), account, region);
                 roleAttempted = true;
                 roleArn = iam.createRole(request -> request.roleName(marker).assumeRolePolicyDocument("""
                         {
