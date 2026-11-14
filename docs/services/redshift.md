@@ -165,6 +165,10 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. A background sweep then copies the cluster's snapshots to that Region, see [Cross-region snapshot copy](#cross-region-snapshot-copy) |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
+| `CreateScheduledAction` | Create a scheduled action that runs `PauseCluster` or `ResumeCluster` on a cluster at an `at(...)` time or on a six-field `cron(...)` schedule, in UTC, with an optional `StartTime`/`EndTime` window, `Enable` and description. A `ResizeCluster` target is refused with `ScheduledActionTypeUnsupported` |
+| `ModifyScheduledAction` | Change the role, schedule, target, window, description or `Enable` of an action; a new schedule, or enabling a disabled action, restarts the count from now |
+| `DeleteScheduledAction` | Remove an action |
+| `DescribeScheduledActions` | List actions filtered by `ScheduledActionName`, `TargetActionType`, `Active`, `StartTime`, `EndTime` and the `cluster-identifier` and `iam-role` filters, paged with `MaxRecords` (20 to 100) and `Marker`, with `State` and `NextInvocations` |
 | `CreateSnapshotSchedule` | Create a UTC rate or cron schedule that takes automated snapshots on associated clusters, with optional tags |
 | `ModifySnapshotSchedule` | Replace a schedule's definitions |
 | `DescribeSnapshotSchedules` | List schedules filtered by `ScheduleIdentifier`, `ClusterIdentifier`, `TagKeys` and `TagValues`, paged with `MaxRecords` and `Marker`, with their associated clusters |
@@ -380,6 +384,10 @@ See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.h
 - **Hybrid storage can lose a copy after a crash.** The copy is written before the source is marked, but hybrid storage flushes in the background and does not report a failed write. If the copy's write fails and the source's succeeds, a crash before the next flush leaves the source marked as copied without a copy, and later sweeps skip it. Persistent and WAL storage report the failed write before the source is marked, so a crash there leaves the snapshot to be copied again.
 - **Retention.** Copied automated snapshots follow the cluster's current `RetentionPeriod`, so `ModifySnapshotCopyRetentionPeriod` changes existing ones. Copied manual snapshots keep the `ManualSnapshotRetentionPeriod` they were copied with; `-1` keeps them until deleted. Retention counts from the source snapshot's creation time.
 - **The cluster store has no Region.** A cluster restored from a copy is created in the same store as every other cluster, as before.
+
+## Scheduled actions
+
+A scheduled action pauses or resumes a provisioned cluster on a schedule. A background sweep runs the latest invocation that came due since it last looked, once, so a long downtime does not replay missed invocations and nothing before an action was created, rescheduled or enabled again runs. With IAM enforcement on, the action's role has to trust `scheduler.redshift.amazonaws.com` and allow `redshift:PauseCluster` or `redshift:ResumeCluster` on the cluster. A failing invocation, such as pausing a cluster that is already paused, is logged and the sweep goes on. Actions are removed with their cluster. Only `PauseCluster` and `ResumeCluster` targets are supported. A cron schedule whose invocations are less than one hour apart is refused with `InvalidSchedule`, as in AWS. Memory storage forgets actions on restart.
 
 ## Automated snapshots
 
@@ -687,6 +695,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED` | `true` | Run the background sweep that copies snapshots of copy-enabled clusters to their destination Region |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS` | `60` | Delay between snapshot copy sweeps |
+| `FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTIONS_ENABLED` | `true` | Run the background sweep that pauses and resumes clusters through scheduled actions |
+| `FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS` | `60` | Delay between scheduled action sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |

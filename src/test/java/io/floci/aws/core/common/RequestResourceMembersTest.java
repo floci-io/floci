@@ -447,7 +447,10 @@ class RequestResourceMembersTest {
                         }
                         String sent = where == null ? value : "other";
                         put(body, member, sent);
-                        form.append('&').append(parameter(member)).append('=').append(encoded(sent));
+                        String ec2Wire = table.ec2Query().getOrDefault(operation.getKey(), Map.of()).get(member);
+                        String parameter = ec2Wire == null ? parameter(member)
+                                : ec2Wire + (member.list() ? ".1" : "");
+                        form.append('&').append(parameter).append('=').append(encoded(sent));
                     });
                     List<String> named = operation.getValue().stream()
                             .filter(other -> (other == resource || named(other) || sharesAMember(other, given)

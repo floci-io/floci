@@ -1262,6 +1262,24 @@ def with_instance_example(model_: dict) -> dict:
     return model_
 
 
+def test_create_vpc_reads_the_new_vpc_and_each_optional_pool():
+    ec2 = model({"CreateVpc": {"CidrBlock": "String", "Ipv4IpamPoolId": "IpamPoolId",
+                               "Ipv6IpamPoolId": "IpamPoolId", "Ipv6Pool": "Ipv6PoolEc2Id"}}, "ec2")
+    ec2["shapes"]["IpamPoolId"] = {"type": "string"}
+    ec2["shapes"]["Ipv6PoolEc2Id"] = {"type": "string"}
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}",
+               "ipam-pool": "arn:${Partition}:ec2::${Account}:ipam-pool/${IpamPoolId}",
+               "ipv6pool-ec2": "arn:${Partition}:ec2:${Region}:${Account}:ipv6pool-ec2/${Ipv6PoolEc2Id}"}
+    upstream = {"action": "ec2:CreateVpc", "types": ["ipam-pool", "ipv6pool-ec2", "vpc"]}
+    entry = r.entry_for("ec2:CreateVpc", upstream, formats, {"ec2": ec2})
+    assert entry["resources"] == [
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv4IpamPoolId"}},
+        {"type": "ipv6pool-ec2", "fill": {"Ipv6PoolEc2Id": "Ipv6Pool"}},
+        {"type": "vpc", "fill": {}, "made": True},
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv6IpamPoolId"}}]
+    assert "targets" not in entry
+
+
 def test_id_targets_follow_the_model_and_resource_types_not_operation_names():
     ec2 = with_instance_example(model({"AnnotateResources": {"Resources": "Strings"}}, "ec2"))
     member = ec2["shapes"]["AnnotateResourcesIn"]["members"]["Resources"]
@@ -1301,7 +1319,9 @@ def test_generated_targets_match_botocores_actual_serialization(operation, targe
         operation_model = model.operation_model(name)
         parameters = ArgumentGenerator().generate_skeleton(operation_model.input_shape)
         parameters[target["member"].removesuffix("[]")] = ids
-        request = create_serializer(model.metadata["protocol"]).serialize_to_request(parameters, operation_model)
+        # The skeleton's other members are placeholders (an empty tag key), so only the serialization is checked.
+        request = create_serializer(model.metadata["protocol"], include_validation=False).serialize_to_request(
+            parameters, operation_model)
         assert [request["body"][target["query"] + "." + str(i)] for i in range(1, 4)] == ids
         checked += 1
     assert checked > 0
@@ -1331,13 +1351,32 @@ def test_instance_target_member_is_derived_from_the_arn_variable_not_the_action_
                        renamed_formats, {"ec2": renamed})["targets"]["member"] == "MachineIds[]"
 
 
-def test_resource_tag_prefixes_come_only_from_supported_reference_resources():
+def test_resource_tag_prefixes_cover_every_type_of_an_id_target_namespace_from_the_reference():
     documents = [{"Name": "ec2", "Resources": [
         {"Name": "instance", "ConditionKeys": ["vendor:ResourceTag/${TagKey}", "aws:RequestTag/${TagKey}",
                                                "aws:ResourceTag/${TagKey}", "ec2:Region"]},
-        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]}]}]
-    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"]}}
+        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]},
+        {"Name": "untaggable", "ConditionKeys": ["ec2:Region"]}]},
+        {"Name": "other", "Resources": [{"Name": "thing", "ConditionKeys": ["aws:ResourceTag/${TagKey}"]}]}]
+    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"],
+                                                      "volume": ["volume:ResourceTag/"]}}
     assert r.resource_tag_keys([]) == {}
+
+
+def test_id_prefixes_read_botocores_examples_by_the_shape_of_each_member():
+    ec2 = model({"DescribeGroups": {"GroupIds": "GroupIdList", "Label": "String"}}, "ec2")
+    ec2["shapes"]["SecurityGroupId"] = {"type": "string"}
+    ec2["shapes"]["GroupIdList"] = {"type": "list", "member": {"shape": "SecurityGroupId"}}
+    ec2["operations"]["DescribeGroups"]["output"] = {"shape": "DescribeGroupsOut"}
+    ec2["shapes"]["DescribeGroupsOut"] = {"type": "structure", "members": {"GroupId": {"shape": "SecurityGroupId"}}}
+    examples = {"ec2": {"examples": {"DescribeGroups": [
+        {"input": {"GroupIds": ["sg-903004f8", "sg-1a2b3c4d"], "Label": "lb-0123456789abcdef"},
+         "output": {"GroupId": "sg-0a1b2c3d4e5f60718"}},
+        {"input": {"GroupIds": ["xx-12345678"]}}]}}}
+    assert r.id_prefixes({"ec2": ec2}, ("security-group",), examples) == {"security-group": "sg-"}
+    # A String member's id-like value names no type, and without examples nothing is known.
+    assert r.id_prefixes({"ec2": ec2}, ("lb",), examples) == {}
+    assert r.id_prefixes({"ec2": ec2}, ("security-group",)) == {}
 
 
 def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_members():
@@ -1714,3 +1753,119 @@ def test_a_resource_id_variable_takes_a_member_named_so_and_a_bare_id_the_member
     # A bare `Id` is whatever the operation is about: the tenant's is its `DistributionTenantId`.
     assert r._filling("Id", "distributiontenant", 1, {"Id": "Id", "DistributionTenantId": "DistributionTenantId"},
                       {"Id"}) == "DistributionTenantId"
+
+
+def test_vpc_operations_read_vpc_ids_and_stored_tag_keys():
+    ec2 = model({"ModifyVpcAttribute": {"VpcId": "String"}}, "ec2")
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"}
+    assert r.entry_for("ec2:ModifyVpcAttribute", {"action": "ec2:ModifyVpcAttribute", "types": ["vpc"]},
+                       formats, {"ec2": ec2})["resources"] == [{"type": "vpc", "fill": {"VpcId": "VpcId"}}]
+    assert r.resource_tag_keys([{"Name": "ec2", "Resources": [{"Name": "vpc", "ConditionKeys": [
+        "aws:ResourceTag/${TagKey}", "ec2:ResourceTag/${TagKey}", "ec2:Region"]}]}]) == {
+            "ec2": {"vpc": ["aws:ResourceTag/", "ec2:ResourceTag/"]}}
+
+
+@pytest.mark.parametrize("operation,kind,variable", [
+    ("CreateSubnet", "subnet", "SubnetId"),
+    ("CreateRouteTable", "route-table", "RouteTableId"),
+    ("CreateSecurityGroup", "security-group", "SecurityGroupId"),
+    ("CreateInternetGateway", "internet-gateway", "InternetGatewayId"),
+])
+def test_network_creates_authorize_new_resource_and_existing_vpc(operation, kind, variable):
+    has_parent = operation != "CreateInternetGateway"
+    members = {"VpcId": "String"} if has_parent else {}
+    ec2 = model({operation: members}, "ec2")
+    formats = {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{{variable}}}",
+               "vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"}
+    types = [kind, "vpc"] if has_parent else [kind]
+    entry = r.entry_for(f"ec2:{operation}", {"action": f"ec2:{operation}", "types": types},
+                        formats, {"ec2": ec2})
+    expected = [{"type": kind, "fill": {}}]
+    if has_parent:
+        expected[0]["made"] = True
+        expected.append({"type": "vpc", "fill": {"VpcId": "VpcId"}})
+    assert entry["resources"] == expected
+
+
+@pytest.mark.parametrize("documentation,output_id,input_id,expected", [
+    ("<p>Allocates an Elastic IP address to your account.</p>", True, False, True),
+    ("Allocates a pool for an Elastic IP address.", True, False, False),
+    ("Describes an Elastic IP address.", True, False, False),
+    ("Allocates an Elastic IP address.", False, False, False),
+    ("Allocates an Elastic IP address.", True, True, False),
+])
+def test_documented_creation_requires_direct_object_and_new_response_id(documentation, output_id, input_id, expected):
+    ec2 = model({"AllocateAddress": {"AllocationId": "String"} if input_id else {}}, "ec2")
+    ec2["operations"]["AllocateAddress"].update(documentation=documentation, output={"shape": "Out"})
+    ec2["shapes"]["Out"] = {"type": "structure", "members": {
+        "AllocationId" if output_id else "PublicIp": {"shape": "String"}}}
+    formats = {"elastic-ip": "arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}"}
+    assert r.with_documented_creation([], "ec2:AllocateAddress", ["elastic-ip"], formats, {"ec2": ec2}) == (
+        [{"type": "elastic-ip", "fill": {}, "made": True}] if expected else [])
+
+
+def test_ec2_query_names_follow_model_serialization_and_only_read_resource_members():
+    ec2 = model({"CreateNetworkInterface": {"Groups": "Strings", "SubnetId": "String", "Ignored": "Strings"}}, "ec2")
+    group = ec2["shapes"]["CreateNetworkInterfaceIn"]["members"]["Groups"]
+    group["locationName"] = "securityGroupId"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups", "SubnetId"}) == {
+        "Groups[]": "SecurityGroupId"}
+    group["queryName"] = "ExactGroupWireName"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups"}) == {
+        "Groups[]": "ExactGroupWireName"}
+    ec2["metadata"]["protocol"] = "query"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups"}) == {}
+
+
+def test_a_typed_list_is_the_targets_only_when_the_request_names_nothing_else_the_action_acts_on():
+    ec2 = model({"Launch": {"SecurityGroupIds": "Strings", "ImageId": "String"},
+                 "ApplyGroups": {"SecurityGroupIds": "Strings"},
+                 "AnnotateResources": {"Resources": "Strings"}}, "ec2")
+    formats = {"security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}",
+               "image": "arn:${Partition}:ec2:${Region}::image/${ImageId}"}
+    known = {"security-group": "sg-"}
+    # A launch's groups sit beside its image: the ordinary rules read both, and the groups are not its targets.
+    launch = r.entry_for("ec2:Launch", {"action": "ec2:Launch", "types": ["image", "security-group"]},
+                         formats, {"ec2": ec2}, known)
+    assert "targets" not in launch
+    assert {"type": "image", "fill": {"ImageId": "ImageId"}} in launch["resources"]
+    applied = r.entry_for("ec2:ApplyGroups", {"action": "ec2:ApplyGroups", "types": ["security-group"]},
+                          formats, {"ec2": ec2}, known)
+    assert applied["targets"] == {"member": "SecurityGroupIds[]", "query": "SecurityGroupIds",
+                                  "prefixes": {"security-group": "sg-"}}
+    tags = r.entry_for("ec2:AnnotateResources", {"action": "ec2:AnnotateResources", "types": ["security-group"]},
+                       formats, {"ec2": ec2}, known)
+    assert tags["targets"]["prefixes"] == {"security-group": "sg-"}
+
+
+def test_a_list_inside_a_structure_is_no_member_the_rules_read():
+    ec2 = model({"CreateSnapshots": {"InstanceSpecification": "Specification"}}, "ec2")
+    ec2["shapes"]["Specification"] = {"type": "structure", "members": {
+        "InstanceId": {"shape": "String"}, "ExcludeDataVolumeIds": {"shape": "Strings"}}}
+    found = r.documented_members({"ec2": ec2}, "CreateSnapshots")
+    assert "InstanceSpecification.InstanceId" in found
+    assert "InstanceSpecification.ExcludeDataVolumeIds" not in found
+
+
+def test_lists_of_several_types_are_read_by_the_ordinary_rules():
+    ec2 = model({"CreateEndpoint": {"RouteTableIds": "Strings", "SecurityGroupIds": "Strings"}}, "ec2")
+    formats = {"route-table": "arn:${Partition}:ec2:${Region}:${Account}:route-table/${RouteTableId}",
+               "security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"}
+    entry = r.entry_for("ec2:CreateEndpoint", {"action": "ec2:CreateEndpoint", "types": ["route-table", "security-group"]},
+                        formats, {"ec2": ec2}, {"route-table": "rtb-", "security-group": "sg-"})
+    assert "targets" not in entry
+    assert {kind for resource in entry["resources"] for kind in r._kinds(resource)} == {"route-table", "security-group"}
+
+
+@pytest.mark.parametrize("operation,members,kinds", [
+    ("AssociateAddress", {"AllocationId": "String", "InstanceId": "String", "NetworkInterfaceId": "String"},
+     ["elastic-ip", "instance", "network-interface"]),
+    ("ReleaseAddress", {"AllocationId": "String"}, ["elastic-ip"]),
+])
+def test_eip_operations_read_scalar_targets_from_models(operation, members, kinds):
+    variables = {"elastic-ip": "AllocationId", "instance": "InstanceId", "network-interface": "NetworkInterfaceId"}
+    formats = {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{{variables[kind]}}}" for kind in kinds}
+    ec2 = model({operation: members}, "ec2")
+    action = "ec2:" + operation
+    entry = r.entry_for(action, {"action": action, "types": kinds}, formats, {"ec2": ec2})
+    assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]

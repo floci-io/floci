@@ -1,13 +1,11 @@
 package io.floci.aws.services.redshift;
 
-import com.cronutils.model.Cron;
 import com.cronutils.model.time.ExecutionTime;
-import io.floci.aws.core.common.AwsCronDefinitions;
+import io.floci.aws.core.common.AwsCronSchedule;
 import io.floci.aws.core.common.AwsException;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -88,12 +86,7 @@ final class RedshiftSnapshotSchedule {
             default -> throw new IllegalArgumentException("Redshift cron needs three or six fields");
         };
         String[] full = normalized.split(" ");
-        if ("?".equals(full[2]) == "?".equals(full[4])) {
-            throw new IllegalArgumentException("Use ? in exactly one of day-of-month and day-of-week");
-        }
-        Cron cron = AwsCronDefinitions.newParser().parse("0 " + normalized);
-        cron.validate();
-        return new Rule(null, ExecutionTime.forCron(cron));
+        return new Rule(null, AwsCronSchedule.parse(full, IllegalArgumentException::new));
     }
 
     private record Rule(Duration rate, ExecutionTime cron) {
@@ -102,7 +95,7 @@ final class RedshiftSnapshotSchedule {
                 long count = Duration.between(anchor, now).getSeconds() / rate.getSeconds();
                 return count < 1 ? Optional.empty() : Optional.of(anchor.plus(rate.multipliedBy(count)));
             }
-            return cron.lastExecution(now.atZone(ZoneOffset.UTC).plusNanos(1)).map(value -> value.toInstant());
+            return AwsCronSchedule.latest(cron, now);
         }
 
         Optional<Instant> next(Instant anchor, Instant after) {
@@ -110,7 +103,7 @@ final class RedshiftSnapshotSchedule {
                 long count = Math.max(0, Duration.between(anchor, after).getSeconds() / rate.getSeconds()) + 1;
                 return Optional.of(anchor.plus(rate.multipliedBy(count)));
             }
-            return cron.nextExecution(after.atZone(ZoneOffset.UTC)).map(value -> value.toInstant());
+            return AwsCronSchedule.next(cron, after);
         }
     }
 }
