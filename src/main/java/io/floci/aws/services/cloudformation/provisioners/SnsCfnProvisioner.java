@@ -50,7 +50,33 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
+    }
+
     private void provisionTopic(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
         String throughputScope = ctx.resolveOptional(props, "FifoThroughputScope");
@@ -60,19 +86,22 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         boolean fifo = "true".equalsIgnoreCase(ctx.resolveOptional(props, "FifoTopic"))
                 || (topicName != null && topicName.endsWith(FIFO_SUFFIX));
         String priorName = r.getAttributes().get("TopicName");
-        // FifoTopic is createOnly and carried by the name, so a flip needs a replacement. Nothing
-        // cleans up the displaced topic or its subscriptions, so refuse it, as SqsCfnProvisioner
-        // does for FifoQueue.
-        if (ctx.isUpdate() && priorName != null && !priorName.isBlank()
-                && priorName.endsWith(FIFO_SUFFIX) != fifo) {
-            throw new AwsException("ValidationError",
-                    "Updating FifoTopic requires resource replacement, which is not supported.", 400);
+        // The engine's change decides whether the update replaces the topic: TopicName and
+        // FifoTopic are create-only in the registry. A topic's mode is carried by its name, so the
+        // prior name's .fifo suffix tells the live mode; the engine reads an added FifoTopic as no
+        // change and would apply the update in place. A named topic cannot be replaced under the
+        // same name.
+        boolean replaces = ctx.isUpdate() && priorName != null && !priorName.isBlank()
+                && (ctx.changes(TOPIC, props).requiresReplacement() || priorName.endsWith(FIFO_SUFFIX) != fifo);
+        if (replaces && topicName != null && topicName.equals(priorName)) {
+            throw CfnExceptions.customNamedReplacement(topicName);
         }
         if (topicName == null || topicName.isBlank()) {
             // ctx.stablePhysicalName does not fit here: the physical id is the topic ARN, so the
             // prior name comes from the attribute recorded at create time. Reusing it keeps an
-            // unnamed topic (and its subscriptions) across updates instead of orphaning it.
-            if (priorName != null && !priorName.isBlank()) {
+            // unnamed topic (and its subscriptions) across updates instead of orphaning it. A
+            // replacing update gets a fresh generated name instead.
+            if (priorName != null && !priorName.isBlank() && !replaces) {
                 topicName = priorName;
             } else if (fifo) {
                 // Like real CloudFormation, a generated FIFO name ends in .fifo.
@@ -146,6 +175,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                 () -> added.forEach(arn -> snsService.unsubscribe(arn, ctx.region())),
                 () -> reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
                         desiredSubscriptions, existing, added));
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     private void reconcileInlineSubscriptions(StackResource r, String topicArn, String region,
