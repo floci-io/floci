@@ -11,24 +11,26 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * {@code resolveSearchOrder}'s own javadoc works through the exact A/B/C/D counterexample this
- * test locks in: a depth-first walk would wrongly search a 2-hop match before a 1-hop sibling.
+ * {@code resolveSearchOrder} walks the upstream graph the way the User Guide's "Upstream repository
+ * priority order" example does: depth-first, in each repository's listed order.
  */
 class UpstreamRepositoryResolverTest {
 
     @Test
-    void directUpstreamsAreSearchedBeforeAnyOfTheirOwnTransitiveUpstreams() {
-        // A -> [B, C], B -> [D]. A depth-first walk reaches D (via B) before C, a direct upstream
-        // of A; the correct, breadth-first order is B, C (both direct), then D.
+    void theUserGuidesExampleIsSearchedDepthFirstInListOrder() {
+        // "Upstream repository priority order": my_repo -> [A, B], A -> [C, D], D -> [E] is
+        // searched my_repo, A, C, D, E, B.
         Map<String, List<String>> upstreams = Map.of(
-                "A", List.of("B", "C"),
-                "B", List.of("D"),
+                "my_repo", List.of("A", "B"),
+                "A", List.of("C", "D"),
+                "B", List.of(),
                 "C", List.of(),
-                "D", List.of());
+                "D", List.of("E"),
+                "E", List.of());
 
-        List<String> order = UpstreamRepositoryResolver.resolveSearchOrder("A", upstreams::get);
+        List<String> order = UpstreamRepositoryResolver.resolveSearchOrder("my_repo", upstreams::get);
 
-        assertEquals(List.of("B", "C", "D"), order);
+        assertEquals(List.of("A", "C", "D", "E", "B"), order);
     }
 
     @Test
@@ -57,7 +59,7 @@ class UpstreamRepositoryResolverTest {
     @Test
     void aRepositoryReachableThroughTwoPathsAppearsExactlyOnce() {
         // A -> [B, C], B -> [D], C -> [D]: D is reachable from both B and C, but must only be
-        // searched once, at the position its first discovery (through B) places it.
+        // searched once, where it is first reached, through B.
         Map<String, List<String>> upstreams = Map.of(
                 "A", List.of("B", "C"),
                 "B", List.of("D"),
@@ -66,7 +68,7 @@ class UpstreamRepositoryResolverTest {
 
         List<String> order = UpstreamRepositoryResolver.resolveSearchOrder("A", upstreams::get);
 
-        assertEquals(List.of("B", "C", "D"), order);
+        assertEquals(List.of("B", "D", "C"), order);
     }
 
     @Test

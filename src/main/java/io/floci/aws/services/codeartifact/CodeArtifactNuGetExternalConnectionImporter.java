@@ -1,5 +1,6 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -188,6 +189,18 @@ public class CodeArtifactNuGetExternalConnectionImporter {
             // when imported is true, not only to release an empty claim.
             service.finishRetainedVersionOriginAttempt(region, domain, owner, repository, "nuget", null, packageId,
                     version, claim.episodeId(), imported);
+        }
+    }
+
+    /**
+     * Whether {@code repository} has a NuGet external connection to fetch through. A repository
+     * deleted since its name was read, as an upstream in a search order can be, has none.
+     */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        try {
+            return nugetExternalConnectionName(region, domain, owner, repository) != null;
+        } catch (AwsException e) {
+            return false;
         }
     }
 

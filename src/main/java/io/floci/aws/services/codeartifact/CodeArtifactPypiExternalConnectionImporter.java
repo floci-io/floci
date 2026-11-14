@@ -23,6 +23,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 /**
  * Retains pypi package versions from the real public repository a repository's {@code
@@ -148,6 +149,19 @@ public class CodeArtifactPypiExternalConnectionImporter {
      */
     public List<ExternalIndexFile> additionalExternalFilenames(String region, String domain, String owner,
             String repository, String repoId, String packageName, Set<String> alreadyKnownFilenames) {
+        return additionalExternalFilenames(region, domain, owner, repository, repoId, packageName,
+                alreadyKnownFilenames, version -> true);
+    }
+
+    /**
+     * {@link #additionalExternalFilenames(String, String, String, String, String, String, Set)},
+     * leaving out as well a file whose version {@code listable} refuses: a downstream repository
+     * listing this one's files through its upstreams leaves out a version it marked Archived or
+     * Disposed itself.
+     */
+    List<ExternalIndexFile> additionalExternalFilenames(String region, String domain, String owner,
+            String repository, String repoId, String packageName, Set<String> alreadyKnownFilenames,
+            Predicate<String> listable) {
         String externalConnectionName = pypiExternalConnectionName(region, domain, owner, repository);
         if (externalConnectionName == null) {
             return List.of();
@@ -168,7 +182,7 @@ public class CodeArtifactPypiExternalConnectionImporter {
                 continue;
             }
             Optional<String> version = resolveVersion(versions, packageName, filename);
-            if (version.isEmpty()) {
+            if (version.isEmpty() || !listable.test(version.get())) {
                 continue;
             }
             try {
@@ -581,6 +595,18 @@ public class CodeArtifactPypiExternalConnectionImporter {
         return candidateVersions.stream()
                 .filter(version -> PypiserverSidecarClient.filenameEmbedsVersion(filename, packageName, version))
                 .findFirst();
+    }
+
+    /**
+     * Whether {@code repository} has a PyPI external connection to fetch through. A repository
+     * deleted since its name was read, as an upstream in a search order can be, has none.
+     */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        try {
+            return pypiExternalConnectionName(region, domain, owner, repository) != null;
+        } catch (AwsException e) {
+            return false;
+        }
     }
 
     private String pypiExternalConnectionName(String region, String domain, String owner, String repository) {

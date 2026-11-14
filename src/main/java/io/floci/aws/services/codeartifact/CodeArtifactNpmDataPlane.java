@@ -199,8 +199,8 @@ public class CodeArtifactNpmDataPlane {
      * never both, so at most one of these two ever finds anything, and the other's own no-op is a
      * single cheap in-memory check (see {@code CodeArtifactNpmUpstreamRepositoryImporter}'s own
      * javadoc). Runs on the blocking worker thread {@link #handle}'s own {@code executeBlocking}
-     * call already dispatched to; both calls only ever touch local sidecar state here, never a
-     * real external network call for the upstream one.
+     * call already dispatched to; the upstream one makes a real external network call only through
+     * an upstream's own external connection.
      */
     private ObjectNode mergedPackumentFromEitherSource(AuthorizationTokenScope tokenScope, NpmRequest npmRequest,
             String repoId, PackageIdentity identity, boolean fullMetadata) {
@@ -208,7 +208,7 @@ public class CodeArtifactNpmDataPlane {
                 tokenScope.owner(), npmRequest.repository(), repoId, identity.namespace(), identity.packageName(),
                 fullMetadata).or(() -> upstreamRepositoryImporter.mergedPackument(tokenScope.region(),
                         npmRequest.domain(), tokenScope.owner(), npmRequest.repository(), repoId,
-                        identity.namespace(), identity.packageName())).orElse(null);
+                        identity.namespace(), identity.packageName(), fullMetadata)).orElse(null);
     }
 
     /**

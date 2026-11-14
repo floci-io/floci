@@ -384,9 +384,37 @@ public class CodeArtifactService implements Resettable {
      * claim is created from nothing (never on an increment of an existing one), so a finish call
      * for an episode already torn down and replaced by a new one under the same source name
      * can never be mistaken for a finish of that new episode (see the field's own javadoc above).
+     * {@code entryPoint} is where the version entered the domain, which is what the version's
+     * origin reports (see {@link #entryPointThrough}).
      */
     private record RetainedVersionOriginClaim(String originName, RetentionOriginKind originKind,
-            int inFlightAttempts, boolean confirmed, long episodeId) {
+            int inFlightAttempts, boolean confirmed, long episodeId, EntryPoint entryPoint) {
+    }
+
+    /**
+     * Where a package version entered the domain, AWS's {@code DomainEntryPoint}: the external
+     * connection it was fetched from, or the repository it was published to.
+     */
+    private record EntryPoint(RetentionOriginKind kind, String name) {
+    }
+
+    /**
+     * The entry point of a version retained from {@code upstreamRepository}: the one its copy there
+     * has when that copy was itself retained, from an external connection or from a repository
+     * further up, and the upstream repository when the version was published there. A claim still
+     * in flight there counts: the copy read from the upstream can be the one that claim just wrote,
+     * before the attempt that wrote it confirms it. Read when the version is retained, and again
+     * when its own claim is confirmed (see {@link #finishRetainedVersionOriginAttempt}), so a later
+     * change at the upstream does not move it, as the retained version itself is not affected by
+     * one.
+     */
+    private EntryPoint entryPointThrough(String owner, String region, String domain, String upstreamRepository,
+            String format, String namespace, String packageName, String version) {
+        RetainedVersionOriginClaim upstreamClaim = retainedVersionOriginConnections.get(ownerScopedKey(owner,
+                packageVersionKey(region, domain, upstreamRepository, format, namespace,
+                        accountingPackageName(format, packageName), normalizedContainerBackedVersion(format, version))));
+        return upstreamClaim != null ? upstreamClaim.entryPoint()
+                : new EntryPoint(RetentionOriginKind.UPSTREAM_REPOSITORY, upstreamRepository);
     }
 
     /**
@@ -2746,16 +2774,14 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * {@code originType} plus the domain entry point a caller needs to render it: for {@code
-     * EXTERNAL}, the exact external connection a version was retained from; for an {@code
-     * INTERNAL} version genuinely retained from a same-domain upstream repository (real AWS has
-     * no third {@code originType} value for this, confirmed against the live {@code
-     * PackageVersionOrigin} API reference, which lists only {@code INTERNAL}/{@code EXTERNAL}/
-     * {@code UNKNOWN}), {@code upstreamRepositoryName}; for a true direct publish, neither is set.
-     * AWS's own {@code DomainEntryPoint} reference describes an ingested package's entry point as
-     * the source it came from, {@code repositoryName} only for one published directly, so a caller
-     * surfacing a domain entry point needs the real source's name itself, not just the originType
-     * flag.
+     * {@code originType} plus the domain entry point a caller needs to render it, where the version
+     * "originally entered" the domain ({@code DomainEntryPoint}): for {@code EXTERNAL}, the external
+     * connection it was fetched through, this repository's or an upstream's; for an {@code INTERNAL}
+     * version retained from a same-domain upstream repository (real AWS has no third {@code
+     * originType} value for this, confirmed against the live {@code PackageVersionOrigin} API
+     * reference, which lists only {@code INTERNAL}/{@code EXTERNAL}/{@code UNKNOWN}), the repository
+     * it was published to, as {@code upstreamRepositoryName}, however many upstreams it came
+     * through; for a true direct publish, neither is set.
      */
     private record VersionOrigin(String originType, String externalConnectionName, String upstreamRepositoryName) {}
 
@@ -2763,9 +2789,9 @@ public class CodeArtifactService implements Resettable {
             String namespace, String packageName, String version) {
         return confirmedRetainedVersionOriginClaim(region, domain, owner, repository, format, namespace, packageName,
                 version)
-                .map(c -> c.originKind() == RetentionOriginKind.EXTERNAL_CONNECTION
-                        ? new VersionOrigin("EXTERNAL", c.originName(), null)
-                        : new VersionOrigin("INTERNAL", null, c.originName()))
+                .map(c -> c.entryPoint().kind() == RetentionOriginKind.EXTERNAL_CONNECTION
+                        ? new VersionOrigin("EXTERNAL", c.entryPoint().name(), null)
+                        : new VersionOrigin("INTERNAL", null, c.entryPoint().name()))
                 .orElse(new VersionOrigin("INTERNAL", null, null));
     }
 
@@ -3428,15 +3454,18 @@ public class CodeArtifactService implements Resettable {
         RetainedVersionOriginClaim existing = retainedVersionOriginConnections.get(key);
         if (existing == null) {
             long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
+            EntryPoint entryPoint = originKind == RetentionOriginKind.EXTERNAL_CONNECTION
+                    ? new EntryPoint(originKind, originName)
+                    : entryPointThrough(owner, region, domain, originName, format, namespace, packageName, version);
             retainedVersionOriginConnections.put(key,
-                    new RetainedVersionOriginClaim(originName, originKind, 1, false, episodeId));
+                    new RetainedVersionOriginClaim(originName, originKind, 1, false, episodeId, entryPoint));
             return new RetainedVersionOriginClaimOutcome(true, episodeId);
         }
         if (!existing.originName().equals(originName) || existing.originKind() != originKind) {
             return new RetainedVersionOriginClaimOutcome(false, 0L);
         }
         retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(originName, originKind,
-                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId()));
+                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId(), existing.entryPoint()));
         return new RetainedVersionOriginClaimOutcome(true, existing.episodeId());
     }
 
@@ -3482,8 +3511,15 @@ public class CodeArtifactService implements Resettable {
         if (remaining == 0 && !confirmed) {
             retainedVersionOriginConnections.remove(key);
         } else {
+            // Read again as the claim is confirmed: the upstream's own claim may have been confirmed,
+            // or given up, since this one was taken.
+            EntryPoint entryPoint = confirmed && !existing.confirmed()
+                    && existing.originKind() == RetentionOriginKind.UPSTREAM_REPOSITORY
+                    ? entryPointThrough(owner, region, domain, existing.originName(), format, namespace, packageName,
+                            version)
+                    : existing.entryPoint();
             retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(
-                    existing.originName(), existing.originKind(), remaining, confirmed, episodeId));
+                    existing.originName(), existing.originKind(), remaining, confirmed, episodeId, entryPoint));
         }
     }
 
@@ -4882,7 +4918,7 @@ public class CodeArtifactService implements Resettable {
         }
         long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
         retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(sourceClaim.get().originName(),
-                sourceClaim.get().originKind(), 0, true, episodeId));
+                sourceClaim.get().originKind(), 0, true, episodeId, sourceClaim.get().entryPoint()));
     }
 
     /**
@@ -4902,8 +4938,10 @@ public class CodeArtifactService implements Resettable {
                 namespace, accountingPackageName(format, packageName),
                 normalizedContainerBackedVersion(format, version)));
         long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
+        EntryPoint entryPoint = entryPointThrough(owner, region, domain, upstreamRepository, format, namespace,
+                packageName, version);
         retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(upstreamRepository,
-                RetentionOriginKind.UPSTREAM_REPOSITORY, 0, true, episodeId));
+                RetentionOriginKind.UPSTREAM_REPOSITORY, 0, true, episodeId, entryPoint));
     }
 
     /**
@@ -6252,8 +6290,8 @@ public class CodeArtifactService implements Resettable {
     /**
      * The priority-ordered, deduplicated, cycle-safe chain of repositories AWS searches when
      * resolving a package-manager request against {@code repository}'s own {@code upstreams}
-     * (never including {@code repository} itself); see {@link UpstreamRepositoryResolver}'s own
-     * javadoc for why this is a breadth-first walk, not a depth-first one.
+     * (never including {@code repository} itself), depth-first in list order; see {@link
+     * UpstreamRepositoryResolver}'s own javadoc.
      */
     List<String> resolveUpstreamSearchOrder(String region, String domain, String domainOwner, String repository) {
         String owner = effectiveOwner(domainOwner);

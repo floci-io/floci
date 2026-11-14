@@ -416,6 +416,18 @@ public class CodeArtifactNpmExternalConnectionImporter {
         return packageName + "-" + version + ".tgz";
     }
 
+    /**
+     * Whether {@code repository} has an npm external connection to fetch through. A repository
+     * deleted since its name was read, as an upstream in a search order can be, has none.
+     */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        try {
+            return npmExternalConnectionName(region, domain, owner, repository) != null;
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
     private String npmExternalConnectionName(String region, String domain, String owner, String repository) {
         return service.describeRepository(region, domain, owner, repository).getExternalConnections().stream()
                 .filter(ec -> "npm".equals(ec.getPackageFormat()))

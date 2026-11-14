@@ -372,6 +372,18 @@ public class CodeArtifactMavenExternalConnectionImporter {
                 false);
     }
 
+    /**
+     * Whether {@code repository} has a Maven external connection to fetch through. A repository
+     * deleted since its name was read, as an upstream in a search order can be, has none.
+     */
+    boolean hasExternalConnection(String region, String domain, String owner, String repository) {
+        try {
+            return mavenExternalConnectionName(region, domain, owner, repository) != null;
+        } catch (AwsException e) {
+            return false;
+        }
+    }
+
     private String mavenExternalConnectionName(String region, String domain, String owner, String repository) {
         return service.describeRepository(region, domain, owner, repository).getExternalConnections().stream()
                 .filter(ec -> "maven".equals(ec.getPackageFormat()))
