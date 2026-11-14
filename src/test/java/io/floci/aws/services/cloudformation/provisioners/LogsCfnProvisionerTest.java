@@ -66,13 +66,19 @@ class LogsCfnProvisionerTest {
 
     /** Provisions as a create (no prior physical id) or an update (prior id and attributes). */
     private StackResource provision(String json, String priorPhysicalId, Map<String, String> attrs) {
+        return provision(json, priorPhysicalId, attrs, null);
+    }
+
+    private StackResource provision(String json, String priorPhysicalId, Map<String, String> attrs,
+                                    String priorJson) {
         StackResource r = new StackResource();
         r.setLogicalId("LogGroup");
         r.setResourceType("AWS::Logs::LogGroup");
         r.setPhysicalId(priorPhysicalId);
         r.setAttributes(new HashMap<>(attrs));
         provisioner.provision(r, props(json),
-                new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, priorPhysicalId));
+                new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, priorPhysicalId,
+                        event -> { }, priorJson == null ? null : props(priorJson)));
         return r;
     }
 
@@ -86,15 +92,13 @@ class LogsCfnProvisionerTest {
         assertEquals("/aws/app", r.getPhysicalId(), "Ref is the log group name");
         assertEquals("arn:aws:logs:us-east-1:000000000000:log-group:/aws/app:*",
                 r.getAttributes().get("Arn"));
-        assertEquals("explicit", r.getAttributes().get("FlociLogGroupNameMode"));
     }
 
     @Test
-    void anUnnamedGroupGetsAGeneratedNameRecordedAsGenerated() {
+    void anUnnamedGroupGetsAGeneratedName() {
         StackResource r = provision("{}", null, Map.of());
 
         assertTrue(r.getPhysicalId().startsWith("my-stack-LogGroup-"), r.getPhysicalId());
-        assertEquals("generated", r.getAttributes().get("FlociLogGroupNameMode"));
     }
 
     @Test
@@ -147,55 +151,52 @@ class LogsCfnProvisionerTest {
         verify(logs, never()).putRetentionPolicy(anyString(), anyInt(), anyString());
     }
 
+    /** The old group is not deleted inline: the engine deletes it on commit, via the recorded cleanup. */
     @Test
-    void arenameCreatesTheNewGroupBeforeDeletingTheOld() {
+    void aRenameCreatesTheNewGroupAndLeavesTheOldForTheEngineToDelete() {
         when(logs.logGroupExists("old", REGION)).thenReturn(true);
 
         StackResource r = provision("""
                 {"LogGroupName": "new"}
-                """, "old", Map.of("FlociLogGroupNameMode", "explicit"));
+                """, "old", Map.of(), """
+                {"LogGroupName": "old"}
+                """);
 
         assertEquals("new", r.getPhysicalId());
         verify(logs).createLogGroup(eq("new"), isNull(), anyMap(), eq(REGION));
-        verify(logs).deleteLogGroup("old", REGION);
+        verify(logs, never()).deleteLogGroup("old", REGION);
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("old", provisioner.updateCleanupPhysicalId(r));
     }
 
-    /**
-     * If creating the replacement fails, the original must survive and the resource must say so, or
-     * rollback would try to restore a group that was never deleted.
-     */
+    /** If creating the replacement fails, the original is untouched and the failure propagates. */
     @Test
-    void aFailedRenameLeavesTheOriginalAndFlagsTheRollback() {
+    void aFailedRenameLeavesTheOriginalAndThrows() {
         when(logs.logGroupExists("old", REGION)).thenReturn(true);
         doThrow(new RuntimeException("name taken"))
                 .when(logs).createLogGroup(eq("new"), any(), anyMap(), anyString());
 
-        StackResource r = new StackResource();
-        r.setLogicalId("LogGroup");
-        r.setResourceType("AWS::Logs::LogGroup");
-        r.setPhysicalId("old");
-        r.setAttributes(new HashMap<>(Map.of("FlociLogGroupNameMode", "explicit")));
-
-        assertThrows(RuntimeException.class, () -> provisioner.provision(r, props("""
+        assertThrows(RuntimeException.class, () -> provision("""
                 {"LogGroupName": "new"}
-                """), new ProvisionContext(engine, REGION, ACCOUNT_ID, STACK, "old")));
+                """, "old", Map.of(), """
+                {"LogGroupName": "old"}
+                """));
 
         verify(logs, never()).deleteLogGroup("old", REGION);
-        assertEquals("true", r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR));
     }
 
-    /**
-     * Dropping an explicit LogGroupName is a replacement on real AWS, so it must not keep
-     * reconciling under the old explicit name.
-     */
+    /** Dropping an explicit LogGroupName is a replacement on real AWS. */
     @Test
     void removingAnExplicitNameReplacesTheGroup() {
         when(logs.logGroupExists("chosen", REGION)).thenReturn(true);
 
-        StackResource r = provision("{}", "chosen", Map.of("FlociLogGroupNameMode", "explicit"));
+        StackResource r = provision("{}", "chosen", Map.of(), """
+                {"LogGroupName": "chosen"}
+                """);
 
         assertTrue(r.getPhysicalId().startsWith("my-stack-LogGroup-"), r.getPhysicalId());
-        verify(logs).deleteLogGroup("chosen", REGION);
+        verify(logs, never()).deleteLogGroup("chosen", REGION);
+        assertEquals("chosen", provisioner.updateCleanupPhysicalId(r));
     }
 
     /** A generated name is kept across updates so a no-op update does not churn the group. */
