@@ -401,7 +401,7 @@ private gateway lifecycles are not modelled.
 | RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
 | GetSecurityGroupsForVpc | Lists the security groups belonging to one VPC, with the same filters as the describe call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
-| ModifySecurityGroupRules | Updates supported fields on security group rules. |
+| ModifySecurityGroupRules | Applies only the nested `SecurityGroupRule.Description` field; other rule fields are ignored. Updates both rule and group views. Every rule must belong to the requested group before any update is applied. |
 | UpdateSecurityGroupRuleDescriptionsIngress | Updates descriptions on matching inbound security group rules. |
 | UpdateSecurityGroupRuleDescriptionsEgress | Updates descriptions on matching outbound security group rules. |
 
