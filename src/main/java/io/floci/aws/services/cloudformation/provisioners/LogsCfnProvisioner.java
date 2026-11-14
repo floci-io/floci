@@ -66,8 +66,7 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
         String priorPhysicalId = ctx.priorPhysicalId();
 
         // LogGroupName is create-only, so the engine's change decides whether this update replaces
-        // the group, an added, changed or removed name included. A named group cannot be replaced
-        // under the same name.
+        // the group. A named group cannot be replaced under the same name.
         boolean replaces = ctx.isUpdate() && priorPhysicalId != null
                 && ctx.changes("AWS::Logs::LogGroup", props).requiresReplacement();
         if (replaces && hasExplicitName && explicitName.equals(priorPhysicalId)) {
@@ -118,6 +117,8 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
 
         // Ref returns the log group name; GetAtt Arn is arn:aws:logs:<region>:<account>:log-group:<name>:*
         r.setPhysicalId(name);
+        // Written by earlier versions to tell a rename from a no-op; the engine decides that now.
+        r.getAttributes().remove("FlociLogGroupNameMode");
         r.getAttributes().put("Arn", AwsArnUtils.Arn
                 .of("logs", ctx.region(), ctx.accountId(), "log-group:" + name + ":*").toString());
         // createLogGroup fails on an existing name, so a replacing update always created its group.
