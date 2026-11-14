@@ -79,7 +79,8 @@ public class CodeArtifactNuGetExternalConnectionImporter {
         if (externalConnectionName == null) {
             return false;
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "nuget", null, packageId)) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "nuget", null, packageId,
+                "EXTERNAL_UPSTREAM")) {
             return false;
         }
 
@@ -95,7 +96,7 @@ public class CodeArtifactNuGetExternalConnectionImporter {
         // claimRetainedVersionOrigin's own javadoc for the race this closes.
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
                 domain, owner, repository, "nuget", null, packageId, version, externalConnectionName,
-                packageFenceSnapshot);
+                RetentionOriginKind.EXTERNAL_CONNECTION, packageFenceSnapshot);
         if (!claim.claimed()) {
             return false;
         }

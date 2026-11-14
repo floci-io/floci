@@ -1006,6 +1006,23 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
         return findSnapshotOfAccount(account, names.getFirst(), region).map(RedshiftServerlessSnapshot::getSnapshotArn);
     }
 
+    /**
+     * What the snapshot stored under {@code arn}, in any account, records as its {@code kmsKeyId}: its key, none for
+     * one under AWS's own key ({@value #AWS_OWNED_KMS_KEY}), which is no key of the account's.
+     */
+    @Override
+    public Optional<String> recorded(String arn, String member) {
+        if (!"kmsKeyId".equals(member) || !AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return snapshots.scanForAccount(parsed.accountId(), key -> key.startsWith(parsed.region() + "::")).stream()
+                .filter(snapshot -> arn.equals(snapshot.getSnapshotArn()))
+                .map(RedshiftServerlessSnapshot::getKmsKeyId)
+                .filter(key -> key != null && !key.isBlank() && !AWS_OWNED_KMS_KEY.equals(key))
+                .findFirst();
+    }
+
     /** The snapshot {@code snapshotName} of {@code accountId} in {@code region}, whoever is calling. */
     public Optional<RedshiftServerlessSnapshot> findSnapshotOfAccount(String accountId, String snapshotName,
                                                                       String region) {

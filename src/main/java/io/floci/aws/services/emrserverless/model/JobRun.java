@@ -42,6 +42,8 @@ public class JobRun {
     private Instant startedAt;
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant endedAt;
+    private ImageConfiguration imageConfiguration;
+    private Map<String, WorkerTypeSpecification> workerTypeSpecifications;
 
     public String getApplicationId() { return applicationId; }
     public void setApplicationId(String applicationId) { this.applicationId = applicationId; }
@@ -93,4 +95,8 @@ public class JobRun {
     public void setStartedAt(Instant startedAt) { this.startedAt = startedAt; }
     public Instant getEndedAt() { return endedAt; }
     public void setEndedAt(Instant endedAt) { this.endedAt = endedAt; }
+    public ImageConfiguration getImageConfiguration() { return imageConfiguration; }
+    public void setImageConfiguration(ImageConfiguration imageConfiguration) { this.imageConfiguration = imageConfiguration; }
+    public Map<String, WorkerTypeSpecification> getWorkerTypeSpecifications() { return workerTypeSpecifications; }
+    public void setWorkerTypeSpecifications(Map<String, WorkerTypeSpecification> workerTypeSpecifications) { this.workerTypeSpecifications = workerTypeSpecifications; }
 }

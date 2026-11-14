@@ -9,6 +9,9 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -16,6 +19,8 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -113,9 +118,7 @@ class MemoryDbContainerManagerTest {
     @Test
     void stopByClusterNameRemovesByDeterministicNameWhenNothingRegistered() {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
-        MemoryDbContainerManager manager = new MemoryDbContainerManager(
-                mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
-                mock(ContainerDetector.class), mock(EmulatorConfig.class), mock(RegionResolver.class));
+        MemoryDbContainerManager manager = newManager(lifecycleManager);
 
         // No container was ever registered for this name (e.g. it failed before registration).
         // Rollback must still fall back to the deterministic name so nothing is orphaned.
@@ -166,12 +169,7 @@ class MemoryDbContainerManagerTest {
         // manager's PING/PONG readiness probe succeeds without a real container.
         try (ServerSocket serverSocket = new ServerSocket(0)) {
             CompletableFuture<Void> responder = startPongResponder(serverSocket, 1);
-
-            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
-            when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
-                    "container-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
-                            "127.0.0.1", serverSocket.getLocalPort()))));
-
+            ContainerLifecycleManager lifecycleManager = lifecycleAnswering(serverSocket);
             MemoryDbContainerManager manager = newManager(lifecycleManager);
 
             MemoryDbContainerHandle handle = manager.tryStart("cluster1", "valkey/valkey:8");
@@ -192,27 +190,9 @@ class MemoryDbContainerManagerTest {
     void startLabelsContainerWithResourceIdentity() throws Exception {
         try (ServerSocket serverSocket = new ServerSocket(0)) {
             CompletableFuture<Void> responder = startPongResponder(serverSocket, 1);
-
-            ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
-            when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
-                    "container-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
-                            "127.0.0.1", serverSocket.getLocalPort()))));
-
-            ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-            ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
-            when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-            when(builder.build()).thenReturn(new ContainerSpec("test-image"));
-
-            EmulatorConfig config = mock(EmulatorConfig.class);
-            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-            EmulatorConfig.MemoryDbServiceConfig memorydb = mock(EmulatorConfig.MemoryDbServiceConfig.class);
-            when(config.services()).thenReturn(services);
-            when(services.memorydb()).thenReturn(memorydb);
-            when(memorydb.dockerNetwork()).thenReturn(Optional.empty());
-
-            MemoryDbContainerManager manager = new MemoryDbContainerManager(containerBuilder, lifecycleManager,
-                    mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
-                    new RegionResolver("us-east-1", "000000000000"));
+            ContainerBuilder.Builder builder = builder();
+            MemoryDbContainerManager manager = newManager(containers(builder), lifecycleAnswering(serverSocket),
+                    mock(ContainerLogStreamer.class));
 
             manager.start("cluster1", "valkey/valkey:8");
 
@@ -226,16 +206,38 @@ class MemoryDbContainerManagerTest {
         }
     }
 
+    /**
+     * In host-path mode the bind source names a directory on the Docker host: Floci creates it only
+     * when it runs there, and inside a container leaves it to the daemon, as the other data planes do.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void hostPathModeCreatesTheBindSourceOnlyOnTheDockerHost(boolean inContainer, @TempDir Path directory)
+            throws Exception {
+        Path bindSource = directory.resolve("floci-data").resolve("memorydb").resolve("vol-1");
+        try (ServerSocket serverSocket = new ServerSocket(0)) {
+            CompletableFuture<Void> responder = startPongResponder(serverSocket, 1);
+            ContainerBuilder.Builder builder = builder();
+            ContainerDetector containerDetector = mock(ContainerDetector.class);
+            when(containerDetector.isRunningInContainer()).thenReturn(inContainer);
+            MemoryDbContainerManager manager = newManager(containers(builder), lifecycleAnswering(serverSocket),
+                    mock(ContainerLogStreamer.class), containerDetector, directory.resolve("floci-data").toString());
+
+            manager.start("cluster1", "valkey/valkey:8", "vol-1", "000000000000", "us-east-1");
+
+            verify(builder).withBind(bindSource.toString(), "/data");
+            assertEquals(!inContainer, Files.isDirectory(bindSource));
+            responder.get(5, TimeUnit.SECONDS);
+        }
+    }
+
     @Test
     void logicalDefaultNamesKeepLogsAndContainersWhileRuntimeKeysStayScoped() throws Exception {
         ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
-        ContainerBuilder containers = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
-        when(containers.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(new ContainerSpec("valkey/valkey:8"));
+        ContainerBuilder.Builder builder = builder();
         ContainerLogStreamer logs = mock(ContainerLogStreamer.class);
         when(logs.generateLogStreamName(anyString())).thenReturn("engine");
-        MemoryDbContainerManager manager = newManager(containers, lifecycle, logs);
+        MemoryDbContainerManager manager = newManager(containers(builder), lifecycle, logs);
         String defaultIdentity = "000000000000-us-east-1-cache";
         String collisionIdentity = "000000000000-us-east-1-111111111111-eu-west-1-same";
         String foreignIdentity = "111111111111-eu-west-1-same";
@@ -285,13 +287,10 @@ class MemoryDbContainerManagerTest {
     @Test
     void failedCreationRollbackUsesTheSameDefaultAndForeignContainerNames() {
         ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
-        ContainerBuilder containers = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
-        when(containers.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(new ContainerSpec("valkey/valkey:8"));
         RuntimeException failure = new IllegalStateException("creation failed before registration");
         when(lifecycle.createAndStartEphemeral(any())).thenThrow(failure);
-        MemoryDbContainerManager manager = newManager(containers, lifecycle, mock(ContainerLogStreamer.class));
+        MemoryDbContainerManager manager = newManager(containers(builder()), lifecycle,
+                mock(ContainerLogStreamer.class));
         assertSame(failure, assertThrows(IllegalStateException.class,
                 () -> manager.start("000000000000-us-east-1-cache", "valkey/valkey:8", null,
                         "000000000000", "us-east-1", "cache")));
@@ -326,29 +325,57 @@ class MemoryDbContainerManagerTest {
         return completed;
     }
 
-    private MemoryDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
-        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
-        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
-        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+    /** A lifecycle whose one backend, {@code container-id}, answers on {@code backend}'s port. */
+    private static ContainerLifecycleManager lifecycleAnswering(ServerSocket backend) {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        when(lifecycle.createAndStartEphemeral(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(6379, new ContainerLifecycleManager.EndpointInfo(
+                        "127.0.0.1", backend.getLocalPort()))));
+        return lifecycle;
+    }
 
+    /** A container builder that returns itself from every call and builds a spec of {@code test-image}. */
+    private static ContainerBuilder.Builder builder() {
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+        return builder;
+    }
+
+    private static ContainerBuilder containers(ContainerBuilder.Builder builder) {
+        ContainerBuilder containers = mock(ContainerBuilder.class);
+        when(containers.newContainer(anyString())).thenReturn(builder);
+        return containers;
+    }
+
+    private MemoryDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
 
-        return newManager(containerBuilder, lifecycleManager, logStreamer);
+        return newManager(containers(builder()), lifecycleManager, logStreamer);
     }
 
     private MemoryDbContainerManager newManager(ContainerBuilder containerBuilder,
                                                 ContainerLifecycleManager lifecycleManager,
                                                 ContainerLogStreamer logStreamer) {
+        return newManager(containerBuilder, lifecycleManager, logStreamer, mock(ContainerDetector.class), null);
+    }
+
+    /** As above, where Floci runs as {@code containerDetector} says, with {@code hostPersistentPath} as its storage's. */
+    private MemoryDbContainerManager newManager(ContainerBuilder containerBuilder,
+                                                ContainerLifecycleManager lifecycleManager,
+                                                ContainerLogStreamer logStreamer,
+                                                ContainerDetector containerDetector, String hostPersistentPath) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.MemoryDbServiceConfig memorydb = mock(EmulatorConfig.MemoryDbServiceConfig.class);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(services);
         when(services.memorydb()).thenReturn(memorydb);
         when(memorydb.dockerNetwork()).thenReturn(Optional.empty());
+        when(config.storage()).thenReturn(storage);
+        when(storage.hostPersistentPath()).thenReturn(hostPersistentPath);
 
         return new MemoryDbContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                mock(ContainerDetector.class), config, new RegionResolver("us-east-1", "000000000000"));
+                containerDetector, config, new RegionResolver("us-east-1", "000000000000"));
     }
 }

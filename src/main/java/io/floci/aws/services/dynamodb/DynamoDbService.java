@@ -136,6 +136,8 @@ public class DynamoDbService {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
     // Held from an account quota check until the capacity it allowed is stored.
     private final Object capacityLock = new Object();
+    // Held from a resource policy revision check until the policy it allowed is stored.
+    private final Object resourcePolicyLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -2310,7 +2312,8 @@ public class DynamoDbService {
         try {
             validateTransactItem(transactItem, region, staged);
             return null;
-        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException e) {
+        } catch (KeySchemaMismatchException | ItemNestingExceededException | UpdatedItemTooLargeException
+                 | UpdateOperandException e) {
             return new TransactionCanceledException.CancellationReason("ValidationError", null, e.getMessage());
         }
     }
@@ -3441,20 +3444,26 @@ public class DynamoDbService {
     /** Result of a successful GetResourcePolicy call: the raw policy document and its revision id. */
     public record ResourcePolicyResult(String policy, String revisionId) {}
 
+    private static final String NO_POLICY_REVISION_ID = "NO_POLICY";
+
     public String putResourcePolicy(String resourceArn, String policy, String expectedRevisionId, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (expectedRevisionId != null
-                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
-            throw new AwsException("PolicyNotFoundException",
-                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+        synchronized (resourcePolicyLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            boolean revisionMatches = NO_POLICY_REVISION_ID.equals(expectedRevisionId)
+                    ? table.getResourcePolicy() == null
+                    : expectedRevisionId == null || expectedRevisionId.equals(table.getResourcePolicyRevisionId());
+            if (!revisionMatches) {
+                throw new AwsException("PolicyNotFoundException",
+                        "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+            }
+            String revisionId = UUID.randomUUID().toString();
+            table.setResourcePolicy(policy);
+            table.setResourcePolicyRevisionId(revisionId);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
+            LOG.debugv("Put resource policy: {0}", resourceArn);
+            return revisionId;
         }
-        String revisionId = UUID.randomUUID().toString();
-        table.setResourcePolicy(policy);
-        table.setResourcePolicyRevisionId(revisionId);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
-        LOG.debugv("Put resource policy: {0}", resourceArn);
-        return revisionId;
     }
 
     public ResourcePolicyResult getResourcePolicy(String resourceArn, String region) {
@@ -3467,23 +3476,25 @@ public class DynamoDbService {
     }
 
     public String deleteResourcePolicy(String resourceArn, String expectedRevisionId, String region) {
-        TableDefinition table = findTableByArn(resourceArn, region);
-        if (table.getResourcePolicy() == null) {
-            throw new AwsException("PolicyNotFoundException",
-                    "No resource policy found for: " + resourceArn, 400);
+        synchronized (resourcePolicyLock) {
+            TableDefinition table = findTableByArn(resourceArn, region);
+            if (table.getResourcePolicy() == null) {
+                throw new AwsException("PolicyNotFoundException",
+                        "No resource policy found for: " + resourceArn, 400);
+            }
+            if (expectedRevisionId != null
+                    && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
+                throw new AwsException("PolicyNotFoundException",
+                        "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
+            }
+            String revisionId = table.getResourcePolicyRevisionId();
+            table.setResourcePolicy(null);
+            table.setResourcePolicyRevisionId(null);
+            String storageKey = regionKey(region, table.getTableName());
+            tableStore.put(storageKey, table);
+            LOG.debugv("Deleted resource policy: {0}", resourceArn);
+            return revisionId;
         }
-        if (expectedRevisionId != null
-                && !expectedRevisionId.equals(table.getResourcePolicyRevisionId())) {
-            throw new AwsException("PolicyNotFoundException",
-                    "Policy with revision id " + expectedRevisionId + " does not exist for: " + resourceArn, 400);
-        }
-        String revisionId = table.getResourcePolicyRevisionId();
-        table.setResourcePolicy(null);
-        table.setResourcePolicyRevisionId(null);
-        String storageKey = regionKey(region, table.getTableName());
-        tableStore.put(storageKey, table);
-        LOG.debugv("Deleted resource policy: {0}", resourceArn);
-        return revisionId;
     }
 
     private TableDefinition findTableByArn(String arn, String region) {
@@ -3635,12 +3646,8 @@ public class DynamoDbService {
                 String leftExpr = valuePart.substring(0, arithmeticIdx).trim();
                 char operator = valuePart.charAt(arithmeticIdx);
                 String rightExpr = valuePart.substring(arithmeticIdx + 1).trim();
-                JsonNode leftVal = evaluateSetExpr(snapshot, leftExpr, exprAttrNames, exprAttrValues);
-                JsonNode rightVal = evaluateSetExpr(snapshot, rightExpr, exprAttrNames, exprAttrValues);
-                if (leftVal == null || rightVal == null || !leftVal.has("N") || !rightVal.has("N")) {
-                    throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: Incorrect operand type for operator or function", 400);
-                }
+                JsonNode leftVal = typedOperand(snapshot, leftExpr, "N", exprAttrNames, exprAttrValues);
+                JsonNode rightVal = typedOperand(snapshot, rightExpr, "N", exprAttrNames, exprAttrValues);
                 try {
                     BigDecimal left = new BigDecimal(leftVal.get("N").asText());
                     BigDecimal right = new BigDecimal(rightVal.get("N").asText());
@@ -3667,16 +3674,8 @@ public class DynamoDbService {
                     if (commaPos >= 0) {
                         String arg1 = inner.substring(0, commaPos).trim();
                         String arg2 = inner.substring(commaPos + 1).trim();
-                        JsonNode list1 = evaluateSetExpr(snapshot, arg1, exprAttrNames, exprAttrValues);
-                        JsonNode list2 = evaluateSetExpr(snapshot, arg2, exprAttrNames, exprAttrValues);
-                        if (list1 == null || list2 == null) {
-                            throw new AwsException("ValidationException",
-                                    "The provided expression refers to an attribute that does not exist in the item", 400);
-                        }
-                        if (!list1.has("L") || !list2.has("L")) {
-                            throw new AwsException("ValidationException",
-                                    "An operand in the update expression has an incorrect data type", 400);
-                        }
+                        JsonNode list1 = typedOperand(snapshot, arg1, "L", exprAttrNames, exprAttrValues);
+                        JsonNode list2 = typedOperand(snapshot, arg2, "L", exprAttrNames, exprAttrValues);
                         ArrayNode merged =
                                 JsonNodeFactory.instance.arrayNode();
                         list1.get("L").forEach(merged::add);
@@ -3698,12 +3697,8 @@ public class DynamoDbService {
                     LOG.debugv("applySetClause: value was null for valuePart={0}, NOT setting attribute", valuePart);
                 }
             } else if (!valuePart.isEmpty()) {
-                // Plain attribute reference: SET a = b  or  SET a = #alias
-                String refAttr = resolveAttributeName(valuePart, exprAttrNames);
-                JsonNode refValue = getValueAtPath(snapshot, refAttr, exprAttrNames);
-                if (refValue != null) {
-                    setValueAtPath(item, attrPath, refValue, exprAttrNames);
-                }
+                setValueAtPath(item, attrPath, evaluateSetExpr(snapshot, valuePart, exprAttrNames, exprAttrValues),
+                        exprAttrNames);
             }
 
             clause = rest;
@@ -3743,9 +3738,21 @@ public class DynamoDbService {
             return null;
         } else if (expr.startsWith(":") && exprAttrValues != null) {
             return exprAttrValues.get(expr);
-        } else {
-            return getValueAtPath(item, resolveAttributeName(expr, exprAttrNames), exprAttrNames);
         }
+        JsonNode value = getValueAtPath(item, resolveAttributeName(expr, exprAttrNames), exprAttrNames);
+        if (value == null) {
+            throw UpdateOperandException.absentAttribute();
+        }
+        return value;
+    }
+
+    private JsonNode typedOperand(ObjectNode item, String operand, String type,
+                                  JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        JsonNode value = evaluateSetExpr(item, operand, exprAttrNames, exprAttrValues);
+        if (value == null || !value.has(type)) {
+            throw UpdateOperandException.incorrectType();
+        }
+        return value;
     }
 
     private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames,
@@ -3972,8 +3979,7 @@ public class DynamoDbService {
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
         for (String type : types) {
             if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
-                throw new AwsException("ValidationException",
-                        "An operand in the update expression has an incorrect data type", 400);
+                throw UpdateOperandException.incorrectType();
             }
         }
     }

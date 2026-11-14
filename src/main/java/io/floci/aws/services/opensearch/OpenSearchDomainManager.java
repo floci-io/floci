@@ -166,9 +166,7 @@ public class OpenSearchDomainManager {
             } else {
                 // Legacy host-path mode: host-persistent-path is an absolute path
                 Path dataPath = legacyCompatibleHostDataPath(domain);
-                if (!containerDetector.isRunningInContainer()) {
-                    ContainerStorageHelper.ensureHostDir(dataPath.toString());
-                }
+                ContainerStorageHelper.ensureHostDir(containerDetector, dataPath.toString());
                 String dataPathStr = dataPath.toAbsolutePath().normalize().toString();
                 String persistentPathStr = Path.of(config.storage().persistentPath()).toAbsolutePath().normalize().toString();
                 String hostDataPath = dataPathStr.replace(persistentPathStr, config.storage().hostPersistentPath());
@@ -331,9 +329,7 @@ public class OpenSearchDomainManager {
                 Path domainDataPath = namespace.isBlank()
                         ? Path.of(dataVolume, arn.accountId(), arn.region(), domain.getDomainName())
                         : Path.of(dataVolume, namespace, arn.accountId(), arn.region(), domain.getDomainName());
-                if (!containerDetector.isRunningInContainer()) {
-                    ContainerStorageHelper.ensureHostDir(domainDataPath.toString());
-                }
+                ContainerStorageHelper.ensureHostDir(containerDetector, domainDataPath.toString());
                 hostPath = domainDataPath.toAbsolutePath().normalize().toString();
             }
             lifecycleManager.ensureBindDirectory(hostPath, image, CONTAINER_DATA_PATH);

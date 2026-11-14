@@ -596,7 +596,6 @@ AWS::RedshiftServerless::Workgroup	SnapshotArn	documented as ignored (docs/servi
 AWS::RedshiftServerless::Workgroup	SnapshotName	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
 AWS::RedshiftServerless::Workgroup	SnapshotOwnerAccount	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
 AWS::RedshiftServerless::Workgroup	Workgroup	accepted and ignored
-AWS::Route53::HostedZone	DelegationSetId	accepted and ignored
 AWS::Route53::HostedZone	HostedZoneFeatures	accepted and ignored
 AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
 AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored

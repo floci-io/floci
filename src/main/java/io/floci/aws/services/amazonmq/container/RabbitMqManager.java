@@ -141,9 +141,7 @@ public class RabbitMqManager {
             } else {
                 String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "amazonmq", broker.getBrokerId())
                         .toAbsolutePath().toString();
-                if (!containerDetector.isRunningInContainer()) {
-                    ContainerStorageHelper.ensureHostDir(hostDataPath);
-                }
+                ContainerStorageHelper.ensureHostDir(containerDetector, hostDataPath);
                 specBuilder.withBind(hostDataPath, "/var/lib/rabbitmq");
             }
 

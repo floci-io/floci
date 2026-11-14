@@ -258,13 +258,11 @@ public class Ec2IpamService {
         String ownerId = requestedOwnerId != null ? requestedOwnerId : callerAccountId();
         requireEnum(tier, TIERS, "Tier");
         requireEnum(meteredAccount, METERED_ACCOUNTS, "MeteredAccount");
-        if (clientToken != null && !clientToken.isBlank()) {
-            for (Ipam existing : ipams.scan(k -> true)) {
-                if (region.equals(existing.getRegion())
-                        && clientToken.equals(existing.getClientToken())) {
-                    return existing;
-                }
-            }
+        Optional<Ipam> replay = Ec2ClientTokens.replay(clientToken,
+                () -> ipams.scan(k -> true).stream().filter(existing -> region.equals(existing.getRegion())),
+                Ipam::getClientToken);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         Ipam ipam = new Ipam();
         ipam.setIpamId("ipam-" + randomHex(17));
@@ -494,14 +492,12 @@ public class Ec2IpamService {
         if (sourceIpamPoolId != null && sourceIpamPoolId.isBlank()) {
             throw new AwsException("MissingParameter", "SourceIpamPoolId is required.", 400);
         }
-        if (clientToken != null && !clientToken.isBlank()) {
-            // Caller-partition scan: an idempotency token is scoped to the account that used it.
-            for (IpamPool existing : pools.scan(k -> true)) {
-                if (region.equals(existing.getRegion())
-                        && clientToken.equals(existing.getClientToken())) {
-                    return existing;
-                }
-            }
+        // Caller-partition scan: an idempotency token is scoped to the account that used it.
+        Optional<IpamPool> replay = Ec2ClientTokens.replay(clientToken,
+                () -> pools.scan(k -> true).stream().filter(existing -> region.equals(existing.getRegion())),
+                IpamPool::getClientToken);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         if (sourceIpamPoolId != null) {
             requirePool(region, sourceIpamPoolId);
@@ -676,12 +672,10 @@ public class Ec2IpamService {
                                               String clientToken) {
         OwnedPool ownedPool = requireOwnedPoolForMutation(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
-        if (clientToken != null && !clientToken.isBlank()) {
-            for (IpamPoolCidr existing : pool.getProvisionedCidrs()) {
-                if (clientToken.equals(existing.getClientToken())) {
-                    return existing;
-                }
-            }
+        Optional<IpamPoolCidr> replay = Ec2ClientTokens.replay(clientToken, () -> pool.getProvisionedCidrs().stream(),
+                IpamPoolCidr::getClientToken);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         if (cidr == null || cidr.isBlank()) {
             throw new AwsException("MissingParameter", "Cidr is required.", 400);
@@ -727,12 +721,10 @@ public class Ec2IpamService {
                                                    String description, String clientToken) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
-        if (clientToken != null && !clientToken.isBlank()) {
-            for (IpamPoolAllocation existing : pool.getAllocations()) {
-                if (clientToken.equals(existing.getClientToken())) {
-                    return existing;
-                }
-            }
+        Optional<IpamPoolAllocation> replay = Ec2ClientTokens.replay(clientToken, () -> pool.getAllocations().stream(),
+                IpamPoolAllocation::getClientToken);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         List<String> provisioned = pool.getProvisionedCidrs().stream()
                 .map(IpamPoolCidr::getCidr).toList();

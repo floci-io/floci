@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrStep;
@@ -59,6 +60,7 @@ class EmrServiceContainerStepsTest {
     private static final String REPORT = "s3://bucket/jobs/report.py";
     private static final String DRIVER_FAILED = "The Spark driver exited with code 1.";
     private static final String INSTALL = "s3://bucket/bootstrap/install.sh";
+    private static final String ERROR_CODE_PAGES = "https://docs.aws.amazon.com/emr/latest/ManagementGuide/";
     // The id of the image a bootstrap kept, which the cluster's steps run in.
     private static final String IMAGE = "sha256:" + "2".repeat(64);
 
@@ -1434,6 +1436,71 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aFailedActionOrAScriptThatCannotBeReadGivesTheErrorDetailOfItsCodeAndABootstrapThatCannotRunNone() {
+        String failedPage = ERROR_CODE_PAGES + "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE.html";
+        String unreadPage = ERROR_CODE_PAGES + "BOOTSTRAP_FAILURE_BA_DOWNLOAD_FAILED_PRIMARY.html";
+        Map<BootstrapRunner.Outcome, List<List<Object>>> details = Map.of(
+                BootstrapRunner.Outcome.actionFailed(2, 7), List.of(List.of(
+                        "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE",
+                        List.of(List.of("primary-instance-id=i-00000000000000001", "bootstrap-action=2",
+                                "return-code=7", "amazon-s3-path=s3://bucket/bootstrap/jars.sh",
+                                "public-doc=" + failedPage)),
+                        "On the master instance (i-00000000000000001), bootstrap action 2 returned a non-zero return"
+                                + " code. For more information, see " + failedPage)),
+                BootstrapRunner.Outcome.notDownloaded(1, "The specified key does not exist."), List.of(List.of(
+                        "BOOTSTRAP_FAILURE_BA_DOWNLOAD_FAILED_PRIMARY",
+                        List.of(List.of("primary-instance-id=i-00000000000000001", "bootstrap-action=1",
+                                "amazon-s3-path=" + INSTALL, "public-doc=" + unreadPage)),
+                        "On the master instance (i-00000000000000001), bootstrap action 1 could not be read from "
+                                + INSTALL + ": The specified key does not exist. For more information, see "
+                                + unreadPage)),
+                // No ErrorDetail code is an image that cannot be pulled.
+                BootstrapRunner.Outcome.couldNotRun("the image could not be pulled"), List.of());
+        details.forEach((outcome, expected) -> {
+            bootstrap.outcome = outcome;
+            EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+            EmrCluster cluster = bootstrapping.service.runJobFlow(bootstrapped(cluster("broken", true)), REGION);
+
+            bootstrapping.runStepThread();
+
+            assertEquals(expected, errorDetails(bootstrapping.service.describeCluster(cluster.getId())));
+            assertEquals(expected, errorDetails(bootstrapping.restart().service.describeCluster(cluster.getId())));
+        });
+    }
+
+    @Test
+    void describeClusterAndListClustersGiveTheErrorDetailsOfAClusterAFailedActionEndedAndNoneForAnother()
+            throws Exception {
+        bootstrap.outcome = BootstrapRunner.Outcome.actionFailed(1, 3);
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        String failedId = bootstrapping.service.runJobFlow(bootstrapped(cluster("failed", true)), REGION).getId();
+        bootstrapping.runStepThread();
+        String waitingId = bootstrapping.service.runJobFlow(cluster("waiting", true), REGION).getId();
+        ObjectMapper objectMapper = new ObjectMapper();
+        EmrHandler handler = new EmrHandler(bootstrapping.service, objectMapper);
+        String page = ERROR_CODE_PAGES + "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE.html";
+        JsonNode expected = objectMapper.readTree("""
+                [{"ErrorCode": "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE",
+                  "ErrorData": [{"primary-instance-id": "i-00000000000000001", "bootstrap-action": "1",
+                                 "return-code": "3", "amazon-s3-path": "%s", "public-doc": "%s"}],
+                  "ErrorMessage": "On the master instance (i-00000000000000001), bootstrap action 1 returned a \
+                non-zero return code. For more information, see %s"}]""".formatted(INSTALL, page, page));
+
+        Map<String, JsonNode> statuses = Map.of(
+                failedId, describedStatus(handler, objectMapper, failedId),
+                waitingId, describedStatus(handler, objectMapper, waitingId));
+        JsonNode listed = ((JsonNode) handler.handle("ListClusters", objectMapper.createObjectNode(), REGION)
+                .getEntity()).path("Clusters");
+
+        assertEquals(expected, statuses.get(failedId).path("ErrorDetails"));
+        assertFalse(statuses.get(waitingId).has("ErrorDetails"));
+        assertEquals(2, listed.size());
+        for (JsonNode summary : listed) {
+            assertEquals(statuses.get(summary.path("Id").asText()), summary.path("Status"));
+        }
+    }
+
+    @Test
     void aBootstrapHandedOffBeforeATeardownLeavesItsClusterBootstrappingAndStartsNoStep() {
         EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
         EmrCluster cluster = bootstrapping.service.runJobFlow(
@@ -1678,6 +1745,7 @@ class EmrServiceContainerStepsTest {
         assertEquals("TERMINATED_WITH_ERRORS", ended.getState());
         assertEquals("INTERNAL_ERROR", ended.getStateChangeReasonCode());
         assertEquals(EmrService.BOOTSTRAP_INTERRUPTED, ended.getStateChangeMessage());
+        assertEquals(List.of(), ended.getErrorDetails());
     }
 
     @Test
@@ -1685,6 +1753,26 @@ class EmrServiceContainerStepsTest {
         EmrServiceFixture.docker(runner, bootstrap, null).service.beforeReset();
 
         assertEquals(List.of(Set.of()), bootstrap.kept);
+    }
+
+    // A cluster's ErrorDetails, each as its code, each of its ErrorData maps as its pairs in order, and its message.
+    private static List<List<Object>> errorDetails(EmrCluster cluster) {
+        List<List<Object>> details = new ArrayList<>();
+        for (EmrErrorDetail detail : cluster.getErrorDetails()) {
+            List<List<String>> data = new ArrayList<>();
+            for (Map<String, String> pairs : detail.getErrorData()) {
+                data.add(pairs.entrySet().stream().map(pair -> pair.getKey() + "=" + pair.getValue()).toList());
+            }
+            details.add(List.of(detail.getErrorCode(), data, detail.getErrorMessage()));
+        }
+        return details;
+    }
+
+    // The Status DescribeCluster gives a cluster.
+    private static JsonNode describedStatus(EmrHandler handler, ObjectMapper objectMapper, String clusterId) {
+        JsonNode answer = (JsonNode) handler.handle("DescribeCluster",
+                objectMapper.createObjectNode().put("ClusterId", clusterId), REGION).getEntity();
+        return answer.path("Cluster").path("Status");
     }
 
     // Two bootstrap actions, as RunJobFlow stores them.

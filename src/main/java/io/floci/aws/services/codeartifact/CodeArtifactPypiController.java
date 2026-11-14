@@ -82,21 +82,25 @@ public class CodeArtifactPypiController {
     private final CodeArtifactService service;
     private final PypiserverSidecarClient pypiserver;
     private final CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
+    private final CodeArtifactPypiUpstreamRepositoryImporter upstreamRepositoryImporter;
     private final HttpClient httpClient;
     private final ConcurrentHashMap<String, Object> uploadLocks = new ConcurrentHashMap<>();
 
     @Inject
     public CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver,
-            CodeArtifactPypiExternalConnectionImporter externalConnectionImporter) {
-        this(service, pypiserver, externalConnectionImporter,
+            CodeArtifactPypiExternalConnectionImporter externalConnectionImporter,
+            CodeArtifactPypiUpstreamRepositoryImporter upstreamRepositoryImporter) {
+        this(service, pypiserver, externalConnectionImporter, upstreamRepositoryImporter,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver,
-            CodeArtifactPypiExternalConnectionImporter externalConnectionImporter, HttpClient httpClient) {
+            CodeArtifactPypiExternalConnectionImporter externalConnectionImporter,
+            CodeArtifactPypiUpstreamRepositoryImporter upstreamRepositoryImporter, HttpClient httpClient) {
         this.service = service;
         this.pypiserver = pypiserver;
         this.externalConnectionImporter = externalConnectionImporter;
+        this.upstreamRepositoryImporter = upstreamRepositoryImporter;
         this.httpClient = httpClient;
     }
 
@@ -147,9 +151,16 @@ public class CodeArtifactPypiController {
             } else {
                 return response;
             }
+            // A repository has either an external connection or upstreams, never both: at most
+            // one of these two calls ever finds anything, and the other's own no-op is cheap
+            // (see CodeArtifactPypiUpstreamRepositoryImporter's own javadoc).
             List<CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile> additional =
                     externalConnectionImporter.additionalExternalFilenames(handle.region(), domain, handle.owner(),
                             repository, handle.repoId(), packageName, knownFilenames);
+            if (additional.isEmpty()) {
+                additional = upstreamRepositoryImporter.additionalInternalFilenames(handle.region(), domain,
+                        handle.owner(), repository, handle.repoId(), packageName, knownFilenames);
+            }
             if (rewrittenOrNull == null && additional.isEmpty()) {
                 return response;
             }
@@ -265,8 +276,10 @@ public class CodeArtifactPypiController {
                     "/packages/" + SidecarUriUtils.encodeSegment(filename), leaseTransferred,
                     () -> pypiserver.endUse(handle.repoId()));
             if (match == null && response.getStatus() == 404
-                    && externalConnectionImporter.tryImportAsset(handle.region(), domain, handle.owner(), repository,
-                            handle.repoId(), filename)) {
+                    && (externalConnectionImporter.tryImportAsset(handle.region(), domain, handle.owner(),
+                            repository, handle.repoId(), filename)
+                        || upstreamRepositoryImporter.tryImportAsset(handle.region(), domain, handle.owner(),
+                            repository, handle.repoId(), filename))) {
                 return proxyGetStreamed(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename),
                         leaseTransferred, () -> pypiserver.endUse(handle.repoId()));
             }

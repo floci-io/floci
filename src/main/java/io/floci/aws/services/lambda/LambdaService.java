@@ -1251,13 +1251,15 @@ public class LambdaService implements ResourceProvider {
     /**
      * DeleteFunction. A Qualifier names a single published version to remove, leaving the
      * function and its other versions in place; without one the whole function goes.
+     * AWS answers 202 for a durable function and keeps it Deleting for about a minute.
+     *
+     * @return true when a durable function or an existing version of it was deleted
      */
-    public void deleteFunction(String region, String functionName, String qualifier) {
+    public boolean deleteFunction(String region, String functionName, String qualifier) {
         if (qualifier != null && !qualifier.isEmpty()) {
-            deleteFunctionVersion(region, functionName, qualifier);
-            return;
+            return deleteFunctionVersion(region, functionName, qualifier);
         }
-        deleteWholeFunction(region, functionName);
+        return deleteWholeFunction(region, functionName);
     }
 
     /**
@@ -1265,7 +1267,7 @@ public class LambdaService implements ResourceProvider {
      * {@code $LATEST} or naming an alias is rejected, a version an alias points at is a
      * conflict, and a version that does not exist is a silent success rather than a 404.
      */
-    private void deleteFunctionVersion(String region, String functionName, String qualifier) {
+    private boolean deleteFunctionVersion(String region, String functionName, String qualifier) {
         if (!QUALIFIER.matcher(qualifier).matches()) {
             throw SmithyValidationErrors.validationException(
                     "Value '" + qualifier + "' at 'qualifier' failed"
@@ -1296,7 +1298,7 @@ public class LambdaService implements ResourceProvider {
         }
         Optional<LambdaFunction> version = functionStore.get(region, name, qualifier);
         if (version.isEmpty()) {
-            return;
+            return false;
         }
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.deleteProvisionedQualifier(fn, qualifier);
@@ -1308,9 +1310,10 @@ public class LambdaService implements ResourceProvider {
             reclaimLegacyCodeDirectoryIfUnused(name);
         }
         LOG.infov("Deleted version {0} of Lambda function: {1}", qualifier, name);
+        return fn.isDurable();
     }
 
-    private void deleteWholeFunction(String region, String functionName) {
+    private boolean deleteWholeFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
@@ -1358,6 +1361,7 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+        return fn.isDurable();
     }
 
     /**
