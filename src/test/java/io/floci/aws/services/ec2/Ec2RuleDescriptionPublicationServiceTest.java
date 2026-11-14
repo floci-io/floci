@@ -3,8 +3,8 @@ package io.floci.aws.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.services.ec2.model.IpPermission;
@@ -14,7 +14,7 @@ import io.floci.aws.services.ec2.model.PrefixListId;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.SecurityGroupRule;
 import io.floci.aws.services.ec2.model.UserIdGroupPair;
-import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
+import io.floci.aws.testing.Ec2ServiceFixtures;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.io.TempDir;
@@ -29,7 +29,6 @@ import java.util.Map;
 
 import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
 
 class Ec2RuleDescriptionPublicationServiceTest {
     private static final String REGION = "us-east-1";
@@ -98,7 +97,7 @@ class Ec2RuleDescriptionPublicationServiceTest {
         "false, prefixListIds", "true, prefixListIds",
         "false, userIdGroupPairs", "true, userIdGroupPairs"
     })
-    void onlyTheSelectedSourceDescriptionChangesAndSurvivesReload(boolean egress, String source) {
+    void selectedSourceDescriptionAndRemovalPreserveSiblingsAfterReload(boolean egress, String source) {
         Fixture fixture = new Fixture(egress, directory);
         IpPermission permission = fixture.mixedSourcePermission();
         List<SecurityGroupRule> added = egress
@@ -132,6 +131,65 @@ class Ec2RuleDescriptionPublicationServiceTest {
         assertEquals(expectedGroup, MAPPER.valueToTree(fixture.groupValue()));
         fixture.groups.load();
         assertEquals(expectedGroup, MAPPER.valueToTree(fixture.groupValue()));
+
+        fixture.service.revokeSecurityGroupRulesByIds(REGION, fixture.group,
+                List.of(selected.getSecurityGroupRuleId()), egress);
+        for (JsonNode expectedPermission : expectedGroup.get(egress ? "ipPermissionsEgress" : "ipPermissions")) {
+            if (expectedPermission.path("fromPort").asInt() == 8443) {
+                ((ArrayNode) expectedPermission.get(source)).remove(0);
+            }
+        }
+        assertEquals(retainedRules, MAPPER.valueToTree(fixture.service.describeSecurityGroupRules(
+                REGION, List.of(fixture.group), retainedIds)));
+        assertTrue(fixture.service.describeSecurityGroupRules(REGION, List.of(fixture.group),
+                List.of(selected.getSecurityGroupRuleId())).isEmpty());
+        assertEquals(expectedGroup, MAPPER.valueToTree(fixture.groupValue()));
+        fixture.groups.load();
+        assertEquals(expectedGroup, MAPPER.valueToTree(fixture.groupValue()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void groupReferenceUpdateAndRemovalUseTheRecordedOwner(boolean egress) {
+        Fixture fixture = new Fixture(egress, directory);
+        UserIdGroupPair retained = new UserIdGroupPair();
+        retained.setGroupId(fixture.retainedGroup);
+        retained.setUserId("111122223333");
+        retained.setDescription("retained");
+        UserIdGroupPair selected = new UserIdGroupPair();
+        selected.setGroupId(fixture.retainedGroup);
+        selected.setUserId("444455556666");
+        selected.setDescription("before");
+        IpPermission permission = new IpPermission();
+        permission.setIpProtocol("tcp");
+        permission.setFromPort(8443);
+        permission.setToPort(8443);
+        permission.setUserIdGroupPairs(List.of(retained, selected));
+        List<SecurityGroupRule> added = egress
+                ? fixture.service.authorizeSecurityGroupEgress(REGION, fixture.group, List.of(permission))
+                : fixture.service.authorizeSecurityGroupIngress(REGION, fixture.group, List.of(permission));
+        String selectedRule = added.stream().filter(rule -> selected.getUserId().equals(
+                rule.getReferencedGroupInfo().getUserId())).findFirst().orElseThrow().getSecurityGroupRuleId();
+
+        fixture.service.modifySecurityGroupRules(REGION, fixture.group, List.of(
+                Map.of("SecurityGroupRuleId", selectedRule, "Description", "after")));
+        fixture.groups.load();
+        List<IpPermission> permissions = egress ? fixture.groupValue().getIpPermissionsEgress()
+                : fixture.groupValue().getIpPermissions();
+        IpPermission updated = permissions.stream().filter(value -> Integer.valueOf(8443).equals(value.getFromPort()))
+                .findFirst().orElseThrow();
+        assertEquals("retained", updated.getUserIdGroupPairs().getFirst().getDescription());
+        assertEquals("after", updated.getUserIdGroupPairs().getLast().getDescription());
+
+        fixture.service.revokeSecurityGroupRulesByIds(REGION, fixture.group, List.of(selectedRule), egress);
+        fixture.groups.load();
+        List<IpPermission> remaining = egress ? fixture.groupValue().getIpPermissionsEgress()
+                : fixture.groupValue().getIpPermissions();
+        IpPermission retainedPermission = remaining.stream()
+                .filter(value -> Integer.valueOf(8443).equals(value.getFromPort())).findFirst().orElseThrow();
+        assertEquals(MAPPER.valueToTree(List.of(retained)), MAPPER.valueToTree(retainedPermission.getUserIdGroupPairs()));
+        assertTrue(fixture.service.describeSecurityGroupRules(REGION, List.of(fixture.group),
+                List.of(selectedRule)).isEmpty());
     }
 
     private static final class Fixture {
@@ -147,16 +205,7 @@ class Ec2RuleDescriptionPublicationServiceTest {
             InMemoryStorageFactory stores = new InMemoryStorageFactory("000000000000")
                     .withStore("ec2-security-group-rules.json", rules)
                     .withStore("ec2-security-groups.json", groups);
-            EmulatorConfig config = mock(EmulatorConfig.class);
-            EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-            EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
-            when(config.defaultAccountId()).thenReturn("000000000000");
-            when(config.services()).thenReturn(services);
-            when(services.ec2()).thenReturn(ec2);
-            when(ec2.mock()).thenReturn(true);
-            when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.NONE);
-            service = new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
-                    mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), stores);
+            service = Ec2ServiceFixtures.mockModeService(stores);
             String vpc = service.createVpc(REGION, "10.66.0.0/16", false).getVpcId();
             group = service.createSecurityGroup(REGION, "owned", "owned", vpc).getGroupId();
             retainedGroup = service.createSecurityGroup(REGION, "retained", "retained", vpc).getGroupId();

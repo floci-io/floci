@@ -43,15 +43,7 @@ class Ec2RuleDescriptionIntegrationTest {
                 .forEach(group -> client.deleteSecurityGroup(request -> request.groupId(group.groupId()))));
         String group = client.createSecurityGroup(request -> request.vpcId(vpc).groupName(name)
                 .description("owned description fixture")).groupId();
-        IpPermission permission = IpPermission.builder().ipProtocol("tcp").fromPort(443).toPort(443)
-                .ipRanges(IpRange.builder().cidrIp("10.234.0.0/24").description("before").build()).build();
-        List<SecurityGroupRule> created = egress
-                ? client.authorizeSecurityGroupEgress(request -> request.groupId(group)
-                        .ipPermissions(permission)).securityGroupRules()
-                : client.authorizeSecurityGroupIngress(request -> request.groupId(group)
-                        .ipPermissions(permission)).securityGroupRules();
-        assertEquals(1, created.size());
-        String rule = created.getFirst().securityGroupRuleId();
+        String rule = createRule(client, group, egress).securityGroupRuleId();
         SecurityGroupRule before = client.describeSecurityGroupRules(request -> request
                 .securityGroupRuleIds(rule)).securityGroupRules().getFirst();
         IpPermission beforePermission = describedPermission(client, group, egress);

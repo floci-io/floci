@@ -8386,67 +8386,80 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * prefix list, and the whole permission only once nothing is left in it. Matching on protocol
      * and ports alone would take out an unrelated rule that happens to share them.
      */
-    private boolean removeRecordedPermission(List<IpPermission> perms, SecurityGroupRule rule) {
-        String referencedGroupId = rule.getReferencedGroupInfo() == null
-                ? null : rule.getReferencedGroupInfo().getGroupId();
-        for (IpPermission perm : perms) {
-            if (!Objects.equals(perm.getIpProtocol(), rule.getIpProtocol())
-                    || !Objects.equals(perm.getFromPort(), rule.getFromPort())
-                    || !Objects.equals(perm.getToPort(), rule.getToPort())) {
+    private boolean removeRecordedPermission(List<IpPermission> permissions, SecurityGroupRule rule) {
+        RecordedPermission match = findRecordedPermission(permissions, rule);
+        if (match == null) {
+            return false;
+        }
+        match.removeSource();
+        dropIfEmpty(permissions, match.permission());
+        return true;
+    }
+
+    /** Locates a source while the caller holds the group lock through its subsequent mutation. */
+    private RecordedPermission findRecordedPermission(List<IpPermission> permissions, SecurityGroupRule rule) {
+        for (IpPermission permission : permissions) {
+            if (!Objects.equals(permission.getIpProtocol(), rule.getIpProtocol())
+                    || !Objects.equals(permission.getFromPort(), rule.getFromPort())
+                    || !Objects.equals(permission.getToPort(), rule.getToPort())) {
                 continue;
             }
             if (rule.getCidrIpv6() != null) {
-                Ipv6Range match6 = perm.getIpv6Ranges().stream()
-                        .filter(r -> rule.getCidrIpv6().equals(r.getCidrIpv6()))
-                        .findFirst().orElse(null);
-                if (match6 == null) {
-                    continue;
+                for (int index = 0; index < permission.getIpv6Ranges().size(); index++) {
+                    if (rule.getCidrIpv6().equals(permission.getIpv6Ranges().get(index).getCidrIpv6())) {
+                        return new RecordedPermission(permission, PermissionSource.IPV6, index);
+                    }
                 }
-                perm.getIpv6Ranges().remove(match6);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            if (rule.getReferencedGroupInfo() != null) {
-                // A reference by a name that matched no group was recorded without an id.
-                UserIdGroupPair matchPair = perm.getUserIdGroupPairs().stream()
-                        .filter(pair -> Objects.equals(referencedGroupId, pair.getGroupId()))
-                        .findFirst().orElse(null);
-                if (matchPair == null) {
-                    continue;
+            } else if (rule.getReferencedGroupInfo() != null) {
+                ReferencedSecurityGroup reference = rule.getReferencedGroupInfo();
+                for (int index = 0; index < permission.getUserIdGroupPairs().size(); index++) {
+                    UserIdGroupPair pair = permission.getUserIdGroupPairs().get(index);
+                    if (Objects.equals(reference.getGroupId(), pair.getGroupId())
+                            && Objects.equals(reference.getUserId(), pair.getUserId())) {
+                        return new RecordedPermission(permission, PermissionSource.GROUP, index);
+                    }
                 }
-                perm.getUserIdGroupPairs().remove(matchPair);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            if (rule.getCidrIpv4() != null) {
-                IpRange match = perm.getIpRanges().stream()
-                        .filter(r -> rule.getCidrIpv4().equals(r.getCidrIp()))
-                        .findFirst().orElse(null);
-                if (match == null) {
-                    continue;
+            } else if (rule.getCidrIpv4() != null) {
+                for (int index = 0; index < permission.getIpRanges().size(); index++) {
+                    if (rule.getCidrIpv4().equals(permission.getIpRanges().get(index).getCidrIp())) {
+                        return new RecordedPermission(permission, PermissionSource.IPV4, index);
+                    }
                 }
-                perm.getIpRanges().remove(match);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            if (rule.getPrefixListId() != null) {
-                PrefixListId matchList = perm.getPrefixListIds().stream()
-                        .filter(l -> rule.getPrefixListId().equals(l.getPrefixListId()))
-                        .findFirst().orElse(null);
-                if (matchList == null) {
-                    continue;
+            } else if (rule.getPrefixListId() != null) {
+                for (int index = 0; index < permission.getPrefixListIds().size(); index++) {
+                    if (rule.getPrefixListId().equals(permission.getPrefixListIds().get(index).getPrefixListId())) {
+                        return new RecordedPermission(permission, PermissionSource.PREFIX_LIST, index);
+                    }
                 }
-                perm.getPrefixListIds().remove(matchList);
-                dropIfEmpty(perms, perm);
-                return true;
-            }
-            // A record naming no peer matches only a permission that names none either.
-            if (!hasSources(perm)) {
-                perms.remove(perm);
-                return true;
+            } else if (!hasSources(permission)) {
+                return new RecordedPermission(permission, PermissionSource.EMPTY, -1);
             }
         }
-        return false;
+        return null;
+    }
+
+    private enum PermissionSource { IPV4, IPV6, GROUP, PREFIX_LIST, EMPTY }
+
+    private record RecordedPermission(IpPermission permission, PermissionSource source, int index) {
+        private void removeSource() {
+            switch (source) {
+                case IPV4 -> permission.getIpRanges().remove(index);
+                case IPV6 -> permission.getIpv6Ranges().remove(index);
+                case GROUP -> permission.getUserIdGroupPairs().remove(index);
+                case PREFIX_LIST -> permission.getPrefixListIds().remove(index);
+                case EMPTY -> { }
+            }
+        }
+
+        private void setDescription(String description) {
+            switch (source) {
+                case IPV4 -> permission.getIpRanges().get(index).setDescription(description);
+                case IPV6 -> permission.getIpv6Ranges().get(index).setDescription(description);
+                case GROUP -> permission.getUserIdGroupPairs().get(index).setDescription(description);
+                case PREFIX_LIST -> permission.getPrefixListIds().get(index).setDescription(description);
+                case EMPTY -> { }
+            }
+        }
     }
 
     private void dropIfEmpty(List<IpPermission> perms, IpPermission perm) {
@@ -8585,34 +8598,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private void updatePermissionDescription(SecurityGroup group, SecurityGroupRule rule) {
         List<IpPermission> permissions = rule.isEgress() ? group.getIpPermissionsEgress() : group.getIpPermissions();
-        for (IpPermission permission : permissions) {
-            if (!Objects.equals(permission.getIpProtocol(), rule.getIpProtocol())
-                    || !Objects.equals(permission.getFromPort(), rule.getFromPort())
-                    || !Objects.equals(permission.getToPort(), rule.getToPort())) {
-                continue;
-            }
-            for (IpRange range : permission.getIpRanges()) {
-                if (rule.getCidrIpv4() != null && rule.getCidrIpv4().equals(range.getCidrIp())) {
-                    range.setDescription(rule.getDescription());
-                }
-            }
-            for (Ipv6Range range : permission.getIpv6Ranges()) {
-                if (rule.getCidrIpv6() != null && rule.getCidrIpv6().equals(range.getCidrIpv6())) {
-                    range.setDescription(rule.getDescription());
-                }
-            }
-            for (PrefixListId prefixList : permission.getPrefixListIds()) {
-                if (rule.getPrefixListId() != null && rule.getPrefixListId().equals(prefixList.getPrefixListId())) {
-                    prefixList.setDescription(rule.getDescription());
-                }
-            }
-            ReferencedSecurityGroup reference = rule.getReferencedGroupInfo();
-            for (UserIdGroupPair pair : permission.getUserIdGroupPairs()) {
-                if (reference != null && Objects.equals(reference.getGroupId(), pair.getGroupId())
-                        && Objects.equals(reference.getUserId(), pair.getUserId())) {
-                    pair.setDescription(rule.getDescription());
-                }
-            }
+        RecordedPermission match = findRecordedPermission(permissions, rule);
+        if (match != null) {
+            match.setDescription(rule.getDescription());
         }
     }
 
