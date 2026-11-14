@@ -15636,6 +15636,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                          List<String> networkInterfaceIds,
                                                          List<Map.Entry<String, List<String>>> filters,
                                                          int maxResults, String nextToken) {
+        return describeNetworkInterfaces(accountId, region, networkInterfaceIds, filters, maxResults, nextToken, true);
+    }
+
+    /**
+     * The resource of {@code type} EC2 holds under {@code id} for the caller, as its Describe operation answers it,
+     * which the IAM condition keys the request-resources table reads from a resource's members are valued from: a
+     * network interface of any kind, stored, held by an instance or owned by an endpoint or a NAT gateway. Empty for a
+     * type it does not answer for and an id it holds nothing under, which the request then fails on. Reads only: it
+     * creates no default resources.
+     */
+    public Optional<Object> heldResource(String region, String type, String id) {
+        if (!"network-interface".equals(type)) {
+            return Optional.empty();
+        }
+        try {
+            return describeNetworkInterfaces(callerAccountId(), region, List.of(id), List.of(), 0, null, false)
+                    .networkInterfaces().stream().findFirst().map(Object.class::cast);
+        } catch (AwsException expected) {
+            // A malformed id or one naming no interface: the request is refused on it, so it carries no keys.
+            return Optional.empty();
+        }
+    }
+
+    private NetworkInterfaceListResult describeNetworkInterfaces(String accountId, String region,
+                                                                 List<String> networkInterfaceIds,
+                                                                 List<Map.Entry<String, List<String>>> filters,
+                                                                 int maxResults, String nextToken,
+                                                                 boolean createDefaults) {
         // Validate pagination parameters
         if (maxResults > 0 && !networkInterfaceIds.isEmpty()) {
             throw new AwsException("InvalidParameterCombination",
@@ -15656,7 +15684,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
-        ensureDefaultResources(region);
+        if (createDefaults) {
+            ensureDefaultResources(region);
+        }
         String safeAccount = accountId != null ? accountId : callerAccountId();
         List<NetworkInterface> result = new ArrayList<>();
         Set<String> foundIds = new HashSet<>();

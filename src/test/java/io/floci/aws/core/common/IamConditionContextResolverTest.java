@@ -148,7 +148,7 @@ class IamConditionContextResolverTest {
                 dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
                 crossAccountServiceInstance, iamServiceInstance,
                 lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()),
-                requestContext, config,
+                requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
     }
 
@@ -806,7 +806,7 @@ class IamConditionContextResolverTest {
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                spellings(), requestContext, config, null,
+                spellings(), requestContext, new RegionResolver("us-east-1", "123456789012"), config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 
