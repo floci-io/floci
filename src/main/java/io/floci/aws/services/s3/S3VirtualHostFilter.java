@@ -151,7 +151,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
             return;
         }
 
-        if (isEndpointRoot(host, baseHostname, serviceHostSuffixes)) {
+        if (isEndpointRoot(host)) {
             return;
         }
         String bucket = extractBucket(host, baseHostname, serviceHostSuffixes);
@@ -323,6 +323,11 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         }
 
         return bucketBeforeS3Qualifier(hostname);
+    }
+
+    /** Whether the host names a configured endpoint rather than a bucket, including controller fallback paths. */
+    boolean isEndpointRoot(String host) {
+        return isEndpointRoot(host, baseHostname, serviceHostSuffixes);
     }
 
     private static boolean isEndpointRoot(String host, String baseHostname, Set<String> serviceHostSuffixes) {
