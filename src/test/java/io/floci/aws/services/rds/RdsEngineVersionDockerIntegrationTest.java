@@ -32,8 +32,11 @@ class RdsEngineVersionDockerIntegrationTest {
     private static final String PASSWORD = "Passw0rd12345";
 
     @BeforeEach
-    void checkDocker() throws InterruptedException {
+    void checkDocker() throws InterruptedException, ClassNotFoundException {
         assumeDocker();
+        // DriverManager hands out only a driver this test's class loader can see, and after a Quarkus
+        // restart the one registered earlier belongs to another loader.
+        Class.forName("org.postgresql.Driver");
     }
 
     @Test
