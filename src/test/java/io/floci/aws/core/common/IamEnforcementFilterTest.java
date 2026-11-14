@@ -196,6 +196,11 @@ class IamEnforcementFilterTest {
 
         verify(request, never()).abortWith(any());
         assertEquals(List.of(Level.WARNING), records.stream().map(LogRecord::getLevel).toList());
+        // The key and the account are the ones AccountContextFilter put in the request context.
+        assertEquals(List.of("A request in account 123456789012 was signed with an IAM user's access key "
+                + "(AKIAUSERKEY), but IAM policy enforcement is off, so Floci allowed it without evaluating "
+                + "the policies that apply to it. Set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to evaluate "
+                + "them as AWS does. This is logged once."), records.stream().map(LogCapture::formatted).toList());
     }
 
     @Test

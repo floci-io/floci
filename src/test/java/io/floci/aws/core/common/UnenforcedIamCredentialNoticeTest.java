@@ -5,7 +5,6 @@ import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.text.MessageFormat;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -66,12 +65,28 @@ class UnenforcedIamCredentialNoticeTest {
         List<String> warnings = warnings(() -> {
             assertFalse(notice.observe("test", "000000000000"));
             assertFalse(notice.observe(ACCOUNT, ACCOUNT));
+            assertFalse(notice.observe("210987654321", ACCOUNT));
             assertFalse(notice.observe(null, ACCOUNT));
             assertFalse(notice.observe("", ACCOUNT));
         });
 
         assertEquals(List.of(), warnings);
         verifyNoInteractions(iamService);
+    }
+
+    @Test
+    void aSessionTheRootMintedNeverWarnsAndIsLookedUpOnce() {
+        when(iamService.isKnownAccessKey("ASIAROOTSESSION")).thenReturn(true);
+        when(iamService.isRootIssuedSessionToken("ASIAROOTSESSION")).thenReturn(true);
+
+        List<String> warnings = warnings(() -> {
+            assertFalse(notice.observe("ASIAROOTSESSION", ACCOUNT));
+            assertFalse(notice.observe("ASIAROOTSESSION", ACCOUNT));
+        });
+
+        assertEquals(List.of(), warnings);
+        verify(iamService, times(1)).isKnownAccessKey("ASIAROOTSESSION");
+        verify(iamService, times(1)).isRootIssuedSessionToken("ASIAROOTSESSION");
     }
 
     @Test
@@ -102,9 +117,7 @@ class UnenforcedIamCredentialNoticeTest {
         List<LogRecord> records = LogCapture.capture(UnenforcedIamCredentialNotice.class, action);
         return records.stream()
                 .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
-                .map(record -> record.getParameters() == null || record.getParameters().length == 0
-                        ? record.getMessage()
-                        : MessageFormat.format(record.getMessage(), record.getParameters()))
+                .map(LogCapture::formatted)
                 .toList();
     }
 }

@@ -14,12 +14,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * written before any identity exists and before the first request.
  *
  * <p>An IAM identity's credential is an IAM user's access key or a session Floci issued, such as
- * an assumed role or a Lambda function's execution role. The {@code test} key and a bare
- * account-id key are the account root's on purpose and never warn.
+ * an assumed role or a Lambda function's execution role. The account root's credentials never
+ * warn: the {@code test} key, a bare account-id key and a GetSessionToken session either of them
+ * minted, which acts as the root.
  *
  * <p>Once the warning is logged this costs one read per request. Before that, each other access
- * key id is looked up once: a key Floci did not issue never becomes one it issued, so it is
- * remembered as checked, up to {@link #MAX_CHECKED_KEYS} of them.
+ * key id is looked up once: a key Floci did not issue never becomes one it issued, and a session
+ * the root minted stays the root's, so it is remembered as checked, up to
+ * {@link #MAX_CHECKED_KEYS} of them.
  */
 final class UnenforcedIamCredentialNotice {
 
@@ -40,11 +42,11 @@ final class UnenforcedIamCredentialNotice {
      */
     boolean observe(String accessKeyId, String accountId) {
         if (warned.get() || accessKeyId == null || accessKeyId.isBlank()
-                || "test".equals(accessKeyId) || accessKeyId.equals(accountId)
+                || "test".equals(accessKeyId) || AccountResolver.isAccountId(accessKeyId)
                 || checkedKeys.contains(accessKeyId)) {
             return false;
         }
-        if (!iamService.isKnownAccessKey(accessKeyId)) {
+        if (!iamService.isKnownAccessKey(accessKeyId) || iamService.isRootIssuedSessionToken(accessKeyId)) {
             if (checkedKeys.size() < MAX_CHECKED_KEYS) {
                 checkedKeys.add(accessKeyId);
             }

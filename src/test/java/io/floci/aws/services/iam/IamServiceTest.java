@@ -767,6 +767,31 @@ class IamServiceTest {
     }
 
     @Test
+    void onlyASessionTokenTheRootMintedIsTheRootsOwnSession() {
+        IamService service = iamService(false);
+        service.createUser("alice", "/");
+        String aliceKey = service.createAccessKey("alice").getAccessKeyId();
+        Instant expiration = Instant.now().plusSeconds(3600);
+        service.registerIssuedSession("ASIAROOTSESSION", "secret", "token", null, expiration, null,
+                "000000000000", "000000000000");
+        service.registerIssuedSession("ASIAUSERSESSION", "secret", "token", null, expiration, null,
+                "000000000000", aliceKey);
+        service.registerIssuedSession("ASIAROOTFEDERATED", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/bob", expiration, READ_S3, "000000000000",
+                "000000000000");
+        service.createRole("Worker", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
+        service.registerSession("ASIAROLESESSION", "secret", "token", "arn:aws:iam::000000000000:role/Worker",
+                expiration, null, "000000000000", "s", "AROAWORKER:s");
+
+        assertTrue(service.isRootIssuedSessionToken("ASIAROOTSESSION"));
+        assertFalse(service.isRootIssuedSessionToken("ASIAUSERSESSION"));
+        assertFalse(service.isRootIssuedSessionToken("ASIAROOTFEDERATED"));
+        assertFalse(service.isRootIssuedSessionToken("ASIAROLESESSION"));
+        assertFalse(service.isRootIssuedSessionToken(aliceKey));
+        assertFalse(service.isRootIssuedSessionToken("ASIANOSUCHSESSION"));
+    }
+
+    @Test
     void aSessionTokenMintedWithAKeyIamDoesNotKnowActsAsTheRoot() {
         IamService service = iamService(false);
         service.registerIssuedSession("ASIAFROMUNKNOWNKEY", "secret", "token", null,

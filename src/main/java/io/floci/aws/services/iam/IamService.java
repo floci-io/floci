@@ -5513,6 +5513,25 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * True when this is a GetSessionToken session the account root minted. It acts as the root
+     * that minted it, as {@link #resolveCallerContext} answers it: allowed everything, bounded only
+     * by the account's SCPs, as the root key itself is. A GetFederationToken session the root
+     * minted is not one, since its session policy is evaluated.
+     */
+    public boolean isRootIssuedSessionToken(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return false;
+        }
+        return findSessionForCallerContext(accessKeyId)
+                .filter(session -> session.getDelegatedApproverArn() == null
+                        && !isFederatedUserSession(session)
+                        && session.getRoleArn() == null
+                        && session.getPresignedAction() == null)
+                .filter(IamService::issuedByRoot)
+                .isPresent();
+    }
+
+    /**
      * True when this is an IAM user's long-term access key, in any account, that is not Active. An
      * inactive key can't be used for API calls (IAM User Guide, "Manage access keys for IAM
      * users"), so enforcement refuses it as it refuses a key that exists nowhere, rather than
