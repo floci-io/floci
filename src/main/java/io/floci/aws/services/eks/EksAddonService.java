@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.eks.model.Addon;
@@ -190,7 +191,9 @@ public class EksAddonService {
         if (cluster == null || addonName == null || addonName.isBlank()) {
             return false;
         }
-        return storage.get(prefix(cluster) + addonName.trim().toLowerCase(Locale.ROOT)).isPresent();
+        // Read in the cluster's account, not the request's: restoring a cluster at startup asks with no request.
+        return AccountAwareStorageBackend.getInAccount(storage, AwsArnUtils.parse(cluster.getArn()).accountId(),
+                prefix(cluster) + addonName.trim().toLowerCase(Locale.ROOT)).isPresent();
     }
 
     public AddonNamesPage list(Cluster cluster, Integer maxResults, String nextToken) {

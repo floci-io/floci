@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.eks.model.Addon;
 import io.floci.aws.services.eks.model.AddonInfo;
@@ -16,6 +18,7 @@ import io.floci.aws.services.eks.model.Update;
 import io.floci.aws.services.eks.model.UpdateAddonRequest;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.IamRole;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -284,6 +287,31 @@ class EksAddonServiceTest {
         fixture.cluster.setStatus(ClusterStatus.ACTIVE);
         fixture.service.delete(fixture.cluster, "eks-pod-identity-agent", false);
         assertFalse(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+    }
+
+    /**
+     * Restoring a cluster at startup asks whether an add-on is installed with no request, so the request context
+     * holds the default account; the add-on is still found in the cluster's account.
+     */
+    @Test
+    void anAddonIsFoundInTheClustersAccountWhateverTheRequestsAccount() {
+        RequestContext request = new RequestContext();
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> context = mock(Instance.class);
+        when(context.get()).thenReturn(request);
+        AccountAwareStorageBackend<EksAddonService.StoredAddon> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, "000000000000");
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        EksAddonService service = new EksAddonService(storage, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                fixture.catalog(), fixture.iam(), fixture.podIdentityAssociations());
+
+        request.setAccountId(ACCOUNT);
+        service.create(fixture.cluster(), new CreateAddonRequest(
+                "eks-pod-identity-agent", null, null, null, null, null, null, null));
+        request.setAccountId("000000000000");
+
+        assertTrue(service.isInstalled(fixture.cluster(), "eks-pod-identity-agent"));
     }
 
     @Test
