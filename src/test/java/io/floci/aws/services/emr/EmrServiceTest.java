@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
 import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
 import static io.floci.aws.services.emr.EmrServiceFixture.step;
+import static io.floci.aws.services.emr.EmrServiceFixture.stepStates;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -123,10 +124,10 @@ class EmrServiceTest {
         EmrStep b = cluster.getSteps().get(1);
 
         assertEquals("RUNNING", service.describeCluster(id).getState());
-        assertEquals(List.of("PENDING", "RUNNING"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("PENDING", "RUNNING"), stepStates(service.listSteps(id, null, null)));
         assertEquals(List.of(b.getId()), ids(service.listSteps(id, List.of("PENDING"), null)));
         fixture.clock.advance(Duration.ofSeconds(60));
-        assertEquals(List.of("RUNNING", "COMPLETED"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("RUNNING", "COMPLETED"), stepStates(service.listSteps(id, null, null)));
         assertEquals(a.getStartDateTime().plusSeconds(60), a.getEndDateTime());
         assertEquals(a.getEndDateTime(), b.getStartDateTime());
         fixture.clock.advance(Duration.ofSeconds(60));
@@ -146,15 +147,15 @@ class EmrServiceTest {
         parallel.setStepConcurrencyLevel(2);
         String id = service.runJobFlow(parallel, REGION).getId();
 
-        assertEquals(List.of("PENDING", "RUNNING", "RUNNING"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("PENDING", "RUNNING", "RUNNING"), stepStates(service.listSteps(id, null, null)));
         fixture.clock.advance(Duration.ofSeconds(10));
         service.modifyCluster(id, 3);
-        assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), stepStates(service.listSteps(id, null, null)));
         // Lowering the level lets the steps already running complete.
         service.modifyCluster(id, 1);
         fixture.clock.advance(Duration.ofSeconds(60));
 
-        assertEquals(List.of("COMPLETED", "COMPLETED", "COMPLETED"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("COMPLETED", "COMPLETED", "COMPLETED"), stepStates(service.listSteps(id, null, null)));
         assertEquals("WAITING", service.describeCluster(id).getState());
     }
 
@@ -226,7 +227,7 @@ class EmrServiceTest {
         List<EmrService.CancelStepInfo> infos = service.cancelSteps(cluster.getId(), List.of(b.getId()));
 
         assertEquals(List.of(new EmrService.CancelStepInfo(b.getId(), "SUBMITTED", null)), infos);
-        assertEquals(List.of("CANCELLED", "RUNNING"), states(service.listSteps(cluster.getId(), null, null)));
+        assertEquals(List.of("CANCELLED", "RUNNING"), stepStates(service.listSteps(cluster.getId(), null, null)));
         assertEquals("CANCELLED b", fixture.states().get(fixture.states().size() - 1));
     }
 
@@ -241,7 +242,7 @@ class EmrServiceTest {
         List<EmrService.CancelStepInfo> infos = service.cancelSteps(cluster.getId(), List.of(a.getId()));
 
         assertEquals(List.of(new EmrService.CancelStepInfo(a.getId(), "SUBMITTED", null)), infos);
-        assertEquals(List.of("RUNNING", "CANCELLED"), states(service.listSteps(cluster.getId(), null, null)));
+        assertEquals(List.of("RUNNING", "CANCELLED"), stepStates(service.listSteps(cluster.getId(), null, null)));
         assertEquals(a.getEndDateTime(), cluster.getSteps().get(1).getStartDateTime());
         assertEquals(List.of("CANCELLED a", "RUNNING b"),
                 fixture.states().subList(fixture.states().size() - 2, fixture.states().size()));
@@ -284,7 +285,7 @@ class EmrServiceTest {
         assertEquals("TERMINATING", terminating.getState());
         assertEquals("USER_REQUEST", terminating.getStateChangeReasonCode());
         assertNull(terminating.getEndDateTime());
-        assertEquals(List.of("CANCELLED", "CANCELLED"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("CANCELLED", "CANCELLED"), stepStates(service.listSteps(id, null, null)));
         assertEquals("RUNNING", service.listInstanceGroups(id).get(0).getState());
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.addJobFlowSteps(id, List.of(step("late"))));
@@ -506,7 +507,7 @@ class EmrServiceTest {
 
         assertEquals("TERMINATED", service.describeCluster(id).getState());
         assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), clusters.stream().map(EmrCluster::getState).toList());
-        assertEquals(List.of("RUNNING", "RUNNING"), states(steps));
+        assertEquals(List.of("RUNNING", "RUNNING"), stepStates(steps));
         assertNull(steps.get(0).getEndDateTime());
         assertEquals(2, group.getRunningInstanceCount());
         assertEquals(2, fleet.getProvisionedOnDemandCapacity());
@@ -583,9 +584,6 @@ class EmrServiceTest {
     }
 
     /** ListSteps' states, newest step first, as it lists them. */
-    private static List<String> states(List<EmrStep> steps) {
-        return steps.stream().map(EmrStep::getState).toList();
-    }
 
     private static List<String> ids(List<EmrStep> steps) {
         return steps.stream().map(EmrStep::getId).toList();

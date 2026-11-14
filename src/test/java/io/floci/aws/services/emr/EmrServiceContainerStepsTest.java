@@ -34,6 +34,7 @@ import java.util.function.BooleanSupplier;
 import static io.floci.aws.services.emr.EmrServiceFixture.ACCOUNT;
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
 import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
+import static io.floci.aws.services.emr.EmrServiceFixture.stepStates;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -999,20 +1000,141 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
-    void cancellingARunningStepStopsItsDriverAndStartsTheNext() {
+    void aCancelledRunningStepKeepsItsPlaceWhileItsDriverStopsThenTheNextStarts() {
         EmrCluster cluster = service.runJobFlow(cluster("cancelling", true,
                 sparkStep("stopped", "TERMINATE_CLUSTER"), sparkStep("next", "CONTINUE")), REGION);
         String stoppedId = cluster.getSteps().get(0).getId();
-        runner.whileRunning = () -> service.cancelSteps(cluster.getId(), List.of(stoppedId));
+        List<String> whileStopping = new ArrayList<>();
+        List<EmrService.CancelStepInfo> again = new ArrayList<>();
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(stoppedId));
+            again.addAll(service.cancelSteps(cluster.getId(), List.of(stoppedId)));
+            // A step added meanwhile waits too.
+            service.addJobFlowSteps(cluster.getId(), List.of(sparkStep("added", "CONTINUE")));
+            EmrCluster stopping = service.describeCluster(cluster.getId());
+            whileStopping.add(stopping.getState());
+            stopping.getSteps().forEach(step -> whileStopping.add(step.getState()));
+        };
 
         fixture.runStepThread();
 
+        // The next step starts once the driver is gone, before anything reads the cluster.
+        assertEquals(1, fixture.stepThreadsWaiting());
         assertEquals(Set.of(stoppedId), runner.stopped);
+        // "Canceling a running step does not allow a pending step to start running" while its driver stops.
+        assertEquals(List.of("RUNNING", "CANCEL_PENDING", "PENDING", "PENDING"), whileStopping);
+        // "CancelSteps is idempotent".
+        assertEquals(List.of(new EmrService.CancelStepInfo(stoppedId, "SUBMITTED", null)), again);
         EmrCluster running = service.describeCluster(cluster.getId());
-        assertEquals("CANCELLED", running.getSteps().get(0).getState());
         // "Canceling a running step does not trigger the step ActionOnFailure."
         assertEquals("RUNNING", running.getState());
-        assertEquals("RUNNING", running.getSteps().get(1).getState());
+        assertEquals(List.of("CANCELLED", "RUNNING", "PENDING"), stepStates(running.getSteps()));
+        assertEquals(List.of("STARTING", "PENDING stopped", "PENDING next", "RUNNING stopped", "CANCEL_PENDING stopped",
+                "PENDING added", "CANCELLED stopped", "RUNNING next"), fixture.states());
+    }
+
+    @Test
+    void aStepWhoseDriverEndsByItselfWhileItsCancelIsPendingIsCancelledAndTakesNoAction() {
+        EmrCluster cluster = service.runJobFlow(cluster("raced", true,
+                sparkStep("raced", "TERMINATE_CLUSTER"), sparkStep("next", "CONTINUE")), REGION);
+        String racedId = cluster.getSteps().get(0).getId();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(racedId));
+            // Its driver exits before the stop reaches it.
+            runner.stopped.remove(racedId);
+        };
+
+        fixture.runStepThread();
+
+        assertEquals(1, fixture.stepThreadsWaiting());
+        EmrCluster going = service.describeCluster(cluster.getId());
+        assertEquals("CANCELLED", going.getSteps().get(0).getState());
+        assertNull(going.getSteps().get(0).getFailureMessage());
+        assertEquals("RUNNING", going.getState());
+        assertEquals("RUNNING", going.getSteps().get(1).getState());
+    }
+
+    @Test
+    void aStepFlociStopsWhileItsCancelIsPendingIsLeftForTheRestartToCancel() {
+        EmrCluster cluster = service.runJobFlow(
+                cluster("torn-down", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(stepId));
+            service.stopManagedContainers();
+        };
+
+        fixture.runStepThread();
+
+        // Cancelling it now would start the next step's driver after the teardown has passed.
+        assertEquals("CANCEL_PENDING", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+        EmrServiceFixture restarted = fixture.restart();
+        restarted.pass(Duration.ZERO);
+        assertEquals("CANCELLED", restarted.service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(List.of("CANCELLED cut", "RUNNING next"), restarted.states());
+    }
+
+    @Test
+    void aStepWhoseCancelWasPendingIsCancelledWhenFlociComesBackInTheImmediateMode() {
+        EmrCluster cluster = service.runJobFlow(
+                cluster("to-immediate", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(stepId));
+            service.stopManagedContainers();
+        };
+        fixture.runStepThread();
+
+        EmrServiceFixture immediate = fixture.restartImmediate();
+        immediate.pass(Duration.ZERO);
+
+        // Nothing would end it there: it is cancelled at once, and the next step completes by time.
+        assertEquals(List.of("CANCELLED cut", "RUNNING next", "COMPLETED next", "WAITING"), immediate.states());
+    }
+
+    @Test
+    void aStepWhoseCancelIsPendingStillRunsForAFailedStepsCancelAndWait() {
+        EmrCluster cluster = service.runJobFlow(cluster("lowered", true, sparkStep("failing", "CANCEL_AND_WAIT"),
+                sparkStep("cancelled", "CONTINUE"), sparkStep("queued", "CONTINUE")), REGION);
+        String cancelledId = cluster.getSteps().get(1).getId();
+        // Both run at level 2, which is lowered to 1 while they do.
+        service.modifyCluster(cluster.getId(), 2);
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        runner.whileRunning = () -> {
+            service.modifyCluster(cluster.getId(), 1);
+            service.cancelSteps(cluster.getId(), List.of(cancelledId));
+        };
+
+        fixture.runStepThread();
+
+        // "If a cluster has step concurrency level 1 but has multiple running steps, ... CANCEL_AND_WAIT
+        // ActionOnFailure will not" activate.
+        assertEquals(List.of("FAILED", "CANCEL_PENDING", "PENDING"),
+                stepStates(service.describeCluster(cluster.getId()).getSteps()));
+        runner.whileRunning = () -> { };
+        fixture.runStepThread();
+        assertEquals(List.of("FAILED", "CANCELLED", "RUNNING"),
+                stepStates(service.describeCluster(cluster.getId()).getSteps()));
+    }
+
+    @Test
+    void terminatingAClusterWhileAStepsCancelIsPendingCancelsTheStepOnce() {
+        EmrCluster cluster = service.runJobFlow(cluster("ended", true, sparkStep("cut", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+        runner.whileRunning = () -> {
+            service.cancelSteps(cluster.getId(), List.of(stepId));
+            service.terminateJobFlows(List.of(cluster.getId()));
+        };
+
+        fixture.runStepThread();
+
+        EmrCluster ended = service.describeCluster(cluster.getId());
+        assertEquals("TERMINATED", ended.getState());
+        assertEquals("CANCELLED", ended.getSteps().get(0).getState());
+        assertEquals(List.of("STARTING", "PENDING cut", "RUNNING cut", "CANCEL_PENDING cut", "CANCELLED cut",
+                "TERMINATED"), fixture.states());
     }
 
     @Test
