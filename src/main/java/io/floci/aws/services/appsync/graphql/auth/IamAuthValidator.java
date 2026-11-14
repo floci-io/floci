@@ -28,6 +28,9 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
+
 /**
  * Verifies the SigV4 signature on an AppSync GraphQL data-plane request, so {@code AWS_IAM} auth
  * actually requires a signed caller rather than merely a well-formed {@code Credential=} value.
@@ -57,8 +60,6 @@ public class IamAuthValidator {
     private static final String SIGNATURE_MISMATCH = "The request signature we calculated does not match the signature"
             + " you provided. Check your AWS Secret Access Key and signing method. Consult the service documentation"
             + " for details.";
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
 
     private final IamService iamService;
@@ -317,7 +318,7 @@ public class IamAuthValidator {
     }
 
     static boolean isEmulatorAllow(String accessKeyId) {
-        return "test".equals(accessKeyId);
+        return LEGACY_ACCESS_KEY_ID.equals(accessKeyId);
     }
 
     static String requestArn(String region, String accountId, String apiId) {

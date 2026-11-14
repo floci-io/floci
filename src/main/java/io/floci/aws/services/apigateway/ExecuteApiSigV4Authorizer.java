@@ -20,6 +20,9 @@ import org.jboss.logging.Logger;
 import java.net.URI;
 import java.time.Instant;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
+
 /**
  * Verifies the SigV4 signature on an execute-api data-plane request, so a route or method whose
  * {@code authorizationType} is {@code AWS_IAM} actually requires a signed caller instead of merely
@@ -56,9 +59,6 @@ public class ExecuteApiSigV4Authorizer {
 
     /** Where a temporary credential's session token rides: a header, or a presigned query parameter. */
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
-
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
 
     private final IamService iamService;
     private final RegionResolver regionResolver;
