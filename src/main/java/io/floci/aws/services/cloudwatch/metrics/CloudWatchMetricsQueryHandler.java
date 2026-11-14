@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudwatch.metrics;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
@@ -338,8 +339,13 @@ public class CloudWatchMetricsQueryHandler {
     }
 
     private Response handleAlarmActions(MultivaluedMap<String, String> params, String region, boolean enabled) {
-        boolean supplied = params.containsKey("AlarmNames") || params.containsKey("AlarmNames.member.1");
-        metricsService.setAlarmActionsEnabled(supplied ? alarmMembers(params, "AlarmNames") : null, enabled, region);
+        List<AwsQueryLists.IndexedMember> members = AwsQueryLists.members(params, "AlarmNames", null);
+        List<String> names = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember member : members) {
+            names.add(params.getFirst(member.prefix()));
+        }
+        boolean supplied = params.containsKey("AlarmNames") || !members.isEmpty();
+        metricsService.setAlarmActionsEnabled(supplied ? names : null, enabled, region);
         String action = enabled ? "EnableAlarmActions" : "DisableAlarmActions";
         return Response.ok(AwsQueryResponse.envelopeNoResult(action, null)).build();
     }

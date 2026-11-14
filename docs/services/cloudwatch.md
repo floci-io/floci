@@ -589,6 +589,9 @@ update this setting through the Query and current JSON APIs, preserving the alar
 actions, tags, and other configuration. They accept up to 100 names, ignore nonexistent
 alarms, and validate the whole request before updating any alarm. Enabling actions does not
 replay notifications for transitions that occurred while disabled.
+Query requests validate all supplied numeric member indexes, including names after a gap.
+The metric evaluator checks current stored action settings before dispatch; disabling does
+not cancel actions that have already passed that check.
 Scaling action retries remain independent.
 Failures are logged per target without blocking other targets. Notifications include a
 single-metric `Trigger`; durable retries, FIFO topics, and metric-math payloads are not covered.

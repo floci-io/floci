@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -109,6 +110,34 @@ class CloudWatchAlarmActionsIntegrationTest {
         call(json, "DeleteAlarms", Map.of("AlarmNames", List.of(name))).then().statusCode(200);
         assertFalse(call(json, "DescribeAlarms", Map.of("AlarmNames", List.of(name),
                 "AlarmTypes", List.of("CompositeAlarm"))).asString().contains(name));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"EnableAlarmActions", "DisableAlarmActions"})
+    void queryValidatesEveryNameAfterAnIndexGapBeforeChangingActions(String action) throws Exception {
+        String name = "alarm-actions-gap-" + Long.toString(System.nanoTime(), 36);
+        boolean enabled = "EnableAlarmActions".equals(action);
+        call(false, "PutCompositeAlarm", Map.of("AlarmName", name, "AlarmRule", "FALSE",
+                "ActionsEnabled", !enabled)).then().statusCode(200);
+        registerAlarmCleanup(name);
+
+        call(false, action, Map.of("AlarmNames.member.1", name, "AlarmNames.member.3", ""))
+                .then().statusCode(400).body(containsString("ValidationError"));
+        Response unchanged = call(false, "DescribeAlarms", Map.of("AlarmNames", List.of(name),
+                "AlarmTypes", List.of("CompositeAlarm"))).then().statusCode(200).extract().response();
+        assertEquals(Boolean.toString(!enabled), field(false, unchanged, "CompositeAlarms", "ActionsEnabled"));
+
+        call(false, action, Map.of("AlarmNames.member.1", name + "-missing", "AlarmNames.member.3", name))
+                .then().statusCode(200);
+        Response changed = call(false, "DescribeAlarms", Map.of("AlarmNames", List.of(name),
+                "AlarmTypes", List.of("CompositeAlarm"))).then().statusCode(200).extract().response();
+        assertEquals(Boolean.toString(enabled), field(false, changed, "CompositeAlarms", "ActionsEnabled"));
+
+        call(false, enabled ? "DisableAlarmActions" : "EnableAlarmActions", Map.of("AlarmNames.member.3", name))
+                .then().statusCode(200);
+        Response withoutFirst = call(false, "DescribeAlarms", Map.of("AlarmNames", List.of(name),
+                "AlarmTypes", List.of("CompositeAlarm"))).then().statusCode(200).extract().response();
+        assertEquals(Boolean.toString(!enabled), field(false, withoutFirst, "CompositeAlarms", "ActionsEnabled"));
     }
 
     @ParameterizedTest
