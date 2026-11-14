@@ -39,7 +39,8 @@ import java.util.Map;
  * <p>A TR-34 block is a PKCS#7 SignedData whose content is an EnvelopedData:
  *
  * <ul>
- *   <li>the key block is encrypted under an ephemeral Triple DES key;
+ *   <li>the key block is encrypted under an ephemeral key, whose cipher follows the key it
+ *       protects;
  *   <li>that ephemeral key is wrapped under the receiving device's public key with RSA-OAEP;
  *   <li>the envelope is signed by the service's signing key, over the signed attributes that
  *       carry the content type, the two-pass nonce, the TR-31 header and the envelope digest.
@@ -679,7 +680,7 @@ public final class Tr34 {
         return new Recovered(HEX_UPPER.formatHex(key), header);
     }
 
-    /** The PKCS#7 padding of a block, the counterpart of {@link #stripPadding}. */
+    /** The PKCS#7 padding of a block. */
     private static byte[] pad(byte[] buffer, int blockSize) {
         int pad = blockSize - (buffer.length % blockSize);
         byte[] out = Arrays.copyOf(buffer, buffer.length + pad);

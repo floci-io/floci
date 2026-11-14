@@ -759,15 +759,15 @@ final class PaymentCryptographyKeyExchange {
      * <p>A TR-34 block carries the header in the clear beside the encrypted key block, so the
      * receiver knows what the key is before it opens the block. The header uses the layout
      * the TR-31 standard fixes: the type is always {@code D} (the reference does not use
-     * the type to name the cipher in a TR-34 block), the length is the placeholder the
-     * reference writes, and the rest names the key the block carries.
+     * the type to name the cipher in a TR-34 block), and the rest names the key the block
+     * carries.
      *
-     * <p>The length field is the placeholder the reference writes, because the field is
-     * ignored in a TR-34 block: what the block carries is the key, not a block of a length
-     * that the receiver would have to compute.
+     * <p>The length field is the placeholder the reference writes, because it is ignored in a
+     * TR-34 block: what the block carries is the key, not a block of a length the receiver
+     * would have to compute.
      *
      * @param key the key under export
-     * @return the header, sixteen characters
+     * @return the sixteen-character header, followed by the optional blocks it carries
      */
     private static String tr31Header(PaymentCryptographyKey key, Map<String, Object> headers) {
         // The usage code and the exportability are the ones the TR-31 block carries, so a
@@ -782,12 +782,11 @@ final class PaymentCryptographyKeyExchange {
         String exportability = exportabilityCode(key, headers);
         String version = versionCode(headers);
         List<String[]> blocks = optionalBlocks(headers);
-        // The version and the length are the placeholders the reference writes, because
-        // neither has a meaning in a TR-34 block: what the block carries is the key, not a
-        // block of a length the receiver would have to compute. The optional blocks follow
-        // the header, each its identifier over two characters, its length over two and then
-        // its value, the way a TR-31 block carries them, and the padding block that keeps
-        // the header a whole number of cipher blocks is the last of them.
+        // The version is the request's KeyVersion, 00 when it names none, as
+        // ExportTr34KeyBlock allows. The optional blocks follow the header, each its
+        // identifier over two characters, its length over two and then its value, the way a
+        // TR-31 block carries them, and the padding block that keeps the header a whole
+        // number of cipher blocks is the last of them.
         List<String[]> padded = PaymentCryptographyTr31.withPadding(blocks,
                 "A".equals(algorithm) ? 16 : 8);
         String header = PaymentCryptographyTr31.header16("D", usage, mode, exportability,
