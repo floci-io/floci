@@ -1204,8 +1204,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     }
 
     /**
-     * The name without its leading and trailing spaces, as {@code PutParameter} stores it. Only the space character
-     * is removed; a tab, newline or other whitespace stays and fails name validation.
+     * Removes leading and trailing ASCII spaces. Other whitespace is preserved for the operation's validation.
      */
     public static String withoutSurroundingSpaces(String name) {
         if (name == null) {
@@ -1406,6 +1405,33 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
 
     String parameterReadName(String nameOrArn, String region) {
         return parameterName(nameOrArn, region, true);
+    }
+
+    /** Whether a read names a stored parameter in the caller's scope, including a version or label selector. */
+    boolean hasStoredParameter(String nameOrArn, String region) {
+        if (nameOrArn.startsWith(SECRET_REFERENCE_PREFIX)) {
+            return false;
+        }
+        String name = parameterReadName(nameOrArn, region);
+        if (AwsArnUtils.looksLikeArn(name)) {
+            return false;
+        }
+        if (parameterStore.get(regionKey(region, name)).isPresent()) {
+            return true;
+        }
+        int separator = name.lastIndexOf(':');
+        if (separator <= 0 || separator == name.length() - 1
+                || name.substring(separator + 1).indexOf(' ') >= 0) {
+            return false;
+        }
+        return parameterStore.get(regionKey(region, name.substring(0, separator))).isPresent();
+    }
+
+    /** A legacy hierarchy is readable only while the caller's account and region contain a parameter below it. */
+    boolean hasStoredParametersUnderPath(String path, String region) {
+        String normalizedPath = path.endsWith("/") ? path : path + "/";
+        String prefix = regionKey(region, normalizedPath);
+        return parameterStore.keys().stream().anyMatch(key -> key.startsWith(prefix));
     }
 
     /**
