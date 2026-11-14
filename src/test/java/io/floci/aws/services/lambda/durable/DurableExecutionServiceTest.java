@@ -217,6 +217,72 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void stepDetailsFollowTheStatusThroughARetry() {
+        invoker.script(event -> {
+            String arn = event.get("DurableExecutionArn").asText();
+            CheckpointResult started = checkpoint(event, token(event),
+                    List.of(step("s1", DurableOperationAction.START, null, null)));
+            assertStepDetails(started.newExecutionState().get(0), 0, false, false, false);
+            assertStepDetails(stateOf(arn, started.checkpointToken()), 0, false, false, false);
+
+            CheckpointResult pending = checkpoint(event, started.checkpointToken(), List.of(
+                    stepRetry("s1", 3, DurableErrorObject.of("boom", "Error"))));
+            assertEquals(DurableOperationStatus.PENDING, pending.newExecutionState().get(0).getStatus());
+            assertStepDetails(pending.newExecutionState().get(0), 1, true, false, false);
+            assertStepDetails(stateOf(arn, pending.checkpointToken()), 1, true, false, false);
+            return pending();
+        });
+        invoker.script(event -> {
+            String arn = event.get("DurableExecutionArn").asText();
+            assertEquals("READY", operation(event, "s1").get("Status").asText());
+            assertStepDetails(operation(event, "s1").get("StepDetails"), 1, false, true, false);
+
+            CheckpointResult restarted = checkpoint(event, token(event),
+                    List.of(step("s1", DurableOperationAction.START, null, null)));
+            assertEquals(DurableOperationStatus.STARTED, restarted.newExecutionState().get(0).getStatus());
+            assertStepDetails(restarted.newExecutionState().get(0), 1, false, false, false);
+            assertStepDetails(stateOf(arn, restarted.checkpointToken()), 1, false, false, false);
+
+            CheckpointResult succeeded = checkpoint(event, restarted.checkpointToken(),
+                    List.of(step("s1", DurableOperationAction.SUCCEED, "ok", null)));
+            assertStepDetails(succeeded.newExecutionState().get(0), 2, false, false, true);
+            assertStepDetails(stateOf(arn, succeeded.checkpointToken()), 2, false, false, true);
+            return succeeded("\"done\"");
+        });
+
+        String arn = start("exec-1", "{}", false).getExecutionArn();
+        clock.advance(Duration.ofSeconds(3));
+        service.sweep();
+
+        assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
+    }
+
+    @Test
+    void aRetryPayloadShowsAsAResultOnlyOnceTheStepIsReady() {
+        invoker.script(event -> {
+            CheckpointResult pending = checkpoint(event, token(event), List.of(
+                    step("s1", DurableOperationAction.START, null, null),
+                    new DurableOperationUpdate("s1", null, null, DurableOperationType.STEP, "Step",
+                            DurableOperationAction.RETRY, "state", null, 3, null, null, null, null, null, null,
+                            null)));
+            assertEquals(DurableOperationStatus.PENDING, pending.newExecutionState().get(0).getStatus());
+            assertStepDetails(pending.newExecutionState().get(0), 1, true, false, false);
+            return pending();
+        });
+        invoker.script(event -> {
+            JsonNode details = operation(event, "s1").get("StepDetails");
+            assertEquals("state", details.get("Result").asText());
+            assertFalse(details.has("Error"));
+            assertFalse(details.has("NextAttemptTimestamp"));
+            return succeeded("\"done\"");
+        });
+
+        start("exec-1", "{}", false);
+        clock.advance(Duration.ofSeconds(3));
+        service.sweep();
+    }
+
+    @Test
     void emptyCheckpointCompletesADueWaitInsideTheInvocation() {
         invoker.script(event -> {
             String token = checkpoint(event, token(event), List.of(waitStart("w1", 1))).checkpointToken();
@@ -1127,6 +1193,29 @@ class DurableExecutionServiceTest {
 
     private static String token(JsonNode event) {
         return event.get("CheckpointToken").asText();
+    }
+
+    private DurableOperation stateOf(String arn, String token) {
+        for (DurableOperation operation : service.getState(arn, token, null, null).operations()) {
+            if ("s1".equals(operation.getId())) {
+                return operation;
+            }
+        }
+        throw new AssertionError("no step s1");
+    }
+
+    private static void assertStepDetails(DurableOperation operation, int attempt, boolean nextAttempt,
+                                          boolean error, boolean result) {
+        assertStepDetails(DurableWire.operation(operation, false).get("StepDetails"), attempt, nextAttempt, error,
+                result);
+    }
+
+    private static void assertStepDetails(JsonNode details, int attempt, boolean nextAttempt, boolean error,
+                                          boolean result) {
+        assertEquals(attempt, details.get("Attempt").asInt());
+        assertEquals(nextAttempt, details.has("NextAttemptTimestamp"));
+        assertEquals(error, details.has("Error"));
+        assertEquals(result, details.has("Result"));
     }
 
     private static JsonNode operation(JsonNode event, String id) {
