@@ -419,19 +419,24 @@ state.
 
   A repository-to-repository upstream chain resolves the same way, for all four formats, reusing
   the exact claim/fence/origin-tracking machinery above: a GET/HEAD/tarball-download/packument
-  miss searches the repository's own `upstreams`, transitively (an upstream's own upstreams are
-  searched too, breadth-first, matching AWS's documented priority order) and not just its direct
-  list, for the first repository with a usable copy. Two real differences from the
-  external-connection case: an Archived or Disposed version *at the resolved upstream repository
-  itself* is skipped, the walk continuing to the next candidate, since a same-domain upstream has
-  a real CodeArtifact-shaped status to check that a public registry never does; and each candidate
-  is checked only for what it already has retained, not what it could itself still pull from its
-  own configured external connection (AWS documents a downstream request chaining through an
-  upstream's own external connection too, so a version a candidate upstream hasn't fetched yet
-  from its own `public:*` connection stays a miss here, even though AWS would resolve it). Since a
-  same-domain upstream read never leaves this process, pypi's own version here needs none of the
-  real external connection's PEP 691 sha256 re-verification or background-thread split: every
-  asset of the resolved version is imported synchronously, in one pass.
+  miss searches the repository's own `upstreams`, transitively, for the first repository with a
+  usable copy. The order is AWS's documented priority order: depth-first, in each repository's
+  listed order, an upstream's own upstreams searched before the next one, so `my_repo` with
+  upstreams `A` and `B`, `A` with `C` and `D` and `D` with `E` is searched `A, C, D, E, B`. An
+  Archived or Disposed version *at the resolved upstream repository itself* is skipped, the walk
+  continuing to the next candidate, since a same-domain upstream has a real CodeArtifact-shaped
+  status to check that a public registry never does. A version no upstream holds is fetched
+  through an upstream's own external connection, the first in that same order that has one, and
+  retained both there and in the repository the request was made to, as AWS documents for a
+  downstream request chaining through an upstream's `public:*` connection; a packument, Simple
+  index or `maven-metadata.xml` read through such an upstream offers what its connection has too.
+  A retained version's `origin.domainEntryPoint` names where it entered the domain: the external
+  connection it was fetched through, `EXTERNAL`, or the repository it was published to, however
+  many upstreams it was retained through. Since the copy from a same-domain upstream never leaves
+  this process (a fetch through an upstream's connection is that connection's own import), pypi's
+  own copy here needs none of the real external connection's PEP 691 sha256 re-verification or
+  background-thread split: every asset of the resolved version is copied synchronously, in one
+  pass.
 - **Maven external-connection retention is the one place this emulator makes a real outbound
   call to the public internet**, rather than only ever talking to a container it started itself.
   An offline environment, or a real outage of the public repository being connected to, means a

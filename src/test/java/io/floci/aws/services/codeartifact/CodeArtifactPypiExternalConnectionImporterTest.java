@@ -370,6 +370,16 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         assertEquals(List.of(), additional);
     }
 
+    /** A downstream repository listing these files through its upstreams leaves out what it refuses. */
+    @Test
+    void additionalExternalFilenamesLeavesOutAVersionTheCallerRefuses() {
+        List<CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile> additional =
+                importer.additionalExternalFilenames(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_NAME,
+                        Set.of(), version -> !VERSION.equals(version));
+
+        assertEquals(List.of(), additional);
+    }
+
     @Test
     void additionalExternalFilenamesReturnsEmptyWhenNoConnectionIsConfigured() {
         CodeArtifactRepository repository = new CodeArtifactRepository();
@@ -616,5 +626,15 @@ class CodeArtifactPypiExternalConnectionImporterTest {
             file.put("yanked", false);
         }
         return toBytes(root);
+    }
+
+    /** An upstream deleted since a search order named it has no connection to fetch through. */
+    @Test
+    void aDeletedRepositoryHasNoExternalConnection() {
+        when(service.describeRepository(REGION, DOMAIN, OWNER, "deleted"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Repository 'deleted' not found.", 404));
+
+        assertFalse(importer.hasExternalConnection(REGION, DOMAIN, OWNER, "deleted"));
+        assertTrue(importer.hasExternalConnection(REGION, DOMAIN, OWNER, REPOSITORY));
     }
 }

@@ -39,8 +39,12 @@ import java.util.Optional;
  *   source.</li>
  *   <li><b>Transitive search, in priority order.</b> {@link
  *   CodeArtifactService#resolveUpstreamSearchOrder} walks {@code repository}'s own direct
- *   upstreams first, then theirs, breadth-first. The first candidate whose own packument names the
- *   requested version wins; it may be several hops deep.</li>
+ *   upstreams in their listed order, each one's own upstreams before the next one, depth-first.
+ *   The first candidate whose own packument names the requested version wins; it may be several
+ *   hops deep.</li>
+ *   <li><b>Through an upstream's external connection.</b> A version no upstream holds is fetched
+ *   through the first upstream, in the same order, with an external connection, and retained there
+ *   and then here, as the User Guide's chain example has it.</li>
  *   <li><b>Archived/Disposed propagation.</b> A candidate's own copy of the version must still be
  *   downloadable there (checked via {@link
  *   CodeArtifactService#requireContainerBackedVersionDownloadable}): the walk skips an Archived or
@@ -59,13 +63,15 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
     private final CodeArtifactService service;
     private final VerdaccioSidecarClient verdaccio;
     private final ObjectMapper mapper;
+    private final CodeArtifactNpmExternalConnectionImporter externalConnectionImporter;
 
     @Inject
     public CodeArtifactNpmUpstreamRepositoryImporter(CodeArtifactService service, VerdaccioSidecarClient verdaccio,
-            ObjectMapper mapper) {
+            ObjectMapper mapper, CodeArtifactNpmExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.verdaccio = verdaccio;
         this.mapper = mapper;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     /**
@@ -73,10 +79,11 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
      * sourced from the first eligible upstream candidate's own stored packument instead of a real
      * registry fetch. Always merges every package-level descriptive field the candidate's document
      * has (there is no abbreviated-vs-full distinction for a same-domain read, see this class's own
-     * javadoc).
+     * javadoc). {@code fullMetadata}, the client's own ask, goes on to a candidate's external
+     * connection, whose document leaves those fields out when it is the abbreviated one.
      */
     public Optional<ObjectNode> mergedPackument(String region, String domain, String owner, String repository,
-            String repoId, String namespace, String packageName) {
+            String repoId, String namespace, String packageName, boolean fullMetadata) {
         if (service.describeRepository(region, domain, owner, repository).getUpstreams().isEmpty()) {
             return Optional.empty();
         }
@@ -98,7 +105,14 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
             try {
                 String candidateBaseUrl = verdaccio.ensureReady(candidateRepoId,
                         verdaccio.publicUrl(domain, candidate));
-                JsonNode external = verdaccio.fetchPackageDocument(candidateBaseUrl, namespace, packageName)
+                // A candidate with an external connection offers what that connection has too, as
+                // a request to it would: a version it has not fetched yet is fetched there first.
+                JsonNode external = (externalConnectionImporter.hasExternalConnection(region, domain, owner,
+                        candidate)
+                        ? externalConnectionImporter.mergedPackument(region, domain, owner, candidate,
+                                candidateRepoId, namespace, packageName, fullMetadata).<JsonNode>map(merged -> merged)
+                        : Optional.<JsonNode>empty())
+                        .or(() -> verdaccio.fetchPackageDocument(candidateBaseUrl, namespace, packageName))
                         .orElse(null);
                 if (external == null) {
                     continue;
@@ -203,6 +217,13 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
                 "INTERNAL_UPSTREAM")) {
             return false;
         }
+        // Snapshotted before the walk, not once a candidate is found: its last leg can fetch through
+        // an upstream's external connection, and a deletion here during that fetch must still move
+        // the fence away from the snapshot (see claimRetainedVersionOrigin's own javadoc).
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
+                "npm", namespace, packageName);
+        long versionFenceSnapshot = service.currentContainerBackedVersionFence(region, domain, owner, repository,
+                "npm", namespace, packageName, version);
 
         String upstreamRepository = null;
         String upstreamRepoId = null;
@@ -243,12 +264,25 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
             }
         }
         if (upstreamRepository == null) {
+            Optional<UpstreamExternalConnectionFetch.Fetched> fetched = UpstreamExternalConnectionFetch.firstFetched(
+                    service, verdaccio, "npm", region, domain, owner, repository, namespace, packageName,
+                    candidate -> externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate),
+                    (candidate, candidateRepoId) -> externalConnectionImporter.tryImportAsset(region, domain, owner,
+                            candidate, candidateRepoId, namespace, packageName, version, assetName)
+                            ? Optional.of(version) : Optional.empty());
+            if (fetched.isPresent()) {
+                upstreamRepository = fetched.get().repository();
+                upstreamRepoId = fetched.get().repoId();
+            }
+        }
+        if (upstreamRepository == null) {
             return false;
         }
 
         try {
             return tryImportFromClaimedCandidate(region, domain, owner, repository, repoId, namespace, packageName,
-                    version, assetName, upstreamRepository, upstreamRepoId);
+                    version, assetName, upstreamRepository, upstreamRepoId, packageFenceSnapshot,
+                    versionFenceSnapshot);
         } finally {
             verdaccio.endUse(upstreamRepoId);
         }
@@ -256,11 +290,7 @@ public class CodeArtifactNpmUpstreamRepositoryImporter {
 
     private boolean tryImportFromClaimedCandidate(String region, String domain, String owner, String repository,
             String repoId, String namespace, String packageName, String version, String assetName,
-            String upstreamRepository, String upstreamRepoId) {
-        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
-                "npm", namespace, packageName);
-        long versionFenceSnapshot = service.currentContainerBackedVersionFence(region, domain, owner, repository,
-                "npm", namespace, packageName, version);
+            String upstreamRepository, String upstreamRepoId, long packageFenceSnapshot, long versionFenceSnapshot) {
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
                 domain, owner, repository, "npm", namespace, packageName, version, upstreamRepository,
                 RetentionOriginKind.UPSTREAM_REPOSITORY, packageFenceSnapshot);

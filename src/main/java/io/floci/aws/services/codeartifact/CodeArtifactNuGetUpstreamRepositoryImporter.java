@@ -22,9 +22,13 @@ import java.util.Optional;
  * <ul>
  *   <li><b>Transitive search, in priority order.</b> {@link
  *   CodeArtifactService#resolveUpstreamSearchOrder} walks {@code repository}'s own direct
- *   upstreams first, then theirs, breadth-first, matching AWS's own documented "Upstream
- *   repository priority order." The first candidate with the requested version wins; it may be
- *   several hops deep, not necessarily a direct upstream of {@code repository} itself.</li>
+ *   upstreams in their listed order, each one's own upstreams before the next one, depth-first,
+ *   matching AWS's own documented "Upstream repository priority order." The first candidate with
+ *   the requested version wins; it may be several hops deep, not necessarily a direct upstream of
+ *   {@code repository} itself.</li>
+ *   <li><b>Through an upstream's external connection.</b> A version no upstream holds is fetched
+ *   through the first upstream, in the same order, with an external connection, and retained there
+ *   and then here, as the User Guide's chain example has it.</li>
  *   <li><b>Archived/Disposed propagation.</b> A candidate's own copy of the version must still be
  *   downloadable there (checked via {@link
  *   CodeArtifactService#requireContainerBackedVersionDownloadable}): an Archived or Disposed
@@ -40,11 +44,14 @@ public class CodeArtifactNuGetUpstreamRepositoryImporter {
 
     private final CodeArtifactService service;
     private final BagetterSidecarClient bagetter;
+    private final CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter;
 
     @Inject
-    public CodeArtifactNuGetUpstreamRepositoryImporter(CodeArtifactService service, BagetterSidecarClient bagetter) {
+    public CodeArtifactNuGetUpstreamRepositoryImporter(CodeArtifactService service, BagetterSidecarClient bagetter,
+            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.bagetter = bagetter;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     /**
@@ -64,6 +71,14 @@ public class CodeArtifactNuGetUpstreamRepositoryImporter {
                 "INTERNAL_UPSTREAM")) {
             return false;
         }
+        // Snapshotted before the walk, not once a candidate is found, the same ordering
+        // CodeArtifactNuGetExternalConnectionImporter#tryImport relies on: the walk's last leg can
+        // fetch through an upstream's external connection, and a deletion here during that fetch
+        // must still move the fence away from the snapshot.
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
+                "nuget", null, packageId);
+        long versionFenceSnapshot = service.currentContainerBackedVersionFence(region, domain, owner, repository,
+                "nuget", null, packageId, version);
 
         String upstreamRepository = null;
         String upstreamRepoId = null;
@@ -109,25 +124,31 @@ public class CodeArtifactNuGetUpstreamRepositoryImporter {
             }
         }
         if (upstreamRepository == null) {
+            Optional<UpstreamExternalConnectionFetch.Fetched> fetched = UpstreamExternalConnectionFetch.firstFetched(
+                    service, bagetter, "nuget", region, domain, owner, repository, null, packageId,
+                    candidate -> externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate),
+                    (candidate, candidateRepoId) -> externalConnectionImporter.tryImport(region, domain, owner,
+                            candidate, candidateRepoId, packageId, version) ? Optional.of(version) : Optional.empty());
+            if (fetched.isPresent()) {
+                upstreamRepository = fetched.get().repository();
+                upstreamRepoId = fetched.get().repoId();
+            }
+        }
+        if (upstreamRepository == null) {
             return false;
         }
 
         try {
             return tryImportFromClaimedCandidate(region, domain, owner, repository, repoId, packageId, version,
-                    upstreamRepository, upstreamRepoId);
+                    upstreamRepository, upstreamRepoId, packageFenceSnapshot, versionFenceSnapshot);
         } finally {
             bagetter.endUse(upstreamRepoId);
         }
     }
 
     private boolean tryImportFromClaimedCandidate(String region, String domain, String owner, String repository,
-            String repoId, String packageId, String version, String upstreamRepository, String upstreamRepoId) {
-        // Snapshotted before the claim and the real write below, not after, the same ordering
-        // CodeArtifactNuGetExternalConnectionImporter#tryImport already relies on.
-        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
-                "nuget", null, packageId);
-        long versionFenceSnapshot = service.currentContainerBackedVersionFence(region, domain, owner, repository,
-                "nuget", null, packageId, version);
+            String repoId, String packageId, String version, String upstreamRepository, String upstreamRepoId,
+            long packageFenceSnapshot, long versionFenceSnapshot) {
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
                 domain, owner, repository, "nuget", null, packageId, version, upstreamRepository,
                 RetentionOriginKind.UPSTREAM_REPOSITORY, packageFenceSnapshot);
