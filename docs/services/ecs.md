@@ -504,6 +504,11 @@ held in memory. The service scheduler starts at boot, so within a few seconds of
 persisted service is brought back to its `desiredCount`, re-registering load balancer targets
 and Cloud Map instances as its tasks start, without waiting for an ECS request.
 
+Before shared container teardown, Floci pauses ECS reconciliation and waits for its current
+pass to finish. It also interrupts and waits for background task launches before other services
+retire their credentials or networking. A state reset starts fresh executors after the old tasks
+have been drained.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,

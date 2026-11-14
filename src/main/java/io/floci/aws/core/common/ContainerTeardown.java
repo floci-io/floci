@@ -23,6 +23,10 @@ package io.floci.aws.core.common;
  */
 public interface ContainerTeardown {
 
+    /** Prevents new work before any service starts draining its containers. */
+    default void beginTeardown() {
+    }
+
     void stopManagedContainers();
 
     /**
