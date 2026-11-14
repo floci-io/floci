@@ -1021,6 +1021,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }
 
         String id;
+        boolean createdHere = false;
         if (resource.getPhysicalId() == null) {
             // CreateHostedZone only accepts a single VPC (a private zone becomes
             // resolvable from that VPC immediately); any further VPCs in the CFN
@@ -1049,29 +1050,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             // physicalId alone (see CfnRollback.ROLLBACK_OWNED_ATTR).
             resource.setPhysicalId(id);
             resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
-            try {
-                for (int i = 1; i < vpcs.size(); i++) {
-                    route53Service.associateVpcWithHostedZone(id, vpcs.get(i), comment);
-                }
-            } catch (RuntimeException e) {
-                // An update that recreates a missing legacy zone (isTrackedZoneMissing above)
-                // fails through CloudFormationService's generic update-rollback path, which
-                // restores the stack's previous StackResource wholesale and never learns this
-                // zone's ID - orphaning it, so the next retry reuses the same caller reference
-                // and fails with HostedZoneAlreadyExists. Since we own this zone (we just
-                // created it), clean it up ourselves rather than depend on that path.
-                // Once cleanup succeeds, physical state matches what it was before this update
-                // started (tracked zone missing), so tell the generic rollback walker this
-                // resource is restored - otherwise it falls through to "rollback is not
-                // implemented" and strands the stack in UPDATE_ROLLBACK_FAILED for a resource
-                // there is nothing left to reconcile.
-                route53Service.deleteHostedZone(id);
-                resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
-                if (replacing) {
-                    resource.setPhysicalId(priorZoneId);
-                }
-                throw e;
-            }
+            createdHere = true;
         } else {
             id = resource.getPhysicalId();
             for (VpcAssociation vpc : vpcs) {
@@ -1079,25 +1058,37 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
-        resource.setPhysicalId(id);
-        resource.getAttributes().put("Id", id);
-        resource.getAttributes().put("NameServers", String.join(",", route53Service.getAssignedNameServers(id)));
-
-        List<Map<String, String>> tags = parseTags(resolved.path("HostedZoneTags"));
-        if (!tags.isEmpty()) {
-            try {
-                route53Service.changeTagsForResource("hostedzone", id, tags, List.of());
-            } catch (RuntimeException e) {
-                if ("true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR))) {
-                    route53Service.deleteHostedZone(id);
-                    resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
-                    if (replacing) {
-                        resource.setPhysicalId(priorZoneId);
-                        restoreZoneAttributes(resource, attributesBefore);
-                    }
-                }
-                throw e;
+        try {
+            for (int i = 1; createdHere && i < vpcs.size(); i++) {
+                route53Service.associateVpcWithHostedZone(id, vpcs.get(i), comment);
             }
+            resource.setPhysicalId(id);
+            resource.getAttributes().put("Id", id);
+            resource.getAttributes().put("NameServers",
+                    String.join(",", route53Service.getAssignedNameServers(id)));
+
+            List<Map<String, String>> tags = parseTags(resolved.path("HostedZoneTags"));
+            if (!tags.isEmpty()) {
+                route53Service.changeTagsForResource("hostedzone", id, tags, List.of());
+            }
+        } catch (RuntimeException e) {
+            if (createdHere) {
+                // An update that recreates a missing legacy zone (isTrackedZoneMissing above)
+                // fails through CloudFormationService's generic update-rollback path, which
+                // restores the stack's previous StackResource wholesale and never learns this
+                // zone's ID, orphaning it. We own the zone we just created, so any later
+                // step failing (VPC association, name-server lookup, tags) deletes it here.
+                // Physical state then matches the state before this update, so mark the
+                // resource restored; otherwise the walker strands the stack in
+                // UPDATE_ROLLBACK_FAILED.
+                route53Service.deleteHostedZone(id);
+                resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+                if (replacing) {
+                    resource.setPhysicalId(priorZoneId);
+                    restoreZoneAttributes(resource, attributesBefore);
+                }
+            }
+            throw e;
         }
         resource.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
         ReplacementCleanup.record(resource, ctx, attributesBefore, replacing);
