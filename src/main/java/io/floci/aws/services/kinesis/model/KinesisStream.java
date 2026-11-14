@@ -1,5 +1,6 @@
 package io.floci.aws.services.kinesis.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -19,6 +20,9 @@ public class KinesisStream {
     private String streamArn;
     private String accountId;
     private String streamStatus;
+    private Instant statusTransitionDeadline;
+    @JsonIgnore
+    private transient boolean statusWindowInProgress;
     private volatile List<KinesisShard> shards = new CopyOnWriteArrayList<>();
     private int retentionPeriodHours = 24;
     private Instant streamCreationTimestamp;
@@ -53,8 +57,33 @@ public class KinesisStream {
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
-    public String getStreamStatus() { return streamStatus; }
-    public void setStreamStatus(String streamStatus) { this.streamStatus = streamStatus; }
+    public String getStreamStatus() { return getStreamStatus(Instant.now()); }
+    public synchronized String getStreamStatus(Instant now) {
+        if (statusWindowInProgress) {
+            return streamStatus;
+        }
+        return statusTransitionDeadline != null && !now.isBefore(statusTransitionDeadline)
+                ? "ACTIVE" : streamStatus;
+    }
+    public synchronized void setStreamStatus(String streamStatus) { this.streamStatus = streamStatus; }
+
+    public synchronized Instant getStatusTransitionDeadline() { return statusTransitionDeadline; }
+    public synchronized void setStatusTransitionDeadline(Instant statusTransitionDeadline) {
+        this.statusTransitionDeadline = statusTransitionDeadline;
+    }
+
+    public synchronized void setStatusWindow(String status, Instant deadline) {
+        this.streamStatus = status;
+        this.statusTransitionDeadline = deadline;
+        this.statusWindowInProgress = false;
+    }
+
+    public synchronized void beginStatusWindow(String status, Instant fallbackDeadline) {
+        // Persistent snapshots taken during a change still have a bounded recovery deadline.
+        this.streamStatus = status;
+        this.statusTransitionDeadline = fallbackDeadline;
+        this.statusWindowInProgress = true;
+    }
 
     public List<KinesisShard> getShards() { return shards; }
     public void setShards(List<KinesisShard> shards) {
