@@ -141,6 +141,21 @@ def widen_partition_and_region(model: dict) -> dict:
     return model
 
 
+def drop_blob_and_timestamp_members(model: dict) -> dict:
+    """The model, with every structure member whose shape is a blob or a timestamp dropped.
+
+    `RequestConstraintCheck` parses neither wire type, so a present value is left to the service's
+    handler. The structure still lists a dropped member as required, so a request without it is refused.
+    """
+    for shape in model["shapes"].values():
+        if shape["type"] != "structure":
+            continue
+        for member, spec in list(shape.get("members", {}).items()):
+            if model["shapes"][spec["shape"]]["type"] in {"blob", "timestamp"}:
+                del shape["members"][member]
+    return model
+
+
 def render(doc: dict) -> str:
     return json.dumps(doc, indent=2, sort_keys=False) + "\n"
 
