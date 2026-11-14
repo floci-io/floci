@@ -54,7 +54,6 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
-import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.LogSetup;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
@@ -5019,10 +5018,11 @@ class EksClusterManagerTest {
                     eksService,
                     Mockito.mock(EksAccessEntryService.class),
                     Mockito.mock(EksPodIdentityAssociationService.class),
-                    Mockito.mock(EksAddonService.class));
+                    Mockito.mock(EksAddonService.class),
+                    mapper);
 
             for (Response response : List.of(
-                    controller.createCluster(new CreateClusterRequest()),
+                    controller.createCluster(mapper.createObjectNode()),
                     controller.describeCluster("wire-cluster"),
                     controller.deleteCluster("wire-cluster"))) {
                 @SuppressWarnings("unchecked")

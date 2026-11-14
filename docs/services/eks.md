@@ -5,6 +5,26 @@
 
 EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
 
+## Cluster request IAM conditions
+
+With IAM enforcement enabled, `CreateCluster` evaluates `eks:authenticationMode`,
+`eks:bootstrapClusterCreatorAdminPermissions`, `eks:endpointPrivateAccess`, and
+`eks:endpointPublicAccess` from the request's `accessConfig` and `resourcesVpcConfig`.
+The generated metadata also maps those keys for `UpdateClusterConfig`, except the
+create-only bootstrap flag; this does not implement the currently unsupported
+update API. Its extraction is covered by resolver tests, not an SDK update lifecycle.
+The action-to-key mappings come from AWS's Service Reference and the request paths from
+botocore. Omitted attributes remain absent from the IAM context; stored cluster settings
+and service defaults do not supply missing request conditions. Generic request-tag
+conditions continue to apply alongside these EKS-specific keys.
+
+A `CreateCluster` body is checked against botocore's EKS request shapes, vendored by
+`tools/aws/regen_eks_shapes.py`, before it is read. A boolean member given anything but a JSON
+boolean or the text `true` or `false`, such as `"endpointPublicAccess": 1`, is refused with
+`SerializationException`, so it cannot reach a cluster as `true` while its condition key carries
+no value. A structure, list or map of the wrong kind is refused the same way. EKS's own wording
+for this error has not been measured; Floci answers as the REST JSON services it was measured on do.
+
 ## Supported Operations
 
 | Operation | Description |
