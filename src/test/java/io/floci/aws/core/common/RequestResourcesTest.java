@@ -184,6 +184,16 @@ class RequestResourcesTest {
                 "000000000000", null));
     }
 
+    @Test
+    void anAssociationOnASharedDocumentGivenByItsArnIsCheckedOnThatArn() throws Exception {
+        String shared = "arn:aws:ssm:us-east-1:100000008230:document/shared";
+        List<String> arns = RequestResources.ofBody("ssm:CreateAssociation",
+                new ObjectMapper().readTree("{\"Name\":\"" + shared + "\"}"), "aws", "us-east-1", "000000000000",
+                null);
+        assertTrue(arns.contains(shared), arns.toString());
+        assertFalse(arns.stream().anyMatch(arn -> arn.contains("document/arn:")), arns.toString());
+    }
+
     /**
      * DynamoDB is built by hand, but the table reads {@code ListTables}: AWS was measured to check it on the literal
      * {@code table/*} of the request's partition, Region and account, whatever table its request names, though the
