@@ -43,6 +43,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
+import io.floci.aws.testutil.LogCapture;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -62,7 +63,6 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
-import java.text.MessageFormat;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -791,10 +791,7 @@ class EmulatorLifecycleTest {
         Handler handler = new Handler() {
             @Override
             public void publish(LogRecord logRecord) {
-                Object[] parameters = logRecord.getParameters();
-                messages.add(parameters == null || parameters.length == 0
-                        ? logRecord.getMessage()
-                        : MessageFormat.format(logRecord.getMessage(), parameters));
+                messages.add(LogCapture.formatted(logRecord));
             }
 
             @Override

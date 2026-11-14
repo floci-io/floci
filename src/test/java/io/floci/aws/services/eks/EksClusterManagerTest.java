@@ -83,7 +83,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1353,7 +1352,7 @@ class EksClusterManagerTest {
             // Compared by severity, not identity: JBoss LogManager has its own Level constants.
             List<String> warnings = logs.stream()
                     .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
-                    .map(record -> MessageFormat.format(record.getMessage(), record.getParameters()))
+                    .map(LogCapture::formatted)
                     .toList();
             assertTrue(warnings.contains(warning), String.valueOf(warnings));
         }
