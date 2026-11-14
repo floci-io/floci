@@ -304,7 +304,7 @@ class RedshiftAutomatedSnapshotServiceTest {
         assertNotNull(changed.getUpdatedAt());
         Instant activation = ANCHOR.plusSeconds(7200);
         changed.setUpdatedAt(activation);
-        fixture.schedules().putForAccount(ACCOUNT, changed.getScheduleIdentifier(), changed);
+        fixture.schedules().putForAccount(ACCOUNT, scheduleKey("us-east-1", changed.getScheduleIdentifier()), changed);
 
         fixture.service().runSnapshotSchedules(activation.plusSeconds(7199));
         assertEquals(1, fixture.snapshots().scanForAccount(ACCOUNT, key -> true).size());
@@ -334,9 +334,9 @@ class RedshiftAutomatedSnapshotServiceTest {
         Instant activation = Instant.now().minusSeconds(7200);
         Cluster cluster = seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(24 hours)");
         cluster.setAutomatedSnapshotAnchor(activation);
-        SnapshotSchedule schedule = spy(fixture.schedules().getForAccount(ACCOUNT, "schedule-warehouse").orElseThrow());
+        SnapshotSchedule schedule = spy(fixture.schedules().getForAccount(ACCOUNT, scheduleKey("us-east-1", "schedule-warehouse")).orElseThrow());
         schedule.setUpdatedAt(activation);
-        fixture.schedules().putForAccount(ACCOUNT, "schedule-warehouse", schedule);
+        fixture.schedules().putForAccount(ACCOUNT, scheduleKey("us-east-1", "schedule-warehouse"), schedule);
         CountDownLatch betweenSetters = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(invocation -> {
@@ -440,6 +440,11 @@ class RedshiftAutomatedSnapshotServiceTest {
                 factory.create("redshift", "redshift-snapshot-schedules.json", new TypeReference<Map<String, SnapshotSchedule>>() { }));
     }
 
+    /** The key a snapshot schedule is stored under: schedules are Regional, kept in their cluster's Region. */
+    private static String scheduleKey(String region, String scheduleIdentifier) {
+        return region + "::" + scheduleIdentifier;
+    }
+
     private static Cluster seed(Fixture fixture, String account, String id, String region, String definition) {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(id);
@@ -452,7 +457,7 @@ class RedshiftAutomatedSnapshotServiceTest {
         if (definition != null) {
             SnapshotSchedule schedule = new SnapshotSchedule("schedule-" + id, null, List.of(definition));
             schedule.setUpdatedAt(ANCHOR);
-            fixture.schedules().putForAccount(account, schedule.getScheduleIdentifier(), schedule);
+            fixture.schedules().putForAccount(account, scheduleKey(region, schedule.getScheduleIdentifier()), schedule);
             cluster.setSnapshotScheduleIdentifier(schedule.getScheduleIdentifier());
         }
         fixture.clusters().putForAccount(account, id, cluster);

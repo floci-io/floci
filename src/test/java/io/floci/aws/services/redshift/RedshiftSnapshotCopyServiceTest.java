@@ -204,6 +204,39 @@ class RedshiftSnapshotCopyServiceTest {
         assertNotNull(enabled.getSnapshotCopyEnabledAt());
     }
 
+    /**
+     * A snapshot copy grant is made in the destination Region, as on AWS: enabling copy names one there, the copy
+     * takes its key, and it can't be deleted there while the cluster copies with it. A grant of the same name in
+     * the source Region is another grant.
+     */
+    @Test
+    void theSnapshotCopyGrantIsTheDestinationRegions() {
+        Fixture fixture = fixture();
+        Cluster cluster = seedCluster(fixture, "warehouse", null);
+        cluster.setSnapshotCopyDestinationRegion(null);
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
+        fixture.service(SOURCE).createSnapshotCopyGrant("copies", "source-key", null);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> fixture.service(SOURCE).enableSnapshotCopy("warehouse", DESTINATION, null, null, "copies"));
+        assertEquals("SnapshotCopyGrantNotFoundFault", missing.getErrorCode());
+
+        fixture.service(DESTINATION).createSnapshotCopyGrant("copies", "destination-key", null);
+        fixture.service(SOURCE).enableSnapshotCopy("warehouse", DESTINATION, null, null, "copies");
+        Cluster enabled = fixture.clusters().getForAccount(ACCOUNT, "warehouse").orElseThrow();
+        enabled.setSnapshotCopyEnabledAt(Instant.now().minusSeconds(60));
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", enabled);
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        assertEquals("destination-key", fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly")
+                .orElseThrow().getKmsKeyId());
+        AwsException inUse = assertThrows(AwsException.class,
+                () -> fixture.service(DESTINATION).deleteSnapshotCopyGrant("copies"));
+        assertEquals("InvalidSnapshotCopyGrantStateFault", inUse.getErrorCode());
+        assertEquals("source-key", fixture.service(SOURCE).deleteSnapshotCopyGrant("copies").getKmsKeyId());
+    }
+
     @Test
     void aNewSnapshotCannotTakeTheIdentifierOfACopyInThatRegion() {
         Fixture fixture = fixture();
