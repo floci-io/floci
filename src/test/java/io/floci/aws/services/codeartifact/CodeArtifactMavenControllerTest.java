@@ -54,6 +54,7 @@ class CodeArtifactMavenControllerTest {
     private CodeArtifactService service;
     private ReposiliteSidecarClient reposilite;
     private CodeArtifactMavenExternalConnectionImporter externalConnectionImporter;
+    private CodeArtifactMavenUpstreamRepositoryImporter upstreamRepositoryImporter;
     private CodeArtifactMavenController controller;
     private HttpHeaders headers;
 
@@ -62,7 +63,9 @@ class CodeArtifactMavenControllerTest {
         service = mock(CodeArtifactService.class);
         reposilite = mock(ReposiliteSidecarClient.class);
         externalConnectionImporter = mock(CodeArtifactMavenExternalConnectionImporter.class);
-        controller = new CodeArtifactMavenController(service, reposilite, externalConnectionImporter);
+        upstreamRepositoryImporter = mock(CodeArtifactMavenUpstreamRepositoryImporter.class);
+        controller = new CodeArtifactMavenController(service, reposilite, externalConnectionImporter,
+                upstreamRepositoryImporter);
         headers = mock(HttpHeaders.class);
         when(headers.getHeaderString(HttpHeaders.AUTHORIZATION)).thenReturn("Bearer some-token");
         when(service.resolveAuthorizationToken("some-token", DOMAIN))

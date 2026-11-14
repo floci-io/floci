@@ -21,6 +21,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -70,6 +71,30 @@ public class PostgresProtocolHandler {
     @FunctionalInterface
     public interface StartupObserver {
         void onStartup(String username, String database, Map<String, String> parameters);
+    }
+
+    /**
+     * Optional callback used by Redshift proxies to provision/verify a database role and
+     * temporary group memberships before the backend session opens. The backend then
+     * authenticates as that role, so PostgreSQL itself keeps the session from becoming another user.
+     */
+    @FunctionalInterface
+    public interface SessionRoleHandover {
+        HandoverOutcome prepare(String clientUsername, String clientPassword, String database) throws SQLException;
+    }
+
+    /**
+     * {@code backendPassword} is the password the backend session logs in as {@code databaseRole}
+     * with; {@code null} means the cluster master password, for the master user itself.
+     * {@code onBackendLogin} runs once that login has finished, whether it succeeded or not, so the
+     * role's own password can be restored while the session stays open; {@code onClose} runs when the
+     * session ends or the login is refused.
+     */
+    public record HandoverOutcome(String databaseRole, String backendPassword,
+                                  Runnable onBackendLogin, Runnable onClose) {
+        public HandoverOutcome(String databaseRole, String backendPassword, Runnable onClose) {
+            this(databaseRole, backendPassword, null, onClose);
+        }
     }
 
     /** The username/password the proxy opens the backend PostgreSQL connection with. */
@@ -176,6 +201,19 @@ public class PostgresProtocolHandler {
                                       PasswordValidator passwordValidator, int handshakeTimeoutMillis,
                                       boolean forwardStartupParameters, boolean databaseIamAuthentication,
                                       StartupObserver startupObserver) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator, handshakeTimeoutMillis,
+                forwardStartupParameters, databaseIamAuthentication, startupObserver, null);
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver,
+                                      SessionRoleHandover roleHandover) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
@@ -236,6 +274,40 @@ public class PostgresProtocolHandler {
             }
         }
 
+        // Phase 4b: A client the proxy vouched for through a role handover runs as the role the
+        // handover names, which the backend authenticates directly. Prepared before any backend
+        // session opens so a refused role never costs a connection.
+        boolean iamHandover = isIam && !isMaster;
+        boolean customHandover = !iamHandover && roleHandover != null
+                && authResult == PasswordValidator.AuthResult.MASTER_EQUIVALENT && !isMaster;
+        String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
+        HandoverOutcome handoverOutcome = null;
+        if (customHandover) {
+            try {
+                handoverOutcome = roleHandover.prepare(clientUsername, clientPassword, effectiveDbName);
+            } catch (SQLException failure) {
+                String sqlState = failure.getSQLState() == null || failure.getSQLState().isBlank()
+                        ? "28000" : failure.getSQLState();
+                sendErrorResponse(clientOut, "FATAL", sqlState, failure.getMessage());
+                clientOut.flush();
+                closeQuietly(client);
+                return null;
+            }
+            if (handoverOutcome == null || handoverOutcome.databaseRole() == null
+                    || handoverOutcome.databaseRole().isBlank()) {
+                if (handoverOutcome != null && handoverOutcome.onClose() != null) {
+                    handoverOutcome.onClose().run();
+                }
+                sendErrorResponse(clientOut, "FATAL", "28000",
+                        "password authentication failed for user \"" + clientUsername + "\"");
+                clientOut.flush();
+                closeQuietly(client);
+                return null;
+            }
+        }
+        Runnable handoverClose = handoverOutcome == null || handoverOutcome.onClose() == null
+                ? () -> { } : handoverOutcome.onClose();
+
         // Phase 5: Connect to backend PostgreSQL, now that the client's startup message and
         // credentials have been validated. IAM and master: use master credentials. The backend
         // has the original container password and is never updated directly, so the proxy always
@@ -245,6 +317,7 @@ public class PostgresProtocolHandler {
         try {
             backend = backendConnector.connect();
         } catch (IOException e) {
+            handoverClose.run();
             sendErrorResponse(clientOut, "FATAL", "08006", "could not connect to backend database");
             clientOut.flush();
             closeQuietly(client);
@@ -260,18 +333,21 @@ public class PostgresProtocolHandler {
             InputStream backendIn = backend.getInputStream();
             OutputStream backendOut = backend.getOutputStream();
 
-            String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
             BackendLogin backendLogin = resolveBackendLogin(isMaster, isIam, authResult,
                     masterUsername, masterPassword, clientUsername, clientPassword);
             String backendUser = backendLogin.user();
             String backendPass = backendLogin.password();
+            if (handoverOutcome != null) {
+                backendUser = handoverOutcome.databaseRole();
+                backendPass = handoverOutcome.backendPassword() != null
+                        ? handoverOutcome.backendPassword() : masterPassword;
+            }
             // An IAM login for any role but the master runs on a session opened as the master and
             // handed over below, so PostgreSQL would apply the client's parameters with the
             // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
             // would regain the master. Those logins open without them, and their parameters are
             // applied once the session belongs to the role (Phase 5c). The proxy reads that
             // session's results and sends it SQL of its own, so it fixes the encoding to UTF-8.
-            boolean iamHandover = isIam && !isMaster;
             Map<String, String> backendParameters;
             if (!forwardStartupParameters) {
                 backendParameters = Map.of();
@@ -280,9 +356,17 @@ public class PostgresProtocolHandler {
             } else {
                 backendParameters = startup.parameters();
             }
-            byte[] backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
-                    effectiveDbName, backendParameters);
+            byte[] backendRejection;
+            try {
+                backendRejection = loginToBackend(backendIn, backendOut, backendUser, backendPass,
+                        effectiveDbName, backendParameters);
+            } finally {
+                if (handoverOutcome != null && handoverOutcome.onBackendLogin() != null) {
+                    handoverOutcome.onBackendLogin().run();
+                }
+            }
             if (backendRejection != null) {
+                handoverClose.run();
                 clientOut.write(backendRejection);
                 clientOut.flush();
                 closeQuietly(client);
@@ -486,8 +570,13 @@ public class PostgresProtocolHandler {
                 }
             }
 
+            if (handoverOutcome != null) {
+                iamRole = handoverOutcome.databaseRole();
+            }
+
             // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
             if (endsWithErrorResponse(bufferedMessages)) {
+                handoverClose.run();
                 for (byte[] msg : bufferedMessages) {
                     clientOut.write(msg);
                 }

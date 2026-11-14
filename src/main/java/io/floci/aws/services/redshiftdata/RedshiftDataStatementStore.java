@@ -180,6 +180,7 @@ class RedshiftDataStatementStore {
         String workgroupName;
         String database;
         String dbUser;
+        List<String> dbGroups = List.of();
         String sessionId;
         String resultFormat = "JSON";
         Status status;
@@ -225,6 +226,7 @@ class RedshiftDataStatementStore {
             copy.workgroupName = workgroupName;
             copy.database = database;
             copy.dbUser = dbUser;
+            copy.dbGroups = dbGroups;
             copy.sessionId = sessionId;
             copy.resultFormat = resultFormat;
             copy.status = status;
