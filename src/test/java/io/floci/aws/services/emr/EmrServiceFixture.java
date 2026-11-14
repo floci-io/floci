@@ -175,7 +175,7 @@ final class EmrServiceFixture {
     // The docker runner mode's step threads, not yet run.
     private final List<Runnable> stepThreads = new ArrayList<>();
     private boolean waking;
-    private final InMemoryStorageFactory storage;
+    final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
     private final BootstrapRunner bootstrap;
     // The docker runner mode's; null in the immediate one.

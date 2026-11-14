@@ -661,13 +661,20 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     /**
      * The cluster an instance group a {@code ModifyInstanceGroups} names by its id alone is in, the one
      * {@link #modifyInstanceGroups} finds it in and changes it there, read under the service's lock, as
-     * {@code addInstanceGroups} adds to a cluster's groups.
+     * {@code addInstanceGroups} adds to a cluster's groups; and the cluster a tag call's {@code ResourceId} names.
      */
     @Override
     public List<String> through(String member, String value, String region) {
-        return "InstanceGroups[].InstanceGroupId".equals(member)
-                ? call(() -> clusterWithGroup(region, value).map(EmrCluster::getClusterArn).stream().toList())
-                : List.of();
+        return switch (member) {
+            case "InstanceGroups[].InstanceGroupId" ->
+                    call(() -> clusterWithGroup(region, value).map(EmrCluster::getClusterArn).stream().toList());
+            // A tag call's ResourceId is a cluster's id, or a Studio's, which Floci does not serve: the cluster the
+            // tag handlers find by it (findCluster), one recorded with no Region included.
+            case "ResourceId" -> call(() -> clusterStore.get(value)
+                    .filter(cluster -> cluster.getRegion() == null || cluster.getRegion().equals(region))
+                    .map(EmrCluster::getClusterArn).stream().toList());
+            default -> List.of();
+        };
     }
 
     public List<EmrInstanceGroup> listInstanceGroups(String clusterId) {

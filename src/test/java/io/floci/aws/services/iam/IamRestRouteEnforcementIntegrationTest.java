@@ -603,22 +603,25 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
-     * Macie's {@code CreateMember} is checked on the member its {@code account.accountId} names: a grant scoped to the
-     * member lets the request reach Macie, which answers that this account has no session, a request naming another
-     * member is refused, and a deny on the member holds under an allow on everything.
+     * Macie's {@code CreateMember} is checked on the account's members, {@code member/*}: nothing botocore or the
+     * Service Reference says names the member it makes by its {@code account.accountId}, so a grant scoped to one
+     * member does not reach it, a grant on the members lets the request reach Macie, which answers that this account
+     * has no session, and a deny on them holds under an allow on everything.
      */
     @Test
-    void macieCreateMemberIsCheckedOnTheMemberItNames() {
+    void macieCreateMemberIsCheckedOnTheAccountsMembers() {
         String user = user("route-macie-member");
-        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+        String members = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/*";
 
-        policy(user, allow("macie2:CreateMember", member));
-        createMember(user, "111122223333", null).statusCode(404);
-        refused(createMember(user, "444455556666", null), "macie2:CreateMember");
-
-        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", member));
+        policy(user, allow("macie2:CreateMember", "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333"));
         refused(createMember(user, "111122223333", null), "macie2:CreateMember");
+
+        policy(user, allow("macie2:CreateMember", members));
+        createMember(user, "111122223333", null).statusCode(404);
         createMember(user, "444455556666", null).statusCode(404);
+
+        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", members));
+        refused(createMember(user, "111122223333", null), "macie2:CreateMember");
     }
 
     /**
@@ -628,7 +631,7 @@ class IamRestRouteEnforcementIntegrationTest {
     @Test
     void macieCreateMemberIsCheckedWithTheTagsItCarries() {
         String user = user("route-macie-tags");
-        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/*";
 
         policy(user, allow("macie2:CreateMember", member));
         createMember(user, "111122223333", null).statusCode(404);

@@ -30,6 +30,25 @@ class RequestResourcesTest {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+    private static final RegionResolver US_EAST_1 = new RegionResolver("us-east-1", "000000000000");
+    /** EventBridge as it answers the reader: the Region's default bus, {@code event-bus/default}. */
+    private static final StoredResourceArns EVENTS = new StoredResourceArns() {
+        @Override
+        public String namespace() {
+            return "events";
+        }
+
+        @Override
+        public Optional<String> find(String type, List<String> names, String region) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<String> findDefault(String type, String region) {
+            return "event-bus".equals(type) ? Optional.of("arn:aws:events:" + region + ":000000000000:event-bus/default")
+                    : Optional.empty();
+        }
+    };
 
     @Test
     void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
@@ -136,12 +155,15 @@ class RequestResourcesTest {
                 "000000000000", null));
     }
 
+    /**
+     * DynamoDB is built by hand, but the table reads {@code ListTables}: AWS was measured to check it on the literal
+     * {@code table/*} of the request's partition, Region and account, whatever table its request names, though the
+     * Service Reference lists no resource type for it (the generator's {@code MEASURED}).
+     */
     @Test
-    void listTablesCorrectionReadsTheCollectionAndLeavesOtherDynamoOperationsHandBuilt() {
+    void listTablesIsCheckedOnTheTableCollectionAwsWasMeasuredToCheck() {
         assertTrue(RequestResources.reads("dynamodb:ListTables"));
-        assertFalse(RequestResources.reads("dynamodb:BatchWriteItem"));
-        assertFalse(RequestResources.reads("dynamodb:ExecuteStatement"));
-        assertFalse(RequestResources.reads(null));
+        assertFalse(RequestResources.reads("dynamodb:DescribeLimits"));
         for (String body : List.of("{}", "{\"TableName\":\"ignored\",\"ExclusiveStartTableName\":\"cursor\"}")) {
             assertEquals(List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:111122223333:table/*"),
                     RequestResources.of("dynamodb:ListTables", json(body), "aws-us-gov", "us-gov-west-1",
@@ -448,18 +470,17 @@ class RequestResourcesTest {
     }
 
     /**
-     * {@code StartExecution} takes Step Functions Local's {@code <stateMachineArn>#<test case>} and runs the
-     * machine the part before the {@code #} names, so that machine is checked; other operations read it whole.
+     * Step Functions Local's {@code <stateMachineArn>#<test case>} is no ARN AWS has, and neither botocore nor the
+     * Service Reference says to read it otherwise, so a request giving one is checked on it as given.
      */
     @Test
-    void aStateMachinesTestCaseIsCheckedOnTheMachineItRuns() {
-        assertEquals(List.of(MACHINE), of("states:StartExecution",
+    void aStateMachinesTestCaseIsCheckedAsGiven() {
+        assertEquals(List.of(MACHINE + "#HappyPath"), of("states:StartExecution",
                 json("{\"stateMachineArn\":\"" + MACHINE + "#HappyPath\"}")));
-        assertEquals(List.of(MACHINE), of("states:StartSyncExecution", json("{\"stateMachineArn\":\"" + MACHINE + "#\"}")));
         assertEquals(List.of(MACHINE + "#x"), of("states:DescribeStateMachine",
                 json("{\"stateMachineArn\":\"" + MACHINE + "#x\"}")));
         assertEquals(List.of("arn:aws:states:us-east-1:000000000000:execution:orders:*"), created("states:StartExecution",
-                json("{\"stateMachineArn\":\"" + MACHINE + "#HappyPath\"}")));
+                json("{\"stateMachineArn\":\"" + MACHINE + "\"}")));
     }
 
     /**
@@ -474,7 +495,7 @@ class RequestResourcesTest {
                 json("{\"stateMachineVersionArn\":\"" + MACHINE + ":3\"}")));
         assertEquals(List.of(MACHINE), of("states:DescribeStateMachine", json("{\"stateMachineArn\":\"" + MACHINE + ":1\"}")));
         assertEquals(List.of(MACHINE), of("states:StartExecution",
-                json("{\"stateMachineArn\":\"" + MACHINE + ":PROD#HappyPath\"}")));
+                json("{\"stateMachineArn\":\"" + MACHINE + ":PROD\"}")));
         assertEquals(List.of("arn:aws:states:us-east-1:000000000000:execution:orders:*"), created("states:StartExecution",
                 json("{\"stateMachineArn\":\"" + MACHINE + ":PROD\"}")));
         String execution = "arn:aws:states:us-east-1:000000000000:execution:orders:run-1";
@@ -515,27 +536,27 @@ class RequestResourcesTest {
     @Test
     void aRuleIsOnTheEventBusItsRequestNames() {
         String events = "arn:aws:events:us-east-1:000000000000:";
-        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule", json("{\"Name\":\"r\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule", json("{\"Name\":\"r\"}"), EVENTS));
         assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
-                json("{\"Name\":\"r\",\"EventBusName\":\"default\"}")));
+                json("{\"Name\":\"r\",\"EventBusName\":\"default\"}"), EVENTS));
         assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
-                json("{\"Name\":\"r\",\"EventBusName\":\"orders\"}")));
+                json("{\"Name\":\"r\",\"EventBusName\":\"orders\"}"), EVENTS));
         assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
-                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/orders\"}")));
+                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/orders\"}"), EVENTS));
         assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
-                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/default\"}")));
+                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/default\"}"), EVENTS));
         assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:rule/orders/r",
                 "arn:aws:events:us-east-1:111122223333:rule/orders/r", "arn:aws:events:eu-west-1:000000000000:rule/orders/r",
                 events + "rule/orders/r"), of("events:DescribeRule", json("{\"Name\":\"r\",\"EventBusName\":"
-                + "\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"}")));
+                + "\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"}"), EVENTS));
         // A target's rule is named by Rule.
         assertEquals(List.of(events + "rule/orders/r"), of("events:PutTargets", json("{\"Rule\":\"r\","
-                + "\"EventBusName\":\"orders\",\"Targets\":[{\"Id\":\"1\",\"Arn\":\"arn:aws:sqs:us-east-1:000000000000:q\"}]}")));
+                + "\"EventBusName\":\"orders\",\"Targets\":[{\"Id\":\"1\",\"Arn\":\"arn:aws:sqs:us-east-1:000000000000:q\"}]}"), EVENTS));
         // A request naming no event bus describes the default one.
-        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{}")));
-        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus", json("{\"Name\":\"orders\"}")));
+        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{}"), EVENTS));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus", json("{\"Name\":\"orders\"}"), EVENTS));
         assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus",
-                json("{\"Name\":\"" + events + "event-bus/orders\"}")));
+                json("{\"Name\":\"" + events + "event-bus/orders\"}"), EVENTS));
     }
 
     /**
@@ -547,14 +568,14 @@ class RequestResourcesTest {
         String events = "arn:aws:events:us-east-1:000000000000:";
         assertEquals(List.of("arn:aws:events:us-east-1:111122223333:rule/r", events + "rule/r"),
                 of("events:DescribeRule", json("{\"Name\":\"r\",\"EventBusName\":"
-                + "\"arn:aws:events:us-east-1:111122223333:event-bus/default\"}")));
+                + "\"arn:aws:events:us-east-1:111122223333:event-bus/default\"}"), EVENTS));
         assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
-                json("{\"Name\":\"r\",\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}")));
+                json("{\"Name\":\"r\",\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}"), EVENTS));
         assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
-                json("{\"Name\":\"r\",\"EventBusName\":null}")));
+                json("{\"Name\":\"r\",\"EventBusName\":null}"), EVENTS));
         assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus",
-                json("{\"Name\":\"arn:aws:events:::event-bus/orders\"}")));
-        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{\"Name\":null}")));
+                json("{\"Name\":\"arn:aws:events:::event-bus/orders\"}"), EVENTS));
+        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{\"Name\":null}"), EVENTS));
     }
 
     /**
@@ -565,11 +586,12 @@ class RequestResourcesTest {
     @Test
     void eachEntryIsOnTheEventBusItNames() {
         String events = "arn:aws:events:us-east-1:000000000000:";
-        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default", events + "event-bus/audit"),
+        // An entry naming no bus is on the default one, which EventBridge gives (StoredResourceArns.findDefault).
+        assertEquals(List.of(events + "event-bus/default", events + "event-bus/orders", events + "event-bus/audit"),
                 of("events:PutEvents", json("{\"Entries\":[{\"EventBusName\":\"orders\"},{\"Source\":\"s\"},"
-                        + "{\"EventBusName\":\"audit\"},{\"EventBusName\":\"orders\"}]}")));
+                        + "{\"EventBusName\":\"audit\"},{\"EventBusName\":\"orders\"}]}"), EVENTS));
         assertEquals(List.of(events + "event-bus/default"), of("events:PutEvents",
-                json("{\"Entries\":[{\"EventBusName\":null},{\"EventBusName\":\"\"},{\"EventBusName\":\" \"}]}")));
+                json("{\"Entries\":[{\"EventBusName\":null},{\"EventBusName\":\"\"},{\"EventBusName\":\" \"}]}"), EVENTS));
         // Each ARN puts its entry's bus in its own account and Region, checked as the caller's too.
         assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:event-bus/orders",
                 "arn:aws:events:us-east-1:111122223333:event-bus/orders",
@@ -578,15 +600,15 @@ class RequestResourcesTest {
                 events + "event-bus/billing"), of("events:PutEvents", json("{\"Entries\":["
                 + "{\"EventBusName\":\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"},"
                 + "{\"EventBusName\":\"audit\"},"
-                + "{\"EventBusName\":\"arn:aws:events:us-east-1:444455556666:event-bus/billing\"}]}")));
+                + "{\"EventBusName\":\"arn:aws:events:us-east-1:444455556666:event-bus/billing\"}]}"), EVENTS));
         assertEquals(List.of(events + "event-bus/orders"), of("events:PutEvents",
-                json("{\"Entries\":[{\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}]}")));
-        assertEquals(List.of(), of("events:PutEvents", json("{\"Entries\":[]}")));
-        assertEquals(List.of(), of("events:PutEvents", json("{}")));
+                json("{\"Entries\":[{\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}]}"), EVENTS));
+        assertEquals(List.of(), of("events:PutEvents", json("{\"Entries\":[]}"), EVENTS));
+        assertEquals(List.of(), of("events:PutEvents", json("{}"), EVENTS));
         // A form's entries run from 1 to the first it gives nothing of.
-        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default"), of("events:PutEvents",
+        assertEquals(List.of(events + "event-bus/default", events + "event-bus/orders"), of("events:PutEvents",
                 form("Action=PutEvents&Entries.member.1.EventBusName=orders&Entries.member.2.Source=s"
-                        + "&Entries.member.4.EventBusName=late")));
+                        + "&Entries.member.4.EventBusName=late"), EVENTS));
     }
 
     /**
@@ -899,10 +921,11 @@ class RequestResourcesTest {
     }
 
     /**
-     * An EMR request modifying instance groups without its {@code ClusterId} is on the cluster each group is in, as its
-     * service finds it, and none for a group in no cluster; with one, on that cluster alone, and with a null one as
-     * with none. A permission set provisioned to all the accounts it is provisioned to is on each of them, a null
-     * {@code TargetId} naming none, and one provisioned to an account on that account alone.
+     * An EMR request modifying instance groups without its {@code ClusterId}, documented as "the cluster to which the
+     * instance group belongs", is on the cluster each group is in, as its service finds it, and none for a group in no
+     * cluster; with one, on that cluster alone, and with a null one as with none. A permission set provisioned to an
+     * account is on that account; provisioned to all the accounts it is provisioned to, on its instance and itself,
+     * since nothing botocore or the Service Reference says names those accounts.
      */
     @Test
     void aResourceIsNamedThroughEachValueOfAListAndOnlyWhenTheRequestNamesItNoOtherWay() {
@@ -924,6 +947,7 @@ class RequestResourcesTest {
                 return "InstanceGroups[].InstanceGroupId".equals(member)
                         ? Optional.ofNullable(groups.get(value)).stream().toList() : List.of();
             }
+
         };
         String modified = "\"InstanceGroups\":[{\"InstanceGroupId\":\"ig-A\",\"InstanceCount\":2},"
                 + "{\"InstanceGroupId\":\"ig-B\",\"InstanceCount\":2},{\"InstanceGroupId\":\"ig-none\"}]";
@@ -962,12 +986,10 @@ class RequestResourcesTest {
             }
         };
         String provisioned = "{\"InstanceArn\":\"" + instance + "\",\"PermissionSetArn\":\"" + permissionSet + "\",";
-        assertEquals(List.of(instance, permissionSet, "arn:aws:sso:::account/111111111111",
-                "arn:aws:sso:::account/222222222222"), RequestResources.of("sso:ProvisionPermissionSet",
+        assertEquals(List.of(instance, permissionSet), RequestResources.of("sso:ProvisionPermissionSet",
                 json(provisioned + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\"}"), "aws", "us-east-1",
                 "000000000000", sso));
-        assertEquals(List.of(instance, permissionSet, "arn:aws:sso:::account/111111111111",
-                "arn:aws:sso:::account/222222222222"), RequestResources.of("sso:ProvisionPermissionSet",
+        assertEquals(List.of(instance, permissionSet), RequestResources.of("sso:ProvisionPermissionSet",
                 json(provisioned + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\",\"TargetId\":null}"), "aws",
                 "us-east-1", "000000000000", sso));
         assertEquals(List.of(instance, permissionSet, "arn:aws:sso:::account/333333333333"), RequestResources.of(
@@ -1022,7 +1044,10 @@ class RequestResourcesTest {
                 json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
     }
 
-    /** A custom action type is {@code Custom}'s, the owner CodePipeline gives every one, which its request does not. */
+    /**
+     * A custom action type is {@code Custom}'s: the request gives no owner, and the operation's name gives the one
+     * value of the {@code ActionOwner} enum it is (the table's {@code fixed}).
+     */
     @Test
     void aCustomActionTypeIsCustoms() {
         assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
@@ -1055,14 +1080,34 @@ class RequestResourcesTest {
                 json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
     }
 
-    /** A CodeBuild build is checked on its project, which its id names before its {@code :}. */
+    /** A CodeBuild build is checked on the project its service holds it under, and none for an id it holds none of. */
     @Test
     void aBuildIsCheckedOnItsProject() {
         String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
-        assertEquals(List.of(project + "a"), of("codebuild:StopBuild", json("{\"id\":\"a:1\"}")));
+        Map<String, String> builds = Map.of("a:1", project + "a", "b:2", project + "b", "a:3", project + "a");
+        StoredResourceArns codeBuild = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "codebuild";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public List<String> through(String member, String value, String region) {
+                return "id".equals(member) || "ids[]".equals(member)
+                        ? Optional.ofNullable(builds.get(value)).stream().toList() : List.of();
+            }
+        };
+        assertEquals(List.of(project + "a"), of("codebuild:StopBuild", json("{\"id\":\"a:1\"}"), codeBuild));
         assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetBuilds",
-                json("{\"ids\":[\"a:1\",\"b:2\",\"a:3\"]}")));
-        assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1")));
+                json("{\"ids\":[\"a:1\",\"b:2\",\"a:3\"]}"), codeBuild));
+        assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1"), codeBuild));
+        // An id of no build it holds names none.
+        assertEquals(List.of(), of("codebuild:StopBuild", json("{\"id\":\"orphan\"}"), codeBuild));
     }
 
     /**
@@ -1204,6 +1249,10 @@ class RequestResourcesTest {
 
     private static List<String> of(String operation, ContainerRequestContext request) {
         return RequestResources.of(operation, request, "aws", "us-east-1", "000000000000");
+    }
+
+    private static List<String> of(String operation, ContainerRequestContext request, StoredResourceArns stored) {
+        return RequestResources.of(operation, request, "aws", "us-east-1", "000000000000", stored);
     }
 
     private static ContainerRequestContext json(String body) {

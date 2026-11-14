@@ -942,6 +942,23 @@ public class AthenaService {
                         "WorkGroup " + name + " is not found.", 400));
     }
 
+    /**
+     * Refuses a metadata read of a data catalog whose metadata is not the account's Glue Data Catalog, which Floci
+     * reads them from: a catalog of another type, or a Glue one registered for another account's catalog. Athena
+     * answers {@code MetadataException} when it cannot read a catalog's metastore, and {@code InvalidRequestException}
+     * for one it does not hold.
+     */
+    public void requireGlueCatalog(String region, String name) {
+        if (DEFAULT_CATALOG.equals(name)) {
+            return;
+        }
+        DataCatalog catalog = requireDataCatalog(region, name);
+        String catalogId = catalog.getParameters() == null ? null : catalog.getParameters().get("catalog-id");
+        if (!"GLUE".equals(catalog.getType()) || (catalogId != null && !catalogId.equals(regionResolver.getAccountId()))) {
+            throw new AwsException("MetadataException", "Unable to read the metadata of data catalog " + name + ".", 400);
+        }
+    }
+
     private DataCatalog requireDataCatalog(String region, String name) {
         return dataCatalogStore.get(catalogKey(region, name))
                 .orElseThrow(() -> new AwsException("InvalidRequestException",

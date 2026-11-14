@@ -149,8 +149,9 @@ configuration and does not deliver the source's logs.
   this account." (likewise for a Delivery Destination and a Delivery).
 - With IAM enforcement on, each action is authorized on the resources the AWS Service Authorization
   Reference lists for it: the source, destination or delivery it names, and for `CreateDelivery` the
-  source, the destination and the new delivery; `DeleteDeliverySource` on the source it deletes. The
-  Describe actions are authorized on `*`, as the reference lists no resource for them.
+  source, the destination and the new delivery; `DeleteDeliverySource` on the delivery destinations the
+  deliveries from the source it deletes send to, the type the reference lists for it, and on `*` for a source
+  with none. The Describe actions are authorized on `*`, as the reference lists no resource for them.
 
 Not modelled: delivery destination policies (`PutDeliveryDestinationPolicy` and its siblings), and
 record field defaults for sources other than an EventBridge event bus.

@@ -229,6 +229,13 @@ public class CloudWatchLogsDeliveryService {
         deliveries.delete(key(region, id));
     }
 
+    /** The ARNs of the delivery destinations the deliveries from the delivery source of that name send to. */
+    public List<String> destinationArnsFrom(String sourceName, String region) {
+        return deliveries.scan(k -> k.startsWith(prefix(region))).stream()
+                .filter(delivery -> sourceName.equals(delivery.getDeliverySourceName()))
+                .map(Delivery::getDeliveryDestinationArn).distinct().toList();
+    }
+
     /** Every delivery, or those from one of {@code deliverySourceNames}. */
     public PaginatedResult<Delivery> describeDeliveries(Integer limit, String nextToken,
                                                         List<String> deliverySourceNames, String region) {

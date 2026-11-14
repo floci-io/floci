@@ -78,7 +78,11 @@ omitted, since the API reference does not document a default. The built-in
 `AwsDataCatalog` stays first, followed by registered catalogs in name order.
 `GetDataCatalog` requires `Name`; `ListDatabases`, `ListTableMetadata` and
 `GetTableMetadata` require `CatalogName`. Name `AwsDataCatalog` explicitly to
-read the built-in catalog.
+read the built-in catalog. Floci reads databases and tables from the account's
+Glue Data Catalog alone, so these three refuse a catalog whose metadata lives
+elsewhere, a `LAMBDA`, `HIVE` or `FEDERATED` one or a `GLUE` one registered for
+another account's `catalog-id`, with `MetadataException`, and a catalog that is
+not registered with `InvalidRequestException`.
 Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
 to the action, caller account, and request region and remain resumable after a
 cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024
