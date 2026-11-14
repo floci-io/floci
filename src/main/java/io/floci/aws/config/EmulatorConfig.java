@@ -945,6 +945,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("bagetter/bagetter:1.6.5")
         String nugetImage();
+
+        /**
+         * Image used for the per-repository Kellnr container backing the {@code cargo} format.
+         * Same reasoning as {@link #npmImage()}: Kellnr has no native concept of multiple named
+         * registries inside one instance either, so this gets one container per CodeArtifact
+         * repository too, and there is no single external instance a URL override could name.
+         */
+        @WithDefault("ghcr.io/kellnr/kellnr:5.14.1")
+        String cargoImage();
     }
 
     interface ConnectServiceConfig {

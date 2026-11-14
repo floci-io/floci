@@ -7,11 +7,11 @@
 Floci supports the CodeArtifact control plane: domains, repositories, resource policies, tags,
 and public upstream (external) connections. Package publish/fetch through the CodeArtifact API
 itself is implemented for the `generic` format only, matching AWS's own restriction that
-`PublishPackageVersion` accepts only `generic`. The `maven`, `npm`, `pypi`, and `nuget` formats are each
-served through their own real package-manager-protocol proxy (`mvn`/Gradle, `npm`/`yarn`/`pnpm`,
-`pip`/`twine`, and `nuget`/`dotnet` publish and resolve all work against the URL
-`GetRepositoryEndpoint` returns); the remaining formats (Ruby, Swift, Cargo) have no real proxy
-behind them yet.
+`PublishPackageVersion` accepts only `generic`. The `maven`, `npm`, `pypi`, `nuget`, and `cargo`
+formats are each served through their own real package-manager-protocol proxy (`mvn`/Gradle,
+`npm`/`yarn`/`pnpm`, `pip`/`twine`, `nuget`/`dotnet`, and `cargo` publish and resolve all work
+against the URL `GetRepositoryEndpoint` returns); the remaining formats (Ruby, Swift) have no real
+proxy behind them yet.
 
 ## Supported Actions
 
@@ -20,9 +20,9 @@ behind them yet.
 | --- | --- |
 | `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags, and its root package group `/*`, whose restrictions are all `ALLOW`. |
 | `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
-| `DescribeDomain` | Returns a domain's full description, including its repository count and the total size of its assets (generic, Maven, npm, pypi, and NuGet; see Known limitations). |
+| `DescribeDomain` | Returns a domain's full description, including its repository count and the total size of its assets (generic, Maven, npm, pypi, NuGet, and Cargo; see Known limitations). |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
-| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven`, `npm`, `pypi`, and `nuget` repository endpoints. |
+| `GetAuthorizationToken` | Issues a bearer token scoped to a domain, valid for 0 (12 hours) or 900-43200 seconds, required by the `maven`, `npm`, `pypi`, `nuget`, and `cargo` repository endpoints. |
 | `PutDomainPermissionsPolicy` | Attaches or replaces a domain's resource policy, versioned by `policyRevision`. |
 | `GetDomainPermissionsPolicy` | Returns a domain's current resource policy and revision. |
 | `DeleteDomainPermissionsPolicy` | Removes a domain's resource policy, optionally checked against `policyRevision`. |
@@ -259,6 +259,55 @@ declared one with `<readme>`) addressable by exact version for as long as that v
 falling back to the nuspec's own `<description>` field when no readme file was embedded, matching
 AWS's documented "the readme file or descriptive text" wording for this action exactly.
 
+## The cargo repository endpoint
+
+`GetRepositoryEndpoint` for `format=cargo` returns `http://localhost:4566/codeartifact/cargo/<domain>/<repository>/`.
+A real `cargo` client reaches it through a `.cargo/config.toml` `[registries.<name>]` block whose
+`index` is `sparse+<that URL>` and whose `credential-provider` runs `aws codeartifact
+get-authorization-token` and feeds the token to Cargo via stdout (or, on Windows,
+`~/.cargo/credentials.toml`), the way [AWS documents configuring Cargo for
+CodeArtifact](https://docs.aws.amazon.com/codeartifact/latest/ug/configure-use-cargo.html). AWS's
+own guide documents only `cargo add`/`cargo build` (resolution) and `cargo publish`/`cargo login`
+against CodeArtifact; this proxy serves exactly that surface and no `yank`/`owner`/search routes,
+since AWS's guide never mentions any of those three for Cargo.
+
+Authentication is a bare `Authorization: <token>` header with no scheme prefix at all, confirmed
+from the Cargo Book's own registry-authentication page (the real `cargo` wire protocol has no
+named HTTP auth scheme, unlike Maven/pypi/nuget's Basic or npm's Bearer); a missing, invalid,
+expired, or wrong-domain token gets a 401 with no `WWW-Authenticate` challenge, since naming a
+scheme real Cargo doesn't send would be misleading.
+
+It is backed by a shared registry server, [Kellnr](https://kellnr.io), the same per-repository
+container pattern as npm/pypi/nuget: each CodeArtifact repository gets its own Kellnr container,
+started lazily on first use and identified internally by a fresh id generated at
+`CreateRepository` time, so a repository deleted and recreated under the same name never inherits
+the previous one's crates. `DeleteRepository` stops and removes that repository's container
+immediately, the same as npm/pypi/nuget. One config knob, `FLOCI_SERVICES_CODEARTIFACT_CARGO_IMAGE`,
+pins the image version.
+
+`GET .../config.json` is authored directly rather than proxied from Kellnr (whose own response
+would self-report its own internal container address): `{"dl":"<endpoint>api/v1/crates",
+"api":"<endpoint>","auth-required":true}`, `<endpoint>` being the exact same value
+`GetRepositoryEndpoint` returns, matching how real CodeArtifact serves Cargo from one combined
+endpoint for index, API, and downloads alike (unlike crates.io's own split between an index host
+and an API host). The sparse HTTP registry index itself (RFC 2789: one newline-delimited-JSON file
+per crate, bucketed by name length/prefix exactly as real crates.io buckets it) is proxied from
+Kellnr close to verbatim, real `deps`/`cksum`/`features` fields included. A real `cargo publish`
+(`PUT api/v1/crates/new`) forwards the client's own real binary wire body (the 4-byte
+length-prefixed metadata, then the 4-byte length-prefixed `.crate` file, confirmed from the Cargo
+Book's own spec text) to Kellnr verbatim, dependency list included, through the same
+`publish:BLOCK` origin-configuration gate and Archived/Disposed-version gate every other
+container-backed format already uses; `GET .../api/v1/crates/{name}/{version}/download` streams
+the real `.crate` back, blocked (404) for an Archived/Disposed version the same way.
+
+Unlike every other format's publish, a `cargo publish` of an already-existing name/version is
+**rejected outright, even when the content is byte-identical**, not treated as an idempotent
+no-op the way Maven/pypi/nuget's publish paths are. This matches real Cargo: the Cargo Book's own
+documented rule is that "a publish is generally permanent. The version can never be overwritten,"
+confirmed live against Kellnr, which answers such a republish with a real `400` carrying the Cargo
+Book's own documented error shape (`{"errors":[{"detail":"..."}]}`); this proxy forwards that
+status and body to the client verbatim rather than reinterpreting it.
+
 ## AWS-compatible failures
 
 Domain and repository names, tags, pagination, duplicate names, missing upstreams, policy-revision
@@ -286,12 +335,19 @@ state.
   trust-policy or permissions-policy enforcement, consistent with Floci's IAM enforcement being
   opt-in elsewhere, but worth knowing if you rely on domain-sharing semantics.
 - **The native per-format download routes don't consult a container-backed version's status
-  override.** `GetPackageVersionAsset` correctly blocks an Archived/Disposed version, but a plain
-  `mvn`/`npm install`/`pip install`/`nuget` fetch against the Maven GAV, npm tarball, pypi
-  filename, or nuget content route proxies straight to the sidecar and never checks it, so that
-  same version's bytes are still fetchable through those routes.
-- **A container-backed (`maven`/`npm`/`pypi`/`nuget`) version's status override does not survive a
-  Floci restart.** It's kept in memory only, for the same reason the byte-count and readme
+  override, for Maven, npm, pypi, and nuget.** `GetPackageVersionAsset` correctly blocks an
+  Archived/Disposed version, but a plain `mvn`/`npm install`/`pip install`/`nuget` fetch against
+  the Maven GAV, npm tarball, pypi filename, or nuget content route proxies straight to the
+  sidecar and never checks it, so that same version's bytes are still fetchable through those
+  routes. `cargo`'s own download route (`GET .../api/v1/crates/{name}/{version}/download`) is the
+  one exception: it calls the same `requireContainerBackedVersionDownloadable` check
+  `GetPackageVersionAsset` uses and correctly 404s an Archived/Disposed version. The sparse index
+  lookup (`GET .../{name}`) is not filtered this way, though: a real `cargo` client's own protocol
+  keeps a yanked version listed in the index with a `yanked` flag rather than removing it, and
+  mapping Floci's own Archived/Disposed status onto that field is a real design decision
+  deliberately deferred, not yet built either way.
+- **A container-backed (`maven`/`npm`/`pypi`/`nuget`/`cargo`) version's status override does not
+  survive a Floci restart.** It's kept in memory only, for the same reason the byte-count and readme
   bookkeeping those formats already need are: the sidecar content it describes doesn't survive a
   restart either (no volume attached, removed on shutdown), so persisting the override alone would
   leave it answering for a version that, after a restart, no longer exists anywhere real. A
@@ -300,13 +356,19 @@ state.
   all once the sidecar itself restarts empty). `generic`'s status has no such gap: it's stored
   directly on the version's own persisted record.
 - **`CopyPackageVersions` has no full cross-call rollback on a mid-copy sidecar failure.**
-  (`generic`, `maven`, `npm`, `pypi`, and `nuget` are all supported — matching real AWS, which
-  places no `format` restriction on this action at all, unlike `PublishPackageVersion`'s own
+  (`generic`, `maven`, `npm`, `pypi`, `nuget`, and `cargo` are all supported — matching real AWS,
+  which places no `format` restriction on this action at all, unlike `PublishPackageVersion`'s own
   restriction to `generic`; `generic` copies through its own `packageVersions` record, while
-  `maven`, `npm`, `pypi`, and `nuget` each bridge straight to their own sidecar's real wire
-  protocol — `mvn deploy`, `npm publish`, `twine upload`, and `nuget push` respectively, confirmed
-  against a live container for each — since none of the four keeps a `packageVersions` record
-  this action could otherwise read from or write to.) A container-backed copy retains byte-for-byte
+  `maven`, `npm`, `pypi`, `nuget`, and `cargo` each bridge straight to their own sidecar's storage,
+  since none of the five keeps a `packageVersions` record this action could otherwise read from or
+  write to. Maven, npm, pypi, and nuget bridge through their sidecar's real wire protocol — `mvn
+  deploy`, `npm publish`, `twine upload`, and `nuget push` respectively, confirmed against a live
+  container for each. `cargo` is the one exception: there is no real client request to replay for
+  a copy, so this bridges through `KellnrSidecarClient`'s own asset-store path instead, which
+  synthesizes fresh, dependency-free metadata rather than forwarding a real client's own `deps`
+  list, since there is no real client involved to have sent one; a copied crate's sparse-index
+  entry therefore always reports an empty dependency list, unlike one reached through a real
+  `cargo publish`.) A container-backed copy retains byte-for-byte
   source assets, and a best-effort compensating cleanup restores or removes whatever one version's
   own write touched if a later step in that same version fails, preserving the original error, but
   a sidecar outage mid-cleanup can still leave a version in an inconsistent state, the same
@@ -338,9 +400,10 @@ state.
   committed shape to split safely, a real design task rather than a mechanical move. A single
   call copying many large versions can therefore hold up every other CodeArtifact request for as
   long as that whole batch takes, not just slow down the one call itself.
-- **The 5 GB asset size quota is a real streaming limit for `generic`, Maven, pypi, and nuget,
-  with two exceptions.** Every upload and download path (direct publish, the native Maven/pypi/
-  nuget proxies, `GetPackageVersionAsset`, and `CopyPackageVersions`) stages an asset to disk and
+- **The 5 GB asset size quota is a real streaming limit for `generic`, Maven, pypi, nuget, and
+  cargo, with two exceptions.** Every upload and download path (direct publish, the native
+  Maven/pypi/nuget/cargo proxies, `GetPackageVersionAsset`, and `CopyPackageVersions`) stages an
+  asset to disk and
   streams it rather than holding it as one JVM array, so none of them are bound by the ~2 GiB
   `byte[]` limit that would otherwise sit well under AWS's own 5 GB quota. Two things still cap a
   real upload below that:
@@ -353,8 +416,8 @@ state.
     publish fails with an uncaught `OutOfMemoryError` rather than a clean rejection. Unlike S3,
     CodeArtifact has no per-service storage-mode override (`FLOCI_STORAGE_SERVICES_S3_MODE`'s own
     equivalent does not exist here): set the global `FLOCI_STORAGE_MODE=persistent` (or `hybrid`/
-    `wal`) to lift this. Maven, npm, pypi, and nuget assets are unaffected either way, since their
-    real bytes always live in their own sidecar container, never in this map.
+    `wal`) to lift this. Maven, npm, pypi, nuget, and cargo assets are unaffected either way, since
+    their real bytes always live in their own sidecar container, never in this map.
   - **npm has its own, separate, much lower ceiling that no Floci-side configuration changes:**
     real npm's publish protocol embeds the whole tarball as one base64 string inside a JSON
     document, and Verdaccio (the sidecar behind this proxy) converts the whole received body to a
@@ -363,10 +426,10 @@ state.
     string length and crashes the Verdaccio process outright with an uncaught `RangeError: Invalid
     string length`, not a clean rejection either. This is a limitation of real npm's own wire
     protocol as Verdaccio implements it, not something this emulator's own code can stream around.
-- **Maven artifacts, npm packages, pypi packages, and NuGet packages do not survive a Floci
-  restart, even under persistent storage.** The Reposilite instance and every per-repository
-  Verdaccio, pypiserver, and BaGetter container have no volume attached and are removed on shutdown
-  along with everything published to them. CodeArtifact repository/domain metadata (including each format's stored sidecar container
+- **Maven artifacts, npm packages, pypi packages, NuGet packages, and cargo crates do not survive a
+  Floci restart, even under persistent storage.** The Reposilite instance and every per-repository
+  Verdaccio, pypiserver, BaGetter, and Kellnr container have no volume attached and are removed on
+  shutdown along with everything published to them. CodeArtifact repository/domain metadata (including each format's stored sidecar container
   id) survives a restart the same way any other Floci state does under persistent storage mode; the
   artifacts and packages themselves do not, so the first request after a restart re-provisions
   empty storage and returns 404 for anything published before the restart.
@@ -385,10 +448,32 @@ state.
   example a Lambda, Batch, or ECS workload container) from reaching the sidecar on its
   container-internal address, bypassing the proxy's token check entirely. Closing this for real
   would mean isolating each sidecar on its own Docker network reachable only from Floci's own
-  process, a change that would need to apply uniformly across all four sidecar-backed formats, not
-  a one-off fix to any single proxy.
-- **Every native endpoint's own external connections and repository-to-repository upstreams both
-  resolve, for all four formats.** On real CodeArtifact, a repository with another repository
+  process, a change that would need to apply uniformly across all five sidecar-backed formats, not
+  a one-off fix to any single proxy. Kellnr (cargo's own sidecar) is the one partial exception:
+  confirmed live, it always demands a valid token for its own publish endpoint regardless of its
+  `KELLNR_REGISTRY__AUTH_REQUIRED` setting, so reaching it directly on the Docker network still
+  doesn't permit a publish without also obtaining the internal token Floci mints and caches for it;
+  that token is never the real CodeArtifact token, but it is still a second, real barrier the other
+  four sidecars don't have. That barrier only holds because the admin account behind it is never
+  left at Kellnr's own shipped `admin`/`admin` default (which every Kellnr deployment shares
+  publicly): a fresh, random password is minted per container at creation
+  (`KELLNR_SETUP__ADMIN_PWD`, confirmed live to override that default) and read fresh on every
+  admin login rather than cached, so it also stays correct across a container silently restarted
+  under the same repository id.
+- **Every native endpoint's own external connections resolve, for Maven, npm, pypi, nuget, and now
+  cargo (`public:crates-io`, against the real `index.crates.io`/`static.crates.io`); the
+  repository-to-repository upstream side does not yet resolve for cargo.** A real `cargo build`/
+  `cargo add` needs more than a plain on-demand fetch to work at all: its own sparse index for one
+  crate name is a single file covering every version, so a cache miss on the download route alone
+  would leave an upstream-only version invisible to its resolver. The native cargo endpoint's own
+  sparse-index route merges in the real upstream index's own version lines not already known
+  locally (read-only, nothing retained until a real download actually happens), the one thing none
+  of the other four formats' own external-connection importers need, since their own clients can
+  always ask for one already-known version directly. `cargo` is otherwise still a container-backed
+  format like the other four (`DescribePackageVersion`, `ListPackages`, `DeletePackage`,
+  `CopyPackageVersions`, and byte accounting all already work for it the same way), but has no
+  repository-to-repository upstream resolution against its own native endpoint yet; that's its own
+  future work. On real CodeArtifact, a repository with another repository
   configured as an upstream (`UpdateRepository`'s `upstreams`) or with an
   `AssociateExternalConnection` to a public repository serves packages from those sources too, not
   just its own; a repository has one or the other, never both. Floci's Maven endpoint does this
@@ -456,18 +541,18 @@ state.
   requires clients to accept HTML as a fallback and pip/uv both do, but it is a real gap against
   AWS's documented surface, not just a quirk of the sidecar.
 - **`DescribePackageVersion` reports only format/namespace/packageName/version/revision/status/origin
-  for Maven, npm, pypi, and nuget, same as it does for generic.** Real CodeArtifact's `PackageVersionDescription`
+  for Maven, npm, pypi, nuget, and cargo, same as it does for generic.** Real CodeArtifact's `PackageVersionDescription`
   can also carry `displayName`, `summary`, `homePage`, `sourceCodeRepository`, `licenses`, and
   `publishedTime`, extracted from the package's own metadata; none of those are populated for any
-  format today, container-backed or generic. For all four, the version's existence is
+  format today, container-backed or generic. For all five, the version's existence is
   confirmed directly against its sidecar (`RepositorySidecarManager.packageVersionExists`) rather
   than through the generic-format-only `packageVersions` record `GetPackageVersionAsset`'s own
   bridge also moved past, and the revision is synthesized the same deterministic way
   `GetPackageVersionAsset`'s bridge already does, so describing a version and then fetching one of
   its assets see the same revision. Every sidecar-backed version reports `Published`: none of
-  these four formats' native publish paths (`mvn deploy`, `npm publish`, `twine upload`, `nuget
-  push`) can leave a version in any other status the way a generic publish deliberately can with
-  `unfinished=true`.
+  these five formats' native publish paths (`mvn deploy`, `npm publish`, `twine upload`, `nuget
+  push`, `cargo publish`) can leave a version in any other status the way a generic publish
+  deliberately can with `unfinished=true`.
 - **The nuget repository endpoint advertises no `RegistrationsBaseUrl` or `SearchQueryService`
   resource.** `nuget install`/`dotnet add package`/`dotnet restore` resolve a package's versions
   and dependencies from `PackageBaseAddress` alone (each version's own `.nuspec`, fetched directly,
@@ -478,38 +563,43 @@ state.
 - **`DescribePackage`'s origin controls default to `publish: ALLOW`/`upstream: BLOCK`** (the
   default for a package whose first version was published directly) **until a caller sets them
   explicitly with `PutPackageOriginConfiguration`, or until the package's first version is
-  retained from a Maven external connection, which instead defaults it to `publish: BLOCK`/
-  `upstream: ALLOW`**, matching AWS's own documented "ingested from a public source" default. For
-  Maven, npm, pypi, and nuget, `DescribePackage` asks the
+  retained from an external connection, which instead defaults it to `publish: BLOCK`/
+  `upstream: ALLOW`**, matching AWS's own documented "ingested from a public source" default
+  (the same default now applies to a cargo crate retained from `public:crates-io`, since
+  `ensureRetainedPackageOriginDefaultIfCurrentRepository` is already fully format-agnostic). For
+  Maven, npm, pypi, nuget, and cargo, `DescribePackage` asks the
   repository's sidecar whether the package exists, which starts that sidecar if it is not already
   running; a package that exists only because `PutPackageOriginConfiguration` created it (no
   versions yet) is found without touching any sidecar.
-- **`PutPackageOriginConfiguration`'s `publish: BLOCK` is only enforced for the `generic`
-  format.** `PublishPackageVersion`, the one path it actually gates, accepts only `generic` to
-  begin with; Maven, npm, pypi, and nuget publishes go through their own native wire protocol (`mvn
-  deploy`, `npm publish`, `twine upload`, `nuget push`) directly against the repository endpoint,
-  which does not yet check this setting. `upstream` is stored and reported faithfully for every
+- **`PutPackageOriginConfiguration`'s `publish: BLOCK` is enforced for every format.**
+  `PublishPackageVersion` is the direct-publish path for `generic`; Maven, npm, pypi, nuget, and
+  cargo each check the same `requireContainerBackedPackagePublishAllowed` gate from their own
+  native wire protocol (`mvn deploy`, `npm publish`, `twine upload`, `nuget push`, `cargo publish`)
+  directly against the repository endpoint. `upstream` is stored and reported faithfully for every
   format, and gates every format's own external-connection retention and repository-to-repository
-  upstream retention (both resolve for Maven, npm, pypi, and nuget; see above). `CopyPackageVersions`
+  upstream retention (external-connection retention now resolves for cargo too, alongside Maven,
+  npm, pypi, and nuget; cargo has no repository-to-repository upstream retention yet, see above).
+  `CopyPackageVersions`
   deliberately does not check `publish: BLOCK`/`upstream: BLOCK` either, for any format, including
   its own `includeFromUpstream` search: the User Guide's own definition of both controls scopes
   them to direct publish/retention "using package managers or similar tools," a mechanism Copy is
   not.
 - **`DescribeDomain`'s `assetSizeBytes` only counts what was published after this field started
   being computed.** Generic-format bytes are summed live from the still-existing
-  `PublishPackageVersion` records, so they're always current. Maven, npm, pypi, and nuget have no
-  such record to sum (the same absent generic-format record `DescribePackageVersion`'s own bridge works
-  around by asking the sidecar directly instead), so each proxy reports its own successfully-written
-  byte count directly; a package published through one of those four formats
+  `PublishPackageVersion` records, so they're always current. Maven, npm, pypi, nuget, and cargo
+  have no such record to sum (the same absent generic-format record `DescribePackageVersion`'s own
+  bridge works around by asking the sidecar directly instead), so each proxy reports its own
+  successfully-written byte count directly; a package published through one of those five formats
   before this accounting existed was never reported and is not retroactively counted. A genuine
-  conflict or an idempotent no-op retry (any of the four formats' own duplicate-publish protection)
-  correctly adds nothing either way. Both `DeleteRepository` and `DeletePackage` clean
+  conflict or an idempotent no-op retry (any of the four byte-identical-retry formats' own
+  duplicate-publish protection; cargo's own publish rejects any republish outright instead, see
+  above) correctly adds nothing either way. Both `DeleteRepository` and `DeletePackage` clean
   up every format's own records and byte counts (and, for `DeleteRepository`, the per-version
   asset content underneath them), so a repository or package recreated under the same name never
-  inherits a predecessor's bytes. Maven/npm/pypi/nuget byte counts live only in memory, the same as the
-  sidecar content they describe (see the restart limitation below), not through `StorageFactory`
-  like every durable store here: the content these bytes count does not survive a restart either,
-  so neither does the count.
+  inherits a predecessor's bytes. Maven/npm/pypi/nuget/cargo byte counts live only in memory, the
+  same as the sidecar content they describe (see the restart limitation below), not through
+  `StorageFactory` like every durable store here: the content these bytes count does not survive a
+  restart either, so neither does the count.
 - **A whole-package `npm unpublish` is accounted for; unpublishing a single version of a
   multi-version package is not.** The pinned Verdaccio image is configured to honor `npm
   unpublish` natively (`unpublish: $all`), bypassing `DeletePackage` entirely; the npm data plane
@@ -528,9 +618,14 @@ state.
 - **Package groups enforce `PUBLISH`, `EXTERNAL_UPSTREAM`, and `INTERNAL_UPSTREAM`.** `PUBLISH` is
   wired into the one package-level origin check every direct-publish path already shares
   (`PublishPackageVersion`'s own `generic`-format path and every native proxy controller's own
-  publish guard, `mvn deploy`/`npm publish`/`twine upload`/`nuget push` alike); every
-  format's external-connection retention (Maven, npm, pypi, NuGet) is wired to the resolved
-  `EXTERNAL_UPSTREAM` mode; and every format's repository-to-repository upstream retention
+  publish guard, `mvn deploy`/`npm publish`/`twine upload`/`nuget push`/`cargo publish` alike);
+  `EXTERNAL_UPSTREAM` and `INTERNAL_UPSTREAM` only apply where a format has retention to gate in
+  the first place; cargo's own external-connection retention is gated by `EXTERNAL_UPSTREAM` the
+  same way the other four formats' already are (`isUpstreamRetentionBlocked`'s own check is fully
+  format-agnostic), but `INTERNAL_UPSTREAM` still never reaches cargo, since it has no
+  repository-to-repository upstream resolution yet (see above). For the formats that do: every
+  format's external-connection retention (Maven, npm, pypi, NuGet, and now cargo) is wired to the
+  resolved `EXTERNAL_UPSTREAM` mode; and every format's repository-to-repository upstream retention
   (`UpdateRepository`'s `upstreams`) is wired to the resolved `INTERNAL_UPSTREAM` mode the same
   way. All three follow the "`BLOCK` always wins over `ALLOW`" interaction between a package's own
   origin configuration and its associated group's, and all three block a weak pattern match
@@ -557,3 +652,4 @@ See the [CodeArtifact API Reference](https://docs.aws.amazon.com/codeartifact/la
 | `FLOCI_SERVICES_CODEARTIFACT_NPM_IMAGE` | `verdaccio/verdaccio:6.10.4` | Verdaccio image used to serve the `npm` format |
 | `FLOCI_SERVICES_CODEARTIFACT_PYPI_IMAGE` | `pypiserver/pypiserver:v2.4.2` | pypiserver image used to serve the `pypi` format |
 | `FLOCI_SERVICES_CODEARTIFACT_NUGET_IMAGE` | `bagetter/bagetter:1.6.5` | BaGetter image used to serve the `nuget` format |
+| `FLOCI_SERVICES_CODEARTIFACT_CARGO_IMAGE` | `ghcr.io/kellnr/kellnr:5.14.1` | Kellnr image used to serve the `cargo` format |
