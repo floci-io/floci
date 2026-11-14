@@ -58,6 +58,19 @@ another.
 `interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
 among them, and `GetApplication` returns each as it was written.
 
+`UpdateApplication` changes any setting of a `CREATED` or `STOPPED` application, and of a `STARTED` one its
+`maximumCapacity` and its custom images, `imageConfiguration` and `workerTypeSpecifications`, as the user guide's
+"Updating Running Applications" describes. For every other setting the API reference's "An application has to be in
+a stopped or created state in order to be updated" holds: a `STARTED` application's update naming one, even beside
+those or with its current value, is refused with `ValidationException`, "Application must be in a stopped or created
+state in order to be updated.", and so is an image change on an application with `initialCapacity` ("Custom image
+updates on running applications are not supported on applications with pre-initialized capacity configured"). A run
+already going keeps the image and the maximum capacity it was launched with, and a new run, or a new attempt of a
+run, takes the application's current ones: "New workloads submitted after the update automatically will use the new
+image, while existing workloads continue with the original image". On a release up to 7.13 whose
+`applicationLevelDigestResolution` is left true, AWS keeps the image it resolved at the application's start until the
+application restarts; Floci resolves each run's image (see the custom images limitation) and runs the new one.
+
 `DeleteApplication` leaves the application in `TERMINATED` state. `GetApplication` continues to
 report that state so lifecycle waiters can observe it, while an unfiltered `ListApplications`
 omits the terminated application. A terminated application cannot be started or stopped again.
