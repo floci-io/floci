@@ -595,7 +595,9 @@ public final class RequestResources {
      * The ARNs of a type the request names through the variables it fills: one for each value of a list member,
      * none when it gives none of them. A value that is itself an ARN of the type names that resource, and the others
      * in the same list their own, as a handler taking a name or an ARN for each reads them (CodeBuild's
-     * {@code BatchGetProjects}). They are in the account the resource's account member gives, which its handler
+     * {@code BatchGetProjects}); for a type of several variables it also gives the variable it fills its own value
+     * there, beside what the request's other members fill, as a handler may read the one or the other (an ECS
+     * service ARN of another cluster than the request's names that service and the one of its name in that cluster). They are in the account the resource's account member gives, which its handler
      * acts in, and none when that member holds no account id; in the request's without one, or with a JSON null for
      * it. An ARN given for a name puts the
      * resource in that ARN's account and Region, the caller's and the request's where it leaves them empty, as its
@@ -608,7 +610,9 @@ public final class RequestResources {
      * the type without a qualifier, is cut where the format ends, as an ARN given is. A variable no member fills
      * takes the value the resource gives it {@code fixed}. A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
-     * else has that id open.
+     * else has that id open. A member the request leaves out that names its service's default of another type
+     * ({@code defaults}) fills its variable from the ARN of that default, which {@code stored} gives in the caller's
+     * account: an ECS service a request names with no cluster is on the default cluster.
      */
     private static void fill(Set<String> arns, RequestResourceMembers.Resource resource,
                              Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
@@ -638,17 +642,26 @@ public final class RequestResources {
                     stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
                 }
             }
+            // A member the request leaves out naming its service's default of another type then fills the variable
+            // from that resource's ARN: an ECS service of a request with no cluster is on the default cluster.
+            String defaulted = resource.defaults().get(variable.getValue().path());
+            Optional<String> fallback = values.isEmpty() && defaulted != null && formats.containsKey(defaulted)
+                    && stored != null && account.equals(accountId) ? stored.findDefault(defaulted, region)
+                    : Optional.empty();
+            if (fallback.isPresent()) {
+                values = List.of(fallback.get());
+            }
+            RequestResourceMembers.ArnFormat named = fallback.isPresent() ? formats.get(defaulted)
+                    : arnOf(resource, variable.getValue().path(), formats);
             if (values.isEmpty()) {
                 continue;
             }
             given = true;
-            RequestResourceMembers.ArnFormat named = arnOf(resource, variable.getValue().path(), formats);
-            if (resource.fill().size() == 1 && fromRequest == null) {
-                List<String> asArns = values.stream()
-                        .filter(value -> !isArnOf(named, value)
-                                && format.pattern().matcher(value).matches()).toList();
-                asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
-                        accountId, stored));
+            List<String> asArns = fromRequest != null ? List.of() : values.stream()
+                    .filter(value -> !isArnOf(named, value) && format.pattern().matcher(value).matches()).toList();
+            asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
+                    accountId, stored));
+            if (resource.fill().size() == 1) {
                 values = values.stream().filter(value -> !asArns.contains(value)).toList();
                 if (values.isEmpty()) {
                     return;
@@ -657,8 +670,14 @@ public final class RequestResources {
             List<Filling> next = new ArrayList<>();
             for (Filling filling : fillings) {
                 for (String value : values) {
+                    // The type's own ARN, for a type of several variables, names that resource and gives this variable
+                    // its value too, beside what the request's other members fill: a handler may read the one or the
+                    // other (an ECS service ARN of another cluster than the request's).
                     next.add(isArnOf(named, value)
                             ? filling.with(variable.getKey(), named.variable(value), AwsArnUtils.parse(value))
+                            : asArns.contains(value)
+                            ? filling.with(variable.getKey(), format.variable(value, variable.getKey()),
+                                    AwsArnUtils.parse(value))
                             : filling.with(variable.getKey(), value, null));
                 }
             }
@@ -731,12 +750,24 @@ public final class RequestResources {
      * ({@code find}), when the request gives each one value: the caller's resource {@code stored} finds under those
      * values in the Region, or else its ARN with that id open, as for a create; in the account its account member gives
      * when it has one, which {@code stored} finds the resource of as {@code findInAccount}; none when it leaves one out
-     * or gives it a JSON null, which its handler reads as none.
+     * or gives it a JSON null, which its handler reads as none. A find by one list member finds each of its values
+     * (ECS's {@code taskDefinitions[]}).
      */
     private static void found(Set<String> arns, RequestResourceMembers.Resource resource,
                               Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
                               JsonNode body, String partition, String region, String accountId,
                               StoredResourceArns stored) {
+        if (resource.find().size() == 1 && resource.find().getFirst().list()) {
+            String account = accountOf(resource, form, body, accountId);
+            if (account == null) {
+                return;
+            }
+            for (String value : values(form, body, resource.find().getFirst())) {
+                foundOne(arns, resource.types().getFirst(), List.of(value), formats, partition, region, account,
+                        accountId, stored);
+            }
+            return;
+        }
         List<String> names = new ArrayList<>();
         for (RequestResourceMembers.Member member : resource.find()) {
             List<String> values = values(form, body, member);
@@ -752,7 +783,13 @@ public final class RequestResources {
         if (account == null) {
             return;
         }
-        String type = resource.types().getFirst();
+        foundOne(arns, resource.types().getFirst(), names, formats, partition, region, account, accountId, stored);
+    }
+
+    /** The resource of the type {@code stored} finds by the values in the account, or else its ARN with its id open. */
+    private static void foundOne(Set<String> arns, String type, List<String> names,
+                                 Map<String, RequestResourceMembers.ArnFormat> formats, String partition,
+                                 String region, String account, String accountId, StoredResourceArns stored) {
         Optional<String> found = stored == null ? Optional.empty()
                 : account.equals(accountId) ? stored.findByMembers(type, names, region)
                 : stored.findInAccount(type, names, account, region);

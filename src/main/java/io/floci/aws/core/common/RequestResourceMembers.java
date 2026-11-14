@@ -58,7 +58,7 @@ final class RequestResourceMembers {
     private static final Set<String> ARN_KEYS = Set.of("types", "arn", "made", "endpoint");
     /** The keys of a resource whose format's variables members fill, or its service finds by them. */
     private static final Set<String> FILL_KEYS = Set.of("type", "fill", "when", "unless", "arnOf", "account", "fixed",
-            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault");
+            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
@@ -132,6 +132,27 @@ final class RequestResourceMembers {
             String resource = format.split(":", 6)[5];
             return AwsArnUtils.parse(arn).resource().substring(resource.indexOf("${"));
         }
+
+        /**
+         * The value {@code variable} takes in an ARN of the format, by the text the format puts around each variable
+         * ({@code api} for {@code ServiceName} in {@code service/blue/api}); null when the ARN does not match.
+         */
+        String variable(String arn, String variable) {
+            String resource = format.split(":", 6)[5];
+            Matcher each = VARIABLE.matcher(resource);
+            StringBuilder regex = new StringBuilder("^");
+            List<String> names = new ArrayList<>();
+            int at = 0;
+            while (each.find()) {
+                regex.append(Pattern.quote(resource.substring(at, each.start()))).append("(.+?)");
+                names.add(each.group(1));
+                at = each.end();
+            }
+            regex.append(Pattern.quote(resource.substring(at))).append('$');
+            Matcher matched = Pattern.compile(regex.toString()).matcher(AwsArnUtils.parse(arn).resource());
+            int index = names.indexOf(variable);
+            return matched.matches() && index >= 0 ? matched.group(index + 1) : null;
+        }
     }
 
     /**
@@ -162,12 +183,25 @@ final class RequestResourceMembers {
      * {@code Search} with no {@code ViewArn}, on the Region's default view), read no other way. Of two types whose
      * formats differ by one variable a member fills, the one without it applies {@code whenDefault} that member is
      * absent or names its type's default resource, which the service gives, and the other {@code unlessDefault}: a
-     * rule on EventBridge's default bus has no bus in its ARN. Each maps the member to that type.
+     * rule on EventBridge's default bus has no bus in its ARN. Each maps the member to that type. A member filling a
+     * variable that is the one of another type's format names that type's default when the request leaves it out
+     * ({@code defaults}, the member mapped to the type), which the service gives: an ECS service of a request with no
+     * {@code cluster} is on the default cluster. One member of {@code find} may be a list, each of whose values the
+     * service finds (ECS's {@code taskDefinitions[]}).
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
-                    boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault) {
+                    boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                    Map<String, String> defaults) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, Map.of());
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -517,9 +551,11 @@ final class RequestResourceMembers {
             find.add(member(operation, member.asText("")));
         }
         if (resource.has("find") && (!resource.path("find").isArray() || find.isEmpty() || !fill.isEmpty()
-                || find.stream().anyMatch(Member::list) || FOUND_ONLY.stream().anyMatch(resource::has))) {
+                || (find.size() > 1 && find.stream().anyMatch(Member::list))
+                || FOUND_ONLY.stream().anyMatch(resource::has))) {
             throw new IllegalStateException(RESOURCE_NAME + " finds a " + type + " for " + operation + " by "
-                    + resource.path("find") + ", no members of one value each, or beside members reading it otherwise");
+                    + resource.path("find") + ", no members of one value each or one list, or beside members reading "
+                    + "it otherwise");
         }
         if (fill.values().stream().filter(member -> member.list() || member.map()).count() > 1) {
             throw new IllegalStateException(RESOURCE_NAME + " fills " + type + " for " + operation
@@ -557,7 +593,36 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(arnOf), account,
-                Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault);
+                Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault,
+                defaults(operation, type, resource.path("defaults"), fill, formats));
+    }
+
+    /**
+     * The {@code defaults} of a resource: each member filling a variable mapped to the type whose format is that
+     * variable alone, whose default the member names when a request leaves it out; empty when it has none.
+     */
+    private static Map<String, String> defaults(String operation, String type, JsonNode defaults,
+                                                Map<String, Member> fill, Map<String, ArnFormat> formats) {
+        if (defaults.isMissingNode()) {
+            return Map.of();
+        }
+        Map<String, String> found = new LinkedHashMap<>();
+        defaults.properties().forEach(entry -> {
+            ArnFormat named = formats.get(entry.getValue().asText(""));
+            String variable = fill.entrySet().stream().filter(filled -> filled.getValue().path().equals(entry.getKey()))
+                    .map(Map.Entry::getKey).findFirst().orElse(null);
+            if (named == null || variable == null || !ONE_VARIABLE.matcher(named.format().split(":", 6)[5]).matches()
+                    || !named.format().endsWith("${" + variable + "}")) {
+                throw new IllegalStateException(RESOURCE_NAME + " names the default of " + entry.getValue() + " by "
+                        + entry.getKey() + " for " + operation + "'s " + type
+                        + ", no member filling the one variable of that type's format");
+            }
+            found.put(entry.getKey(), entry.getValue().asText());
+        });
+        if (found.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " names no defaults for " + operation + "'s " + type);
+        }
+        return Map.copyOf(found);
     }
 
     /**

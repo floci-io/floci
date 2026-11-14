@@ -1219,6 +1219,72 @@ class RequestResourcesTest {
     }
 
     /**
+     * An ECS request names its cluster by name or ARN, and the default cluster, which ECS gives, when it names none; a
+     * service or a task given by its own ARN is that resource, and by its name in the cluster the request names too
+     * when that is another, as a handler may read the one or the other; and a task definition is the revision ECS
+     * resolves a reference to, a family alone being its latest, each of a list's found on its own, or its revision
+     * open when ECS has none.
+     */
+    @Test
+    void anEcsRequestNamesItsClusterOrTheDefaultAndTheRevisionEcsResolves() {
+        String prefix = "arn:aws:ecs:us-east-1:000000000000:";
+        StoredResourceArns ecs = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "ecs";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                if (!"task-definition".equals(type) || names.size() != 1) {
+                    return Optional.empty();
+                }
+                return switch (names.getFirst()) {
+                    case "web", "web:3", "arn:aws:ecs:us-east-1:000000000000:task-definition/web:3" ->
+                            Optional.of(prefix + "task-definition/web:3");
+                    default -> Optional.empty();
+                };
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "cluster".equals(type) ? Optional.of(prefix + "cluster/default") : Optional.empty();
+            }
+        };
+        assertEquals(List.of(prefix + "service/default/api"),
+                of("ecs:DescribeServices", json("{\"services\":[\"api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/blue/api"),
+                of("ecs:DescribeServices", json("{\"cluster\":\"blue\",\"services\":[\"api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/blue/api"), of("ecs:DescribeServices",
+                json("{\"cluster\":\"" + prefix + "cluster/blue\",\"services\":[\"api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/blue/api"), of("ecs:DescribeServices",
+                json("{\"cluster\":\"blue\",\"services\":[\"" + prefix + "service/blue/api\"]}"), ecs));
+        assertEquals(List.of(prefix + "service/green/api", prefix + "service/blue/api"), of("ecs:DescribeServices",
+                json("{\"cluster\":\"blue\",\"services\":[\"" + prefix + "service/green/api\"]}"), ecs));
+        assertEquals(List.of(prefix + "task/blue/t-2", prefix + "task/default/t-1", prefix + "task/default/t-2"),
+                of("ecs:DescribeTasks", json("{\"tasks\":[\"t-1\",\"" + prefix + "task/blue/t-2\"]}"), ecs));
+        assertEquals(List.of(prefix + "cluster/default"), of("ecs:DescribeClusters", json("{}"), ecs));
+        assertEquals(List.of(prefix + "cluster/blue"), of("ecs:DeleteCluster", json("{\"cluster\":\"blue\"}"), ecs));
+        // A cluster given by ARN however the documentation words it ("The ARN or short name of the cluster").
+        assertEquals(List.of(prefix + "cluster/blue", prefix + "task/blue/t-1"), of("ecs:ExecuteCommand",
+                json("{\"cluster\":\"" + prefix + "cluster/blue\",\"task\":\"t-1\",\"command\":\"ls\"}"), ecs));
+        // Each attribute is on the container instance its targetId names.
+        assertEquals(List.of(prefix + "container-instance/blue/i-1", prefix + "container-instance/blue/i-2"),
+                of("ecs:PutAttributes", json("{\"cluster\":\"blue\",\"attributes\":[{\"name\":\"a\",\"targetId\":\"i-1\"},"
+                        + "{\"name\":\"b\",\"targetType\":\"container-instance\",\"targetId\":\"i-2\"}]}"), ecs));
+        // Without ECS to give its default, a service of no cluster is in any.
+        assertEquals(List.of(prefix + "service/*/api"), of("ecs:DescribeServices", json("{\"services\":[\"api\"]}")));
+        for (String reference : List.of("web", "web:3", prefix + "task-definition/web:3")) {
+            assertEquals(List.of(prefix + "task-definition/web:3"),
+                    of("ecs:RunTask", json("{\"taskDefinition\":\"" + reference + "\"}"), ecs), reference);
+        }
+        assertEquals(List.of(prefix + "task-definition/*:*"),
+                of("ecs:RunTask", json("{\"taskDefinition\":\"gone\"}"), ecs));
+        assertEquals(List.of(prefix + "task-definition/web:3", prefix + "task-definition/*:*"),
+                of("ecs:DeleteTaskDefinitions", json("{\"taskDefinitions\":[\"web:3\",\"gone:1\"]}"), ecs));
+    }
+
+    /**
      * A Parameter Store parameter is {@code parameter/<name>} whether its name starts with a slash or not, without the
      * whitespace around it, a name of two leading slashes keeping the second and one beginning {@code /parameter/}
      * keeping that; a version or a label after its name, or after its ARN, is checked on the parameter; a path is
