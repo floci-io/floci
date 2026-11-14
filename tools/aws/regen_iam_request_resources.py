@@ -94,10 +94,11 @@ follow the rule unchanged: a family of a hand-built namespace whose requests nam
 way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
-`ID_TARGETS` stages id-list namespaces separately: a resource ARN's variable names its list member,
-with the configured heterogeneous resource list as a fallback. Botocore supplies its serialized
-EC2 Query name (including queryName and capitalization), and documented id prefixes distinguish
-the supported resource types. `resourceTagKeys` comes from those types' Service Reference condition keys. Each generated `targets` entry preserves the
+`ID_TARGETS` is Floci's coverage of id-list namespaces, the types of each it reads by id (EC2's instances): a
+resource ARN's variable names its list member, with the request's list of whatever resources it acts on
+(`Resources`) as a fallback. Botocore supplies its serialized EC2 Query name (including queryName and
+capitalization), and the id prefix botocore documents each type with ("the instance ID (for example,
+i-0123456789abcdef0)") distinguishes them. `resourceTagKeys` comes from those types' Service Reference condition keys. Each generated `targets` entry preserves the
 request's order and duplicates, including a wildcard for each unsupported id; only resolved ARNs
 use the corresponding target's condition context. Other requests in those namespaces stay on `*`.
 Beyond the members' names, botocore's shapes and documentation say what a member names, and the rule reads them:
@@ -147,27 +148,25 @@ already give, and linking to its evidence; the generator refuses an entry that b
 review the first. Documentation, analogy, the request's shape and what a Floci handler does are not evidence: what
 they give belongs in a rule. DynamoDB's `ListTables` (`table/*`) and Step Functions' `SendTask*` (the token's
 activity or state machine) are its entries.
-`CLIENTS_NOT_READ` are SDK clients the reference lists for a
-namespace's operations whose requests Floci does not serve, each with its reason.
-`UNQUALIFIED` are the resource types whose ARN a request may give with a qualifier, one more `:<name>`
-past its format, and whose service checks it without one: Step Functions checks a version or an alias
-on its state machine's ARN, and Parameter Store a version or a label on its parameter's. A value filling a variable
-named `...WithoutLeadingSlash` is read as a Parameter Store name, without the whitespace around it and one leading
-`/`: a parameter's ARN is `parameter/<name>`, whether or not its name starts with a slash. `MINTED_IDS` are the
-resource types whose service follows the name their format ends in with an id it mints, `/<id>`, which the
-format leaves out and a request naming one by its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
-asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
-all an id their service mints, which a request names by members the ARN does not hold, with those
-members: each operation whose request has them all names the type by them (`find`), and the reader
-asks the service for the ARN they find, or else checks the ARN with its id open, as for a create; an
-Application Auto Scaling scalable target, `scalable-target/<id>`, is named by its service namespace,
-resource id and scalable dimension, and the Redshift Serverless workgroup a Data API request runs on,
-`workgroup/<id>`, by its name or ARN. `THROUGH` are the members naming a resource the reference gives no
-type, through which a request names a resource of one it does, with those types: each operation whose
-request has the member, and whose action acts on one of them, names its resource through it (`through`),
-and the reader asks the service for the ARN of the caller's resource at the other end, or else names
-none; a Data API session, by its `SessionId`, runs on the cluster or the serverless workgroup it was
-opened on. A type named by its variables takes one no member fills from the ARN of another type the action acts
+A type's ARN given with a qualifier, one more `:<name>` past its format, is checked without one where the
+metadata says the qualifier names nothing of its own (`unqualified`): the reference gives Step Functions'
+`statemachinealias` and `statemachineversion` formats as the state machine's and one more `:${...}`, and no action
+acts on them, and botocore documents Parameter Store's `Name` as `"name:version"` or `"name:label"`, a selector the
+reference gives no type. A value filling a variable named `...WithoutLeadingSlash` is read as a Parameter Store
+name, without the whitespace around it and one leading `/`: a parameter's ARN is `parameter/<name>`, whether or not
+its name starts with a slash. A type whose botocore ARN shape (`<Type>Arn`) takes one more path segment past its
+format, which ends in a name, has an id its service mints after the name (`mintedIds`): EventBridge's connections
+and API destinations, whose stored ARN the reader asks the service for, or else checks with that id open. A type
+whose ARN is all an id its service mints is named by the members its service finds it by (`find`): those botocore
+documents as its key ("Scalable targets are uniquely identified by the combination of resource ID, scalable
+dimension, and namespace"), or else a name of it where no request of the namespace gives the id (a Redshift
+Serverless namespace by its `namespaceName`), and the reader asks the service for the ARN they find, or else checks
+the ARN with its id open, as for a create. A member naming a resource the reference gives no type, whose botocore
+record holds it beside members named after types the action acts on, names those through it (`through`): a Data
+API session's `SessionData` holds its `SessionId` beside the `ClusterIdentifier` or `WorkgroupName` it runs on, and
+the reader asks the service for the ARN of the caller's resource at the other end, or else names none. A member
+whose botocore shape takes an alias as well as the type's ARN, named for the type with a word before it
+(`IncomingKeyIdentifier`), names a resource of the type, which its service resolves. A type named by its variables takes one no member fills from the ARN of another type the action acts
 on whose format is that variable alone, given by the one top-level ARN member named after that type: a permission
 set an IAM Identity Center create makes has the id of the instance its `InstanceArn` names.
 
@@ -221,21 +220,6 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
               "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
-
-# SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
-# members are not read.
-CLIENTS_NOT_READ: dict[str, str] = {
-    "kinesisanalytics": "Kinesis Data Analytics v1, SQL applications on the KinesisAnalytics_20150814 target, which "
-                        "Floci does not serve (it serves v2, kinesisanalyticsv2); its operations share v2's names and "
-                        "name their resources by other members",
-}
-
-# The namespaces whose members may name a resource of a type with a word before the type's, as
-# `IncomingKeyIdentifier` names a key: the word says which of them it is. Such a member's value may
-# be an alias, and the namespace's service resolves it to the resource the alias points at, so the
-# resource is the one the alias names. A namespace whose service cannot resolve an alias is not
-# among these: an alias would be read as the name of a resource of the type, which names nothing.
-QUALIFIED_MEMBERS = ("payment-cryptography",)
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
@@ -381,80 +365,32 @@ NOT_COVERED: dict[str, str] = {
 }
 
 
-# Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
-# service drops to check it, and why.
-UNQUALIFIED: dict[str, str] = {
-    "states:statemachine": "Step Functions authorizes a version or an alias on its state machine's ARN, not on the "
-                           "version's or the alias's ('To authorize a version or an alias to invoke an API action, "
-                           "Step Functions uses the state machine's ARN instead of using the version ARN or alias ARN')",
-    "ssm:parameter": "Parameter Store reads a version or a label after a parameter's name ('To query by parameter "
-                     "label, use \"Name\": \"name:label\". To query by parameter version, use \"Name\": "
-                     "\"name:version\"', GetParameter's Name) and checks the read on the parameter, whose name "
-                     "holds no colon",
-}
-
-# Resource types whose service follows the one variable their format ends in with an id it mints, `/<id>`,
-# which the format leaves out and a request naming one by its name does not give, and why.
-MINTED_IDS: dict[str, str] = {
-    "events:connection": "EventBridge mints a connection's ARN as connection/<name>/<id> (botocore's ConnectionArn "
-                         "pattern ends in connection/<name>/<id>) and checks a connection on it: the user "
-                         "guide grants events:RetrieveConnectionCredentials on connection/<name>/*",
-    "events:api-destination": "EventBridge mints an API destination's ARN as api-destination/<name>/<id> "
-                              "(botocore's ApiDestinationArn pattern ends in api-destination/<name>/<id>), "
-                              "as it does a connection's",
-}
-
-# Resource types whose ARN is all an id their service mints, which a request names by members the ARN does not
-# hold, the members in the order the service reads them, and why: an operation whose request has them all names the
-# type by them, and the reader asks the service for the ARN they find.
-FOUND_BY: dict[str, tuple[list[str], str]] = {
-    "application-autoscaling:ScalableTarget": (
-        ["ServiceNamespace", "ResourceId", "ScalableDimension"],
-        "a scalable target's ARN ends in its unique id, scalable-target/<id> ('The unique ID "
-        "(1234abcd56ab78cd901ef1234567890ab123) is a value assigned by Application Auto Scaling to the scalable "
-        "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
-        "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
-        "resource (service/<cluster>/<service>), not that id"),
-    **{f"redshift-serverless:{kind}": ([member], f"a Redshift Serverless {kind}'s ARN ends in the id the service gives "
-                                                  f"it, {path}/<id> ('The unique identifier' of its {kind}), while its "
-                                                  f"requests name it by {member}")
-       for kind, member, path in (("namespace", "namespaceName", "namespace"),
-                                  ("workgroup", "workgroupName", "workgroup"),
-                                  ("snapshot", "snapshotName", "snapshot"),
-                                  ("endpointAccess", "endpointName", "managedvpcendpoint"))},
-    "redshift-data:workgroup": (
-        ["WorkgroupName"],
-        "a serverless workgroup's ARN ends in the id Redshift Serverless gives it, workgroup/<id> (its Workgroup's "
-        "workgroupId, 'The unique identifier of the workgroup'; botocore's WorkgroupNameString takes an ARN ending "
-        "in workgroup/<uuid>), while a Data API request names the workgroup by WorkgroupName, 'The serverless "
-        "workgroup name or Amazon Resource Name (ARN)'"),
-}
-
-# Members naming a resource of their service's own the reference gives no type, through which a request names a
-# resource of one it does, the types that resource may be of, and why: an operation whose request has the member,
-# and whose action acts on one of those types, names it through the member, and the reader asks the service for the
-# ARN of the caller's resource at the other end.
-THROUGH: dict[str, tuple[list[str], str]] = {
-    "redshift-data:SessionId": (
-        ["cluster", "workgroup"],
-        "a Data API session runs on the cluster or the serverless workgroup it was opened on (ListSessions filters "
-        "sessions 'by session status, compute target (cluster or serverless workgroup), or database'), and its "
-        "SessionId 'can then be used in subsequent ExecuteStatement and BatchExecuteStatement operations' "
-        "(Amazon Redshift Management Guide), which then run there"),
-}
-
 # The variables of an ARN format the account, partition and Region fill.
 KNOWN_VARIABLES = {"Partition", "Region", "Account"}
 
-# A staged read of heterogeneous resource-id lists. The model supplies the member and its wire name;
-# the Service Reference supplies the action's types and their ARN formats. EC2 documents instance ids
-# with the i- prefix (EC2 User Guide, resource-ids). Only instances are covered here: other ids retain
-# a wildcard entry. Lists named by their resource ARN variable and heterogeneous Resources lists
-# share this reader and its generated condition contexts; requests without those lists stay unchanged.
-ID_TARGETS = {"ec2": {"member": "Resources", "prefixes": {"instance": "i-"}}}
+# Floci's coverage of id-list namespaces: the types of each it reads by id, which ResourceArnBuilder and the condition
+# resolver resolve with their stored tags. It states no AWS fact: the model supplies each list member and its wire
+# name, the Service Reference the action's types and ARN formats, and botocore's documentation the id prefix of each
+# type (`id_prefixes`). Other ids keep a wildcard entry until their coverage grows; requests without those lists stay
+# unchanged.
+ID_TARGETS = {"ec2": ("instance",)}
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
+# A type's id with the example botocore documents it by: "the instance ID (for example, i-0123456789abcdef0)".
+ID_EXAMPLE_RE = re.compile(r"\b([a-z][a-z ]*?) ID \(for example, ([a-z0-9]+-)[0-9a-f]{8,}\)")
+# A sentence of botocore's documentation stating the members that key a type: "<things> are uniquely identified by the
+# combination of <parts>".
+UNIQUE_KEY_RE = re.compile(r"(?P<things>[A-Za-z][A-Za-z ]*?) (?:are|is) uniquely identified by (?:the )?combination of "
+                           r"(?P<parts>[A-Za-z ,]+?)(?:,? which\b|\.|$)")
+# One more `:${...}` past a format: what a type of the reference qualifies another's ARN by.
+QUALIFIER_RE = re.compile(r":\$\{\w+}")
+# A string pattern that takes an alias, `alias/...`, as one of its alternatives.
+ALIAS_PATTERN_RE = re.compile(r"(?:^|[|(])\^?alias/")
+# A format's resource that is a word and one variable (`connection/${ConnectionName}`), and the two path segments of
+# its own an ARN pattern takes past that word when its service mints an id after the name (`\\/[...]+\\/[...]+$`).
+MINTED_WORD_RE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*)/\$\{\w+}$")
+MINTED_TAIL = r"\\/(?:\[[^\]]*\][+*]|\([^()]*\)[+*]?)\\/(?:\[[^\]]*\][+*]|\([^()]*\)[+*]?)\$?$"
 STEM_SUFFIX_RE = re.compile(r"(arns|arn|names|name|identifiers|identifier|ids|id|config|s)$")
 # A bare member that names the resource of the type its operation acts on.
 BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
@@ -519,7 +455,7 @@ def resource_tag_keys(documents: list[dict]) -> dict[str, dict[str, list[str]]]:
     result = {}
     for document in documents:
         namespace = document["Name"]
-        supported = ID_TARGETS.get(namespace, {}).get("prefixes", {})
+        supported = ID_TARGETS.get(namespace, ())
         types = {resource["Name"]: sorted(key.removesuffix("${TagKey}")
                  for key in resource.get("ConditionKeys", []) if key.endswith(":ResourceTag/${TagKey}"))
                  for resource in document.get("Resources", []) if resource["Name"] in supported}
@@ -997,6 +933,23 @@ def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
     return found
 
 
+def alias_members(models: dict[str, dict], operation: str) -> set[str]:
+    """The top-level members of the operation's request whose botocore shape takes an alias of a resource as well as
+    its ARN (Payment Cryptography's `KeyArnOrKeyAliasType`, `...:(key/...|alias/...)$|^alias/...`): its service
+    resolves such a value to the resource the alias points at, so a member named for a type with a word before it
+    (`IncomingKeyIdentifier`) names a resource of that type."""
+    found: set[str] = set()
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec:
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            shape = model["shapes"][member["shape"]]
+            if shape.get("type") == "string" and ALIAS_PATTERN_RE.search(shape.get("pattern") or ""):
+                found.add(name)
+    return found
+
+
 def member_shapes(models: dict[str, dict], operation: str) -> dict[str, str]:
     """The botocore shape each top-level member of the operation's request holds, by member name, across the request's
     clients."""
@@ -1388,7 +1341,7 @@ def compatible(member: str, variable: str) -> bool:
 
 def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
                   arn_members: set[str] | None = None, labels: dict[str, str] | None = None,
-                  shapes: dict[str, str] | None = None) -> list[dict]:
+                  shapes: dict[str, str] | None = None, aliased: set[str] | None = None) -> list[dict]:
     """The resources the rule finds the operation's request naming, as vendored entries. `labels` gives the path
     segment before each bare member a REST request carries as a path label, stemmed (`path_labels`), and `shapes` the
     botocore shape each member holds (`member_shapes`)."""
@@ -1436,7 +1389,7 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (v == in_slot, kind_of(v) == "", v)):
             choice = _filling(variable, kind_stem, len(variables), {m: p for m, p in names.items() if m not in fill.values()},
-                              bare=bare, qualified=namespace_of(operation) in QUALIFIED_MEMBERS, word_stem=word_stem,
+                              bare=bare, aliased=aliased, word_stem=word_stem,
                               shapes=shapes if not held else None)
             if choice is not None:
                 fill[variable] = choice
@@ -1458,9 +1411,8 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
             full = [kind for kind in kinds if complete[kind]]
             kept += kinds if len(kinds) == 1 else (full if len(full) == 1 else [])
     specs = [{"types": kinds, "arn": arns[member]} for member, kinds in sorted(by_arn.items())]
-    qualified = namespace_of(operation) in QUALIFIED_MEMBERS
     return specs + [{"type": kind, "fill": dict(sorted(filled[kind].items()))} for kind in types if kind in kept] + \
-        also_filled(types, members, filled, kept, used, qualified)
+        also_filled(types, members, filled, kept, used, aliased or set())
 
 
 RESOURCE_PART_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$")
@@ -1527,7 +1479,8 @@ def creates_for(operation: str, types: list[str], formats: dict[str, str], membe
 
 
 def makes_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
-              arn_members: set[str] | None = None, labels: dict[str, str] | None = None) -> list[dict]:
+              arn_members: set[str] | None = None, labels: dict[str, str] | None = None,
+              aliased: set[str] | None = None) -> list[dict]:
     """The resource a create whose action acts on no resource type makes: of the one type of its namespace named as
     the operation is past its verb, or else related to that name, named as the rule names a type an action acts on,
     its variables nothing fills open. AWS checks the tagging action a create's tags need on the resource being
@@ -1541,7 +1494,8 @@ def makes_for(operation: str, types: list[str], formats: dict[str, str], members
         or [kind for kind in formats if related(created, stem(kind))]
     if len(kinds) != 1:
         return []
-    return [resource for resource in resources_for(operation, kinds, formats, members, arn_members, labels)
+    return [resource for resource in resources_for(operation, kinds, formats, members, arn_members, labels,
+                                                   aliased=aliased)
             if resource.get("type") == kinds[0]][:1]
 
 
@@ -1551,7 +1505,7 @@ def by_members_key_is_empty(kinds: list[str], filled: dict[str, dict[str, str]])
 
 
 def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str], bare: set[str],
-             qualified: bool = False, word_stem: str | None = None,
+             aliased: set[str] | None = None, word_stem: str | None = None,
              shapes: dict[str, str] | None = None) -> str | None:
     """The member that fills the variable: one of a compatible kind whose stem relates to the variable's,
     or, for the variable named after the type or a type's only one, a member named after the type, or a
@@ -1571,7 +1525,8 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
         candidates = [member for member in names if compatible(member, variable)
                       and ((member in bare and member.lower() in BARE)
                            or (stem(member) and (related(stem(member), kind_stem)
-                                                 or (qualified and names_type(member, kind_stem)))))]
+                                                 or (member in (aliased or set())
+                                                     and names_type(member, kind_stem)))))]
     elif not candidates and word_stem and related(variable_stem, word_stem):
         # A variable named after the format's leading word (`rule/${EventBusName}/${RuleName}`'s `RuleName`) takes a
         # bare `Name` or `Id` of the operation that is about the type, and no member named after another type.
@@ -1593,13 +1548,14 @@ def _filling(variable: str, kind_stem: str, variables: int, names: dict[str, str
 
 
 def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dict[str, str]],
-                kept: list[str], used: dict[str, str], qualified: bool) -> list[dict]:
+                kept: list[str], used: dict[str, str], aliased: set[str]) -> list[dict]:
     """The resources a request names besides the one it fills a type with, when it names several of that type and
     acts on each of them.
 
     <p>A re-encryption decrypts under the key its path names and encrypts under the key its body names, so both are
     acted on and both are checked. A member that names a resource of the type, with a word before it saying which of
-    them it is, fills the type's variable as well."""
+    them it is, fills the type's variable as well, when botocore's shape for it takes an alias as well as the type's
+    ARN, which the service resolves (Payment Cryptography's `KeyArnOrKeyAliasType`)."""
     found = []
     for kind in types:
         if kind not in kept or kind not in filled or not filled[kind]:
@@ -1609,7 +1565,7 @@ def also_filled(types: list[str], members: dict[str, str], filled: dict[str, dic
         for member in sorted(members):
             if used.get(kind) == member:
                 continue
-            if not qualified or not names_type(member, kind_stem):
+            if member not in aliased or not names_type(member, kind_stem):
                 continue
             if not compatible(member, variable):
                 continue
@@ -1629,30 +1585,59 @@ def names_type(member: str, kind_stem: str) -> bool:
 # --------------------------------------------------------------------------- #
 # The vendored document
 # --------------------------------------------------------------------------- #
-def id_targets(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> dict | None:
-    """An id list, in model and EC2 Query spelling, with each supported type's discriminator."""
+def id_prefixes(models: dict[str, dict], kinds: tuple[str, ...]) -> dict[str, str]:
+    """The prefix botocore documents each type's ids with, "the instance ID (for example, i-0123456789abcdef0)", for the
+    types given; a type it gives no example of has none."""
+    counts: dict[str, dict[str, int]] = {}
+    for model in models.values():
+        for shape in model["shapes"].values():
+            for member in shape.get("members", {}).values():
+                documentation = member.get("documentation") or ""
+                if "for example, " not in documentation:
+                    continue
+                text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", documentation))
+                for named, prefix in ID_EXAMPLE_RE.findall(text):
+                    kind = next((kind for kind in kinds if stem(kind) == stem(named.split()[-1])), None)
+                    if kind:
+                        counts.setdefault(kind, {}).setdefault(prefix, 0)
+                        counts[kind][prefix] += 1
+    return {kind: max(found, key=found.get) for kind, found in sorted(counts.items())}
+
+
+def namespace_id_prefixes(namespace: str, models: dict[str, dict]) -> dict[str, str] | None:
+    """`id_prefixes` of the types `ID_TARGETS` reads by id in the namespace; None for a namespace it reads none of."""
+    return id_prefixes(models, ID_TARGETS[namespace]) if namespace in ID_TARGETS else None
+
+
+def id_targets(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict],
+               known: dict[str, str] | None = None) -> dict | None:
+    """An id list, in model and EC2 Query spelling, with each type `ID_TARGETS` reads by id's discriminator, the prefix
+    botocore documents its ids with (`id_prefixes`): the list a type's ARN variable names, or else the request's list
+    of whatever resources it acts on (`Resources`, of the tagging calls)."""
     configured = ID_TARGETS.get(namespace_of(operation))
     if configured is None:
         return None
+    known = known if known is not None else id_prefixes(models, configured)
     found = None
     for model in models.values():
         spec = model["operations"].get(operation.split(":", 1)[1], {})
         if "input" not in spec or "ec2" not in _protocols(model):
             continue
         members = model["shapes"][spec["input"]["shape"]].get("members", {})
-        variables = {variable for kind in configured["prefixes"] if kind in types and kind in formats
+        variables = {variable for kind in known if kind in types and kind in formats
                      for variable in set(VARIABLE_RE.findall(formats[kind])) - KNOWN_VARIABLES}
         candidates = [name for name, member in members.items()
                       if _strings(model, model["shapes"][member["shape"]]) == "[]"
                       and name.lower().removesuffix("s") in {variable.lower() for variable in variables}]
         if len(candidates) > 1:
             raise ValueError(f"{operation}: several id lists name the target: {candidates}")
-        member_name = candidates[0] if candidates else configured["member"]
-        member = members.get(member_name)
+        listed = [name for name, member in members.items() if stem(name) == "resource"
+                  and _strings(model, model["shapes"][member["shape"]]) == "[]"]
+        member_name = candidates[0] if candidates else listed[0] if len(listed) == 1 else None
+        member = members.get(member_name) if member_name else None
         if member is None or _strings(model, model["shapes"][member["shape"]]) != "[]":
             continue
-        prefixes = {kind: prefix for kind, prefix in configured["prefixes"].items()
-                    if kind in types and kind in formats}
+        prefixes = {kind: prefix for kind, prefix in known.items() if kind in types and kind in formats}
         if not prefixes:
             continue
         for kind in prefixes:
@@ -1668,7 +1653,8 @@ def id_targets(operation: str, types: list[str], formats: dict[str, str], models
     return found
 
 
-def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: dict[str, dict]) -> dict:
+def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: dict[str, dict],
+              known: dict[str, str] | None = None) -> dict:
     """What the file says for one operation."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
@@ -1680,7 +1666,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                    and values and all(only_arn(value) for value in values)}
     if namespace_of(operation) in ID_TARGETS:
         entry = {"action": upstream["action"], "types": types, "resources": []}
-        targets = id_targets(operation, types, formats, models)
+        targets = id_targets(operation, types, formats, models, known)
         if targets is not None:
             entry["targets"] = targets
         return entry
@@ -1693,7 +1679,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if creates:
         entry["creates"] = creates
     makes = makes_for(operation, types, formats, members, arn_members,
-                      path_labels(models, operation.split(":", 1)[1]))
+                      path_labels(models, operation.split(":", 1)[1]), alias_members(models, operation.split(":", 1)[1]))
     if makes:
         entry["makes"] = makes
     named = _named(resources) | _named(creates) | _named(makes)
@@ -1737,10 +1723,12 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     if resources is None:
         resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members,
                                                                           arn_members, labels,
-                                                                          member_shapes(models, name)),
+                                                                          member_shapes(models, name),
+                                                                          alias_members(models, name)),
                                                             formats, types, members),
-                                            namespace_of(operation), types, members),
-                                 namespace_of(operation), types, members)
+                                            types, formats, members, found_keys(models, formats),
+                                            requested_members(models)),
+                                 types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
     optional = optional_members(models, name)
     resources = with_absent_arn(resources, formats, optional)
@@ -1752,7 +1740,9 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_default_pairs(resources, formats, optional)
     resources = with_enum_named(operation, resources, formats, models)
     resources = with_subject_through(operation, resources, members, map_fields(models, name), optional, models)
-    return with_optional_qualifier(resources, optional)
+    resources = with_optional_qualifier(resources, optional)
+    # Two rules naming the same resource the same way name it once.
+    return [resource for index, resource in enumerate(resources) if resource not in resources[:index]]
 
 
 def with_enum_named(operation: str, resources: list[dict], formats: dict[str, str],
@@ -1982,27 +1972,101 @@ def _named(value: object) -> set[str]:
     return {re.split(r"[\[{.]", value, maxsplit=1)[0]} if isinstance(value, str) else set()
 
 
-def with_found(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
-    """The resources, a `FOUND_BY` type the action acts on named by the members its service finds it by, when the
-    request has them all, rather than by any it fills: its variables are an id the request does not give."""
-    found = [resource for resource in resources if f"{namespace}:{resource.get('type')}" not in FOUND_BY]
+def with_found(resources: list[dict], types: list[str], formats: dict[str, str], members: dict[str, str],
+               keys: dict[str, list[str]], requested: set[str]) -> list[dict]:
+    """The resources, a type whose ARN is all an id its service mints named instead by the members its service finds
+    it by, when the request has them all, rather than by any it fills:
+    - the members botocore documents as its key (`found_keys`: a scalable target by its `ServiceNamespace`,
+      `ResourceId` and `ScalableDimension`, its own id being one Application Auto Scaling assigns);
+    - or else a name of it, a member named after the type or its format's resource word and ending as a name, where
+      the format's one variable is an id no request of the namespace gives (`requested`, every member of its requests),
+      which the service mints: a Redshift Serverless namespace, `namespace/${NamespaceId}`, by its `namespaceName`; a
+      VPC endpoint, `managedvpcendpoint/${EndpointAccessId}`, by its `endpointName`. Where some request gives the id,
+      as Cognito's `IdentityPoolId`, a name beside it is a new name, not the resource's."""
+    by_kind = {}
     for kind in types:
-        by = FOUND_BY.get(f"{namespace}:{kind}", ([], ""))[0]
-        if by and all(members.get(member) == member for member in by):
-            found.append({"type": kind, "fill": {}, "find": list(by)})
+        variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+        key = keys.get(kind)
+        if key and all(members.get(member) == member for member in key):
+            by_kind[kind] = key
+        elif len(variables) == 1 and kind_of(variables[0]) == "id" and kind not in keys:
+            word = RESOURCE_PART_RE.match(formats[kind])
+            stems = {stem(kind)} | ({stem(word.group(1))} if word else set())
+            if any(kind_of(given) in ("id", "identifier") and (given.lower() == variables[0].lower()
+                   or (stem(variables[0]) == "resource" and stem(given)
+                       and any(related(stem(given), known) for known in stems))) for given in requested):
+                continue
+            named = sorted(member for member, path in members.items() if path == member and kind_of(member) == "name"
+                           and any(related(stem(member), known) for known in stems))
+            if len(named) == 1:
+                by_kind[kind] = named
+    # A type botocore documents a key of is named by that key alone, never by a member filling its id, which is not one
+    # a request gives: a request lacking a member of its key names none.
+    found = [resource for resource in resources if resource.get("type") not in by_kind and resource.get("type") not in keys]
+    return found + [{"type": kind, "fill": {}, "find": list(by)} for kind, by in by_kind.items()]
+
+
+def requested_members(models: dict[str, dict]) -> set[str]:
+    """Every top-level member of every request of the clients given."""
+    return {member for model in models.values() for spec in model["operations"].values() if "input" in spec
+            for member in model["shapes"][spec["input"]["shape"]].get("members", {})}
+
+
+def found_keys(models: dict[str, dict], formats: dict[str, str]) -> dict[str, list[str]]:
+    """The members botocore documents as a type's key, by type: "Scalable targets are uniquely identified by the
+    combination of resource ID, scalable dimension, and namespace" (Application Auto Scaling's
+    `RegisterScalableTarget`) keys a `ScalableTarget` by `ServiceNamespace`, `ResourceId` and `ScalableDimension`, the
+    members of the documenting request each part names, in the request's order."""
+    found: dict[str, list[str]] = {}
+    for model in models.values():
+        for operation, spec in model["operations"].items():
+            text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", spec.get("documentation") or ""))
+            match = UNIQUE_KEY_RE.search(text)
+            if not match or "input" not in spec:
+                continue
+            kinds = [kind for kind in formats if stem(kind) == stem(match.group("things"))]
+            request = list(model["shapes"][spec["input"]["shape"]].get("members", {}))
+            parts = [re.sub(r"[^a-z0-9]", "", part.lower())
+                     for part in re.split(r",\s*(?:and\s+)?|\s+and\s+", match.group("parts")) if part.strip()]
+            key = [member for member in request if any(member.lower().endswith(part) for part in parts)]
+            if len(kinds) == 1 and len(key) == len(parts):
+                found[kinds[0]] = key
     return found
 
 
-def with_through(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
-    """The resources, and the one of the `THROUGH` types the action acts on that each member of the request naming
-    a resource of its service's own runs on."""
+def with_through(resources: list[dict], types: list[str], members: dict[str, str],
+                 reached: dict[str, list[str]]) -> list[dict]:
+    """The resources, and the types the action acts on that each member of the request naming a resource of its
+    service's own reaches (`through_members`), named through that member: the reader asks the service for the ARN of
+    the caller's resource at the other end."""
     through = []
-    for key, (kinds, _) in sorted(THROUGH.items()):
-        member = key.split(":", 1)[1]
+    for member, kinds in sorted(reached.items()):
         on = [kind for kind in types if kind in kinds]
-        if key.startswith(f"{namespace}:") and on and members.get(member) == member:
+        if on and members.get(member) == member:
             through.append({"types": on, "through": member})
     return resources + through
+
+
+def through_members(models: dict[str, dict], formats: dict[str, str]) -> dict[str, list[str]]:
+    """The members naming a resource of their service's own that the reference gives no type, each with the types the
+    resource runs on or is in: botocore's record of it, a structure named after it that holds the member, holds members
+    named after those types. A Data API session's `SessionData` holds its `SessionId` beside the `ClusterIdentifier`
+    or `WorkgroupName` of the cluster or the serverless workgroup it runs on, so a request naming a session alone
+    reaches that one."""
+    stems = {stem(kind): kind for kind in formats}
+    found: dict[str, set[str]] = {}
+    for model in models.values():
+        for shape_name, shape in model["shapes"].items():
+            fields = shape.get("members", {}) if shape.get("type") == "structure" else {}
+            for member in fields:
+                thing = stem(member)
+                if not member.endswith("Id") or not thing or not shape_name.lower().startswith(thing) \
+                        or any(related(thing, known) for known in stems):
+                    continue
+                kinds = {stems[stem(field)] for field in fields if field != member and stem(field) in stems}
+                if kinds:
+                    found.setdefault(member, set()).update(kinds)
+    return {member: sorted(kinds) for member, kinds in sorted(found.items())}
 
 
 def rest_operations(data: Path) -> dict[str, set[str]]:
@@ -2051,29 +2115,18 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     _check_overrides(covered)
     read_namespaces = set(NAMESPACES) | {namespace_of(operation) for operation in covered}
     namespaces = {namespace: sorted({client for operation, value in covered.items()
-                                     if namespace_of(operation) == namespace for client in value["clients"]
-                                     if client not in CLIENTS_NOT_READ})
+                                     if namespace_of(operation) == namespace for client in value["clients"]})
                   for namespace in sorted(read_namespaces)}
     formats = arn_formats(documents, read_namespaces)
-    unqualified = unqualified_types()
-    minted = minted_types()
-    missing = [f"{name} names {namespace}:{kind}, no resource type with an ARN format of a namespace the file reads"
-               for name, listed in (("UNQUALIFIED", unqualified), ("MINTED_IDS", minted))
-               for namespace, kinds in listed.items() for kind in kinds if kind not in formats.get(namespace, {})]
-    missing += [f"MINTED_IDS names {namespace}:{kind}, whose ARN format does not end in its one variable"
-                for namespace, kinds in minted.items() for kind in kinds
-                if kind in formats.get(namespace, {}) and not ONE_VARIABLE_RE.match(_resource(formats[namespace][kind]))]
-    missing += [f"FOUND_BY names {key}, no resource type with an ARN format of a namespace the file reads"
-                for key in sorted(FOUND_BY) if key.split(":", 1)[1] not in formats.get(key.split(":", 1)[0], {})]
-    missing += [f"THROUGH names {key.split(':', 1)[0]}:{kind}, no resource type with an ARN format of a namespace the "
-                f"file reads" for key, (kinds, _) in sorted(THROUGH.items()) for kind in kinds
-                if kind not in formats.get(key.split(":", 1)[0], {})]
-    if missing:
-        raise ValueError("; ".join(missing))
+    minted = minted_types(formats, namespaces, data)
     operations = {}
+    prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(namespaces[namespace])))
+                for namespace in ID_TARGETS if namespace in namespaces}
     for operation, value in sorted(covered.items()):
         models = load_models(data, set(namespaces[namespace_of(operation)]))
-        operations[operation] = entry_for(operation, value, formats.get(namespace_of(operation), {}), models)
+        operations[operation] = entry_for(operation, value, formats.get(namespace_of(operation), {}), models,
+                                          prefixes.get(namespace_of(operation)))
+    unqualified = unqualified_types(formats, operations, namespaces, data)
     return {
         "_source": {
             "generator": "tools/aws/regen_iam_request_resources.py",
@@ -2084,7 +2137,6 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                     "make iam-request-resources-verify checks every action, type and format against AWS.",
         },
         "namespaces": namespaces,
-        "clientsNotRead": dict(sorted(CLIENTS_NOT_READ.items())),
         "handBuilt": list(HAND_BUILT),
         "notCovered": dict(sorted(NOT_COVERED.items())),
         "otherNamespaces": sorted(namespace for namespace in _with_resource_types(documents)
@@ -2098,22 +2150,59 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     }
 
 
-def unqualified_types() -> dict[str, list[str]]:
-    """`UNQUALIFIED` as the types of each namespace."""
-    return _types_of(UNQUALIFIED)
+def unqualified_types(formats: dict[str, dict[str, str]], operations: dict[str, dict],
+                      namespaces: dict[str, list[str]], data: Path) -> dict[str, list[str]]:
+    """The types of each namespace whose ARN a request may give with a qualifier, one more `:<name>` past its format,
+    and whose service checks it without one:
+    - the reference gives types whose formats are the type's and one more `:${...}`, and no action acts on any of them:
+      Step Functions' `statemachinealias` and `statemachineversion`, `stateMachine:${StateMachineName}:${...}`, which
+      no action acts on, while `DescribeStateMachineAlias` and `StartExecution` act on the `statemachine`;
+    - botocore documents a member that fills the type as taking `"<member>": "name:<selector>"`, a selector the
+      reference gives no type: Parameter Store's `GetParameter` `Name` ("To query by parameter version, use \"Name\":
+      \"name:version\""), the parameter being what is checked."""
+    acted: dict[str, set[str]] = {}
+    for operation, entry in operations.items():
+        acted.setdefault(namespace_of(operation), set()).update(entry["types"])
+    found: dict[str, set[str]] = {}
+    for namespace, kinds in formats.items():
+        for kind, arn in kinds.items():
+            longer = [other for other, extended in kinds.items()
+                      if other != kind and extended.startswith(arn) and QUALIFIER_RE.fullmatch(extended[len(arn):])]
+            if longer and not set(longer) & acted.get(namespace, set()):
+                found.setdefault(namespace, set()).add(kind)
+    loaded: dict[str, dict[str, dict]] = {}
+    for operation, entry in operations.items():
+        namespace, name = namespace_of(operation), operation.split(":", 1)[1]
+        filled = [(resource["type"], path) for resource in entry["resources"] if "type" in resource
+                  for path in resource.get("fill", {}).values() if "." not in path and "[" not in path]
+        if not filled:
+            continue
+        if namespace not in loaded:
+            loaded[namespace] = load_models(data, set(namespaces.get(namespace, [])))
+        models = loaded[namespace]
+        for kind, path in filled:
+            text = re.sub(r"<[^>]+>", "", _member_documentation(models, name, path) or "")
+            if re.search(r'"' + re.escape(path) + r'":\s*"name:\w+"', text):
+                found.setdefault(namespace, set()).add(kind)
+    return {namespace: sorted(kinds) for namespace, kinds in sorted(found.items())}
 
 
-def minted_types() -> dict[str, list[str]]:
-    """`MINTED_IDS` as the types of each namespace."""
-    return _types_of(MINTED_IDS)
-
-
-def _types_of(listed: dict[str, str]) -> dict[str, list[str]]:
-    """`<namespace>:<type>` keys as the types of each namespace."""
+def minted_types(formats: dict[str, dict[str, str]], namespaces: dict[str, list[str]],
+                 data: Path) -> dict[str, list[str]]:
+    """The types of each namespace whose service follows the one variable their format ends in with an id it mints,
+    which the format leaves out and a request naming one by its name does not give: botocore's ARN shape for the type
+    (`<Type>Arn`) takes one more path segment past the format's, two each of its own (EventBridge's `ConnectionArn`
+    ends in `connection\\/[...]+\\/[...]+`, the format in `connection/${ConnectionName}`)."""
     found: dict[str, list[str]] = {}
-    for key in sorted(listed):
-        namespace, kind = key.split(":", 1)
-        found.setdefault(namespace, []).append(kind)
+    for namespace in sorted(formats):
+        shapes = {name.lower(): shape["pattern"]
+                  for model in load_models(data, set(namespaces.get(namespace, []))).values()
+                  for name, shape in model["shapes"].items() if shape.get("type") == "string" and shape.get("pattern")}
+        for kind, arn in sorted(formats[namespace].items()):
+            word = MINTED_WORD_RE.match(_resource(arn))
+            pattern = shapes.get(re.sub(r"[^a-z0-9]", "", kind.lower()) + "arn")
+            if word and pattern and re.search(re.escape(word.group(1)) + MINTED_TAIL, pattern):
+                found.setdefault(namespace, []).append(kind)
     return found
 
 
@@ -2157,7 +2246,7 @@ def _check_overrides(covered: dict[str, dict]) -> None:
 def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
-    for key in ("_source", "namespaces", "clientsNotRead", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
+    for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
                 "unqualified", "mintedIds"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
@@ -2225,10 +2314,9 @@ def validate(document: dict) -> list[str]:
         if not isinstance(document.get(key), list) or not all(isinstance(n, str) and NAMESPACE_RE.match(n)
                                                               for n in document[key]):
             problems.append(f"{key} is not a list of namespaces")
-    for key in ("notCovered", "clientsNotRead"):
-        if not isinstance(document.get(key), dict) or not all(
-                isinstance(reason, str) and reason for reason in document[key].values()):
-            problems.append(f"{key} does not give each a reason")
+    if not isinstance(document.get("notCovered"), dict) or not all(
+            isinstance(reason, str) and reason for reason in document["notCovered"].values()):
+        problems.append("notCovered does not give each a reason")
     for operation, entry in operations.items():
         namespace = namespace_of(operation)
         if not OPERATION_RE.match(operation) or namespace not in namespaces:
@@ -2385,20 +2473,21 @@ def _created_problems(operation: str, created: object, types: set[str], formats:
 def derive(document: dict, data: Path) -> list[str]:
     """Where the resources the file gives differ from what botocore gives for its types and formats."""
     problems: list[str] = []
-    if document["clientsNotRead"] != dict(sorted(CLIENTS_NOT_READ.items())):
-        problems.append(f"the file leaves out the clients {json.dumps(document['clientsNotRead'])}, CLIENTS_NOT_READ "
-                        f"gives {json.dumps(dict(sorted(CLIENTS_NOT_READ.items())))}")
-    if document["unqualified"] != unqualified_types():
-        problems.append(f"the file checks {json.dumps(document['unqualified'])} without a qualifier, "
-                        f"UNQUALIFIED gives {json.dumps(unqualified_types())}")
-    if document["mintedIds"] != minted_types():
-        problems.append(f"the file gives {json.dumps(document['mintedIds'])} a minted id, "
-                        f"MINTED_IDS gives {json.dumps(minted_types())}")
+    unqualified = unqualified_types(document["arnFormats"], document["operations"], document["namespaces"], data)
+    if document["unqualified"] != unqualified:
+        problems.append(f"the file checks {json.dumps(document['unqualified'])} without a qualifier, the reference "
+                        f"and botocore give {json.dumps(unqualified)}")
+    minted = minted_types(document["arnFormats"], document["namespaces"], data)
+    if document["mintedIds"] != minted:
+        problems.append(f"the file gives {json.dumps(document['mintedIds'])} a minted id, botocore's ARN patterns "
+                        f"give {json.dumps(minted)}")
+    prefixes = {namespace: namespace_id_prefixes(namespace, load_models(data, set(document["namespaces"][namespace])))
+                for namespace in ID_TARGETS if namespace in document["namespaces"]}
     for operation, entry in document["operations"].items():
         namespace = namespace_of(operation)
         models = load_models(data, set(document["namespaces"][namespace]))
         expected = entry_for(operation, {"action": entry["action"], "types": entry["types"]},
-                             document["arnFormats"].get(namespace, {}), models)
+                             document["arnFormats"].get(namespace, {}), models, prefixes.get(namespace))
         if expected != entry:
             problems.append(f"{operation}: the file has {json.dumps(entry)}, botocore gives {json.dumps(expected)}")
     return problems
@@ -2415,7 +2504,7 @@ def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str,
             untrue.append(f"AWS checks {operation} as {actual['action']}, not {entry['action']}")
         elif (actual["types"] or []) != entry["types"]:
             untrue.append(f"AWS gives {entry['action']} the resource types {actual['types']}, not {entry['types']}")
-        elif not set(actual["clients"]) - set(vendored["clientsNotRead"]) <= set(vendored["namespaces"][namespace_of(operation)]):
+        elif not set(actual["clients"]) <= set(vendored["namespaces"][namespace_of(operation)]):
             untrue.append(f"AWS lists {operation} for {actual['clients']}, which the file does not read")
     for namespace, types in vendored["arnFormats"].items():
         changed = sorted(kind for kind, arn in types.items() if formats.get(namespace, {}).get(kind) != arn)
