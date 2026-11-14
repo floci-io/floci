@@ -5207,7 +5207,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Map<String, String>> terminateInstances(String region, List<String> instanceIds) {
+        return terminateInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one TerminateInstances could end, and the
+     * request is then answered with DryRunOperation, nothing terminated.
+     */
+    public List<Map<String, String>> terminateInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> requireEc2ManagedInstance(region, id, "terminated"));
+            throw dryRunOperation();
+        }
         List<Map<String, String>> result = new ArrayList<>();
         // Every instance named here is going away, so none of them counts as a live dependant of
         // a capture -- not the ones already processed, which linger as shutting-down while their
@@ -5218,11 +5230,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // would silently fall back to the default account.
         String owner = callerAccountId();
         for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be terminated through EC2", 400);
-            }
+            Instance inst = requireEc2ManagedInstance(region, id, "terminated");
 
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
@@ -5326,14 +5334,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Map<String, String>> stopInstances(String region, List<String> instanceIds) {
+        return stopInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one StopInstances could stop, and the
+     * request is then answered with DryRunOperation, nothing stopped.
+     */
+    public List<Map<String, String>> stopInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> requireEc2ManagedInstance(region, id, "stopped"));
+            throw dryRunOperation();
+        }
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be stopped through EC2", 400);
-            }
+            Instance inst = requireEc2ManagedInstance(region, id, "stopped");
 
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
@@ -5376,6 +5392,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Map<String, String>> startInstances(String region, List<String> instanceIds) {
+        return startInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one StartInstances could start, the vCPU
+     * quota and Capacity Reservation admission included, and the request is then answered with
+     * DryRunOperation, nothing started or reserved.
+     */
+    public List<Map<String, String>> startInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
         if (config.services().ec2().enforceVcpuQuotas()) {
             synchronized (privateIpAllocationLock) {
@@ -5383,16 +5408,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 Set<String> legacySpot = spotInstanceIds(region);
                 List<Instance> targets = new ArrayList<>();
                 for (String id : new LinkedHashSet<>(instanceIds)) {
-                    Instance instance = getRequiredInstance(region, id);
-                    if (isExternalInstance(region, id)) {
-                        throw new AwsException("OperationNotPermitted",
-                                "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
-                    }
-                    if ("terminated".equals(instance.getState().getName())) {
-                        throw new AwsException("IncorrectInstanceState",
-                                "The instance '" + id + "' is not in a state from which it can be started.", 400);
-                    }
-                    targets.add(instance);
+                    targets.add(requireStartableInstance(region, id));
                 }
                 for (Instance instance : targets) {
                     String state = instance.getState().getName();
@@ -5404,18 +5420,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 enforceStandardOnDemandQuota(region, additional);
             }
         }
+        if (dryRun) {
+            List<Instance> starting = new ArrayList<>();
+            for (String id : instanceIds) {
+                Instance instance = requireStartableInstance(region, id);
+                String state = instance.getState().getName();
+                if ("stopped".equals(state) || "stopping".equals(state)) {
+                    starting.add(instance);
+                }
+            }
+            // The real start sets each of these pending and admits it into its Capacity Reservation.
+            acquireCapacity(region, starting, true);
+            throw dryRunOperation();
+        }
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-           Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
-            }
-
-            if ("terminated".equals(inst.getState().getName())) {
-                throw new AwsException("IncorrectInstanceState",
-                        "The instance '" + id + "' is not in a state from which it can be started.", 400);
-            }
+            Instance inst = requireStartableInstance(region, id);
             InstanceState prev = inst.getState();
             synchronized (capacityReservationLock) {
                 if ("stopped".equals(prev.getName()) || "stopping".equals(prev.getName())) {
@@ -5522,13 +5542,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void rebootInstances(String region, List<String> instanceIds) {
+        rebootInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one RebootInstances could reboot, and the
+     * request is then answered with DryRunOperation, nothing rebooted.
+     */
+    public void rebootInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> requireEc2ManagedInstance(region, id, "rebooted"));
+            throw dryRunOperation();
+        }
         for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be rebooted through EC2", 400);
-            }
+            Instance inst = requireEc2ManagedInstance(region, id, "rebooted");
 
             if (!config.services().ec2().mock()) {
                 containerManager.reboot(inst);
@@ -6107,6 +6135,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private boolean isExternalInstance(String region, String instanceId) {
         return findExternalInstance(callerAccountId(), region, instanceId).isPresent();
+    }
+
+    /**
+     * The instance {@code instanceId} names, if EC2 itself runs it: a cluster node is refused with
+     * OperationNotPermitted, as its cluster runs it. {@code action} words the refusal ("stopped").
+     */
+    private Instance requireEc2ManagedInstance(String region, String instanceId, String action) {
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (isExternalInstance(region, instanceId)) {
+            throw new AwsException("OperationNotPermitted",
+                    "The instance '" + instanceId + "' is a cluster node and cannot be " + action + " through EC2", 400);
+        }
+        return inst;
+    }
+
+    /** As above, for StartInstances, which also refuses an instance that is terminated. */
+    private Instance requireStartableInstance(String region, String instanceId) {
+        Instance inst = requireEc2ManagedInstance(region, instanceId, "started");
+        if ("terminated".equals(inst.getState().getName())) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + instanceId + "' is not in a state from which it can be started.", 400);
+        }
+        return inst;
     }
 
     private Instance getRequiredInstance(String region, String instanceId) {
@@ -11341,9 +11392,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     void acquireCapacity(String region, List<Instance> admitted) {
+        acquireCapacity(region, admitted, false);
+    }
+
+    /**
+     * As above; with {@code dryRun}, {@code admitted} are the stopped instances a StartInstances dry
+     * run names. Each is admitted as the real start admits it once it is pending, the batch counted
+     * against copies of the reservations, and the same refusals are thrown, but nothing is recorded.
+     */
+    private void acquireCapacity(String region, List<Instance> admitted, boolean dryRun) {
         synchronized (capacityReservationLock) {
             Set<String> groupInstances = capacityGroupInstanceIds.get(callerAccountId() + "::" + region);
-            if (groupInstances != null) {
+            if (groupInstances != null && !dryRun) {
                 for (Instance instance : admitted) {
                     if (instance.getCapacityReservationGroupArn() != null) {
                         groupInstances.add(instance.getInstanceId());
@@ -11355,7 +11415,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .stream().map(CapacityReservation::new).toList();
             Map<String, CapacityReservation> changed = new LinkedHashMap<>();
             for (Instance instance : admitted) {
-                if (!holdsCapacity(instance) || instance.isSpot()
+                if ((!dryRun && !holdsCapacity(instance)) || instance.isSpot()
                         || "none".equals(instance.getCapacityReservationPreference())) {
                     continue;
                 }
@@ -11374,7 +11434,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .filter(r -> r.getAvailableInstanceCount() > 0).findFirst().orElse(null);
                 if (selected == null) {
                     if (target != null) {
-                        CapacityReservation reservation = getRequiredCapacityReservation(region, target);
+                        // A dry run counts its batch on the copies, as the real start's save after each
+                        // instance counts it in the store.
+                        CapacityReservation reservation = dryRun
+                                ? candidates.stream().filter(r -> target.equals(r.getCapacityReservationId()))
+                                        .findFirst().orElseGet(() -> getRequiredCapacityReservation(region, target))
+                                : getRequiredCapacityReservation(region, target);
                         if (matchesCapacityReservation(instance, reservation)
                                 && reservation.getAvailableInstanceCount() <= 0) {
                             throw new AwsException("ReservationCapacityExceeded",
@@ -11393,7 +11458,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 selected.setAvailableInstanceCount(selected.getAvailableInstanceCount() - 1);
                 changed.put(key(region, selected.getCapacityReservationId()), selected);
             }
-            if (!changed.isEmpty()) {
+            if (!changed.isEmpty() && !dryRun) {
                 persistCapacityMembership(changed);
             }
         }
