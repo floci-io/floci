@@ -79,8 +79,10 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -101,6 +103,7 @@ class CodeArtifactServiceTest {
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
     private AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore;
+    private AccountAwareStorageBackend<PackageGroup> packageGroupStore;
     private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
     private PypiserverSidecarClient pypiserverClient;
@@ -113,7 +116,7 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         packageOriginConfigStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
-        AccountAwareStorageBackend<PackageGroup> packageGroupStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        packageGroupStore = spy(AccountAwareStorageBackend.<PackageGroup>inMemory(ACCOUNT_ID));
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -8120,10 +8123,10 @@ class CodeArtifactServiceTest {
         assertEquals("dom", view.domainName());
         assertEquals("contact", view.contactInfo());
         assertEquals("desc", view.description());
-        assertNull(view.parentPattern());
+        assertEquals("/*", view.parentPattern());
         assertEquals("INHERIT", view.restrictions().get("PUBLISH").mode());
         assertEquals("ALLOW", view.restrictions().get("PUBLISH").effectiveMode());
-        assertNull(view.restrictions().get("PUBLISH").inheritedFromPattern());
+        assertEquals("/*", view.restrictions().get("PUBLISH").inheritedFromPattern());
     }
 
     @Test
@@ -8133,8 +8136,9 @@ class CodeArtifactServiceTest {
         service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
         PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/space/*");
         assertEquals("/npm/*", child.parentPattern());
-        PackageGroupDescriptionView root = service.describePackageGroup(REGION, "dom", null, "/npm/*");
-        assertNull(root.parentPattern());
+        PackageGroupDescriptionView npm = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertEquals("/*", npm.parentPattern());
+        assertNull(service.describePackageGroup(REGION, "dom", null, "/*").parentPattern());
     }
 
     @Test
@@ -8185,7 +8189,8 @@ class CodeArtifactServiceTest {
         service.createPackageGroup(REGION, "dom", null, "/pypi/*", null, null, Map.of());
 
         PackageGroupListResult all = service.listPackageGroups(REGION, "dom", null, null, null, null);
-        assertEquals(2, all.packageGroups().size());
+        assertEquals(List.of("/*", "/npm/*", "/pypi/*"),
+                all.packageGroups().stream().map(PackageGroupDescriptionView::pattern).toList());
 
         PackageGroupListResult npmOnly = service.listPackageGroups(REGION, "dom", null, "/npm", null, null);
         assertEquals(1, npmOnly.packageGroups().size());
@@ -8262,11 +8267,76 @@ class CodeArtifactServiceTest {
     }
 
     @Test
-    void getAssociatedPackageGroupThrowsResourceNotFoundWhenNoGroupMatches() {
+    void getAssociatedPackageGroupIsTheRootGroupWhenNoOtherGroupMatches() {
         service.createDomain(REGION, "dom", null, Map.of());
-        AwsException e = assertThrows(AwsException.class,
-                () -> service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null, "react"));
-        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        GetAssociatedPackageGroupResult result =
+                service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null, "react");
+        assertEquals("/*", result.packageGroup().pattern());
+        assertEquals("STRONG", result.associationType());
+    }
+
+    @Test
+    void aDomainIsCreatedWithItsRootPackageGroupAllowingEveryOrigin() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView root = service.describePackageGroup(REGION, "dom", null, "/*");
+        assertEquals("Default root package group", root.description());
+        assertNull(root.contactInfo());
+        assertNull(root.parentPattern());
+        for (String type : List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM")) {
+            assertEquals("ALLOW", root.restrictions().get(type).mode(), type);
+            assertEquals("ALLOW", root.restrictions().get(type).effectiveMode(), type);
+            assertNull(root.restrictions().get(type).inheritedFromPattern(), type);
+        }
+        assertEquals(List.of("/*"), service.listPackageGroups(REGION, "dom", null, null, null, null)
+                .packageGroups().stream().map(PackageGroupDescriptionView::pattern).toList());
+    }
+
+    @Test
+    void theRootPackageGroupCanBeChangedButNotCreatedAgainOrDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException created = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/*", null, null, Map.of()));
+        assertEquals("ConflictException", created.getErrorCode());
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.deletePackageGroup(REGION, "dom", null, "/*"));
+        assertEquals("ValidationException", deleted.getErrorCode());
+        assertEquals("The root package group, '/*', cannot be deleted.", deleted.getMessage());
+
+        service.updatePackageGroup(REGION, "dom", null, "/*", "team@example.com", "everything");
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        PackageGroupDescriptionView npm = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertEquals("BLOCK", npm.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/*", npm.restrictions().get("PUBLISH").inheritedFromPattern());
+        assertEquals("everything", service.describePackageGroup(REGION, "dom", null, "/*").description());
+    }
+
+    @Test
+    void aDomainWhoseRootCannotBeStoredIsNotLeftBehindToRefuseTheRetry() {
+        doThrow(new IllegalStateException("storage unavailable")).when(packageGroupStore)
+                .putForAccount(anyString(), startsWith(REGION + "::dom::"), any());
+        assertThrows(IllegalStateException.class, () -> service.createDomain(REGION, "dom", null, Map.of()));
+        doCallRealMethod().when(packageGroupStore).putForAccount(anyString(), anyString(), any());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        assertEquals("Default root package group",
+                service.describePackageGroup(REGION, "dom", null, "/*").description());
+    }
+
+    @Test
+    void aStoredDomainWithoutARootPackageGroupGetsOneWhenSeeded() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        List.copyOf(packageGroupStore.keysForAccount(ACCOUNT_ID))
+                .forEach(key -> packageGroupStore.deleteForAccount(ACCOUNT_ID, key));
+        assertThrows(AwsException.class, () -> service.describePackageGroup(REGION, "dom", null, "/*"));
+
+        service.seedRootPackageGroups();
+        service.seedRootPackageGroups();
+
+        assertEquals("Default root package group",
+                service.describePackageGroup(REGION, "dom", null, "/*").description());
+        assertEquals(1, service.listPackageGroups(REGION, "dom", null, null, null, null).packageGroups().size());
     }
 
     @Test
