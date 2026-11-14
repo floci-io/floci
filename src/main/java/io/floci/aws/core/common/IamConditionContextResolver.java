@@ -810,6 +810,7 @@ public class IamConditionContextResolver {
         }
         if (targets != null) {
             addResourceTags(conditions, form.get(targets.query() + ".1"), targets);
+            addInterfaceTagContext(action, conditions, form.get(targets.query() + ".1"), targets);
         }
         return conditions.isEmpty() ? null : conditions;
     }
@@ -870,6 +871,7 @@ public class IamConditionContextResolver {
                 addRequestTags(conditions, form, "Tag.");
             }
             addResourceTags(conditions, form.get(idParameter + i), generatedTargets);
+            addInterfaceTagContext(action, conditions, form.get(idParameter + i), generatedTargets);
             targets.add(conditions);
         }
         return targets;
@@ -931,6 +933,18 @@ public class IamConditionContextResolver {
             }
         }
         putStoredTags(conditions, region, resourceId, prefixes);
+    }
+
+    private void addInterfaceTagContext(String action, Map<String, List<String>> conditions, String resourceId,
+                                        RequestResourceMembers.Targets targets) {
+        String prefix = targets.prefixes().get("network-interface");
+        if (!("ec2:CreateTags".equals(action) || "ec2:DeleteTags".equals(action)) || prefix == null
+                || resourceId == null || !resourceId.startsWith(prefix) || !ec2Service.isResolvable()) {
+            return;
+        }
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        ec2Service.get().networkInterfaceConditionContext(region, resourceId)
+                .forEach((key, value) -> conditions.put(key, List.of(value)));
     }
 
     private void putStoredTags(Map<String, List<String>> conditions, String region, String resourceId,

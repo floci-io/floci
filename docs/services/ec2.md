@@ -2,6 +2,12 @@
 
 **Protocol:** EC2 Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+`CreateTags` and `DeleteTags` on network interfaces evaluate the target's stored
+VPC, subnet, availability zone, and interface ID alongside its own ownership tags.
+This includes primary interfaces held by an instance. Every member of a batch
+must satisfy its conditions before any tags change; another interface's VPC or
+tags cannot authorize it. Authorization reads do not create default resources.
+
 ## Instance IAM authorization
 
 With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.

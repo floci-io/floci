@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsArnUtils.Arn;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsPartition;
 import io.floci.aws.core.common.AwsPartitions;
@@ -11097,6 +11098,47 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private void removeTags(String region, String resourceId) {
         tags.delete(key(region, resourceId));
+    }
+
+    /** Stored interface identity for IAM conditions; does not create default resources. */
+    public Map<String, String> networkInterfaceConditionContext(String region, String interfaceId) {
+        String account = callerAccountId();
+        NetworkInterface stored = (networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware
+                ? aware.getForAccount(account, key(region, interfaceId)) : networkInterfaces.get(key(region, interfaceId)))
+                .orElse(null);
+        String vpc = stored == null ? null : stored.getVpcId();
+        String subnet = stored == null ? null : stored.getSubnetId();
+        String zone = stored == null ? null : stored.getAvailabilityZone();
+        if (stored == null) {
+            List<Instance> scoped = instances instanceof AccountAwareStorageBackend<Instance> aware
+                    ? aware.scanForAccount(account, k -> k.startsWith(region + "::"))
+                    : instances.scan(k -> k.startsWith(region + "::"));
+            for (Instance instance : scoped) {
+                if (instance.getState() != null && "terminated".equals(instance.getState().getName())) {
+                    continue;
+                }
+                for (InstanceNetworkInterface attached : instance.getNetworkInterfaces()) {
+                    if (interfaceId.equals(attached.getNetworkInterfaceId())) {
+                        vpc = attached.getVpcId();
+                        subnet = attached.getSubnetId();
+                        zone = instance.getPlacement() == null ? null : instance.getPlacement().getAvailabilityZone();
+                    }
+                }
+            }
+        }
+        if (vpc == null) {
+            return Map.of();
+        }
+        Map<String, String> context = new LinkedHashMap<>();
+        context.put("ec2:NetworkInterfaceID", interfaceId);
+        context.put("ec2:Vpc", Arn.of("ec2", region, account, "vpc/" + vpc).toString());
+        if (subnet != null) {
+            context.put("ec2:Subnet", Arn.of("ec2", region, account, "subnet/" + subnet).toString());
+        }
+        if (zone != null) {
+            context.put("ec2:AvailabilityZone", zone);
+        }
+        return Map.copyOf(context);
     }
 
     /** The tags currently on one resource in {@code region}, as CreateTags and DeleteTags maintain them. */
