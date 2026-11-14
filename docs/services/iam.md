@@ -1052,7 +1052,10 @@ on the one action a level allows leaves none either. What a namespace-wide readi
 right: an SCP denying `s3:DeleteBucket` alone keeps S3 on the list, because every other S3 action is
 still reachable, and a `Deny` that carries a `Condition` or names particular resources closes nothing
 at all, since the region-restricting deny on `*` that most organizations carry, and a deny scoped to
-one bucket, both leave the service reachable by every request they do not cover. The survivors are
+one bucket, both leave the service reachable by every request they do not cover. A `Deny` that names no
+resource closes nothing either: a statement reaches through whichever resource element it names, so
+one naming neither, because the element is absent or carries nothing but a value that is no string,
+reaches no request and takes no service off the list. The survivors are
 found by probing the chain with the actions the policies themselves name plus one stand-in action per
 wildcard, which is exact for the patterns policies are written with; a wildcard that is not a
 trailing one, as in `s3:*Object`, cannot be probed that way and leaves the service on the list rather
@@ -2847,7 +2850,10 @@ account key carries no identity policies of its own.
 - **Session policies**: inline policies passed during `sts:AssumeRole`.
 - **Permission boundaries**: managed policies used to cap maximum permissions.
 - **Action/Resource patterns**: literal matches, wildcards (`*`, `?`), and `NotAction`/`NotResource` blocks.
-  Action names match without regard to case, resource ARNs match case-sensitively, as on AWS.
+  Action names match without regard to case, resource ARNs match case-sensitively, as on AWS. Each
+  value is written as a string, so one that is not, in a list as much as on its own, names nothing:
+  a statement whose only `NotResource` entry is a number excludes nothing and matches nothing,
+  rather than excluding nothing and so covering everything.
 - **Conditions**: support for `Condition` blocks with multiple operators.
 - **Policy variables**: `${...}` placeholders in a `Resource` pattern or a `Condition` value,
   resolved from the request context.
