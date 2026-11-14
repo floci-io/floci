@@ -10,6 +10,8 @@ import io.floci.aws.services.sns.model.Subscription;
 import io.floci.aws.services.sns.model.Topic;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -26,9 +28,11 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -846,5 +850,44 @@ class SnsCfnProvisionerTest {
         // A topic policy has no entity of its own, so its delete touches nothing.
         provisioner.delete("AWS::SNS::TopicPolicy", "topic-policy-abc12345", REGION);
         verifyNoMoreInteractions(sns);
+    }
+
+    /**
+     * A replacing update that a later resource fails points the topic back to the old ARN with the old
+     * inline-subscription marker, and deletes the new topic only when this update created it.
+     */
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(delimiter = '|', textBlock = """
+            unnamed topic turning FIFO | my-stack-Topic-abc123 | {"FifoTopic": false, "Subscription": [SUB]} | {"FifoTopic": true, "Subscription": [SUB]} | true | 1
+            rename onto a topic outside the stack | old | {"TopicName": "old", "Subscription": [SUB]} | {"TopicName": "taken", "Subscription": [SUB]} | false | 0
+            """)
+    void aRolledBackTopicReplacementRestoresTheOldTopicAndDeletesOnlyWhatItCreated(
+            String label, String priorName, String priorJson, String newJson, boolean created, int deletes) {
+        String oldArn = "arn:aws:sns:us-east-1:000000000000:" + priorName;
+        String newArn = "arn:aws:sns:us-east-1:000000000000:replacement";
+        String marker = "__FlociInlineSubscription:arn:old-sub";
+        String sub = "{\"Protocol\": \"lambda\", \"Endpoint\": \"arn:lambda\"}";
+        StackResource r = new StackResource();
+        r.setLogicalId("Topic");
+        r.setResourceType("AWS::SNS::Topic");
+        r.setPhysicalId(oldArn);
+        r.setAttributes(new HashMap<>(Map.of("TopicName", priorName, "TopicArn", oldArn, "Arn", oldArn,
+                marker, "true")));
+        doReturn(new SnsService.TopicCreation(topic(newArn), created))
+                .when(sns).createTopicWithStatus(anyString(), anyMap(), anyMap(), eq(REGION));
+        doReturn(subscription("arn:new-sub")).when(sns).subscribe(eq(newArn), anyString(), anyString(),
+                eq(REGION), anyMap());
+        ProvisionContext update = new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack",
+                oldArn, e -> { }, props(priorJson.replace("SUB", sub)));
+
+        provisioner.provision(r, props(newJson.replace("SUB", sub)), update);
+        assertEquals(newArn, r.getPhysicalId(), label);
+        assertTrue(provisioner.rollbackUpdate(r), label);
+
+        assertEquals(oldArn, r.getPhysicalId(), label);
+        assertEquals(priorName, r.getAttributes().get("TopicName"), label);
+        assertEquals("true", r.getAttributes().get(marker), label);
+        verify(sns, times(deletes)).deleteTopic(newArn, REGION);
+        verify(sns, times(deletes)).deleteTopic(anyString(), eq(REGION));
     }
 }
