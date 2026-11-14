@@ -20,6 +20,7 @@ import io.floci.aws.services.redshift.model.RedshiftEvent;
 import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
+import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -64,6 +65,7 @@ public class RedshiftQueryHandler {
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
     private final IamEnforcementFilter iamEnforcementFilter;
     private final RedshiftResourcePolicies resourcePolicies;
+    private final RedshiftTableRestoreService tableRestores;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
@@ -71,7 +73,8 @@ public class RedshiftQueryHandler {
                                 RegionResolver regionResolver,
                                 RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
                                 IamEnforcementFilter iamEnforcementFilter,
-                                RedshiftResourcePolicies resourcePolicies) {
+                                RedshiftResourcePolicies resourcePolicies,
+                                RedshiftTableRestoreService tableRestores) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
@@ -80,12 +83,13 @@ public class RedshiftQueryHandler {
         this.zeroEtlConsumer = zeroEtlConsumer;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.resourcePolicies = resourcePolicies;
+        this.tableRestores = tableRestores;
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                          EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                          RegionResolver regionResolver) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null);
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -330,6 +334,49 @@ public class RedshiftQueryHandler {
                     .end("RestoreFromClusterSnapshotResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "RestoreTableFromClusterSnapshot" -> {
+            TableRestoreStatus status = tableRestores.restoreTable(new RedshiftTableRestoreService.Request(
+                    requireParam(params, "ClusterIdentifier"), requireParam(params, "SnapshotIdentifier"),
+                    requireParam(params, "SourceDatabaseName"), params.getFirst("SourceSchemaName"),
+                    requireParam(params, "SourceTableName"), params.getFirst("TargetDatabaseName"),
+                    params.getFirst("TargetSchemaName"), requireParam(params, "NewTableName"),
+                    Boolean.TRUE.equals(booleanParam(params, "EnableCaseSensitiveIdentifier"))));
+            String xml = new XmlBuilder()
+                    .start("RestoreTableFromClusterSnapshotResponse")
+                      .start("RestoreTableFromClusterSnapshotResult")
+                        .raw(tableRestoreStatusXml(status))
+                      .end("RestoreTableFromClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("RestoreTableFromClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeTableRestoreStatus" -> {
+            PaginatedResult<TableRestoreStatus> page = tableRestores.describeTableRestoreStatus(
+                    params.getFirst("ClusterIdentifier"), params.getFirst("TableRestoreRequestId"),
+                    intParam(params, "MaxRecords"), params.getFirst("Marker"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("DescribeTableRestoreStatusResponse")
+                      .start("DescribeTableRestoreStatusResult")
+                        .start("TableRestoreStatusDetails");
+            for (TableRestoreStatus status : page.items()) {
+                xml.raw(tableRestoreStatusXml(status));
+            }
+            xml.end("TableRestoreStatusDetails");
+            if (page.nextToken() != null) {
+                xml.elem("Marker", page.nextToken());
+            }
+            String body = xml
+                      .end("DescribeTableRestoreStatusResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeTableRestoreStatusResponse")
+                    .build();
+            return Response.ok(body).type(MediaType.APPLICATION_XML).build();
         }
         case "CreateClusterParameterGroup" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
@@ -1576,6 +1623,30 @@ public class RedshiftQueryHandler {
         return builder.end("EventCategories")
                 .elem("Message", event.getMessage())
                 .end("Event").build();
+    }
+
+    private static String tableRestoreStatusXml(TableRestoreStatus status) {
+        XmlBuilder xml = new XmlBuilder().start("TableRestoreStatus")
+                .elem("TableRestoreRequestId", status.getTableRestoreRequestId())
+                .elem("Status", status.getStatus())
+                .elem("Message", status.getMessage())
+                .elem("RequestTime", status.getRequestTime() == null ? null
+                        : DateTimeFormatter.ISO_INSTANT.format(status.getRequestTime()))
+                .elem("ClusterIdentifier", status.getClusterIdentifier())
+                .elem("SnapshotIdentifier", status.getSnapshotIdentifier())
+                .elem("SourceDatabaseName", status.getSourceDatabaseName())
+                .elem("SourceSchemaName", status.getSourceSchemaName())
+                .elem("SourceTableName", status.getSourceTableName())
+                .elem("TargetDatabaseName", status.getTargetDatabaseName())
+                .elem("TargetSchemaName", status.getTargetSchemaName())
+                .elem("NewTableName", status.getNewTableName());
+        if (status.getProgressInMegaBytes() != null) {
+            xml.elem("ProgressInMegaBytes", status.getProgressInMegaBytes());
+        }
+        if (status.getTotalDataInMegaBytes() != null) {
+            xml.elem("TotalDataInMegaBytes", status.getTotalDataInMegaBytes());
+        }
+        return xml.end("TableRestoreStatus").build();
     }
 
     private static Boolean booleanParam(MultivaluedMap<String, String> params, String name) {

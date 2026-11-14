@@ -2430,6 +2430,39 @@ public class RedshiftService implements ManagedSecretRotator {
         return snapshot;
     }
 
+    /** Whether the caller's account has a cluster named {@code identifier}. */
+    public boolean hasCluster(String identifier) {
+        return clusters.get(identifier).isPresent();
+    }
+
+    /** What a table restore reads from and writes into: the cluster, the snapshot dump and the database it covers. */
+    public record TableRestoreSource(Cluster cluster, Path dump, String database) {
+    }
+
+    /**
+     * Resolves the cluster and the snapshot of it a table is restored from. Like AWS, the snapshot must have been
+     * taken from the cluster, and both must be available.
+     */
+    public TableRestoreSource tableRestoreSource(String clusterIdentifier, String snapshotIdentifier) {
+        Cluster cluster = clusters.get(clusterIdentifier).orElseThrow(
+                () -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Snapshot snapshot = findSnapshot(snapshotIdentifier)
+                .filter(found -> clusterIdentifier.equals(found.getClusterIdentifier()))
+                .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + snapshotIdentifier + " not found", 404));
+        if (!"available".equals(cluster.getClusterStatus())) {
+            throw new AwsException("InvalidClusterState",
+                    "Cluster " + clusterIdentifier + " is not in the available state.", 400);
+        }
+        String sqlDump = snapshot.getSqlDump();
+        if (!"available".equals(snapshot.getStatus()) || !isTrustedDumpPath(sqlDump)
+                || !Files.exists(Paths.get(sqlDump))) {
+            throw new AwsException("InvalidClusterSnapshotState",
+                    "Snapshot " + snapshotIdentifier + " is not in the available state.", 400);
+        }
+        return new TableRestoreSource(cluster, Paths.get(sqlDump), CLUSTER_DB_NAME);
+    }
+
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier) {
         return restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, null);
     }

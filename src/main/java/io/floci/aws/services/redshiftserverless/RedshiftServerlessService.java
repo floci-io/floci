@@ -1055,6 +1055,30 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
 
     public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}
 
+    /** What a table restore reads from and writes into: the workgroup's backend, the snapshot's database and dump. */
+    public record TableRestoreSource(Workgroup workgroup, Namespace namespace, Path dump) {}
+
+    /**
+     * Resolves what restoring one table of {@code snapshotName} into {@code workgroupName} needs. The snapshot must be
+     * available and of {@code namespaceName}, the workgroup must be running, and the snapshot must hold data.
+     */
+    public synchronized TableRestoreSource tableRestoreSource(String namespaceName, String workgroupName,
+                                                              String snapshotName, String region) {
+        RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(snapshot);
+        if (!namespaceName.equals(snapshot.getNamespaceName())) {
+            throw snapshotNotFound(snapshotName);
+        }
+        Namespace namespace = getNamespace(namespaceName, region);
+        Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!hasLiveRuntime(workgroup)) {
+            throw ServerlessSupport.conflict("The workgroup " + workgroupName + " is not available.");
+        }
+        Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> ServerlessSupport.validation(
+                "The snapshot " + snapshotName + " holds no table data to restore."));
+        return new TableRestoreSource(workgroup, namespace, dump);
+    }
+
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
         requireResourceArn(resourceArn);
         Optional<Namespace> namespace = namespaceByArn(resourceArn, region);
