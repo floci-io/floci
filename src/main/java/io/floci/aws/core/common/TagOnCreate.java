@@ -88,7 +88,20 @@ final class TagOnCreate {
             return Optional.empty();
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? PassedRoles.jsonBody(ctx) : null;
+        return of(operation, entry, form, form.isEmpty() ? PassedRoles.jsonBody(ctx) : null);
+    }
+
+    /**
+     * As {@link #of(String, ContainerRequestContext)}, for a JSON request that is not an HTTP request of its own (a
+     * state machine's task to its integrated service).
+     */
+    static Optional<Tagging> ofBody(String operation, JsonNode body) {
+        TagOnCreateMembers.Entry entry = TagOnCreateMembers.of(operation);
+        return entry == null ? Optional.empty() : of(operation, entry, Map.of(), body);
+    }
+
+    private static Optional<Tagging> of(String operation, TagOnCreateMembers.Entry entry, Map<String, String> form,
+                                        JsonNode body) {
         Set<TagSet> sets = new LinkedHashSet<>();
         Set<TagSet> otherSpellings = new LinkedHashSet<>();
         for (TagOnCreateMembers.Member member : entry.members()) {

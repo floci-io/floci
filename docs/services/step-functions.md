@@ -747,8 +747,14 @@ calls, and it is what the CDK's policies for these two tasks grant.
 `.sync` authorizes the starting call only: a job cannot fail midway through its wait for lack of a
 Describe permission, and the best-effort cancel of an abandoned job is not evaluated either. What the
 CDK grants a `.sync` task beyond that, such as `elasticmapreduce:DescribeStep` or `ecs:DescribeTasks`,
-is accepted but not needed here. `iam:PassRole` is not evaluated for the roles `runTask`, `createCluster` or
-`startJobRun` pass, nor a tagging action such as `elasticmapreduce:AddTags` for what they tag.
+is accepted but not needed here. `iam:PassRole` is not evaluated for the roles `runTask` or `createCluster`
+pass, nor a tagging action such as `elasticmapreduce:AddTags` for what they tag.
+
+An EMR Serverless API is checked as the same request made directly is, from the generated tables, on the
+request the integration sends: `startJobRun` also needs `iam:PassRole` on its `ExecutionRoleArn`, passed to
+`emr-serverless.amazonaws.com`, and `createApplication` and `startJobRun` need `emr-serverless:TagResource`
+for the `Tags` they send, on the application a create makes or the one a job run is checked on, with each
+tag as `aws:RequestTag/<key>` and the keys as `aws:TagKeys`, which the API's own action is checked with too.
 
 A request naming nothing it can reach has only the role checks, and its service answers it: no
 `TaskDefinition` or one ECS does not have, a service or cluster ECS does not have, no `ClusterId`, no
