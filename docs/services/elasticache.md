@@ -350,8 +350,11 @@ Snapshots outlive the group they were taken from, as on AWS. They are taken of
 cluster-mode-disabled replication groups only: a cluster-mode-enabled group, a standalone cache
 cluster or a group without a running backend is refused, as is seeding a cluster-mode-enabled
 group. Automatic snapshots, `CopySnapshot` and `FinalSnapshotIdentifier` are not modeled. To
-reload the dataset, the backend runs with `--enable-debug-command local`, which allows `DEBUG`
-only for connections from inside its own container; clients always connect through the proxy.
+reload the dataset, the backend of a group created from a snapshot starts with
+`--enable-debug-command local`, which allows `DEBUG` only for connections from inside its own
+container; clients always connect through the proxy. Redis has that flag from 7.0 on, so every
+other group starts without it, and an image that passes it to an older server still starts them;
+such an image cannot seed a group from a snapshot, since its server refuses the flag.
 
 ## Engine version and backend image
 
