@@ -42,6 +42,21 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void storedTagsUseExactIndexedArnWithoutScanningOrReadingValues() {
+        InMemoryStorage<String, Secret> storage = Mockito.spy(new InMemoryStorage<>());
+        SecretsManagerService indexed = new SecretsManagerService(storage, 30);
+        Secret secret = indexed.createSecret("path/name-ABCDEF", "value", null, null, null,
+                List.of(new Secret.Tag("Access", "allowed")), REGION);
+        Mockito.clearInvocations(storage);
+        assertEquals(Map.of("Access", "allowed"), indexed.storedSecretTags(secret.getArn()));
+        assertNull(secret.getLastAccessedDate());
+        assertEquals(Map.of(), indexed.storedSecretTags(secret.getArn().substring(0, secret.getArn().length() - 7)));
+        assertEquals(Map.of(), indexed.storedSecretTags(secret.getArn() + "x"));
+        assertEquals(Map.of(), indexed.storedSecretTags("not-an-arn"));
+        Mockito.verify(storage, Mockito.never()).scan(ArgumentMatchers.any());
+    }
+
+    @Test
     void createSecret() {
         Secret secret = service.createSecret("my-secret", "super-secret-value",
                 null, "A test secret", null, null, REGION);

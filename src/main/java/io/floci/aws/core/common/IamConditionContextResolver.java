@@ -25,6 +25,7 @@ import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -109,6 +110,7 @@ public class IamConditionContextResolver {
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
     private final Instance<RequestConditionSpelling> requestConditionSpellings;
+    private final Instance<SecretsManagerService> secretsManagerService;
     private final RequestContext requestContext;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
@@ -129,13 +131,14 @@ public class IamConditionContextResolver {
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
                                        Instance<RequestConditionSpelling> requestConditionSpellings,
+                                       Instance<SecretsManagerService> secretsManagerService,
                                        RequestContext requestContext,
                                        RegionResolver regionResolver,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
         this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
-                lambdaWebService, requestConditionSpellings, requestContext, regionResolver,
+                lambdaWebService, requestConditionSpellings, secretsManagerService, requestContext, regionResolver,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -147,6 +150,7 @@ public class IamConditionContextResolver {
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
                                 Instance<RequestConditionSpelling> requestConditionSpellings,
+                                Instance<SecretsManagerService> secretsManagerService,
                                 RequestContext requestContext,
                                 RegionResolver regionResolver,
                                 EmulatorConfig config,
@@ -160,12 +164,45 @@ public class IamConditionContextResolver {
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
         this.requestConditionSpellings = requestConditionSpellings;
+        this.secretsManagerService = secretsManagerService;
         this.requestContext = requestContext;
         this.regionResolver = regionResolver;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
         this.clock = clock;
         this.serviceCatalog = serviceCatalog;
+    }
+
+    /** Resolve tags separately for each authorized secret ARN; request tags cannot supply stored tags. */
+    public Map<String, List<String>> withSecretResourceTags(String scope, String action, String resource,
+                                                           Map<String, List<String>> context) {
+        if (!"secretsmanager".equals(scope)) {
+            return context;
+        }
+        Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
+        List<String> prefixes = new ArrayList<>();
+        for (String key : List.of("aws:ResourceTag/${TagKey}", "secretsmanager:ResourceTag/tag-key")) {
+            if (RequestConditionKeys.takes(action, key)) {
+                prefixes.add(key.substring(0, key.indexOf('/') + 1));
+            }
+        }
+        if (prefixes.isEmpty()) {
+            return context;
+        }
+        result.keySet().removeIf(key -> prefixes.stream().anyMatch(prefix ->
+                key.regionMatches(true, 0, prefix, 0, prefix.length())));
+        if (secretsManagerService.isResolvable()) {
+            secretsManagerService.get().storedSecretTags(resource).forEach((key, value) -> {
+                for (String prefix : prefixes) {
+                    String contextKey = prefix + key;
+                    String existingKey = result.keySet().stream()
+                            .filter(candidate -> candidate.equalsIgnoreCase(contextKey))
+                            .findFirst().orElse(contextKey);
+                    result.computeIfAbsent(existingKey, ignored -> new ArrayList<>()).add(value);
+                }
+            });
+        }
+        return result;
     }
 
     public Map<String, List<String>> resolve(String credentialScope, String action,

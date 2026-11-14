@@ -132,8 +132,12 @@ def test_the_vendored_table_covers_its_namespaces():
         "route53:ChangeResourceRecordSets"]
     assert document["memberShapes"]["route53:ChangeResourceRecordSets"][
         "ChangeBatch.Changes.Change.ResourceRecordSet.Name"] == "DNSName"
+    assert document["actions"]["secretsmanager:GetSecretValue"] == [
+        "aws:ResourceTag/${TagKey}", "secretsmanager:ResourceTag/tag-key"]
+    assert "secretsmanager:GetSecretValue" not in document["members"]
+    assert "secretsmanager:ListSecrets" not in document["actions"]
     assert document["protocols"] == {"eks": "rest-json", "lambda": "rest-json",
-                                     "redshift": "query", "route53": "rest-xml"}
+                                     "redshift": "query", "route53": "rest-xml", "secretsmanager": "json"}
 
 
 @pytest.mark.parametrize("changed", [

@@ -7,6 +7,8 @@ it. `SERVICES` names, for each namespace, the keys read and where:
 - `eks`: a CreateCluster or UpdateClusterConfig request is checked with the access configuration and endpoint
   flags it names in its JSON body, as `eks:authenticationMode`, `eks:bootstrapClusterCreatorAdminPermissions`,
   `eks:endpointPrivateAccess` and `eks:endpointPublicAccess`; a member it leaves out names nothing.
+- `secretsmanager`: existing secret tags supply `aws:ResourceTag/${TagKey}` and
+  `secretsmanager:ResourceTag/tag-key` for the actions listed by the Service Reference.
 - `lambda`: a Lambda Web Functions request is checked with the endpoint's authType as
   `lambda:Request/WebFunctionAuthType`, the one the request names, and `lambda:Resource/WebFunctionAuthType`,
   the one the endpoint has before the request, read from the stored endpoint.
@@ -75,6 +77,12 @@ FLAT_PROTOCOLS = ("query", "ec2")
 # carries it, each key read from the stored resource, and the actions that take a key their request does not
 # carry, with the reason.
 SERVICES = {
+    "secretsmanager": {
+        "model": "secretsmanager",
+        "request": {},
+        "stored": ("aws:ResourceTag/${TagKey}", "secretsmanager:ResourceTag/tag-key"),
+        "not_in_request": {},
+    },
     "eks": {
         "model": "eks",
         "request": {

@@ -51,6 +51,102 @@
       "route53:ChangeResourceRecordSetsActions",
       "route53:ChangeResourceRecordSetsNormalizedRecordNames",
       "route53:ChangeResourceRecordSetsRecordTypes"
+    ],
+    "secretsmanager:AcceptCrossAccountReplication": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:AssociateCrossAccountReplica": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:CancelRotateSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:CreateSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:DeleteResourcePolicy": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:DeleteSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:DescribeSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:DisassociateCrossAccountReplica": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:GetResourcePolicy": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:GetSecretValue": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:ListResourcePolicies": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:ListSecretVersionIds": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:PutResourcePolicy": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:PutSecretValue": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:RemoveRegionsFromReplication": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:ReplicateSecretToRegions": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:RestoreSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:RotateSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:StopReplicationToReplica": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:TagResource": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:UntagResource": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:UpdateSecret": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:UpdateSecretVersionStage": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
+    ],
+    "secretsmanager:ValidateResourcePolicy": [
+      "aws:ResourceTag/${TagKey}",
+      "secretsmanager:ResourceTag/tag-key"
     ]
   },
   "members": {
@@ -156,6 +252,7 @@
     "eks": "rest-json",
     "lambda": "rest-json",
     "redshift": "query",
-    "route53": "rest-xml"
+    "route53": "rest-xml",
+    "secretsmanager": "json"
   }
 }
