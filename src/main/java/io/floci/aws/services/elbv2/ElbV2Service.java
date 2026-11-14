@@ -1048,6 +1048,17 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         String listenerArn = rule.getListenerArn();
         if (conditions != null) rule.setConditions(new ArrayList<>(conditions));
         if (actions != null)    rule.setActions(new ArrayList<>(actions));
+        if (actions != null) {
+            // As ModifyListener does for its default actions: a target group the rule now forwards to is in use by
+            // the load balancer, and one nothing routes to any more is not, so it can be deleted.
+            Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
+            if (listener != null) {
+                for (Action action : actions) {
+                    linkTgToLb(action, listener.getLoadBalancerArn());
+                }
+                unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+            }
+        }
         persistRegion(rules, region);
         dataPlane.recompileRules(listenerArn, () -> getListenerRules(region, listenerArn));
         return rule;
