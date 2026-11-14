@@ -211,6 +211,9 @@ public class LambdaLayerService {
      * Returns information about a specific layer version.
      */
     public LambdaLayerVersion getLayerVersion(String region, String layerName, long versionNumber) {
+        if (AwsArnUtils.looksLikeArn(layerName)) {
+            return getLayerVersionByArn(layerName + ":" + versionNumber);
+        }
         return layerStore.get(region, layerName, versionNumber)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Layer version " + versionNumber + " for layer " + layerName + " not found.", 404));
