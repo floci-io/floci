@@ -1880,7 +1880,11 @@ public class ResourceArnBuilder {
                     if (AwsArnUtils.isArnFor(secretId, "secretsmanager")) {
                         return stored.orElse(secretId);
                     }
-                    return stored.orElseGet(() -> secretArn(secretId, region, accountId, partition));
+                    // A name-scoped existence check must also match before creation. Keep supplied
+                    // ARNs exact above, and always prefer a stored ARN (including its real suffix).
+                    String name = "secretsmanager:DescribeSecret".equals(action)
+                            ? secretId + UNASSIGNED_SECRET_SUFFIX : secretId;
+                    return stored.orElseGet(() -> secretArn(name, region, accountId, partition));
                 }
             }
         }

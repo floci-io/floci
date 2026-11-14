@@ -1338,6 +1338,20 @@ class ResourceArnBuilderTest {
         assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing"), arns);
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws,us-east-1", "aws-us-gov,us-gov-west-1", "aws-cn,cn-north-1"})
+    void describeAbsentSecretNameUsesAnUnassignedSuffix(String partition, String region) {
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        for (String name : List.of("app/missing", "app/missing-AbC123")) {
+            when(secrets.findArn(ACCOUNT, name, region)).thenReturn(Optional.empty());
+            setJsonBody("{\"SecretId\":\"" + name + "\"}");
+            assertEquals(List.of("arn:" + partition + ":secretsmanager:" + region + ":" + ACCOUNT
+                            + ":secret:" + name + "-??????"),
+                    backedBy(secrets).buildSecretsManagerResources("secretsmanager:DescribeSecret", ctx,
+                            region, ACCOUNT, partition));
+        }
+    }
+
     @Test
     void secretsManagerResolvesAPartialArnToTheStoredArnAndKeepsAnArnThatIsNotStored() {
         String partialArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core";

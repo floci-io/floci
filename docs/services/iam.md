@@ -2695,8 +2695,10 @@ the random suffix, is evaluated against the stored secret's full ARN, suffix inc
 `secret:<name>-??????` resource, the pattern the Secrets Manager User Guide documents, matches it as
 it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluated against
 `secret:<Name>-??????`, standing in for the suffix the secret is assigned when it is created, so a
-policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
-request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
+policy scoped to a name prefix such as `secret:app/*` allows it. `DescribeSecret` also uses that
+unassigned suffix when a name matches no secret in the request's account and region, so an
+authorized existence check reaches the service's `ResourceNotFoundException`. Other operations
+retain the unsuffixed missing-name target. An ARN that matches no stored secret is kept as given.
 
 **KMS keys.** A request that names a key by its id, an alias name, an alias ARN or a key ARN is
 evaluated against the stored key's ARN, as the KMS API reference resolves the request's key
