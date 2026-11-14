@@ -21,6 +21,8 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -59,9 +61,10 @@ class AppSyncResolverExecutorTest {
     private final RecordingInvoker dynamoDbInvoker =
             new RecordingInvoker(DataSourceType.AMAZON_DYNAMODB);
     private final RecordingInvoker lambdaInvoker = new RecordingInvoker(DataSourceType.AWS_LAMBDA);
+    private final RecordingInvoker httpInvoker = new RecordingInvoker(DataSourceType.HTTP);
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final AppSyncResolverExecutor executor = new AppSyncResolverExecutor(appSync, jsRuntime,
-            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker, dynamoDbInvoker, lambdaInvoker),
+            new AppSyncDataSourceInvokers(List.of(invoker, noneInvoker, dynamoDbInvoker, lambdaInvoker, httpInvoker),
                     mock(AppSyncDataSourceAuthorizer.class)), vtlEngine(), objectMapper);
 
     private static AppSyncVtlEngine vtlEngine() {
@@ -807,6 +810,35 @@ class AppSyncResolverExecutorTest {
         assertEquals(Map.of(":active", true, ":id", "42"), request.get("variableMap"));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void vtlUnitAndPipelineFunctionsDispatchHttpRequestsAndPreserveErrorResponses(boolean pipeline) {
+        when(appSync.getDataSource(API_ID, "accountHttp"))
+                .thenReturn(dataSource("accountHttp", DataSourceType.HTTP));
+        httpInvoker.answer = Map.of("statusCode", 404, "headers", Map.of(), "body", "missing");
+        String requestTemplate = """
+                {"version":"2018-05-29","method":"GET","resourcePath":"/schedules/$ctx.args.name"}
+                """;
+        Resolver resolver = resolver(pipeline ? ResolverKind.PIPELINE : ResolverKind.UNIT,
+                pipeline ? "pipeline-code" : null);
+        if (pipeline) {
+            when(appSync.getFunction(API_ID, "httpFn")).thenReturn(vtlFunction("httpFn", "accountHttp",
+                    requestTemplate, "$util.toJson($ctx.result)"));
+            resolver.setPipelineConfig(Map.of("functions", List.of("httpFn")));
+            jsRuntime.script("pipeline-code", "request", (h, ctx) -> ok(Map.of()));
+            jsRuntime.script("pipeline-code", "response", (h, ctx) -> ok(ctx.get("result")));
+        } else {
+            resolver.setDataSourceName("accountHttp");
+            resolver.setRequestMappingTemplate(requestTemplate);
+            resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
+        }
+        ResolverOutcome result = executor.execute(resolver, invocation(Map.of("name", "example")));
+        assertTrue(result.errors().isEmpty());
+        assertEquals(httpInvoker.answer, result.data());
+        assertEquals(List.of(Map.of("version", "2018-05-29", "method", "GET", "resourcePath", "/schedules/example")),
+                httpInvoker.requests);
+    }
+
     @Test
     void vtlDataSourceErrorIsAvailableToTheResponseTemplate() {
         when(appSync.getDataSource(API_ID, "accountFunction"))
@@ -958,10 +990,10 @@ class AppSyncResolverExecutorTest {
 
     @Test
     void vtlRequestReturnCannotBypassUnsupportedDataSourceValidation() {
-        when(appSync.getDataSource(API_ID, "accountHttp"))
-                .thenReturn(dataSource("accountHttp", DataSourceType.HTTP));
+        when(appSync.getDataSource(API_ID, "accountEvents"))
+                .thenReturn(dataSource("accountEvents", DataSourceType.AMAZON_EVENTBRIDGE));
         Resolver resolver = resolver(ResolverKind.UNIT, null);
-        resolver.setDataSourceName("accountHttp");
+        resolver.setDataSourceName("accountEvents");
         resolver.setRequestMappingTemplate("#return({\"short\":\"circuit\"})");
         resolver.setResponseMappingTemplate("$util.toJson($ctx.result)");
 
