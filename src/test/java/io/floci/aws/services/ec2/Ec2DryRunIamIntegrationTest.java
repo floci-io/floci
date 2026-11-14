@@ -9,13 +9,17 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.AttributeValue;
+import software.amazon.awssdk.services.ec2.model.Instance;
 import software.amazon.awssdk.services.ec2.model.InstanceType;
 import software.amazon.awssdk.services.ec2.model.Volume;
 
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.function.BiConsumer;
 
 import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static org.awaitility.Awaitility.await;
@@ -90,38 +94,53 @@ class Ec2DryRunIamIntegrationTest {
 
     @Test
     void aTerminateDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        assertAnInstanceDryRunNeedsTheCallersCurrentPermission("TerminateInstances",
+                (caller, instanceId) -> caller.terminateInstances(r -> r.instanceIds(instanceId).dryRun(true)));
+    }
+
+    @Test
+    void aModifyInstanceAttributeDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        assertAnInstanceDryRunNeedsTheCallersCurrentPermission("ModifyInstanceAttribute",
+                (caller, instanceId) -> caller.modifyInstanceAttribute(r -> r.instanceId(instanceId)
+                        .instanceType(AttributeValue.builder().value("t3.small").build()).dryRun(true)));
+    }
+
+    /**
+     * A caller the policy allows {@code action} gets DryRunOperation for {@code dryRun} on a running instance,
+     * and UnauthorizedOperation once the policy is removed; the instance is unchanged either way.
+     */
+    private void assertAnInstanceDryRunNeedsTheCallersCurrentPermission(String action,
+            BiConsumer<Ec2Client, String> dryRun) throws Exception {
         String policy = """
                 {"Version":"2012-10-17","Statement":[{
-                  "Effect":"Allow","Action":"ec2:TerminateInstances","Resource":"*"
+                  "Effect":"Allow","Action":"ec2:%s","Resource":"*"
                 }]}
-                """;
+                """.formatted(action);
         try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint);
-                SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "instance-dryrun-allowed-", "instances",
-                        policy);
+                SignedIamUsers.User user = SignedIamUsers.createUser(endpoint,
+                        "dryrun-" + action.toLowerCase(Locale.ROOT) + "-", "instances", policy);
                 Ec2Client caller = AwsTestClients.create(Ec2Client.builder(), user.accessKeyId(),
                         user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
             String instanceId = admin.runInstances(r -> r.imageId("ami-1234567890abcdef0")
                     .instanceType(InstanceType.T3_MICRO).minCount(1).maxCount(1)).instances().get(0).instanceId();
             try {
                 await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
-                        .untilAsserted(() -> assertEquals("running", state(admin, instanceId)));
+                        .untilAsserted(() -> assertEquals("running", instance(admin, instanceId).state().nameAsString()));
+                Instance before = instance(admin, instanceId);
 
-                assertAwsError("DryRunOperation", 412,
-                        () -> caller.terminateInstances(r -> r.instanceIds(instanceId).dryRun(true)));
+                assertAwsError("DryRunOperation", 412, () -> dryRun.accept(caller, instanceId));
                 SignedIamUsers.iam(endpoint, "DeleteUserPolicy", Map.of("UserName", user.name(), "PolicyName", "instances"))
                         .then().statusCode(200);
-                assertAwsError("UnauthorizedOperation", 403,
-                        () -> caller.terminateInstances(r -> r.instanceIds(instanceId).dryRun(true)));
+                assertAwsError("UnauthorizedOperation", 403, () -> dryRun.accept(caller, instanceId));
 
-                assertEquals("running", state(admin, instanceId));
+                assertEquals(before, instance(admin, instanceId));
             } finally {
                 admin.terminateInstances(r -> r.instanceIds(instanceId));
             }
         }
     }
 
-    private static String state(Ec2Client client, String instanceId) {
-        return client.describeInstances(r -> r.instanceIds(instanceId)).reservations().get(0).instances().get(0)
-                .state().nameAsString();
+    private static Instance instance(Ec2Client client, String instanceId) {
+        return client.describeInstances(r -> r.instanceIds(instanceId)).reservations().get(0).instances().get(0);
     }
 }

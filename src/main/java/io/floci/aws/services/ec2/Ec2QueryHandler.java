@@ -119,11 +119,11 @@ public class Ec2QueryHandler {
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 // EBS encryption defaults
                 case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
-                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
-                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(region);
+                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(params, region);
+                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(params, region);
                 case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
-                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(params, region);
                 // AMI block public access
                 case "EnableImageBlockPublicAccess" -> handleEnableImageBlockPublicAccess(params, region);
                 case "DisableImageBlockPublicAccess" -> handleDisableImageBlockPublicAccess(params, region);
@@ -678,12 +678,14 @@ public class Ec2QueryHandler {
                 ebsEncryptionService.getEbsEncryptionByDefault(region));
     }
 
-    private Response handleEnableEbsEncryptionByDefault(String region) {
+    private Response handleEnableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("EnableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.enableEbsEncryptionByDefault(region));
     }
 
-    private Response handleDisableEbsEncryptionByDefault(String region) {
+    private Response handleDisableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("DisableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.disableEbsEncryptionByDefault(region));
     }
@@ -695,10 +697,11 @@ public class Ec2QueryHandler {
 
     private Response handleModifyEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
         return ebsKmsKeyResponse("ModifyEbsDefaultKmsKeyIdResponse",
-                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId")));
+                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId"), dryRun(p)));
     }
 
-    private Response handleResetEbsDefaultKmsKeyId(String region) {
+    private Response handleResetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("ResetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.resetEbsDefaultKmsKeyId(region));
     }
@@ -1511,7 +1514,7 @@ public class Ec2QueryHandler {
      */
     private Response handleMonitoring(MultivaluedMap<String, String> p, String region, String action,
                                       boolean enabled) {
-        List<String> changed = service.setInstanceMonitoring(region, getList(p, "InstanceId"), enabled);
+        List<String> changed = service.setInstanceMonitoring(region, getList(p, "InstanceId"), enabled, dryRun(p));
         String state = enabled ? "enabled" : "disabled";
         XmlBuilder xml = new XmlBuilder()
                 .start(action + "Response", AwsNamespaces.EC2)
@@ -1677,16 +1680,16 @@ public class Ec2QueryHandler {
         // UserData arrives base64-encoded, as on RunInstances; both forms are kept so the attribute
         // describes back exactly as sent.
         String userDataEncoded = p.getFirst("UserData.Value");
-        if (userDataEncoded != null) {
-            service.modifyInstanceUserData(region, instanceId, Ec2UserDataDecoder.decode(userDataEncoded), userDataEncoded);
-        }
+        String userData = userDataEncoded == null ? null : Ec2UserDataDecoder.decode(userDataEncoded);
         // Find which attribute is being modified
+        String attrName = null;
+        String attrValue = null;
         for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
             String val = p.getFirst(attr);
             if (val != null) {
-                String attrName = attr.replace(".Value", "");
+                attrName = attr.replace(".Value", "");
                 attrName = Character.toLowerCase(attrName.charAt(0)) + attrName.substring(1);
-                service.modifyInstanceAttribute(region, instanceId, attrName, val);
+                attrValue = val;
                 break;
             }
         }
@@ -1699,6 +1702,17 @@ public class Ec2QueryHandler {
             }
             groupIds.add(groupId);
         }
+        if (dryRun(p)) {
+            service.checkInstanceAttributeChange(region, instanceId, userDataEncoded != null, attrName != null,
+                    groupIds);
+            throw Ec2Service.dryRunOperation();
+        }
+        if (userDataEncoded != null) {
+            service.modifyInstanceUserData(region, instanceId, userData, userDataEncoded);
+        }
+        if (attrName != null) {
+            service.modifyInstanceAttribute(region, instanceId, attrName, attrValue);
+        }
         if (!groupIds.isEmpty()) {
             service.modifyInstanceGroups(region, instanceId, groupIds);
         }
@@ -1710,7 +1724,8 @@ public class Ec2QueryHandler {
         if (instanceId == null || instanceId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
         }
-        Instance inst = service.modifyInstanceMetadataOptions(region, instanceId, parseMetadataOptions(p, ""));
+        Instance inst = service.modifyInstanceMetadataOptions(region, instanceId, parseMetadataOptions(p, ""),
+                dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyInstanceMetadataOptionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -7037,7 +7052,7 @@ public class Ec2QueryHandler {
 
         List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
                 type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,
-                spotRequestTags, instanceTags, userDataEncoded);
+                spotRequestTags, instanceTags, userDataEncoded, dryRun(p));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RequestSpotInstancesResponse", AwsNamespaces.EC2)
@@ -7070,7 +7085,7 @@ public class Ec2QueryHandler {
 
     private Response handleCancelSpotInstanceRequests(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "SpotInstanceRequestId");
-        List<SpotInstanceRequest> requests = service.cancelSpotInstanceRequests(region, ids);
+        List<SpotInstanceRequest> requests = service.cancelSpotInstanceRequests(region, ids, dryRun(p));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("CancelSpotInstanceRequestsResponse", AwsNamespaces.EC2)

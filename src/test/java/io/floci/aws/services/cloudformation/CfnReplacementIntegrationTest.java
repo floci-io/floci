@@ -48,8 +48,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * An update replaces a resource exactly when its change set said {@code Replacement: True}, and the
  * change set's {@code Replacement} is the one AWS documents for the changed property ("Update
- * requires"). Covered: AppConfig profiles and ElastiCache clusters changed in a create-only and in
- * another property; a create-only value that is not plain template text (a dynamic reference
+ * requires"). Covered: AppConfig profiles, ElastiCache clusters and Route53 hosted zones changed in a
+ * create-only and in another property; a create-only value that is not plain template text (a dynamic reference
  * rewritten as the literal it resolves to, a value known only during the update, a value read from
  * a resource replaced in the same update, an attribute another resource moves while the update
  * runs); and a stack that holds no record of what its dynamic references resolved to.
@@ -123,6 +123,16 @@ class CfnReplacementIntegrationTest {
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\"",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.small\"",
                         "False", true, null),
+                createOnlyRow("Route53 zone Name", "", "", "AWS::Route53::HostedZone",
+                        "\"Name\": \"replacement-before.example.test\"",
+                        "\"Name\": \"replacement-after.example.test\"",
+                        "True", false, null),
+                createOnlyRow("Route53 zone HostedZoneConfig", "", "", "AWS::Route53::HostedZone",
+                        "\"Name\": \"replacement-comment.example.test\","
+                                + " \"HostedZoneConfig\": {\"Comment\": \"first\"}",
+                        "\"Name\": \"replacement-comment.example.test\","
+                                + " \"HostedZoneConfig\": {\"Comment\": \"second\"}",
+                        "False", false, null),
                 SUBNET_GROUP_REPLACED,
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),

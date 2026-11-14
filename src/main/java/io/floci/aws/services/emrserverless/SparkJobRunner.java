@@ -37,6 +37,14 @@ public interface SparkJobRunner {
         /** The run's Spark driver runs. */
         void started();
 
+        /**
+         * The run resolved the custom image its job names for {@code workerType} ({@link Job#customImage} for its
+         * driver, {@link Executors#image} for its executors) to the image whose manifest digest is {@code digest}, and
+         * runs that image as that worker type.
+         */
+        default void imageResolved(WorkerType workerType, String digest) {
+        }
+
         /** The run has passed its timeout, and its driver is about to be stopped. */
         void timedOut();
 
@@ -45,6 +53,12 @@ public interface SparkJobRunner {
          * that runs is stopped.
          */
         boolean cancelled();
+    }
+
+    /** What a run's container runs as: its driver, or one of its executors. */
+    enum WorkerType {
+        DRIVER,
+        EXECUTOR
     }
 
     /** What a run's driver runs: Spark's {@code spark-submit}, or Hive's {@code hive}. */

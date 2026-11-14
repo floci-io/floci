@@ -5350,7 +5350,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * @return the ids that were changed, in request order
      */
     public List<String> setInstanceMonitoring(String region, List<String> instanceIds, boolean enabled) {
+        return setInstanceMonitoring(region, instanceIds, enabled, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must exist, and the request is then answered with
+     * DryRunOperation, no instance's monitoring changed.
+     */
+    public List<String> setInstanceMonitoring(String region, List<String> instanceIds, boolean enabled,
+                                              boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> getRequiredInstance(region, id));
+            throw dryRunOperation();
+        }
         List<String> changed = new ArrayList<>();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
@@ -5777,11 +5790,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public void modifyInstanceUserData(String region, String instanceId, String userData, String encodedUserData) {
         ensureDefaultResources(region);
         Instance inst = getRequiredInstance(region, instanceId);
-        String state = inst.getState() != null ? inst.getState().getName() : null;
-        if (!"stopped".equals(state)) {
-            throw new AwsException("IncorrectInstanceState",
-                    "The instance '" + instanceId + "' is not in the 'stopped' state.", 400);
-        }
+        requireStoppedForUserData(inst);
         inst.setUserData(userData);
         inst.setEncodedUserData(encodedUserData);
         instances.put(key(region, instanceId), inst);
@@ -5873,6 +5882,51 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 inst.getIamInstanceProfileAssociationTime());
     }
 
+    /**
+     * ModifyInstanceAttribute's checks for a dry run, in the order the change makes them, changing
+     * nothing: with any part to change, the instance exists; new user data needs it stopped; each
+     * security group exists in the instance's VPC. With nothing to change, as for the change, there
+     * is nothing to check.
+     */
+    public void checkInstanceAttributeChange(String region, String instanceId, boolean userData,
+                                             boolean attribute, List<String> groupIds) {
+        ensureDefaultResources(region);
+        if (!userData && !attribute && groupIds.isEmpty()) {
+            return;
+        }
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (userData) {
+            requireStoppedForUserData(inst);
+        }
+        if (!groupIds.isEmpty()) {
+            synchronized (attachmentTopologyLock(region)) {
+                instanceVpcGroups(region, inst, groupIds);
+            }
+        }
+    }
+
+    /** New user data needs the instance stopped, as on AWS. */
+    private static void requireStoppedForUserData(Instance inst) {
+        String state = inst.getState() != null ? inst.getState().getName() : null;
+        if (!"stopped".equals(state)) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + inst.getInstanceId() + "' is not in the 'stopped' state.", 400);
+        }
+    }
+
+    /** The security groups {@code groupIds} names, each of which must be in the instance's VPC. */
+    private List<SecurityGroup> instanceVpcGroups(String region, Instance inst, List<String> groupIds) {
+        List<SecurityGroup> groups = new ArrayList<>();
+        for (String groupId : groupIds) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (!Objects.equals(inst.getVpcId(), sg.getVpcId())) {
+                throw new AwsException("InvalidGroup.NotFound", "Security group is not in the instance VPC", 400);
+            }
+            groups.add(sg);
+        }
+        return groups;
+    }
+
     public void modifyInstanceAttribute(String region, String instanceId, String attribute, String value) {
         ensureDefaultResources(region);
         Instance inst = getRequiredInstance(region, instanceId);
@@ -5915,11 +5969,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<GroupIdentifier> identifiers = new ArrayList<>();
         List<String> protectedGroups = new ArrayList<>();
         synchronized (attachmentTopologyLock(region)) {
-            for (String groupId : groupIds) {
-                SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-                if (!Objects.equals(inst.getVpcId(), sg.getVpcId())) {
-                    throw new AwsException("InvalidGroup.NotFound", "Security group is not in the instance VPC", 400);
-                }
+            for (SecurityGroup sg : instanceVpcGroups(region, inst, groupIds)) {
                 identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
                 protectedGroups.add(callerAccountId() + "::" + key(region, sg.getGroupId()));
             }
@@ -5977,6 +6027,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public Instance modifyInstanceMetadataOptions(String region, String instanceId,
                                                   LaunchTemplateData.MetadataOptions request) {
+        return modifyInstanceMetadataOptions(region, instanceId, request, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the options and the instance pass every check the change makes,
+     * and the request is then answered with DryRunOperation, the options unchanged.
+     */
+    public Instance modifyInstanceMetadataOptions(String region, String instanceId,
+                                                  LaunchTemplateData.MetadataOptions request, boolean dryRun) {
         ensureDefaultResources(region);
         validateMetadataOptions(request);
         Instance inst = getRequiredInstance(region, instanceId);
@@ -5984,6 +6043,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("OperationNotPermitted",
                     "The instance '" + instanceId + "' is a cluster node and its metadata options cannot be"
                             + " modified through EC2", 400);
+        }
+        if (dryRun) {
+            throw dryRunOperation();
         }
         inst.setMetadataOptions(LaunchTemplateData.MetadataOptions.merge(inst.effectiveMetadataOptions(), request));
         instances.put(key(region, instanceId), inst);
@@ -16215,22 +16277,39 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                          String keyName, String subnetId, List<String> securityGroupIds,
                                                          String userData, String iamInstanceProfileArn,
                                                          List<Tag> spotRequestTags, List<Tag> instanceTags, String encodedUserData) {
+        return requestSpotInstances(region, spotPrice, instanceCount, type, productDescription, imageId, instanceType,
+                keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn, spotRequestTags, instanceTags,
+                encodedUserData, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the request's instances are checked as RunInstances checks a dry
+     * run of all of them at once, which then answers DryRunOperation: no request is made and no
+     * instance launched.
+     */
+    public List<SpotInstanceRequest> requestSpotInstances(String region, String spotPrice, Integer instanceCount,
+                                                         String type, String productDescription, String imageId, String instanceType,
+                                                         String keyName, String subnetId, List<String> securityGroupIds,
+                                                         String userData, String iamInstanceProfileArn,
+                                                         List<Tag> spotRequestTags, List<Tag> instanceTags, String encodedUserData,
+                                                         boolean dryRun) {
         ensureDefaultResources(region);
 
         int count = instanceCount != null ? instanceCount : 1;
         String finalType = type != null ? type : "one-time";
+        if (dryRun) {
+            runSpotInstances(region, imageId, instanceType, count, keyName, securityGroupIds, subnetId, instanceTags,
+                    userData, iamInstanceProfileArn, encodedUserData, true);
+            throw dryRunOperation();
+        }
 
         List<SpotInstanceRequest> requests = new ArrayList<>();
 
         for (int i = 0; i < count; i++) {
             String spotRequestId = "sir-" + randomHex(8);
 
-            Reservation reservation = runInstances(region, imageId, instanceType, 1, 1, keyName,
-                    securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
-                    /* associatePublicIp */ null, /* networkInterfaceId */ null,
-                    /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
-                    /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData,
-                    false, null, null, null, true);
+            Reservation reservation = runSpotInstances(region, imageId, instanceType, 1, keyName, securityGroupIds,
+                    subnetId, instanceTags, userData, iamInstanceProfileArn, encodedUserData, false);
 
             Instance launchedInstance = reservation.getInstances().get(0);
 
@@ -16285,14 +16364,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                            List<Map.Entry<String, List<String>>> filters) {
         ensureDefaultResources(region);
 
-        if (!spotRequestIds.isEmpty()) {
-            for (String id : spotRequestIds) {
-                if (spotInstanceRequests.get(key(region, id)).isEmpty()) {
-                    throw new AwsException("InvalidSpotInstanceRequestID.NotFound",
-                            "The spot instance request ID '" + id + "' does not exist", 400);
-                }
-            }
-        }
+        spotRequestIds.forEach(id -> requireSpotInstanceRequest(region, id));
 
         return spotInstanceRequests.scan(k -> true).stream()
                 .filter(sir -> sir.getRegion().equals(region))
@@ -16301,16 +16373,47 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
+    /**
+     * RunInstances for {@code count} of a Spot request's instances, as its launch specification gives them; with
+     * {@code dryRun}, RunInstances' own dry run of all of them.
+     */
+    private Reservation runSpotInstances(String region, String imageId, String instanceType, int count,
+                                         String keyName, List<String> securityGroupIds, String subnetId,
+                                         List<Tag> instanceTags, String userData, String iamInstanceProfileArn,
+                                         String encodedUserData, boolean dryRun) {
+        return runInstances(region, imageId, instanceType, count, count, keyName,
+                securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
+                /* associatePublicIp */ null, /* networkInterfaceId */ null,
+                /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
+                /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData,
+                dryRun, null, null, null, true);
+    }
+
+    private SpotInstanceRequest requireSpotInstanceRequest(String region, String id) {
+        return spotInstanceRequests.get(key(region, id)).orElseThrow(() -> new AwsException(
+                "InvalidSpotInstanceRequestID.NotFound",
+                "The spot instance request ID '" + id + "' does not exist", 400));
+    }
+
     public List<SpotInstanceRequest> cancelSpotInstanceRequests(String region, List<String> spotRequestIds) {
+        return cancelSpotInstanceRequests(region, spotRequestIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every request must exist, and the call is then answered with
+     * DryRunOperation, no request cancelled.
+     */
+    public List<SpotInstanceRequest> cancelSpotInstanceRequests(String region, List<String> spotRequestIds,
+                                                                boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            spotRequestIds.forEach(id -> requireSpotInstanceRequest(region, id));
+            throw dryRunOperation();
+        }
 
         List<SpotInstanceRequest> result = new ArrayList<>();
         for (String id : spotRequestIds) {
-            SpotInstanceRequest sir = spotInstanceRequests.get(key(region, id)).orElse(null);
-            if (sir == null) {
-                throw new AwsException("InvalidSpotInstanceRequestID.NotFound",
-                        "The spot instance request ID '" + id + "' does not exist", 400);
-            }
+            SpotInstanceRequest sir = requireSpotInstanceRequest(region, id);
 
             sir.setState("cancelled");
             sir.setStatusCode("request-canceled-and-instance-running");

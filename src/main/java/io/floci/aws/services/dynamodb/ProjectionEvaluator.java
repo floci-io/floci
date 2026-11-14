@@ -101,13 +101,13 @@ final class ProjectionEvaluator {
 
     static void validateExpression(String expression, JsonNode exprAttrNames) {
         validateSyntax(expression, "ProjectionExpression");
-        DynamoDbReservedWords.check(expression, "ProjectionExpression");
         validatePaths(expression, exprAttrNames);
     }
 
     /**
-     * Rejects an undefined #alias, and any two paths where one covers the other.
-     * DynamoDB applies both before the read, so a request that matches nothing still fails.
+     * Rejects an undefined #alias, a reserved word, and a path that overlaps an earlier one.
+     * DynamoDB checks each path in written order before the read, so a request that matches
+     * nothing still fails.
      */
     static void validatePaths(String expression, JsonNode exprAttrNames) {
         if (expression == null || expression.isBlank()) {
@@ -116,21 +116,18 @@ final class ProjectionEvaluator {
         List<List<PathSegment>> paths = new ArrayList<>();
         for (String rawPath : splitProjectionPaths(expression)) {
             List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames, true);
-            if (!segments.isEmpty()) {
-                paths.add(segments);
+            if (segments.isEmpty()) {
+                continue;
             }
-        }
-        for (int i = 0; i < paths.size(); i++) {
-            List<PathSegment> first = paths.get(i);
-            for (int j = i + 1; j < paths.size(); j++) {
-                List<PathSegment> second = paths.get(j);
-                if (covers(first, second) || covers(second, first)) {
+            for (List<PathSegment> earlier : paths) {
+                if (covers(earlier, segments) || covers(segments, earlier)) {
                     throw new AwsException("ValidationException",
                             "Invalid ProjectionExpression: Two document paths overlap with each other; "
-                            + "must remove or rewrite one of these paths; path one: " + render(first)
-                            + ", path two: " + render(second), 400);
+                            + "must remove or rewrite one of these paths; path one: " + render(earlier)
+                            + ", path two: " + render(segments), 400);
                 }
             }
+            paths.add(segments);
         }
     }
 
@@ -255,6 +252,9 @@ final class ProjectionEvaluator {
 
     private static String resolveSegment(String seg, JsonNode exprAttrNames, boolean requireDefinedNames) {
         if (!seg.startsWith("#")) {
+            if (requireDefinedNames && DynamoDbReservedWords.isReserved(seg)) {
+                throw DynamoDbReservedWords.reservedWord("ProjectionExpression", seg);
+            }
             return seg;
         }
         JsonNode resolved = exprAttrNames != null ? exprAttrNames.get(seg) : null;
