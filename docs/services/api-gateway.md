@@ -847,6 +847,25 @@ authorizer's context into request headers, query strings, and paths. For a retur
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
 
+HTTP API `HTTP_PROXY` header, query string and path mappings also read `$request.body`,
+`$request.body.<JSONPath>`, `$stageVariables.<name>` and the `$context` variables `accountId`,
+`apiId`, `domainName`, `domainPrefix`, `extendedRequestId`, `httpMethod`, `path`, `protocol`,
+`requestTime`, `requestTimeEpoch`, `routeKey` and `stage`, alongside `requestId`,
+`identity.sourceIp` and the authorizer values above. A JSONPath that selects a scalar maps its text,
+and one that selects an object or array maps its JSON. A missing field, an empty body or a body
+that is not JSON resolves to nothing, so that header or query mapping is skipped, and the same
+expression embedded in an `overwrite:path` value such as `/orders/$request.body.order.id` becomes
+an empty string. Floci evaluates the whole body, where AWS reads only its first 100 KB.
+An expression embedded in a path is read whole before it is resolved: a body JSONPath takes dotted
+names, `[n]` indexes and `['key']` selectors, so `/orders/$request.body.items[0].id` selects the
+first item's `id`, a stage variable name ends at the first character that is not a letter, digit or
+underscore, and a `$request.path`, `$request.header` or `$request.querystring` name ends at the next
+`.`, so `/files/$request.path.name.json` keeps its `.json` suffix. A header value mapped from any
+source, including the whole `$request.body`, is rejected when it contains CR, LF, NUL or any other
+control character besides tab, as is a mapped `Host`: the request never reaches the backend and the
+caller receives `502` with
+`{"message":"Bad Gateway: invalid request header value for <name>"}`.
+
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
 `SQS-PurgeQueue`, `AppConfig-GetConfiguration`, `Kinesis-PutRecord`,

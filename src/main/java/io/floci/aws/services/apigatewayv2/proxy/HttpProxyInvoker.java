@@ -49,8 +49,10 @@ import java.util.StringJoiner;
  * request and the response. Java's HttpClient also restricts certain headers
  * (Content-Length, etc.) — those are skipped silently.
  *
- * <p>If the backend is unreachable or times out, returns a 502 Bad Gateway
- * ProxyResult so the controller can relay a clean error to the original client.
+ * <p>If the backend is unreachable or times out, or a mapped header name or value cannot be
+ * written as a single header line (a control character such as CR or LF in a value mapped from the
+ * caller's request), returns a 502 Bad Gateway ProxyResult so the controller can relay a clean
+ * error to the original client. Nothing is sent to the backend in the header case.
  */
 @ApplicationScoped
 public class HttpProxyInvoker {
@@ -357,6 +359,9 @@ public class HttpProxyInvoker {
         if (pinned) {
             try {
                 return invokeHttpPinned(finalUrl, method, builder, options.timeout());
+            } catch (PinnedHttpClient.InvalidRequestHeaderException e) {
+                LOG.warnv("HTTP_PROXY: {0}", e.getMessage());
+                return errorResult("Bad Gateway: " + e.getMessage());
             } catch (PinnedHttpClient.ResponseTooLargeException ignored) {
                 return tooLargeResult();
             } catch (Exception e) {
@@ -385,11 +390,20 @@ public class HttpProxyInvoker {
                             : HttpRequest.BodyPublishers.noBody());
         }
 
-        for (Map.Entry<String, List<String>> e : builder.headers().entrySet()) {
-            if (RESTRICTED.contains(e.getKey().toLowerCase())) continue;
-            for (String v : e.getValue()) {
-                hrb.header(e.getKey(), v);
+        try {
+            for (Map.Entry<String, List<String>> e : builder.headers().entrySet()) {
+                if (RESTRICTED.contains(e.getKey().toLowerCase())) continue;
+                for (String v : e.getValue()) {
+                    PinnedHttpClient.requireValidHeader(e.getKey(), v);
+                    hrb.header(e.getKey(), v);
+                }
             }
+        } catch (PinnedHttpClient.InvalidRequestHeaderException e) {
+            LOG.warnv("HTTP_PROXY: {0}", e.getMessage());
+            return errorResult("Bad Gateway: " + e.getMessage());
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("HTTP_PROXY: invalid request header: {0}", e.getMessage());
+            return errorResult("Bad Gateway: invalid request header");
         }
 
         try {
