@@ -416,8 +416,14 @@ holding the driver and its executors, or a command or a script. The cluster itse
   goes to `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/node/<instance-id>/bootstrap-actions/<n>/`,
   as the Management Guide's bootstrap failure pages give the folder. The actions run once, as on the
   master, and every node of the cluster runs from the image they leave, so each holds what they installed. Shutdown
-  actions do not run, and
-  `Status.ErrorDetails` is not given.
+  actions do not run. A cluster a failed action ended has a `Status.ErrorDetails` entry in `DescribeCluster` and
+  `ListClusters`, with the code and `ErrorData` keys of the Management Guide's error code pages:
+  `BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE` with `primary-instance-id`, `bootstrap-action`, `return-code`,
+  `amazon-s3-path` and `public-doc` for an action that exits with another code than 0, and
+  `BOOTSTRAP_FAILURE_BA_DOWNLOAD_FAILED_PRIMARY` with the same but `return-code` for a script that cannot be read.
+  `ErrorData` is a list of maps, and no source shows how AWS spreads the keys over them: Floci gives one map holding
+  them all. `ErrorMessage` is the reason's message and the error code's page, in Floci's words, as AWS advises
+  against parsing that text. A cluster that ends with `INTERNAL_ERROR` has no `ErrorDetails`.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then

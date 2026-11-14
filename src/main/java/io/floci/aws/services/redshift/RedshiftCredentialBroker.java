@@ -34,10 +34,17 @@ public class RedshiftCredentialBroker implements Resettable {
 
     public TempCredential issue(String accountId, String clusterId, String dbUser,
                                 List<String> dbGroups, int durationSeconds) {
+        return issue(accountId, clusterId, dbUser, dbGroups, durationSeconds, dbUser, true);
+    }
+
+    public TempCredential issue(String accountId, String clusterId, String dbUser,
+                                List<String> dbGroups, int durationSeconds,
+                                String databaseRole, boolean autoCreate) {
         String password = randomPassword();
         Instant expiresAt = Instant.now().plusSeconds(durationSeconds);
         List<String> groups = dbGroups == null ? List.of() : List.copyOf(dbGroups);
-        TempCredential credential = new TempCredential(dbUser, password, expiresAt, groups);
+        TempCredential credential = new TempCredential(
+                dbUser, password, expiresAt, groups, databaseRole, autoCreate);
         store.compute(key(accountId, clusterId, dbUser), (k, existing) -> {
             CopyOnWriteArrayList<TempCredential> list =
                     existing == null ? new CopyOnWriteArrayList<>() : existing;
@@ -49,7 +56,18 @@ public class RedshiftCredentialBroker implements Resettable {
     }
 
     public Optional<TempCredential> resolve(String accountId, String clusterId, String dbUser) {
-        return liveCredentials(key(accountId, clusterId, dbUser)).stream().findFirst();
+        List<TempCredential> live = liveCredentials(key(accountId, clusterId, dbUser));
+        if (live.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(live.get(live.size() - 1));
+    }
+
+    public Optional<TempCredential> authenticate(String accountId, String clusterId,
+                                                 String username, String password) {
+        return liveCredentials(key(accountId, clusterId, username)).stream()
+                .filter(c -> c.password().equals(password))
+                .findFirst();
     }
 
     public Match classify(String accountId, String clusterId, String username, String password) {

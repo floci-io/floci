@@ -15,6 +15,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
 import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrStep;
@@ -741,6 +742,19 @@ public class EmrHandler {
         putEpoch(timeline, "CreationDateTime", c.getCreationDateTime());
         putEpoch(timeline, "ReadyDateTime", c.getReadyDateTime());
         putEpoch(timeline, "EndDateTime", c.getEndDateTime());
+        if (!c.getErrorDetails().isEmpty()) {
+            ArrayNode details = status.putArray("ErrorDetails");
+            for (EmrErrorDetail detail : c.getErrorDetails()) {
+                ObjectNode node = details.addObject();
+                node.put("ErrorCode", detail.getErrorCode());
+                ArrayNode data = node.putArray("ErrorData");
+                for (Map<String, String> pairs : detail.getErrorData()) {
+                    ObjectNode map = data.addObject();
+                    pairs.forEach(map::put);
+                }
+                node.put("ErrorMessage", detail.getErrorMessage());
+            }
+        }
         return status;
     }
 
