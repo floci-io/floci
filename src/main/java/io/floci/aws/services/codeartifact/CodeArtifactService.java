@@ -89,7 +89,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget", "cargo");
     private static final Set<String> ORIGIN_RESTRICTION_VALUES = Set.of("ALLOW", "BLOCK");
     /**
      * Formats AWS documents as valid for {@code GetPackageVersionReadme} specifically: the
@@ -3699,7 +3699,12 @@ public class CodeArtifactService implements Resettable {
             String format, String namespace, String packageName, String version, String repoId,
             long versionFenceSnapshot, long episodeId) {
         String owner = effectiveOwner(domainOwner);
-        if ("nuget".equals(format)) {
+        // Not a nuget-specific quirk: needed by any format whose sidecar client holds a real
+        // per-request container lease (beginUse/endUse actually doing something, not the no-op
+        // default) that could go stale if the repository is deleted and recreated mid-write.
+        // KellnrSidecarClient (cargo) delegates beginUse/endUse to a real lease exactly like
+        // BagetterSidecarClient (nuget) does, so it has the identical exposure.
+        if ("nuget".equals(format) || "cargo".equals(format)) {
             if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repoId)) {
                 return false;
             }
@@ -4355,7 +4360,7 @@ public class CodeArtifactService implements Resettable {
             String namespace, String packageName, List<String> versions, Map<String, String> versionRevisions,
             boolean allowOverwrite, boolean includeFromUpstream) {
         if (!"generic".equals(format) && !CONTAINER_BACKED_FORMATS.contains(format)) {
-            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', or 'nuget'.");
+            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', 'nuget', or 'cargo'.");
         }
         boolean hasVersions = versions != null && !versions.isEmpty();
         boolean hasRevisions = versionRevisions != null && !versionRevisions.isEmpty();
@@ -6506,7 +6511,7 @@ public class CodeArtifactService implements Resettable {
         if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
             throw validation("namespace is required when " + action + " a " + format + " package.");
         }
-        if (("pypi".equals(format) || "nuget".equals(format)) && namespace != null) {
+        if (("pypi".equals(format) || "nuget".equals(format) || "cargo".equals(format)) && namespace != null) {
             throw validation(format + " packages do not have a namespace.");
         }
     }

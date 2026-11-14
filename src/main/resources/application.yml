@@ -163,6 +163,7 @@ quarkus:
       - --initialize-at-run-time=io.floci.aws.services.dms.DmsService
       - --initialize-at-run-time=io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials
       - --initialize-at-run-time=io.floci.aws.services.ecs.container.EcsTaskRoleCredentials
+      - --initialize-at-run-time=io.floci.aws.services.codeartifact.KellnrSidecarManager
       - --initialize-at-run-time=io.floci.aws.services.ssoportal.SsoPortalService
       - --initialize-at-run-time=io.floci.aws.services.redshift.proxy.RedshiftRoleAccess
       - --initialize-at-run-time=io.floci.aws.services.redshift.spectrum.SpectrumMaterializer
@@ -1149,6 +1150,7 @@ floci:
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
       nuget-image: "bagetter/bagetter:1.6.5"
+      cargo-image: "ghcr.io/kellnr/kellnr:5.14.1"
     quicksight:
       enabled: true
       embed-base-url: ${floci.base-url}
