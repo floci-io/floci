@@ -17,13 +17,10 @@ import software.amazon.awssdk.services.redshift.model.RestoreTableFromClusterSna
 import software.amazon.awssdk.services.redshift.model.TableRestoreStatus;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Properties;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -77,7 +74,7 @@ class RedshiftTableRestoreTest {
         Endpoint endpoint = client.describeClusters(
                 DescribeClustersRequest.builder().clusterIdentifier(clusterId).build()).clusters().get(0).endpoint();
 
-        try (Connection connection = awaitPostgresConnection(endpoint.address(), endpoint.port());
+        try (Connection connection = TestFixtures.awaitRedshiftConnection(endpoint.address(), endpoint.port(), USERNAME, PASSWORD);
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE orders (id INT, note VARCHAR(40))");
             statement.execute("INSERT INTO orders VALUES (1, 'first'), (2, 'second')");
@@ -143,25 +140,5 @@ class RedshiftTableRestoreTest {
             Thread.sleep(500);
         } while (Instant.now().isBefore(deadline));
         return status;
-    }
-
-    private static Connection awaitPostgresConnection(String host, int port) throws Exception {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try {
-                Properties properties = new Properties();
-                properties.setProperty("user", USERNAME);
-                properties.setProperty("password", PASSWORD);
-                properties.setProperty("sslmode", "disable");
-                properties.setProperty("connectTimeout", "5");
-                return DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/" + DATABASE,
-                        properties);
-            } catch (SQLException e) {
-                last = e;
-                Thread.sleep(1000);
-            }
-        }
-        throw last != null ? last : new SQLException("Timed out waiting for PostgreSQL at " + host + ":" + port);
     }
 }

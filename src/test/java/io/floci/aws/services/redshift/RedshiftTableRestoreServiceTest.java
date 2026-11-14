@@ -8,6 +8,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.redshift.RedshiftService.TableRestoreSource;
+import io.floci.aws.services.redshift.container.RedshiftContainerManager;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,7 +20,8 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Optional;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Supplier;
 
@@ -30,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -40,7 +43,8 @@ class RedshiftTableRestoreServiceTest {
     private static final String DUMP = "CREATE TABLE public.orders (\n    id integer\n);\n";
 
     private RedshiftService redshift;
-    private RedshiftTableRestorer restorer;
+    private RedshiftContainerManager containerManager;
+    private final List<String> scripts = new ArrayList<>();
     private RedshiftTableRestoreService service;
 
     @BeforeEach
@@ -59,12 +63,16 @@ class RedshiftTableRestoreServiceTest {
         when(redshift.hasCluster("analytics")).thenReturn(true);
         when(redshift.withResourceLock(anyString(), anyString(), anyString(), any())).thenAnswer(
                 call -> ((Supplier<?>) call.getArgument(3)).get());
-        restorer = mock(RedshiftTableRestorer.class);
-        when(restorer.script(any(), anyString(), anyString(), anyString(), anyString(), any(Boolean.class)))
-                .thenReturn(Optional.of("BEGIN;\nCOMMIT;\n"));
+        containerManager = mock(RedshiftContainerManager.class);
+        doAnswer(call -> {
+            scripts.add(Files.readString(call.getArgument(4, Path.class)));
+            return null;
+        }).when(containerManager).runTableRestoreScript(anyString(), anyString(), anyString(), anyString(),
+                any(Path.class));
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
-        service = new RedshiftTableRestoreService(storageFactory, redshift, restorer, regionResolver,
+        service = new RedshiftTableRestoreService(storageFactory, redshift, new RedshiftTableRestorer(containerManager),
+                regionResolver,
                 Clock.fixed(Instant.parse("2026-11-20T12:00:00Z"), ZoneOffset.UTC));
     }
 
@@ -82,8 +90,10 @@ class RedshiftTableRestoreServiceTest {
         assertEquals("public", accepted.getTargetSchemaName());
         assertEquals("dev", accepted.getTargetDatabaseName());
         assertEquals("Orders_Copy", accepted.getNewTableName());
-        verify(restorer).run(ACCOUNT_ID, "analytics", "admin", "dev", "BEGIN;\nCOMMIT;\n");
-        verify(restorer).script(any(), eq("public"), eq("orders"), eq("public"), eq("orders_copy"), eq(false));
+        verify(containerManager).runTableRestoreScript(eq(ACCOUNT_ID), eq("analytics"), eq("admin"), eq("dev"),
+                any(Path.class));
+        assertEquals(List.of("BEGIN;\nCREATE TABLE \"public\".\"orders_copy\" (\n    id integer\n);\nCOMMIT;\n"),
+                scripts);
 
         TableRestoreStatus described = service.describeTableRestoreStatus(
                 "analytics", accepted.getTableRestoreRequestId(), null, null).items().getFirst();
@@ -93,15 +103,16 @@ class RedshiftTableRestoreServiceTest {
 
     @Test
     void aFailingScriptIsRecordedAsFailedWithItsReason() {
-        doThrow(new AwsException("InternalFailure", "relation already exists", 500))
-                .when(restorer).run(anyString(), anyString(), anyString(), anyString(), anyString());
+        doThrow(new AwsException("InternalFailure", "psql:/tmp/x.sql:2: ERROR:  relation already exists", 500))
+                .when(containerManager).runTableRestoreScript(anyString(), anyString(), anyString(), anyString(),
+                        any(Path.class));
 
         TableRestoreStatus accepted = service.restoreTable(request("dev", "orders"));
 
         TableRestoreStatus described = service.describeTableRestoreStatus(
                 "analytics", accepted.getTableRestoreRequestId(), null, null).items().getFirst();
         assertEquals(TableRestoreStatus.FAILED, described.getStatus());
-        assertEquals("relation already exists", described.getMessage());
+        assertEquals("The table could not be restored: relation already exists", described.getMessage());
     }
 
     @Test
@@ -115,9 +126,6 @@ class RedshiftTableRestoreServiceTest {
 
     @Test
     void aSourceTableOrDatabaseThatIsNotInTheSnapshotIsRefused() {
-        when(restorer.script(any(), anyString(), anyString(), anyString(), anyString(), any(Boolean.class)))
-                .thenReturn(Optional.empty());
-
         assertEquals("InvalidTableRestoreArgument", assertThrows(AwsException.class,
                 () -> service.restoreTable(request("dev", "missing"))).getErrorCode());
         assertEquals("InvalidTableRestoreArgument", assertThrows(AwsException.class,

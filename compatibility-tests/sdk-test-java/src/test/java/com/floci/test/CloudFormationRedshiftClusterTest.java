@@ -15,12 +15,9 @@ import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -117,35 +114,12 @@ class CloudFormationRedshiftClusterTest {
                 ? TestFixtures.proxyHost()
                 : addr;
 
-        try (Connection conn = awaitPostgresConnection(connectHost, port, "admin", "Secret12345");
+        try (Connection conn = TestFixtures.awaitRedshiftConnection(connectHost, port, "admin", "Secret12345");
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT 1")) {
             assertThat(rs.next()).isTrue();
             assertThat(rs.getInt(1)).isEqualTo(1);
         }
-    }
-
-    private static Connection awaitPostgresConnection(String host, int port, String username, String password) throws Exception {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        SQLException lastFailure = null;
-        while (Instant.now().isBefore(deadline)) {
-            try {
-                Properties properties = new Properties();
-                properties.setProperty("user", username);
-                properties.setProperty("password", password);
-                properties.setProperty("sslmode", "disable");
-                properties.setProperty("connectTimeout", "5");
-                return DriverManager.getConnection(
-                        "jdbc:postgresql://" + host + ":" + port + "/dev",
-                        properties);
-            } catch (SQLException e) {
-                lastFailure = e;
-                Thread.sleep(1000);
-            }
-        }
-        throw lastFailure != null
-                ? lastFailure
-                : new SQLException("Timed out waiting for Redshift connection at " + host + ":" + port);
     }
 
     private static void waitForDeleted(String name, int maxSeconds) throws InterruptedException {
