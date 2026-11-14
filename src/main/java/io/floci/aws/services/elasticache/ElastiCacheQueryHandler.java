@@ -72,6 +72,9 @@ public class ElastiCacheQueryHandler {
             case "CreateReplicationGroup"     -> handleCreateReplicationGroup(params, region);
             case "DescribeReplicationGroups"  -> handleDescribeReplicationGroups(params);
             case "ModifyReplicationGroup"     -> handleModifyReplicationGroup(params);
+            case "IncreaseReplicaCount"       -> handleReplicaCount(params, true);
+            case "DecreaseReplicaCount"       -> handleReplicaCount(params, false);
+            case "TestFailover"               -> handleTestFailover(params);
             case "DeleteReplicationGroup"     -> handleDeleteReplicationGroup(params);
             case "CreateUser"                 -> handleCreateUser(params);
             case "DescribeUsers"              -> handleDescribeUsers(params);
@@ -262,6 +265,32 @@ public class ElastiCacheQueryHandler {
                     optionalSecurityGroupIds(params));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("ModifyReplicationGroup", AwsNamespaces.EC, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleReplicaCount(MultivaluedMap<String, String> params, boolean increase) {
+        String action = increase ? "IncreaseReplicaCount" : "DecreaseReplicaCount";
+        try {
+            if (!increase && !extractMemberList(params, "ReplicasToRemove.member.").isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "Floci decreases the replica count by NewReplicaCount only, not by ReplicasToRemove.", 400);
+            }
+            ReplicationGroup group = service.changeReplicaCount(params.getFirst("ReplicationGroupId"),
+                    intParam(params, "NewReplicaCount"), increase);
+            return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.EC, replicationGroupXml(group))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleTestFailover(MultivaluedMap<String, String> params) {
+        try {
+            ReplicationGroup group = service.testFailover(params.getFirst("ReplicationGroupId"),
+                    params.getFirst("NodeGroupId"));
+            return Response.ok(AwsQueryResponse.envelope("TestFailover", AwsNamespaces.EC,
+                    replicationGroupXml(group))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
         }

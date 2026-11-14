@@ -2126,12 +2126,106 @@ public class ElastiCacheService implements ResourceProvider {
             }
             return members;
         }
+        int primary = primaryMember(group);
         for (int i = 1; i <= group.getNumCacheClusters(); i++) {
             members.add(new MemberCacheCluster(group,
                     group.getReplicationGroupId() + "-" + String.format("%03d", i),
-                    group.getProxyPort(), i == 1));
+                    group.getProxyPort(), i == primary));
         }
         return members;
+    }
+
+    /** The member a cluster-mode-disabled group reports as primary: the first, unless TestFailover moved it. */
+    private static int primaryMember(ReplicationGroup group) {
+        int index = group.getPrimaryMemberIndex();
+        return index >= 1 && index <= group.getNumCacheClusters() ? index : 1;
+    }
+
+    // ── Replicas and failover ─────────────────────────────────────────────────
+
+    /**
+     * IncreaseReplicaCount and DecreaseReplicaCount for a cluster-mode-disabled group. Its members
+     * share one backend, so a replica is a member cache cluster the group reports, and the count is
+     * what changes, at once. Up to five replicas, as on AWS, and at least one while automatic failover
+     * is enabled. A decrease removes the highest-numbered members; when the primary was one of them,
+     * the first member becomes primary.
+     */
+    public ReplicationGroup changeReplicaCount(String groupId, Integer newReplicaCount, boolean increase) {
+        requireGroupId(groupId);
+        if (newReplicaCount == null) {
+            throw new AwsException("InvalidParameterValue", "The parameter NewReplicaCount must be provided.", 400);
+        }
+        synchronized (lockFor("rg:" + groupId)) {
+            ReplicationGroup group = requireFailoverCapable(groupId,
+                    increase ? "IncreaseReplicaCount" : "DecreaseReplicaCount");
+            int current = group.getNumCacheClusters() - 1;
+            if (newReplicaCount < 0 || newReplicaCount > 5) {
+                throw new AwsException("InvalidParameterValue", "NewReplicaCount must be between 0 and 5.", 400);
+            }
+            if (increase ? newReplicaCount <= current : newReplicaCount >= current) {
+                throw new AwsException("InvalidParameterValue", "NewReplicaCount " + newReplicaCount + " must be "
+                        + (increase ? "greater" : "less") + " than the " + current + " replica(s) replication group "
+                        + groupId + " has.", 400);
+            }
+            if (group.isAutomaticFailoverEnabled() && newReplicaCount < 1) {
+                throw new AwsException("InvalidParameterCombination", "Replication group " + groupId
+                        + " has automatic failover enabled, so it needs at least one replica.", 400);
+            }
+            int primary = primaryMember(group);
+            group.setNumCacheClusters(newReplicaCount + 1);
+            group.setPrimaryMemberIndex(primary <= group.getNumCacheClusters() ? primary : 1);
+            groups.put(groupId, group);
+            LOG.infov("Replication group {0} now has {1} replica(s)", groupId, String.valueOf(newReplicaCount));
+            return group;
+        }
+    }
+
+    /**
+     * TestFailover on a cluster-mode-disabled group, whose only node group is 0001: the next member
+     * becomes primary and the old primary a replica. The members share one backend, so the data and
+     * the endpoints stay as they are; the roles every API reports change.
+     */
+    public ReplicationGroup testFailover(String groupId, String nodeGroupId) {
+        requireGroupId(groupId);
+        if (nodeGroupId == null || nodeGroupId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The parameter NodeGroupId must be provided.", 400);
+        }
+        synchronized (lockFor("rg:" + groupId)) {
+            ReplicationGroup group = requireFailoverCapable(groupId, "TestFailover");
+            if (!"0001".equals(nodeGroupId)) {
+                throw new AwsException("NodeGroupNotFoundFault", "Node group " + nodeGroupId
+                        + " not found in replication group " + groupId + ".", 404);
+            }
+            if (!group.isAutomaticFailoverEnabled() || group.getNumCacheClusters() < 2) {
+                throw new AwsException("InvalidReplicationGroupState", "Replication group " + groupId
+                        + " needs automatic failover enabled and at least one replica to fail over.", 400);
+            }
+            group.setPrimaryMemberIndex(primaryMember(group) % group.getNumCacheClusters() + 1);
+            groups.put(groupId, group);
+            LOG.infov("Replication group {0} failed over to member {1}", groupId,
+                    String.valueOf(group.getPrimaryMemberIndex()));
+            return group;
+        }
+    }
+
+    private static void requireGroupId(String groupId) {
+        if (groupId == null || groupId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The parameter ReplicationGroupId must be provided.", 400);
+        }
+    }
+
+    /** The group, read under its monitor by the caller: available and cluster-mode disabled. */
+    private ReplicationGroup requireFailoverCapable(String groupId, String operation) {
+        ReplicationGroup group = getReplicationGroup(groupId);
+        if (group.isClusterEnabled()) {
+            throw new AwsException("InvalidParameterValue", "Floci supports " + operation
+                    + " on cluster-mode-disabled replication groups only; " + groupId + " is cluster-mode enabled.", 400);
+        }
+        if (group.getStatus() != ReplicationGroupStatus.AVAILABLE) {
+            throw new AwsException("InvalidReplicationGroupState",
+                    "Replication group " + groupId + " is not available.", 400);
+        }
+        return group;
     }
 
     public ReplicationGroup modifyReplicationGroup(String groupId, List<String> userGroupIdsToAdd,

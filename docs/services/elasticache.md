@@ -79,6 +79,9 @@ without user associations retain their existing behavior.
 | `CreateReplicationGroup` | Start a new Redis/Valkey cluster; `AtRestEncryptionEnabled`, `KmsKeyId` (resolved to the key ARN), `SnapshotRetentionLimit`, `SnapshotWindow`, `Tags` and `UserGroupIds` are kept and returned, with the group `ARN`. `UserGroupIds` needs `TransitEncryptionEnabled` or an `AuthToken` |
 | `DescribeReplicationGroups` | List clusters and their connection info |
 | `ModifyReplicationGroup` | Modify `SnapshotRetentionLimit` and `SnapshotWindow`, and the associated user groups (`UserGroupIdsToAdd`, `UserGroupIdsToRemove`, `RemoveUserGroups`). A cache with user groups no longer takes its AUTH token, `AuthTokenUpdateStrategy=DELETE` removes the token when adding a user group, and removing the last user group leaves the cache without access control. Changing the AUTH token (`ROTATE`, `SET`) is not supported |
+| `IncreaseReplicaCount` | Raise a cluster-mode-disabled group's replicas to `NewReplicaCount` (up to 5). See [Replicas and failover](#replicas-and-failover) |
+| `DecreaseReplicaCount` | Lower a cluster-mode-disabled group's replicas to `NewReplicaCount`; `ReplicasToRemove` is not supported |
+| `TestFailover` | Promote the next member of node group `0001` of a cluster-mode-disabled group with automatic failover enabled |
 | `DeleteReplicationGroup` | Stop and remove a cluster |
 | `CreateUser` | Create a user with password, no-password-required or IAM authentication, set through `AuthenticationMode` or the top-level `Passwords` and `NoPasswordRequired` |
 | `DescribeUsers` | List ElastiCache users |
@@ -330,6 +333,18 @@ deleted: `DeleteCacheParameterGroup` answers `InvalidCacheParameterGroupState` u
 replication group is gone. The reference counts from the moment `CreateReplicationGroup` accepts
 the name, not from when the group is stored, so a delete that lands while that create is still
 provisioning its container is refused too.
+
+## Replicas and failover
+
+The members of a cluster-mode-disabled replication group share one backend, so a replica is a
+member cache cluster the group reports (`MemberClusters`, `NodeGroupMembers`), not a second server.
+`IncreaseReplicaCount` and `DecreaseReplicaCount` change the number of members at once, between 0
+and 5 replicas, and keep at least one replica while automatic failover is enabled; a decrease
+removes the highest-numbered members. `TestFailover` with `NodeGroupId` `0001` makes the next member
+the primary and the old primary a replica, as each `CurrentRole` then reports; the data and the
+endpoints stay as they are. It needs automatic failover enabled and at least one replica. When a
+decrease removes the member that is primary, the first member becomes primary. Cluster-mode-enabled
+groups are refused with `InvalidParameterValue`.
 
 ## Snapshots
 
