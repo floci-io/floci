@@ -27,6 +27,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -103,6 +104,11 @@ public class RedshiftAuditLogPublisher {
 
     public void register(String accountId, String region, RedshiftAuditTarget target) {
         registrations.put(registryKey(accountId, target.identifier()), new Registration(region, target));
+    }
+
+    /** The target registered under {@code identifier}, which a caller that only knows the backend publishes for. */
+    public Optional<RedshiftAuditTarget> registeredTarget(String accountId, String identifier) {
+        return Optional.ofNullable(registrations.get(registryKey(accountId, identifier))).map(Registration::target);
     }
 
     public void unregister(String accountId, String clusterIdentifier) {

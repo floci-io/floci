@@ -17,6 +17,7 @@ import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.RedshiftAuditSql;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChange;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChanges;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.proxy.CopyJobSql;
 import io.floci.aws.services.redshift.proxy.RedshiftSqlInterceptor;
 import io.floci.aws.services.redshift.spectrum.BackendSql;
@@ -473,10 +474,28 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         }
     }
 
+    /**
+     * What the audit logs of the target's cluster or workgroup take: a cluster's settings, or the target its
+     * workgroup's namespace registered, which is none while the namespace exports no logs.
+     */
+    private RedshiftAuditTarget auditTarget(RedshiftDataResourceResolver.DatabaseTarget target) {
+        if (auditLogPublisher == null) {
+            return null;
+        }
+        if (target.cluster() != null) {
+            return RedshiftAuditTarget.of(target.cluster());
+        }
+        String backendKey = target.backendKey();
+        int separator = backendKey == null ? -1 : backendKey.indexOf(':');
+        return separator < 0 ? null : auditLogPublisher.registeredTarget(backendKey.substring(0, separator),
+                backendKey.substring(separator + 1)).orElse(null);
+    }
+
     private void publishConnection(RedshiftDataResourceResolver.DatabaseTarget target, String event, String error) {
-        if (auditLogPublisher != null && target.cluster() != null) {
+        RedshiftAuditTarget auditTarget = auditTarget(target);
+        if (auditTarget != null) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(target.arn());
-            auditLogPublisher.publishConnection(target.cluster(), arn.accountId(), arn.region(), target.database(),
+            auditLogPublisher.publishConnection(auditTarget, arn.accountId(), arn.region(), target.database(),
                     target.auditUser(), event, null, error);
         }
     }
@@ -572,8 +591,9 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
     private void publishActivity(RedshiftDataStatementStore.StoredStatement stored,
                                  RedshiftDataResourceResolver.DatabaseTarget target, String sql) {
-        if (auditLogPublisher != null && target.cluster() != null) {
-            auditLogPublisher.publishActivity(target.cluster(), stored.accountId, stored.region,
+        RedshiftAuditTarget auditTarget = auditTarget(target);
+        if (auditTarget != null) {
+            auditLogPublisher.publishActivity(auditTarget, stored.accountId, stored.region,
                     target.database(), target.auditUser(), sql);
         }
     }
@@ -590,9 +610,10 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
     private void publishUserChanges(RedshiftDataStatementStore.StoredStatement stored,
                                     RedshiftDataResourceResolver.DatabaseTarget target, List<UserChange> changes) {
-        if (auditLogPublisher != null && target.cluster() != null) {
+        RedshiftAuditTarget auditTarget = auditTarget(target);
+        if (auditTarget != null) {
             for (UserChange change : changes) {
-                auditLogPublisher.publishUserChange(target.cluster(), stored.accountId, stored.region,
+                auditLogPublisher.publishUserChange(auditTarget, stored.accountId, stored.region,
                         target.database(), change.username(), change.action(), change.oldUsername());
             }
         }
