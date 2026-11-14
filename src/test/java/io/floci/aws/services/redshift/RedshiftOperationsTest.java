@@ -1152,14 +1152,7 @@ public class RedshiftOperationsTest {
     }
 
     private static Response redshift(String action, String... keyValues) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH_HEADER)
-            .formParam("Action", action);
-        for (int i = 0; i < keyValues.length; i += 2) {
-            request.formParam(keyValues[i], keyValues[i + 1]);
-        }
-        return request.when().post("/");
+        return redshiftIn("us-east-1", action, keyValues);
     }
 
     private static void assertFault(Response response, int status, String code) {
@@ -1417,7 +1410,7 @@ public class RedshiftOperationsTest {
         AccountAwareStorageBackend<ClusterParameterGroup> backend = storageFactory.create(
                 "redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
         // Parameter groups are Regional: stored under their Region, us-east-1 here.
-        String key = "us-east-1::" + name;
+        String key = RedshiftService.regionalKey("us-east-1", name);
         assertTrue(backend.get(key).isEmpty());
         ClusterParameterGroup legacy = new ClusterParameterGroup(name, "redshift-1.0", "legacy custom group");
         legacy.setParameters(List.of(new Parameter("max_cursor_result_set_size", "1000")));

@@ -525,7 +525,7 @@ class RedshiftServiceTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void activityParameterUpdatesStayWithinTheCallingAccount(boolean reset) {
+    void activityParameterUpdatesStayWithinTheCallingAccountAndRegion(boolean reset) {
         ClusterParameterGroup group = new ClusterParameterGroup("shared", "redshift-1.0", "audit");
         when(parameterGroupBackend.get(regionalKey("shared"))).thenReturn(Optional.of(group));
         Cluster owned = new Cluster();
@@ -536,10 +536,17 @@ class RedshiftServiceTest {
         foreign.setClusterIdentifier("foreign");
         foreign.setClusterParameterGroupName("shared");
         foreign.setUserActivityLoggingEnabled(reset);
+        // A cluster of another Region uses that Region's group of the same name.
+        Cluster otherRegion = new Cluster();
+        otherRegion.setClusterIdentifier("west");
+        otherRegion.setClusterParameterGroupName("shared");
+        otherRegion.setSnapshotRegion("eu-west-1");
+        otherRegion.setUserActivityLoggingEnabled(reset);
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "owned", owned),
-                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "foreign", foreign)));
-        when(clusterBackend.scan(any())).thenReturn(List.of(owned));
+                new AccountAwareStorageBackend.AccountEntry<>("222222222222", "foreign", foreign),
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "west", otherRegion)));
+        when(clusterBackend.scan(any())).thenReturn(List.of(owned, otherRegion));
 
         if (reset) {
             service.resetClusterParameterGroup("shared", true, List.of());
@@ -549,7 +556,33 @@ class RedshiftServiceTest {
 
         assertEquals(!reset, owned.isUserActivityLoggingEnabled());
         assertEquals(reset, foreign.isUserActivityLoggingEnabled());
+        assertEquals(reset, otherRegion.isUserActivityLoggingEnabled());
         verify(clusterBackend, never()).putForAccount(eq("222222222222"), anyString(), any());
+        verify(clusterBackend, never()).putForAccount(anyString(), eq("west"), any());
+    }
+
+    /**
+     * A snapshot schedule is in use only by the clusters of its Region: a cluster of another Region using a
+     * schedule of the same name is not one of its clusters and does not keep it from being deleted.
+     */
+    @Test
+    void aSnapshotScheduleIsInUseOnlyByTheClustersOfItsRegion() {
+        Cluster west = storedCluster("west", "eu-west-1");
+        west.setSnapshotScheduleIdentifier("nightly");
+        when(clusterBackend.scan(any())).thenReturn(List.of(west));
+        SnapshotSchedule schedule = new SnapshotSchedule("nightly", null, List.of("rate(12 hours)"));
+        when(snapshotScheduleBackend.get(regionalKey("nightly"))).thenReturn(Optional.of(schedule));
+        when(snapshotScheduleBackend.get(RedshiftService.regionalKey("eu-west-1", "nightly")))
+                .thenReturn(Optional.of(schedule));
+        RedshiftService westService = serviceIn("eu-west-1");
+
+        assertEquals(List.of("west"), westService.clustersUsingSnapshotSchedule("nightly"));
+        assertEquals(List.of(), service.clustersUsingSnapshotSchedule("nightly"));
+        assertEquals("InvalidClusterSnapshotScheduleState", assertThrows(AwsException.class,
+                () -> westService.deleteSnapshotSchedule("nightly")).getErrorCode());
+        service.deleteSnapshotSchedule("nightly");
+        verify(snapshotScheduleBackend).delete(regionalKey("nightly"));
+        verify(snapshotScheduleBackend, never()).delete(RedshiftService.regionalKey("eu-west-1", "nightly"));
     }
 
     @Test
@@ -979,7 +1012,7 @@ class RedshiftServiceTest {
 
     /** The key the four Regional stores keep {@code name} under in us-east-1, the fixture's Region. */
     private static String regionalKey(String name) {
-        return "us-east-1::" + name;
+        return RedshiftService.regionalKey("us-east-1", name);
     }
 
     private StorageFactory sf;

@@ -2,6 +2,7 @@ package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -2148,23 +2149,37 @@ public class RedshiftService implements ManagedSecretRotator {
      * group, subnet group, snapshot copy grant or snapshot schedule. Each is Regional, so the same name can be
      * used in each Region of an account.
      */
-    private static String regionalKey(String region, String name) {
-        return region + "::" + name;
+    static String regionalKey(String region, String name) {
+        return region + KEY_SEPARATOR + name;
+    }
+
+    /** Separates the Region from the name in a {@link #regionalKey}. */
+    private static final String KEY_SEPARATOR = "::";
+
+    /**
+     * Copies stored records in the JSON form the storage keeps them in, so a record copied to a second Region is a
+     * record of its own there, as it would be read back from disk.
+     */
+    private static final ObjectMapper RECORD_COPIES = new ObjectMapper().registerModule(new JavaTimeModule());
+
+    @SuppressWarnings("unchecked")
+    private static <V> V copyOf(V record) {
+        return RECORD_COPIES.convertValue(record, (Class<V>) record.getClass());
     }
 
     /**
      * Moves the cluster parameter groups, subnet groups, snapshot schedules and snapshot copy grants stored before
      * they became Regional from their bare name onto {@link #regionalKey} keys. They recorded no Region, and every
-     * Region saw them: each moves to the default Region, and is copied to every other Region where one of its
-     * account's clusters uses it, so those clusters keep finding it.
+     * Region saw them: each moves to the default Region, and every other Region where one of its account's clusters
+     * uses it gets a copy of its own, so those clusters keep finding it.
      */
     private void migrateLegacyRegionalRecords(List<AccountAwareStorageBackend.AccountEntry<Cluster>> persistedClusters) {
         migrateLegacyRegionalRecords(parameterGroups, ClusterParameterGroup::getParameterGroupName, persistedClusters,
-                Cluster::getClusterParameterGroupName, this::snapshotRegion);
+                Cluster::getClusterParameterGroupName, this::clusterRegion);
         migrateLegacyRegionalRecords(subnetGroups, ClusterSubnetGroup::getClusterSubnetGroupName, persistedClusters,
-                Cluster::getClusterSubnetGroupName, this::snapshotRegion);
+                Cluster::getClusterSubnetGroupName, this::clusterRegion);
         migrateLegacyRegionalRecords(snapshotSchedules, SnapshotSchedule::getScheduleIdentifier, persistedClusters,
-                Cluster::getSnapshotScheduleIdentifier, this::snapshotRegion);
+                Cluster::getSnapshotScheduleIdentifier, this::clusterRegion);
         migrateLegacyRegionalRecords(snapshotCopyGrants, SnapshotCopyGrant::getSnapshotCopyGrantName, persistedClusters,
                 Cluster::getSnapshotCopyGrantName, Cluster::getSnapshotCopyDestinationRegion);
     }
@@ -2177,15 +2192,13 @@ public class RedshiftService implements ManagedSecretRotator {
                                                   List<AccountAwareStorageBackend.AccountEntry<Cluster>> persistedClusters,
                                                   Function<Cluster, String> nameUsed,
                                                   Function<Cluster, String> regionOfUse) {
-        Predicate<String> legacy = key -> !key.contains("::");
+        Predicate<String> legacy = key -> !key.contains(KEY_SEPARATOR);
         List<AccountAwareStorageBackend.AccountEntry<V>> entries = store.scanAllAccountEntries(legacy);
         if (entries.isEmpty()) {
             return;
         }
         String defaultRegion = regionResolver.getDefaultRegion();
-        Set<String> accounts = new LinkedHashSet<>();
         for (AccountAwareStorageBackend.AccountEntry<V> entry : entries) {
-            accounts.add(entry.accountId());
             String recordName = name.apply(entry.value());
             for (AccountAwareStorageBackend.AccountEntry<Cluster> cluster : persistedClusters) {
                 String region = regionOfUse.apply(cluster.value());
@@ -2195,15 +2208,12 @@ public class RedshiftService implements ManagedSecretRotator {
                     continue;
                 }
                 if (store.getForAccount(entry.accountId(), regionalKey(region, recordName)).isEmpty()) {
-                    store.putForAccount(entry.accountId(), regionalKey(region, recordName), entry.value());
+                    store.putForAccount(entry.accountId(), regionalKey(region, recordName), copyOf(entry.value()));
                 }
             }
         }
-        for (String accountId : accounts) {
-            store.migrateLegacyEntries(accountId, legacy,
-                    value -> name.apply(value) == null ? null : regionalKey(defaultRegion, name.apply(value)),
-                    value -> true);
-        }
+        store.migrateLegacyEntriesInAllAccounts(legacy,
+                value -> name.apply(value) == null ? null : regionalKey(defaultRegion, name.apply(value)));
         store.flush();
     }
 
@@ -2213,11 +2223,11 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private boolean isRequestRegionKey(String key) {
-        return key.startsWith(regionResolver.getRegion() + "::");
+        return key.startsWith(regionResolver.getRegion() + KEY_SEPARATOR);
     }
 
     private List<Snapshot> copiesInRegion(String region) {
-        return snapshotCopies.scan(key -> key.startsWith(region + "::"));
+        return snapshotCopies.scan(key -> key.startsWith(region + KEY_SEPARATOR));
     }
 
     /** The copy in this request's Region if there is one, otherwise the snapshot itself. */
@@ -2977,8 +2987,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private void refreshClustersForActivityParameter(String parameterGroupName, ClusterParameterGroup group) {
         boolean enabled = userActivityLoggingEnabled(group);
         String accountId = clusters.accountId();
-        List<Cluster> affected = clusters.scan(key -> true).stream()
-                .filter(this::isInRequestRegion)
+        List<Cluster> affected = regionalClusters().stream()
                 .filter(cluster -> parameterGroupName.equals(cluster.getClusterParameterGroupName())).toList();
         for (Cluster cluster : affected) {
             cluster.setUserActivityLoggingEnabled(enabled);
@@ -3505,7 +3514,7 @@ public class RedshiftService implements ManagedSecretRotator {
         }
         SnapshotSchedule schedule = cluster.getSnapshotScheduleIdentifier() == null ? null
                 : snapshotSchedules.getForAccount(accountId,
-                        regionalKey(snapshotRegion(cluster), cluster.getSnapshotScheduleIdentifier())).orElseThrow(
+                        regionalKey(clusterRegion(cluster), cluster.getSnapshotScheduleIdentifier())).orElseThrow(
                         () -> new AwsException("SnapshotScheduleNotFound", "The cluster's snapshot schedule is missing", 400));
         List<String> definitions = schedule == null ? List.of("rate(8 hours)")
                 : List.copyOf(schedule.getScheduleDefinitions());
@@ -3787,7 +3796,7 @@ public class RedshiftService implements ManagedSecretRotator {
         }
         int retention;
         if ("automated".equals(copy.getSnapshotType())) {
-            String region = key.substring(0, key.indexOf("::"));
+            String region = key.substring(0, key.indexOf(KEY_SEPARATOR));
             // A cluster recreated under the same name has a new generation and no say over the old copies.
             Integer current = clusters.getForAccount(accountId, copy.getClusterIdentifier())
                     .filter(cluster -> region.equals(cluster.getSnapshotCopyDestinationRegion()))
@@ -3907,8 +3916,7 @@ public class RedshiftService implements ManagedSecretRotator {
 
     /** Identifiers of the clusters currently using the schedule, sorted for a stable response. */
     public List<String> clustersUsingSnapshotSchedule(String scheduleIdentifier) {
-        return clusters.scan(k -> true).stream()
-                .filter(this::isInRequestRegion)
+        return regionalClusters().stream()
                 .filter(c -> scheduleIdentifier.equals(c.getSnapshotScheduleIdentifier()))
                 .map(Cluster::getClusterIdentifier)
                 .sorted()
