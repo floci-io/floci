@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.EndpointConfigResource;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.EndpointResource;
@@ -12,7 +13,9 @@ import io.floci.aws.services.sagemaker.model.SageMakerEntities.TrainingJobResour
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -21,6 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 class SageMakerServiceTest {
+    private static final String DEFAULT_ACCOUNT = "000000000000";
+    private static final String OTHER_ACCOUNT = "111111111111";
+
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
@@ -321,6 +327,101 @@ class SageMakerServiceTest {
         run.creationTime = recreated.creationTime - 1;
         assertFalse(service.updateTrainingJob(run));
         assertEquals("InProgress", describeStatus(service, "reset-job"));
+    }
+
+    @Test
+    void endpointWorkerStartsTheModelOfTheEndpointsOwnAccount() {
+        WorkerFixture fixture = workerFixture();
+        assertEquals("image-of-account-111",
+                fixture.service().modelForEndpoint(endpoint("Creating")).primaryContainer.get("Image"));
+    }
+
+    @Test
+    void endpointWorkerSavesItsOutcomeInTheEndpointsOwnAccount() {
+        WorkerFixture fixture = workerFixture();
+        assertTrue(fixture.service().finalizeEndpointStart(endpoint("InService")));
+        assertEquals("InService",
+                fixture.endpoints().getForAccount(OTHER_ACCOUNT, "us-east-1::demo-ep").orElseThrow().endpointStatus);
+    }
+
+    @Test
+    void trainingWorkerSavesItsOutcomeInTheJobsOwnAccount() {
+        WorkerFixture fixture = workerFixture();
+        assertTrue(fixture.service().updateTrainingJob(trainingJob("Completed")));
+        assertEquals("Completed",
+                fixture.jobs().getForAccount(OTHER_ACCOUNT, "us-east-1::demo-job").orElseThrow().trainingJobStatus);
+    }
+
+    private record WorkerFixture(SageMakerService service,
+                                 AccountAwareStorageBackend<EndpointResource> endpoints,
+                                 AccountAwareStorageBackend<TrainingJobResource> jobs) {
+    }
+
+    /**
+     * #8373: the endpoint and training workers call back on their own threads, outside any request,
+     * where an account-aware store reads the default account. Stores with no request context stand
+     * in for that thread. Account 111 owns the resources; the default account holds a same-named
+     * endpoint config and model with a different image.
+     */
+    private WorkerFixture workerFixture() {
+        AccountAwareStorageBackend<ModelResource> models =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, DEFAULT_ACCOUNT);
+        AccountAwareStorageBackend<EndpointConfigResource> configs =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, DEFAULT_ACCOUNT);
+        AccountAwareStorageBackend<EndpointResource> endpoints =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, DEFAULT_ACCOUNT);
+        AccountAwareStorageBackend<TrainingJobResource> jobs =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, DEFAULT_ACCOUNT);
+        SageMakerService service = new SageMakerService(models, configs, endpoints, jobs,
+                new RegionResolver("us-east-1", DEFAULT_ACCOUNT), mapper,
+                mock(SageMakerEndpointManager.class), mock(SageMakerTrainingRunner.class));
+
+        models.putForAccount(DEFAULT_ACCOUNT, "us-east-1::demo", model("demo", "image-of-default-account"));
+        configs.putForAccount(DEFAULT_ACCOUNT, "us-east-1::demo-cfg", endpointConfig("demo-cfg", "demo"));
+        models.putForAccount(OTHER_ACCOUNT, "us-east-1::demo", model("demo", "image-of-account-111"));
+        configs.putForAccount(OTHER_ACCOUNT, "us-east-1::demo-cfg", endpointConfig("demo-cfg", "demo"));
+        endpoints.putForAccount(OTHER_ACCOUNT, "us-east-1::demo-ep", endpoint("Creating"));
+        jobs.putForAccount(OTHER_ACCOUNT, "us-east-1::demo-job", trainingJob("InProgress"));
+        return new WorkerFixture(service, endpoints, jobs);
+    }
+
+    private static ModelResource model(String name, String image) {
+        ModelResource model = new ModelResource();
+        model.modelName = name;
+        model.region = "us-east-1";
+        model.primaryContainer.put("Image", image);
+        return model;
+    }
+
+    private static EndpointConfigResource endpointConfig(String name, String modelName) {
+        EndpointConfigResource config = new EndpointConfigResource();
+        config.endpointConfigName = name;
+        config.region = "us-east-1";
+        config.productionVariants.add(new HashMap<>(Map.of("VariantName", "v", "ModelName", modelName)));
+        return config;
+    }
+
+    /** A fresh object each call, so a check of the stored record proves a write rather than a shared reference. */
+    private static EndpointResource endpoint(String status) {
+        EndpointResource endpoint = new EndpointResource();
+        endpoint.endpointName = "demo-ep";
+        endpoint.endpointConfigName = "demo-cfg";
+        endpoint.endpointStatus = status;
+        endpoint.region = "us-east-1";
+        endpoint.accountId = OTHER_ACCOUNT;
+        endpoint.generation = 1;
+        return endpoint;
+    }
+
+    private static TrainingJobResource trainingJob(String status) {
+        TrainingJobResource job = new TrainingJobResource();
+        job.trainingJobName = "demo-job";
+        job.trainingJobArn = "arn:aws:sagemaker:us-east-1:" + OTHER_ACCOUNT + ":training-job/demo-job";
+        job.trainingJobStatus = status;
+        job.creationTime = 1000L;
+        job.region = "us-east-1";
+        job.accountId = OTHER_ACCOUNT;
+        return job;
     }
 
     private String describeStatus(SageMakerService service, String name) throws Exception {

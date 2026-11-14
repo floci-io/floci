@@ -12,6 +12,7 @@ import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.EndpointConfigResource;
@@ -486,10 +487,11 @@ public class SageMakerService {
     }
 
     public ModelResource modelForEndpoint(EndpointResource ep) {
-        EndpointConfigResource cfg = endpointConfig(ep.region, ep.endpointConfigName)
+        EndpointConfigResource cfg = getInAccount(endpointConfigStore, ep.accountId, regionKey(ep.region, ep.endpointConfigName))
                 .orElseThrow(() -> validation("Could not find endpoint configuration \"" + ep.endpointConfigName + "\"."));
         String modelName = String.valueOf(cfg.productionVariants.get(0).get("ModelName"));
-        return model(ep.region, modelName).orElseThrow(() -> validation("Could not find model \"" + modelName + "\"."));
+        return getInAccount(modelStore, ep.accountId, regionKey(ep.region, modelName))
+                .orElseThrow(() -> validation("Could not find model \"" + modelName + "\"."));
     }
 
     /**
@@ -499,12 +501,13 @@ public class SageMakerService {
      * of publishing it, because the endpoint it belongs to is gone or has moved on.
      */
     synchronized boolean finalizeEndpointStart(EndpointResource ep) {
-        EndpointResource current = endpointStore.get(regionKey(ep.region, ep.endpointName)).orElse(null);
+        String key = regionKey(ep.region, ep.endpointName);
+        EndpointResource current = getInAccount(endpointStore, ep.accountId, key).orElse(null);
         if (current == null || current.generation != ep.generation) {
             return false;
         }
         ep.lastModifiedTime = nowMillis();
-        endpointStore.put(regionKey(ep.region, ep.endpointName), ep);
+        putInAccount(endpointStore, ep.accountId, key, ep);
         return true;
     }
 
@@ -516,15 +519,32 @@ public class SageMakerService {
      */
     public synchronized boolean updateTrainingJob(TrainingJobResource job) {
         String key = regionKey(job.region, job.trainingJobName);
-        TrainingJobResource current = trainingJobStore.get(key).orElse(null);
+        TrainingJobResource current = getInAccount(trainingJobStore, job.accountId, key).orElse(null);
         if (current == null || !Objects.equals(current.trainingJobArn, job.trainingJobArn)
                 || current.creationTime != job.creationTime) {
             LOG.debugv("SageMaker training job {0} is no longer the stored job; discarding its run update",
                     job.trainingJobName);
             return false;
         }
-        trainingJobStore.put(key, job);
+        putInAccount(trainingJobStore, job.accountId, key, job);
         return true;
+    }
+
+    // #8373: the endpoint and training workers call back outside any request, where an account-aware
+    // store falls back to the default account, so they name the account that owns the resource.
+    private static <V> Optional<V> getInAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> accountAware) {
+            return accountAware.getForAccount(accountId, key);
+        }
+        return store.get(key);
+    }
+
+    private static <V> void putInAccount(StorageBackend<String, V> store, String accountId, String key, V value) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> accountAware) {
+            accountAware.putForAccount(accountId, key, value);
+        } else {
+            store.put(key, value);
+        }
     }
 
     private Map<String, String> resourceTags(String arn) {
