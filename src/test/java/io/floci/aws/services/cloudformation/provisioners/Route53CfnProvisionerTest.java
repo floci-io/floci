@@ -136,6 +136,7 @@ class Route53CfnProvisionerTest {
                         new Route53Service.CreateZoneResult(zone, null));
         when(service.associateVpcWithHostedZone(eq("Z123456789"), argThat(sameVpc(secondVpc)), any()))
                 .thenThrow(new RuntimeException("boom"));
+        doThrow(new AwsException("Throttling", "slow", 400)).when(service).deleteHostedZone("Z123456789");
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
@@ -151,13 +152,15 @@ class Route53CfnProvisionerTest {
         resource.setLogicalId("Zone");
         resource.setResourceType("AWS::Route53::HostedZone");
 
-        assertThrows(RuntimeException.class,
+        RuntimeException thrown = assertThrows(RuntimeException.class,
                 () -> new Route53CfnProvisioner(service).provision(resource, props, context));
 
+        assertEquals("boom", thrown.getMessage());
         assertEquals("Z123456789", resource.getPhysicalId());
         assertTrue("true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR)),
                 "a zone that was actually created must stay marked rollback-owned when a "
-                        + "follow-up VPC association fails, so CREATE_FAILED cleanup still deletes it");
+                        + "follow-up VPC association fails and its own cleanup fails, so CREATE_FAILED "
+                        + "cleanup still deletes it");
     }
 
     private static ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
