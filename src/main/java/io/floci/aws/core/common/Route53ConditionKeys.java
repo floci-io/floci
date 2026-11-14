@@ -1,6 +1,7 @@
 package io.floci.aws.core.common;
 
 import io.floci.aws.services.route53.Route53ChangeBatch;
+import io.floci.aws.services.route53.Route53RecordName;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
 import jakarta.ws.rs.container.ContainerRequestContext;
 
@@ -23,10 +24,18 @@ final class Route53ConditionKeys {
         if (body == null) {
             return null;
         }
+        List<Map<String, Object>> changes;
+        try {
+            changes = Route53ChangeBatch.parse(new String(body, StandardCharsets.UTF_8));
+        } catch (AwsException invalidBatch) {
+            // Preserve the buffered body: the controller rejects the same batch with its XML error.
+            // No conditions are invented, and no mutation can pass the shared parser.
+            return null;
+        }
         List<String> actions = new ArrayList<>();
         List<String> names = new ArrayList<>();
         List<String> types = new ArrayList<>();
-        for (Map<String, Object> change : Route53ChangeBatch.parse(new String(body, StandardCharsets.UTF_8))) {
+        for (Map<String, Object> change : changes) {
             actions.add((String) change.get("action"));
             ResourceRecordSet record = (ResourceRecordSet) change.get("rrs");
             names.add(normalizedName(record.getName()));
@@ -37,28 +46,7 @@ final class Route53ConditionKeys {
                 "route53:ChangeResourceRecordSetsRecordTypes", types);
     }
 
-    // Route 53 Developer Guide: specifying-conditions-route53.html and DomainNameFormat.html.
     static String normalizedName(String name) {
-        String source = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
-        StringBuilder normalized = new StringBuilder();
-        for (int index = 0; index < source.length(); index++) {
-            char value = source.charAt(index);
-            boolean escaped = value == '\\' && index + 3 < source.length()
-                    && source.substring(index + 1, index + 4).chars().allMatch(c -> c >= '0' && c <= '7');
-            if (escaped) {
-                value = (char) Integer.parseInt(source.substring(index + 1, index + 4), 8);
-                index += 3;
-            }
-            if (value >= 'A' && value <= 'Z') {
-                value = (char) (value + ('a' - 'A'));
-            }
-            if (value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || value == '-'
-                    || value == '_' || value == '.' && !escaped) {
-                normalized.append(value);
-            } else {
-                normalized.append(String.format(Locale.ROOT, "\\%03o", (int) value));
-            }
-        }
-        return normalized.toString();
+        return Route53RecordName.conditionName(name);
     }
 }

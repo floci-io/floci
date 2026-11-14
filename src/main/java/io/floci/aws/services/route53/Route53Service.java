@@ -1114,15 +1114,7 @@ public class Route53Service implements Resettable {
     }
 
     public static String normalizeRecordName(String name) {
-        String normalized = normalizeName(name);
-        if (normalized == null) {
-            return null;
-        }
-        StringBuilder result = new StringBuilder(normalized.length());
-        for (int i = 0; i < normalized.length(); i++) {
-            result.append(asciiLower(normalized.charAt(i)));
-        }
-        return result.toString();
+        return Route53RecordName.recordName(name);
     }
 
     private static String generateZoneId() {

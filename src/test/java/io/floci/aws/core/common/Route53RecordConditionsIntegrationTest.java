@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -69,6 +71,34 @@ class Route53RecordConditionsIntegrationTest {
                 assertTrue(admin.listResourceRecordSets(r -> r.hostedZoneId(zone)).resourceRecordSets().stream()
                         .anyMatch(r -> r.name().equalsIgnoreCase("probe.example.test.") && r.resourceRecords().getFirst().value()
                                 .equals("192.0.2.1")));
+                // Octal letters address the same record, rather than a second independently stored spelling.
+                client.changeResourceRecordSets(r -> r.hostedZoneId(zone).changeBatch(b -> b.changes(
+                        change("UPSERT", "\\160robe.example.test", "A"))));
+                assertEquals(1, admin.listResourceRecordSets(r -> r.hostedZoneId(zone)).resourceRecordSets().stream()
+                        .filter(r -> !List.of("NS", "SOA").contains(r.typeAsString())
+                                && !r.name().equals("second.example.test.")).count());
+                policy(user, "{\"Effect\":\"Allow\",\"Action\":\"route53:ChangeResourceRecordSets\",\"Resource\":\""
+                        + resource + "\"}");
+                Route53Exception invalid = assertThrows(Route53Exception.class,
+                        () -> client.changeResourceRecordSets(r -> r.hostedZoneId(zone).changeBatch(b -> b.changes(
+                                change("REPLACE", "probe.example.test", "A")))));
+                assertEquals(400, invalid.statusCode());
+                assertEquals("InvalidInput", invalid.awsErrorDetails().errorCode());
+                assertTrue(invalid.awsErrorDetails().sdkHttpResponse().firstMatchingHeader("Content-Type")
+                        .orElse("").contains("xml"));
+                List<ResourceRecordSet> beforeInvalid = admin.listResourceRecordSets(r -> r.hostedZoneId(zone))
+                        .resourceRecordSets();
+                given().port(endpoint.getPort()).header("Authorization", auth(credentials.accessKeyId(), "route53"))
+                        .contentType("application/xml").body("<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>")
+                        .post("/2013-04-01/hostedzone/" + zone.replace("/hostedzone/", "") + "/rrset")
+                        .then().statusCode(400).contentType("application/xml")
+                        .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+                assertEquals(beforeInvalid, admin.listResourceRecordSets(r -> r.hostedZoneId(zone)).resourceRecordSets());
+                client.changeResourceRecordSets(r -> r.hostedZoneId(zone).changeBatch(b -> b.changes(
+                        change("DELETE", "probe.example.test", "A"))));
+                assertTrue(admin.listResourceRecordSets(r -> r.hostedZoneId(zone)).resourceRecordSets().stream()
+                        .filter(r -> !List.of("NS", "SOA").contains(r.typeAsString()))
+                        .allMatch(r -> r.name().equals("second.example.test.")));
                 policy(user, grant + "," + """
                         {"Effect":"Deny","Action":"route53:ChangeResourceRecordSets","Resource":"%s",
                          "Condition":{"ForAnyValue:StringEquals":{
