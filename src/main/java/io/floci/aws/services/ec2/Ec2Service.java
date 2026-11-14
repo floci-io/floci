@@ -16298,12 +16298,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         int count = instanceCount != null ? instanceCount : 1;
         String finalType = type != null ? type : "one-time";
         if (dryRun) {
-            runInstances(region, imageId, instanceType, count, count, keyName,
-                    securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
-                    /* associatePublicIp */ null, /* networkInterfaceId */ null,
-                    /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
-                    /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData,
-                    true, null, null, null, true);
+            runSpotInstances(region, imageId, instanceType, count, keyName, securityGroupIds, subnetId, instanceTags,
+                    userData, iamInstanceProfileArn, encodedUserData, true);
             throw dryRunOperation();
         }
 
@@ -16312,12 +16308,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         for (int i = 0; i < count; i++) {
             String spotRequestId = "sir-" + randomHex(8);
 
-            Reservation reservation = runInstances(region, imageId, instanceType, 1, 1, keyName,
-                    securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
-                    /* associatePublicIp */ null, /* networkInterfaceId */ null,
-                    /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
-                    /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData,
-                    false, null, null, null, true);
+            Reservation reservation = runSpotInstances(region, imageId, instanceType, 1, keyName, securityGroupIds,
+                    subnetId, instanceTags, userData, iamInstanceProfileArn, encodedUserData, false);
 
             Instance launchedInstance = reservation.getInstances().get(0);
 
@@ -16379,6 +16371,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(sir -> spotRequestIds.isEmpty() || spotRequestIds.contains(sir.getSpotInstanceRequestId()))
                 .filter(sir -> matchesFilters(sir, filters, region))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * RunInstances for {@code count} of a Spot request's instances, as its launch specification gives them; with
+     * {@code dryRun}, RunInstances' own dry run of all of them.
+     */
+    private Reservation runSpotInstances(String region, String imageId, String instanceType, int count,
+                                         String keyName, List<String> securityGroupIds, String subnetId,
+                                         List<Tag> instanceTags, String userData, String iamInstanceProfileArn,
+                                         String encodedUserData, boolean dryRun) {
+        return runInstances(region, imageId, instanceType, count, count, keyName,
+                securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn,
+                /* associatePublicIp */ null, /* networkInterfaceId */ null,
+                /* networkInterfaceDeviceIndex */ 0, /* availabilityZone */ null,
+                /* metadataOptions */ null, /* creditSpecificationCpuCredits */ null, encodedUserData,
+                dryRun, null, null, null, true);
     }
 
     private SpotInstanceRequest requireSpotInstanceRequest(String region, String id) {

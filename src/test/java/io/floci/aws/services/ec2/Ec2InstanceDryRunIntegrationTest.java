@@ -244,7 +244,7 @@ class Ec2InstanceDryRunIntegrationTest {
     }
 
     private String launch() {
-        String instanceId = ec2("RunInstances", "ImageId", "ami-1234567890abcdef0", "InstanceType", "t3.micro",
+        String instanceId = ec2("RunInstances", "ImageId", IMAGE, "InstanceType", "t3.micro",
                 "MinCount", "1", "MaxCount", "1").getString("RunInstancesResponse.instancesSet.item.instanceId");
         awaitState(instanceId, "running");
         return instanceId;
