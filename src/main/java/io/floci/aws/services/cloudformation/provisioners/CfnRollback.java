@@ -151,6 +151,11 @@ public final class CfnRollback {
      * {@code Route53CfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
      */
     public static final String HEALTH_CHECK_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53HealthCheckUpdateSnapshot";
+    /**
+     * The record a record set update displaced and the record it wrote, for that update's rollback. The
+     * commit's cleanup walk reaches every resource, and the record set drops it there.
+     */
+    public static final String ROUTE53_RECORD_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53RecordUpdate";
     public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**

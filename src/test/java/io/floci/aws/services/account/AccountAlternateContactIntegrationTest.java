@@ -1,11 +1,13 @@
 package io.floci.aws.services.account;
 
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.services.account.AlternateContactRequests.alternateContactRequest;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -26,23 +28,31 @@ class AccountAlternateContactIntegrationTest {
 
     @Test
     void rejectsInvalidContactType() {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"AlternateContactType\":\"OTHER\"}")
-                .post("/getAlternateContact").then().statusCode(400).body("__type", equalTo("ValidationException"));
+        post("/getAlternateContact", "{\"AlternateContactType\":\"OTHER\"}")
+                .statusCode(400).body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Invalid parameter at 'AlternateContactType' failed to satisfy constraint: "
+                        + "'Member must satisfy enum value set: [BILLING, OPERATIONS, SECURITY]'"));
+    }
+
+    @Test
+    void rejectsNonStringMember() {
+        ObjectNode request = alternateContactRequest().put("PhoneNumber", 12025550123L);
+        post("/putAlternateContact", request.toString())
+                .statusCode(400).body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("PhoneNumber must be a string."));
     }
 
     @Test
     void rejectsNonStringAccountIdInsteadOfFallingBackToCaller() {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"AccountId\":123456789012,\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"security@example.com\",\"PhoneNumber\":\"+12025550123\"}")
-                .post("/putAlternateContact").then().statusCode(400).body("__type", equalTo("SerializationException"));
+        ObjectNode request = alternateContactRequest().put("AccountId", 123456789012L);
+        post("/putAlternateContact", request.toString())
+                .statusCode(400).body("__type", equalTo("SerializationException"));
     }
 
     @Test
     void trailingJsonReturnsSerializationException() {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"AlternateContactType\":\"SECURITY\"} {}")
-                .post("/getAlternateContact").then().statusCode(400).body("__type", equalTo("SerializationException"));
+        post("/getAlternateContact", "{\"AlternateContactType\":\"SECURITY\"} {}")
+                .statusCode(400).body("__type", equalTo("SerializationException"));
     }
 
     @Test
@@ -58,20 +68,19 @@ class AccountAlternateContactIntegrationTest {
     }
 
     private static ValidatableResponse put(String email) {
-        return given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"" + email + "\",\"PhoneNumber\":\"+12025550123\"}")
-                .post("/putAlternateContact").then();
+        return post("/putAlternateContact", alternateContactRequest().put("EmailAddress", email).toString());
     }
 
     private static ValidatableResponse get() {
-        return given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"AlternateContactType\":\"SECURITY\"}")
-                .post("/getAlternateContact").then();
+        return post("/getAlternateContact", "{\"AlternateContactType\":\"SECURITY\"}");
     }
 
     private static ValidatableResponse delete() {
+        return post("/deleteAlternateContact", "{\"AlternateContactType\":\"SECURITY\"}");
+    }
+
+    private static ValidatableResponse post(String path, String body) {
         return given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"AlternateContactType\":\"SECURITY\"}")
-                .post("/deleteAlternateContact").then();
+                .body(body).post(path).then();
     }
 }

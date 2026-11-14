@@ -2,6 +2,7 @@ package io.floci.aws.services.apigateway;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -29,7 +30,7 @@ class JwtClaimsWireFormatTest {
                 null, new ObjectMapper(), null,
                 null, null, null, null, new ApiGatewayExecuteRouteContext(), null,
                 null, null
-        , null, null, null);
+        , null, null, null, new HttpProxyInvoker());
     }
 
     private static String unsignedToken(String claimsJson) {

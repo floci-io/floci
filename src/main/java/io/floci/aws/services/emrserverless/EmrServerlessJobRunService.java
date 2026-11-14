@@ -19,6 +19,7 @@ import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
+import io.floci.aws.services.emrserverless.model.ImageConfiguration;
 import io.floci.aws.services.emrserverless.model.JobDriver;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
@@ -521,6 +522,7 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setAttempt(FIRST_ATTEMPT);
         run.setAttemptCreatedAt(now);
         run.setAttemptUpdatedAt(now);
+        applyImages(run, app);
         if (sparkRunner == null) {
             run.setStartedAt(now);
         }
@@ -600,7 +602,53 @@ public class EmrServerlessJobRunService implements Resettable {
      * {@code TezTask} image is not used; a Spark run's executors have their own, {@link #executors}.
      */
     static String customImage(Application app) {
-        return workerImage(app, HIVE_TYPE.equalsIgnoreCase(app.getType()) ? HIVE_DRIVER_WORKER_TYPE : DRIVER_WORKER_TYPE);
+        return workerImage(app, driverWorkerType(app.getType()));
+    }
+
+    private static String driverWorkerType(String applicationType) {
+        return HIVE_TYPE.equalsIgnoreCase(applicationType) ? HIVE_DRIVER_WORKER_TYPE : DRIVER_WORKER_TYPE;
+    }
+
+    /**
+     * The image configurations an attempt of a run applies: its application's, and its worker types', as they stand
+     * when the attempt is made. Floci resolves a custom image for each attempt, as "EMR 7.14 and later" do ("New
+     * custom images take effect for new workloads immediately") and "New job attempts will pick new images", so the
+     * run's {@code workerTypeSpecifications} hold the attempt's own, as AWS's do "when the
+     * applicationLevelDigestResolution is false for the application". Each is a copy holding the image's URI, with no
+     * digest until the attempt's runner resolves that image, {@link #imageDigestResolved}.
+     */
+    private static void applyImages(JobRun run, Application app) {
+        run.setImageConfiguration(appliedImage(app.getImageConfiguration()));
+        Map<String, WorkerTypeSpecification> workerTypes = new LinkedHashMap<>();
+        if (app.getWorkerTypeSpecifications() != null) {
+            app.getWorkerTypeSpecifications().forEach((workerType, specification) -> {
+                ImageConfiguration image = specification != null
+                        ? appliedImage(specification.getImageConfiguration()) : null;
+                if (image != null) {
+                    WorkerTypeSpecification applied = new WorkerTypeSpecification();
+                    applied.setImageConfiguration(image);
+                    workerTypes.put(workerType, applied);
+                }
+            });
+        }
+        run.setWorkerTypeSpecifications(workerTypes.isEmpty() ? null : workerTypes);
+    }
+
+    private static ImageConfiguration appliedImage(ImageConfiguration image) {
+        if (image == null || image.getImageUri() == null) {
+            return null;
+        }
+        ImageConfiguration applied = new ImageConfiguration();
+        applied.setImageUri(image.getImageUri());
+        return applied;
+    }
+
+    // The image configuration an attempt applies to a worker type: the worker type's own, else the run's, as
+    // workerImage chose its image.
+    private static ImageConfiguration appliedImage(JobRun run, String workerType) {
+        WorkerTypeSpecification worker = run.getWorkerTypeSpecifications() != null
+                ? run.getWorkerTypeSpecifications().get(workerType) : null;
+        return worker != null ? worker.getImageConfiguration() : run.getImageConfiguration();
     }
 
     // A worker type's custom image, else the application's, else null for the release's.
@@ -780,6 +828,32 @@ public class EmrServerlessJobRunService implements Resettable {
                 });
     }
 
+    /**
+     * The run's latest attempt resolved its {@code workerType}'s custom image to the image whose manifest digest is
+     * {@code digest}: the image configuration that worker type took its image from, its own or the run's, both copied
+     * from the application the attempt's job was made from, gets it as its {@code resolvedImageDigest}. Another naming
+     * the same image does not: its image may not run, as an {@code Executor} image while the executors run in the
+     * driver's container, or was pulled apart, maybe after a push. One the driver and the executors both take their
+     * image from holds the driver's.
+     */
+    private synchronized void imageDigestResolved(String jobRunId, SparkJobRunner.WorkerType workerType, String digest,
+                                                  long launchedIn) {
+        if (launchedIn != generation) {
+            return;
+        }
+        store.get(jobRunId).ifPresent(record -> {
+            JobRun run = record.getJobRun();
+            ImageConfiguration driver = appliedImage(run, driverWorkerType(record.getApplicationType()));
+            ImageConfiguration applied = workerType == SparkJobRunner.WorkerType.DRIVER
+                    ? driver : appliedImage(run, EXECUTOR_WORKER_TYPE);
+            if (applied == null || (workerType == SparkJobRunner.WorkerType.EXECUTOR && applied == driver)) {
+                return;
+            }
+            applied.setResolvedImageDigest(digest);
+            store.put(jobRunId, record);
+        });
+    }
+
     // A run past its timeout is CANCELLING while its driver is stopped: "the job run has timed out".
     private synchronized void driverTimedOut(String jobRunId, long launchedIn) {
         if (launchedIn != generation) {
@@ -884,6 +958,7 @@ public class EmrServerlessJobRunService implements Resettable {
         run.setStartedAt(null);
         run.setEndedAt(null);
         run.setTotalExecutionDurationSeconds(null);
+        applyImages(run, app);
         store.put(run.getJobRunId(), record);
         LOG.infov("EMR Serverless job run {0} failed its attempt {1}; attempt {2} starts", run.getJobRunId(),
                 failed.getAttempt(), run.getAttempt());
@@ -1291,6 +1366,12 @@ public class EmrServerlessJobRunService implements Resettable {
         @Override
         public void started() {
             RequestScopes.runAs(job.accountId(), job.region(), () -> driverStarted(job.runId(), launchedIn));
+        }
+
+        @Override
+        public void imageResolved(SparkJobRunner.WorkerType workerType, String digest) {
+            RequestScopes.runAs(job.accountId(), job.region(),
+                    () -> imageDigestResolved(job.runId(), workerType, digest, launchedIn));
         }
 
         @Override

@@ -58,10 +58,16 @@ public class EmrTaskInvoker {
      */
     record Job(String api, String clusterId, String stepId, ObjectNode response) {}
 
+    /** Whether {@link #start} takes the integration, as a {@code .sync} of an API that waits or the API itself. */
+    static boolean serves(StatesIntegration integration) {
+        String api = integration.api();
+        return APIS.contains(api) && (integration.suffix().isEmpty()
+                || ".sync".equals(integration.suffix()) && SYNC_APIS.contains(api));
+    }
+
     Job start(StatesIntegration integration, JsonNode input, String region) {
         String api = integration.api();
-        if (!APIS.contains(api)
-                || !integration.suffix().isEmpty() && !(".sync".equals(integration.suffix()) && SYNC_APIS.contains(api))) {
+        if (!serves(integration)) {
             throw unsupported(integration);
         }
         JsonNode request = input != null && input.isObject() ? input : objectMapper.createObjectNode();

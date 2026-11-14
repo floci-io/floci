@@ -107,7 +107,8 @@ class DynamoDbAccessPathIntegrationTest {
         request("DynamoDB_20120810.Query", """
                 {
                   "TableName":"%s",
-                  "KeyConditionExpression":"pk = :pk AND status = :status",
+                  "KeyConditionExpression":"pk = :pk AND #status = :status",
+                  "ExpressionAttributeNames":{"#status":"status"},
                   "ExpressionAttributeValues":{
                     ":pk":{"S":"p1"},
                     ":status":{"S":"open"}

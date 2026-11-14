@@ -1111,6 +1111,85 @@ class RequestResourcesTest {
     }
 
     /**
+     * A restore whose service asks KMS, as the caller, to decrypt with the key its snapshot records is also checked
+     * as {@code kms:Decrypt} on that key, found in the snapshot's own account and Region, the caller's or another's;
+     * one KMS no longer holds is forwarded as the value the snapshot records, not held, which refuses it; a snapshot
+     * recording no key, or one under a key AWS manages, whose policy lets the account use it through the service,
+     * forwards nothing.
+     */
+    @Test
+    void aRestoreForwardsDecryptOnTheKeyItsSnapshotRecords() {
+        String caller = "000000000000";
+        String owner = "111122223333";
+        String own = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/mine";
+        String shared = "arn:aws:redshift-serverless:eu-west-1:" + owner + ":snapshot/theirs";
+        String plain = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/plain";
+        String lost = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/lost";
+        String managed = "arn:aws:redshift-serverless:us-east-1:" + caller + ":snapshot/managed";
+        String awsKey = "arn:aws:kms:us-east-1:" + caller + ":key/aws-redshift";
+        Map<String, String> keys = Map.of(own, "k-own", shared, "alias/theirs", lost, "deleted",
+                managed, "alias/aws/redshift");
+        StoredResourceArns serverless = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "redshift-serverless";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> recorded(String arn, String member) {
+                return "kmsKeyId".equals(member) ? Optional.ofNullable(keys.get(arn)) : Optional.empty();
+            }
+        };
+        StoredResourceArns kms = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "kms";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                if (!"key".equals(type)) {
+                    return Optional.empty();
+                }
+                return names.equals(List.of("k-own")) ? Optional.of("arn:aws:kms:" + region + ":" + caller + ":key/k-own")
+                        : names.equals(List.of("alias/aws/redshift")) ? Optional.of(awsKey) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+                return "key".equals(type) && names.equals(List.of("alias/theirs"))
+                        ? Optional.of("arn:aws:kms:" + region + ":" + account + ":key/k-theirs") : Optional.empty();
+            }
+
+            @Override
+            public boolean grantsItsAccountThroughServices(String arn) {
+                return awsKey.equals(arn);
+            }
+        };
+        String operation = "redshift-serverless:RestoreFromSnapshot";
+        assertEquals(List.of(
+                new RequestResources.Forwarded("kms:Decrypt", "arn:aws:kms:us-east-1:" + caller + ":key/k-own",
+                        "kms:ViaService", "redshift-serverless", true),
+                new RequestResources.Forwarded("kms:Decrypt", "arn:aws:kms:eu-west-1:" + owner + ":key/k-theirs",
+                        "kms:ViaService", "redshift-serverless", true),
+                new RequestResources.Forwarded("kms:Decrypt", "deleted", "kms:ViaService", "redshift-serverless",
+                        false)),
+                RequestResources.forwarded(operation, List.of("*", own, shared, plain, lost, managed), caller,
+                        serverless, namespace -> "kms".equals(namespace) ? kms : null));
+        // Without the snapshot's or the key's service, or for an operation forwarding nothing, nothing is forwarded.
+        assertEquals(List.of(), RequestResources.forwarded(operation, List.of(own), caller, null, namespace -> kms));
+        assertEquals(List.of(), RequestResources.forwarded(operation, List.of(own), caller, serverless,
+                namespace -> null));
+        assertEquals(List.of(), RequestResources.forwarded("redshift-serverless:GetSnapshot", List.of(own), caller,
+                serverless, namespace -> kms));
+    }
+
+    /**
      * A Parameter Store parameter is {@code parameter/<name>} whether its name starts with a slash or not, without the
      * whitespace around it, a name of two leading slashes keeping the second and one beginning {@code /parameter/}
      * keeping that; a version or a label after its name, or after its ARN, is checked on the parameter; a path is

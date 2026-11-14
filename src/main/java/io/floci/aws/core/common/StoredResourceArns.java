@@ -10,7 +10,9 @@ import java.util.Optional;
  * ({@code scalable-target/<id>}, named by its service namespace, resource id and scalable dimension;
  * {@code workgroup/<id>}, named by its name). Also the ARNs of the resources a request names through another of its
  * service's own (the cluster or workgroup a Data API session runs on, the cluster an EMR instance group is in, the
- * accounts an IAM Identity Center permission set is provisioned to).
+ * accounts an IAM Identity Center permission set is provisioned to). Also what a resource's record holds that a
+ * request the operation's service forwards as the caller acts on (the key a Redshift snapshot is encrypted with), and
+ * the ARN of that resource in the service that owns it (the key, in KMS).
  *
  * <p>The reader asks for every type of the namespace, not only for the ones whose ARN carries an id the service
  * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the alias
@@ -25,8 +27,8 @@ import java.util.Optional;
  * for the namespace a request is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
- * {@code through}, a default): never a fact about what an operation acts on, which the table alone says, from
- * botocore and the Service Reference, or from AWS behaviour measured where neither carries it.</p>
+ * {@code through}, a default, {@code forwarded}): never a fact about what an operation acts on, which the table alone
+ * says, from botocore and the Service Reference, or from what AWS says where neither carries it.</p>
  */
 public interface StoredResourceArns {
 
@@ -50,6 +52,26 @@ public interface StoredResourceArns {
      */
     default List<String> through(String member, String value, String region) {
         return List.of();
+    }
+
+    /**
+     * What the resource stored under {@code arn}, in the account and Region the ARN names, records in {@code member},
+     * as botocore names that member of the type's record (a Redshift Serverless snapshot's {@code kmsKeyId}, the key
+     * it is encrypted with); empty when the service holds no such resource, it records nothing there, or the member
+     * is not one it reads. A variable the ARN leaves open ({@code *}) matches whatever the handler would act on in
+     * its place (a provisioned snapshot of any cluster, for a restore naming none).
+     */
+    default Optional<String> recorded(String arn, String member) {
+        return Optional.empty();
+    }
+
+    /**
+     * Whether the resource {@code arn} names, one {@link #find} gave, lets every principal of its account have a
+     * service act on it through that service, as the key policy AWS writes for an AWS managed KMS key does: a request
+     * another service forwards as the caller then needs no permission of the caller's on it. False for any other.
+     */
+    default boolean grantsItsAccountThroughServices(String arn) {
+        return false;
     }
 
     /**

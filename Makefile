@@ -32,7 +32,7 @@
 # src/main/resources/aws/cur-request-shapes.json, the Cost and Usage Reports request constraints
 # for every operation, is generated from botocore's CUR model by tools/aws/regen_cur_shapes.py.
 # src/main/resources/aws/account-request-shapes.json, the Account Management request constraints of the
-# primary contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
+# contact operations, is generated from botocore's Account model by tools/aws/regen_account_shapes.py.
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.
