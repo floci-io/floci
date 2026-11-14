@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -134,6 +135,64 @@ public final class RequestResources {
             return List.of();
         }
         return named(operation, resources, formats(table, operation), Map.of(), body, partition, region, accountId, stored);
+    }
+
+    /**
+     * A request an operation's service makes to another service as the caller, which the caller needs permission for
+     * too: {@code action} on {@code resource}, sent from {@code endpoint}, the operation's endpoint prefix, which the
+     * condition key {@code viaService} names where the action takes one (null otherwise). Not {@code held} when the
+     * action's service holds no resource of that name (a deleted key), {@code resource} then being the value the
+     * record holds: that service refuses the request, so the operation fails.
+     */
+    public record Forwarded(String action, String resource, String viaService, String endpoint, boolean held) {
+    }
+
+    /**
+     * The requests the operation's service makes to another as the caller (the table's {@code forwarded}), for the
+     * resources the request is checked on: for each of {@code resources} of the type whose record holds what the
+     * action acts on, the resource that record's member names, as the action's service finds it in the account and
+     * Region of the ARN, the caller's ({@code find}) or another's ({@code findInAccount}), or the value itself, not
+     * held, when it finds none. None for a resource whose service records nothing there (a snapshot under AWS's own
+     * key records no key of the account's), or one whose policy lets every principal of its account have the service
+     * act on it ({@link StoredResourceArns#grantsItsAccountThroughServices}: an AWS managed key). {@code held} is the
+     * operation's service, and {@code services} gives the action's.
+     */
+    public static List<Forwarded> forwarded(String operation, List<String> resources, String accountId,
+                                            StoredResourceArns held, Function<String, StoredResourceArns> services) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        List<RequestResourceMembers.Forwarded> uses = operation == null ? List.of()
+                : table.forwarded().getOrDefault(operation, List.of());
+        if (uses.isEmpty() || held == null) {
+            return List.of();
+        }
+        Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
+        List<Forwarded> found = new ArrayList<>();
+        for (RequestResourceMembers.Forwarded use : uses) {
+            StoredResourceArns service = services.apply(use.action().substring(0, use.action().indexOf(':')));
+            RequestResourceMembers.ArnFormat of = formats.get(use.of());
+            if (service == null || of == null) {
+                continue;
+            }
+            for (String resource : resources) {
+                if (!of.pattern().matcher(resource).matches()) {
+                    continue;
+                }
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
+                Optional<String> named = held.recorded(resource, use.member());
+                if (named.isEmpty()) {
+                    continue;
+                }
+                Optional<String> target = arn.accountId().equals(accountId)
+                        ? service.find(use.type(), List.of(named.get()), arn.region())
+                        : service.findInAccount(use.type(), List.of(named.get()), arn.accountId(), arn.region());
+                if (target.isEmpty()) {
+                    found.add(new Forwarded(use.action(), named.get(), use.viaService(), use.endpoint(), false));
+                } else if (!service.grantsItsAccountThroughServices(target.get())) {
+                    found.add(new Forwarded(use.action(), target.get(), use.viaService(), use.endpoint(), true));
+                }
+            }
+        }
+        return List.copyOf(found);
     }
 
     /** Whether the table holds the operation as one with no resource of its own, which is checked on {@code *}. */
