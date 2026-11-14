@@ -185,7 +185,16 @@ class LambdaDurableProtocolIntegrationTest {
             .body("Operations", hasSize(2))
             .body("Operations[0].Type", equalTo("EXECUTION"))
             .body("Operations[1].Id", equalTo("s1"))
-            .body("NextMarker", equalTo(""));
+            .body("$", not(hasKey("NextMarker")));
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/state?MaxItems=1&CheckpointToken=" + nextToken)
+        .then()
+            .statusCode(200)
+            .body("Operations", hasSize(1))
+            .body("NextMarker", notNullValue());
 
         given()
             .urlEncodingEnabled(false)
