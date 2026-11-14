@@ -76,8 +76,8 @@ public class TempRolePasswordTracker implements Resettable {
 
     private final SecureRandom random = new SecureRandom();
     private final ConcurrentHashMap<Key, Entry> entries = new ConcurrentHashMap<>();
-    // Khóa theo key, không bị xóa khi entry bị gỡ: acquire và release luôn cùng khóa nên một login
-    // đang chờ không thể chạy tiếp trên entry đã bị release cuối cùng gỡ khỏi map.
+    // One lock per key that outlives its entry: acquire and release always take the same lock, so a
+    // login waiting on it cannot carry on with an entry the last release has already removed.
     private final ConcurrentHashMap<Key, Object> keyLocks = new ConcurrentHashMap<>();
 
     public Lease acquire(String backendKey, String roleName, PasswordReader reader,
