@@ -10,10 +10,14 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static io.floci.aws.testing.CfnRequests.cfn;
 import static org.hamcrest.Matchers.containsString;
@@ -358,17 +362,48 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
             .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE_SPOT"));
     }
 
-    @Test
-    void updateStack_droppedDesiredCount_setsTheDesiredCountToOne() {
-        String name = stackName();
-        submitService("CreateStack", name, 3);
-        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
-        describeService(name).body("services[0].desiredCount", equalTo(3));
+    /**
+     * One row per case of the AWS::ECS::Service DesiredCount contract: a new service without it gets 1, and an
+     * update that leaves it out omits it from UpdateService, so the stored count stays. Columns: the declaration
+     * at create (null: none), the count set through the ECS API after create (null: none), the declaration at
+     * update (null: none), the count DescribeServices reports at the end.
+     */
+    private static Stream<Arguments> desiredCountCases() {
+        String noValue = "{\"Fn::If\": [\"Never\", 3, {\"Ref\": \"AWS::NoValue\"}]}";
+        return Stream.of(
+            Arguments.of("createWithoutIt", null, null, null, 1),
+            Arguments.of("updateDropsIt", "3", null, null, 3),
+            Arguments.of("neverDeclaredButSetThroughTheApi", null, 4, null, 4),
+            Arguments.of("updateChoosesNoValue", "3", null, noValue, 3),
+            Arguments.of("updateDeclaresZero", "3", null, "0", 0));
+    }
 
-        submitTemplate("UpdateStack", name, serviceTemplate(name, 0).replace("\"DesiredCount\": 0,", ""));
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("desiredCountCases")
+    void updateStack_desiredCount_followsTheContract(String row, String atCreate, Integer setThroughTheApi,
+                                                     String atUpdate, int expected) {
+        String name = stackName();
+        submitTemplate("CreateStack", name, withDesiredCount(name, atCreate, REGISTRIES_SETTING));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
+        if (atCreate == null && setThroughTheApi == null) {
+            describeService(name).body("services[0].desiredCount", equalTo(expected));
+            return;
+        }
+        if (setThroughTheApi != null) {
+            ecs("UpdateService", "{\"cluster\": \"%1$s\", \"service\": \"%1$s-svc\", \"desiredCount\": %2$d}"
+                    .formatted(name, setThroughTheApi));
+        }
+
+        submitTemplate("UpdateStack", name, withDesiredCount(name, atUpdate, STRATEGY_SETTING));
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
 
-        describeService(name).body("services[0].desiredCount", equalTo(1));
+        describeService(name).body("services[0].desiredCount", equalTo(expected));
+    }
+
+    /** SERVICE_TEMPLATE with DesiredCount set to {@code value} (a JSON value), or without the property when null. */
+    private static String withDesiredCount(String stackName, String value, String setting) {
+        return serviceTemplate(stackName, 0, setting)
+            .replace("\"DesiredCount\": 0,", value == null ? "" : "\"DesiredCount\": " + value + ",");
     }
 
     private void createServiceStack(String name, String... settings) {
