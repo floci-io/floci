@@ -465,7 +465,14 @@ public class Ec2IpamService {
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description) {
         return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
-                description, config.defaultAccountId());
+                description, config.defaultAccountId(), null);
+    }
+
+    public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
+                                   String sourceIpamPoolId, String addressFamily, String description,
+                                   List<Tag> tags) {
+        return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
+                description, config.defaultAccountId(), null, tags);
     }
 
     /** Overload for callers (e.g. CloudFormation provisioning) that already have the real
@@ -474,7 +481,7 @@ public class Ec2IpamService {
                                    String sourceIpamPoolId, String addressFamily, String description,
                                    String ownerId) {
         return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
-                description, ownerId, null);
+                description, ownerId, null, null);
     }
 
     /**
@@ -485,6 +492,13 @@ public class Ec2IpamService {
     public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
                                    String sourceIpamPoolId, String addressFamily, String description,
                                    String requestedOwnerId, String clientToken) {
+        return createIpamPool(region, ipamScopeId, locale, sourceIpamPoolId, addressFamily,
+                description, requestedOwnerId, clientToken, null);
+    }
+
+    public IpamPool createIpamPool(String region, String ipamScopeId, String locale,
+                                   String sourceIpamPoolId, String addressFamily, String description,
+                                   String requestedOwnerId, String clientToken, List<Tag> tags) {
         // Same null-means-caller resolution as createIpam.
         String ownerId = requestedOwnerId != null ? requestedOwnerId : callerAccountId();
         if (ipamScopeId == null || ipamScopeId.isBlank()) {
@@ -519,6 +533,7 @@ public class Ec2IpamService {
         pool.setDescription(description);
         pool.setState("create-complete");
         pool.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
+        pool.setTags(tags != null ? new ArrayList<>(tags) : new ArrayList<>());
         pools.put(key(region, pool.getIpamPoolId()), pool);
         LOG.infov("Created IPAM pool {0} (scope {1}, source {2})",
                 pool.getIpamPoolId(), ipamScopeId, sourceIpamPoolId);
@@ -714,7 +729,13 @@ public class Ec2IpamService {
     public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
                                                    Integer netmaskLength, String cidr,
                                                    String description) {
-        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, null);
+        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, null, null);
+    }
+
+    public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
+                                                   Integer netmaskLength, String cidr,
+                                                   String description, List<Tag> tags) {
+        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, null, tags);
     }
 
     /**
@@ -725,6 +746,12 @@ public class Ec2IpamService {
     public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
                                                    Integer netmaskLength, String cidr,
                                                    String description, String clientToken) {
+        return allocateIpamPoolCidr(region, ipamPoolId, netmaskLength, cidr, description, clientToken, null);
+    }
+
+    public IpamPoolAllocation allocateIpamPoolCidr(String region, String ipamPoolId,
+                                                   Integer netmaskLength, String cidr,
+                                                   String description, String clientToken, List<Tag> tags) {
         OwnedPool ownedPool = requireOwnedPool(region, ipamPoolId);
         IpamPool pool = ownedPool.pool();
         if (clientToken != null && !clientToken.isBlank()) {
@@ -769,6 +796,7 @@ public class Ec2IpamService {
         allocation.setResourceType("custom");
         allocation.setResourceOwner(config.defaultAccountId());
         allocation.setClientToken(clientToken != null && !clientToken.isBlank() ? clientToken : null);
+        allocation.setTags(tags != null ? new ArrayList<>(tags) : new ArrayList<>());
         pool.getAllocations().add(allocation);
         savePool(ownedPool);
         LOG.infov("Allocated {0} from IPAM pool {1}", chosen, ipamPoolId);

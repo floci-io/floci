@@ -2404,6 +2404,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateIpamPool(MultivaluedMap<String, String> p, String region) {
         checkDryRun(p);
+        List<Tag> poolTags = parseTagsForResource(p, "ipam-pool");
         IpamPool pool = ipamService.createIpamPool(region,
                 p.getFirst("IpamScopeId"),
                 p.getFirst("Locale"),
@@ -2411,11 +2412,13 @@ public class Ec2QueryHandler {
                 p.getFirst("AddressFamily"),
                 p.getFirst("Description"),
                 null,
-                p.getFirst("ClientToken"));
+                p.getFirst("ClientToken"),
+                poolTags);
+        applyResourceTags(poolTags, region, pool.getIpamPoolId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateIpamPoolResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
-        writeIpamPool(xml, "ipamPool", pool);
+        writeIpamPool(xml, "ipamPool", pool, region);
         xml.end("CreateIpamPoolResponse");
         return xmlResponse(xml.build());
     }
@@ -2431,7 +2434,7 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("ipamPoolSet");
         for (IpamPool pool : ipamService.describeIpamPools(region, ids, getFiltersList(p))) {
-            writeIpamPool(xml, "item", pool);
+            writeIpamPool(xml, "item", pool, region);
         }
         xml.end("ipamPoolSet").end("DescribeIpamPoolsResponse");
         return xmlResponse(xml.build());
@@ -2443,7 +2446,7 @@ public class Ec2QueryHandler {
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteIpamPoolResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
-        writeIpamPool(xml, "ipamPool", pool);
+        writeIpamPool(xml, "ipamPool", pool, region);
         xml.end("DeleteIpamPoolResponse");
         return xmlResponse(xml.build());
     }
@@ -2462,7 +2465,7 @@ public class Ec2QueryHandler {
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyIpamPoolResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
-        writeIpamPool(xml, "ipamPool", pool);
+        writeIpamPool(xml, "ipamPool", pool, region);
         xml.end("ModifyIpamPoolResponse");
         return xmlResponse(xml.build());
     }
@@ -2497,16 +2500,19 @@ public class Ec2QueryHandler {
     }
 
     private Response handleAllocateIpamPoolCidr(MultivaluedMap<String, String> p, String region) {
+        List<Tag> allocationTags = parseTagsForResource(p, "ipam-pool-allocation");
         IpamPoolAllocation allocation = ipamService.allocateIpamPoolCidr(region,
                 p.getFirst("IpamPoolId"),
                 parseOptionalInt(p.getFirst("NetmaskLength"), "NetmaskLength"),
                 p.getFirst("Cidr"),
                 p.getFirst("Description"),
-                p.getFirst("ClientToken"));
+                p.getFirst("ClientToken"),
+                allocationTags);
+        applyResourceTags(allocationTags, region, allocation.getIpamPoolAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateIpamPoolCidrResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
-        writeIpamPoolAllocation(xml, "ipamPoolAllocation", allocation);
+        writeIpamPoolAllocation(xml, "ipamPoolAllocation", allocation, region);
         xml.end("AllocateIpamPoolCidrResponse");
         return xmlResponse(xml.build());
     }
@@ -2531,7 +2537,7 @@ public class Ec2QueryHandler {
                 .start("ipamPoolAllocationSet");
         for (IpamPoolAllocation allocation
                 : ipamService.getIpamPoolAllocations(region, p.getFirst("IpamPoolId"))) {
-            writeIpamPoolAllocation(xml, "item", allocation);
+            writeIpamPoolAllocation(xml, "item", allocation, region);
         }
         xml.end("ipamPoolAllocationSet").end("GetIpamPoolAllocationsResponse");
         return xmlResponse(xml.build());
@@ -2562,7 +2568,26 @@ public class Ec2QueryHandler {
                 .end(wrapper);
     }
 
-    private void writeIpamPool(XmlBuilder xml, String wrapper, IpamPool pool) {
+    private static List<Tag> mergeTags(List<Tag> modelTags, List<Tag> storeTags) {
+        Map<String, Tag> merged = new LinkedHashMap<>();
+        if (modelTags != null) {
+            for (Tag t : modelTags) {
+                if (t != null && t.getKey() != null) {
+                    merged.put(t.getKey(), t);
+                }
+            }
+        }
+        if (storeTags != null) {
+            for (Tag t : storeTags) {
+                if (t != null && t.getKey() != null) {
+                    merged.put(t.getKey(), t);
+                }
+            }
+        }
+        return new ArrayList<>(merged.values());
+    }
+
+    private void writeIpamPool(XmlBuilder xml, String wrapper, IpamPool pool, String region) {
         xml.start(wrapper)
                 .elem("ipamPoolId", pool.getIpamPoolId())
                 .elem("ipamPoolArn", pool.getIpamPoolArn())
@@ -2592,10 +2617,11 @@ public class Ec2QueryHandler {
         if (pool.getAllocationDefaultNetmaskLength() != null) {
             xml.elem("allocationDefaultNetmaskLength", String.valueOf(pool.getAllocationDefaultNetmaskLength()));
         }
-        xml.end(wrapper);
+        xml.raw(tagSetXml(mergeTags(pool.getTags(), service.resourceTags(region, pool.getIpamPoolId()))))
+                .end(wrapper);
     }
 
-    private void writeIpamPoolAllocation(XmlBuilder xml, String wrapper, IpamPoolAllocation allocation) {
+    private void writeIpamPoolAllocation(XmlBuilder xml, String wrapper, IpamPoolAllocation allocation, String region) {
         xml.start(wrapper)
                 .elem("ipamPoolAllocationId", allocation.getIpamPoolAllocationId())
                 .elem("cidr", allocation.getCidr())
@@ -2603,7 +2629,8 @@ public class Ec2QueryHandler {
         if (allocation.getDescription() != null) {
             xml.elem("description", allocation.getDescription());
         }
-        xml.end(wrapper);
+        xml.raw(tagSetXml(mergeTags(allocation.getTags(), service.resourceTags(region, allocation.getIpamPoolAllocationId()))))
+                .end(wrapper);
     }
 
     private Response handleCreateVpcEndpoint(MultivaluedMap<String, String> p, String region) {
