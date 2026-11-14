@@ -2448,6 +2448,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 () -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         Snapshot snapshot = findSnapshot(snapshotIdentifier)
                 .filter(found -> clusterIdentifier.equals(found.getClusterIdentifier()))
+                .filter(this::isInRequestRegion)
                 .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
                         "Snapshot " + snapshotIdentifier + " not found", 404));
         if (!"available".equals(cluster.getClusterStatus())) {

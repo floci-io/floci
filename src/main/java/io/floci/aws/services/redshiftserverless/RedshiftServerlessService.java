@@ -1071,6 +1071,10 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
         }
         Namespace namespace = getNamespace(namespaceName, region);
         Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!namespaceName.equals(workgroup.getNamespaceName())) {
+            throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
+                    + namespaceName + ".");
+        }
         if (!hasLiveRuntime(workgroup)) {
             throw ServerlessSupport.conflict("The workgroup " + workgroupName + " is not available.");
         }

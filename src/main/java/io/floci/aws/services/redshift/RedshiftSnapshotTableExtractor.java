@@ -17,11 +17,19 @@ import java.util.Optional;
  */
 public final class RedshiftSnapshotTableExtractor {
 
-    private static final String CREATE_TABLE = "CREATE TABLE ";
+    private static final List<String> CREATE_TABLE_PREFIXES = List.of("CREATE TABLE ", "CREATE UNLOGGED TABLE ");
+    private static final String PARTITIONED = "PARTITION BY ";
     private static final String COPY = "COPY ";
     private static final String COPY_END = "\\.";
 
     private RedshiftSnapshotTableExtractor() {
+    }
+
+    /** The table is of a kind a restore cannot carry over whole, such as a partitioned one whose rows live elsewhere. */
+    public static final class UnsupportedTableException extends RuntimeException {
+        public UnsupportedTableException(String message) {
+            super(message);
+        }
     }
 
     /**
@@ -56,10 +64,11 @@ public final class RedshiftSnapshotTableExtractor {
                     }
                     continue;
                 }
-                if (line.startsWith(CREATE_TABLE) && create.isEmpty()) {
-                    QualifiedName name = QualifiedName.parse(line, CREATE_TABLE.length());
+                String createPrefix = create.isEmpty() ? createPrefix(line) : null;
+                if (createPrefix != null) {
+                    QualifiedName name = QualifiedName.parse(line, createPrefix.length());
                     if (name != null && name.matches(sourceSchema, sourceTable, caseSensitive)) {
-                        create.add(CREATE_TABLE + quote(targetSchema) + "." + quote(targetTable)
+                        create.add(createPrefix + quote(targetSchema) + "." + quote(targetTable)
                                 + line.substring(name.end()));
                         inCreate = !line.endsWith(";");
                     }
@@ -76,10 +85,24 @@ public final class RedshiftSnapshotTableExtractor {
         if (create.isEmpty()) {
             return Optional.empty();
         }
+        if (create.stream().anyMatch(statement -> statement.stripLeading().startsWith(PARTITIONED)
+                || statement.contains(") " + PARTITIONED))) {
+            throw new UnsupportedTableException("The table " + sourceSchema + "." + sourceTable
+                    + " is partitioned, and its rows are stored in its partitions, which cannot be restored with it.");
+        }
         StringBuilder script = new StringBuilder("BEGIN;\n");
         create.forEach(statement -> script.append(statement).append('\n'));
         data.forEach(row -> script.append(row).append('\n'));
         return Optional.of(script.append("COMMIT;\n").toString());
+    }
+
+    private static String createPrefix(String line) {
+        for (String prefix : CREATE_TABLE_PREFIXES) {
+            if (line.startsWith(prefix)) {
+                return prefix;
+            }
+        }
+        return null;
     }
 
     /** The identifier as a quoted one, so a name with spaces, quotes or capitals reaches Postgres unchanged. */

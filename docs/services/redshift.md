@@ -660,7 +660,7 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 
 - The restore runs inside the request. The response shows `PENDING`, and `DescribeTableRestoreStatus` already reports `SUCCEEDED` or `FAILED`, with the reason in `Message`. `InProgressTableRestoreQuotaExceededFault` is never returned.
 - A snapshot covers one database, `dev`. A `SourceDatabaseName` or table the snapshot does not hold is refused with `InvalidTableRestoreArgument`. A target table that already exists, or a target schema or database that does not, ends the request in `FAILED` and leaves nothing behind.
-- Only the definition and the rows are restored. Constraints, defaults that read a sequence and ownership are not.
+- Only the definition and the rows are restored. Constraints, defaults that read a sequence and ownership are not. A partitioned table is refused with `InvalidTableRestoreArgument`, because its rows live in its partitions.
 - Names are matched ignoring case unless `EnableCaseSensitiveIdentifier` is `true`, and folded to lower case in the target otherwise.
 - The status of a deleted cluster's requests is dropped when they are next listed, so a cluster recreated under its name can inherit a request made against its predecessor if nothing listed them in between.
 

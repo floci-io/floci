@@ -1064,6 +1064,19 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void tableRestoreRefusesAWorkgroupOfAnotherNamespace() {
+        create("table-ns-a");
+        create("table-ns-b");
+        service.createSnapshot("table-snap", "table-ns-a", null, null, REGION);
+        createWorkgroup("table-wg-b", "table-ns-b");
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> service.tableRestoreSource("table-ns-a", "table-wg-b", "table-snap", REGION));
+
+        assertEquals("ValidationException", mismatch.getErrorCode());
+    }
+
+    @Test
     void restoreFromSharedSnapshotReadsTheSnapshotOfAnotherAccount() throws Exception {
         String owner = "999999999999";
         create("shared-ns");

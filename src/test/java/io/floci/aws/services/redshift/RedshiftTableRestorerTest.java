@@ -11,7 +11,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 
@@ -22,8 +21,8 @@ class RedshiftTableRestorerTest {
         RedshiftContainerManager containerManager = mock(RedshiftContainerManager.class);
         doThrow(new AwsException("InternalFailure", "Failed to restore snapshot for cluster c: psql:/tmp/x.sql:9: "
                 + "ERROR:  invalid input syntax for type integer: \"secret-row\"\nCONTEXT:  COPY t, line 1: \"secret-row\"",
-                500)).when(containerManager).restoreSnapshot(anyString(), anyString(), anyString(), anyString(),
-                any(Path.class), eq(true));
+                500)).when(containerManager).runTableRestoreScript(anyString(), anyString(), anyString(), anyString(),
+                any(Path.class));
 
         AwsException failure = assertThrows(AwsException.class,
                 () -> new RedshiftTableRestorer(containerManager).run("1", "c", "admin", "dev", "BEGIN;\nCOMMIT;\n"));

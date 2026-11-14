@@ -11,6 +11,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RedshiftSnapshotTableExtractorTest {
@@ -87,6 +88,40 @@ class RedshiftSnapshotTableExtractorTest {
         assertTrue(script("SALES", "mixed case", "public", "x", false).isPresent());
         assertTrue(script("sales", "mixed case", "public", "x", true).isEmpty());
         assertTrue(script("sales", "Mixed Case", "public", "x", true).isPresent());
+    }
+
+    @Test
+    void anUnloggedTableKeepsItsQualifierAndItsRows() throws IOException {
+        Files.writeString(dump, String.join("\n",
+                "CREATE UNLOGGED TABLE public.scratch (",
+                "    id integer",
+                ");",
+                "COPY public.scratch (id) FROM stdin;",
+                "5",
+                "\\.",
+                ""));
+
+        String script = script("public", "scratch", "public", "scratch_copy", false).orElseThrow();
+
+        assertTrue(script.contains("CREATE UNLOGGED TABLE \"public\".\"scratch_copy\" ("), script);
+        assertTrue(script.contains("COPY \"public\".\"scratch_copy\" (id) FROM stdin;"), script);
+    }
+
+    @Test
+    void aPartitionedTableIsRefusedBecauseItsRowsLiveInItsPartitions() throws IOException {
+        Files.writeString(dump, String.join("\n",
+                "CREATE TABLE public.events (",
+                "    id integer",
+                ")",
+                "PARTITION BY RANGE (id);",
+                "CREATE TABLE public.events_1 (",
+                "    id integer",
+                ");",
+                ""));
+
+        assertThrows(RedshiftSnapshotTableExtractor.UnsupportedTableException.class,
+                () -> script("public", "events", "public", "copy", false));
+        assertTrue(script("public", "events_1", "public", "copy", false).isPresent());
     }
 
     @Test
