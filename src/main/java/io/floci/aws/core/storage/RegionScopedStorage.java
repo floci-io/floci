@@ -15,11 +15,13 @@ import java.util.function.Predicate;
  * Region view of a factory-owned account store, for a service whose resources are Regional: each key is
  * stored under the request's Region ({@code us-east-1/key}), so a Region sees only its own. Older,
  * regionless keys belong only to the configured default region; new writes always record their region
- * explicitly. A logical key may hold any character, a slash included, except that it cannot itself start
- * with a Region and a slash: that is how a stored key's Region is told apart. A Region here is one
- * {@link RegionResolver#isKnownRegion} admits, the rule {@code AccountContextFilter} serves requests by;
- * with {@code floci.partitions.allow-unknown-regions}, a key stored for a Region no partition knows reads
- * as a regionless one.
+ * explicitly. A logical key may hold any character, a slash and a leading Region included, since every key
+ * this view writes starts with its own Region. Only a stored key without one is read as regionless, so a
+ * regionless key is one whose first label is not a Region: one {@link RegionResolver#isKnownRegion} admits,
+ * the rule {@code AccountContextFilter} serves requests by. With
+ * {@code floci.partitions.allow-unknown-regions}, a key stored for a Region no partition knows therefore reads
+ * as a regionless one, and a regionless key stored before this view under a name starting with a Region
+ * reads as that Region's.
  */
 public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
 
@@ -39,32 +41,24 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
 
     @Override
     public void put(String key, V value) {
-        if (!logicalKey(key)) {
-            throw new IllegalArgumentException("Region-scoped storage keys cannot start with a region prefix");
-        }
         delegate.put(prefix() + key, value);
-        if (defaultRegion() && delegate.get(key).isPresent()) {
+        if (regionlessHere(key) && delegate.get(key).isPresent()) {
             delegate.delete(key);
         }
     }
 
     @Override
     public Optional<V> get(String key) {
-        if (!logicalKey(key)) {
-            return Optional.empty();
-        }
         return delegate.get(prefix() + key)
-                .or(() -> defaultRegion() ? delegate.get(key) : Optional.empty());
+                .or(() -> regionlessHere(key) ? delegate.get(key) : Optional.empty());
     }
 
     @Override
     public void delete(String key) {
-        if (logicalKey(key)) {
-            if (defaultRegion()) {
-                delegate.delete(key);
-            }
-            delegate.delete(prefix() + key);
+        if (regionlessHere(key)) {
+            delegate.delete(key);
         }
+        delegate.delete(prefix() + key);
     }
 
     @Override
@@ -113,8 +107,7 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
      */
     private static String logicalKeyOf(String stored, String prefix, boolean includeLegacy) {
         if (stored.startsWith(prefix)) {
-            String key = stored.substring(prefix.length());
-            return logicalKey(key) ? key : null;
+            return stored.substring(prefix.length());
         }
         return includeLegacy && !regionPrefixed(stored) ? stored : null;
     }
@@ -142,8 +135,12 @@ public final class RegionScopedStorage<V> implements StorageBackend<String, V> {
         return regions.getRegion().equals(regions.getDefaultRegion());
     }
 
-    private static boolean logicalKey(String key) {
-        return key != null && !regionPrefixed(key);
+    /**
+     * Whether {@code key} may also be stored regionless, as it was before this view, and is read here that way:
+     * only in the default Region, and only when it doesn't start with a Region, as a stored key of this view does.
+     */
+    private boolean regionlessHere(String key) {
+        return key != null && defaultRegion() && !regionPrefixed(key);
     }
 
     /** Whether {@code key} starts with a Region and a slash, as every key this view stores does. */

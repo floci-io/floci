@@ -13,7 +13,6 @@ import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -47,10 +46,14 @@ class RegionScopedStorageTest {
             selected.clear();
             assertEquals(List.of("west"), west.scan(key -> true));
 
+            // A key naming another Region is a key of this one: it never reaches that Region's record.
             assertEquals(Optional.empty(), east.get("us-west-2/existing"));
             east.delete("us-west-2/existing");
-            assertThrows(IllegalArgumentException.class, () -> east.put("us-west-2/existing", "wrong"));
+            east.put("us-west-2/existing", "east-named-west");
+            assertEquals(Optional.of("east-named-west"), east.get("us-west-2/existing"));
+            assertEquals(Set.of("existing", "untouched", "us-west-2/existing"), east.keys());
             assertEquals(Optional.of("west"), west.get("existing"));
+            assertEquals(Set.of("existing"), west.keys());
             east.clear();
             assertEquals(Set.of(), east.keys());
             assertEquals(Optional.of("west"), west.get("existing"));
@@ -60,8 +63,8 @@ class RegionScopedStorageTest {
     }
 
     /**
-     * A key may hold a slash, as a Glue name may; only a Region and a slash at its start are refused. A
-     * label shaped like a Region that no partition admits ({@code my-cd-1}) is part of the key.
+     * A key may hold a slash, as a Glue name may, a Region and a slash at its start included. A label shaped
+     * like a Region that no partition admits ({@code my-cd-1}) is part of the key.
      */
     @ParameterizedTest
     @ValueSource(strings = {"memory", "persistent", "hybrid", "wal"})
@@ -84,7 +87,18 @@ class RegionScopedStorageTest {
             assertEquals(Optional.of("legacy"), east.get("older/record"));
             assertEquals(Set.of("older/record"), east.keys());
             assertEquals(Optional.empty(), west.get("older/record"));
-            assertThrows(IllegalArgumentException.class, () -> west.put("eu-west-1/plan", "wrong"));
+
+            west.put("eu-west-1/plan", "west-named-eu");
+            east.put("us-east-1/plan", "east-named-east");
+            assertEquals(Optional.of("west-named-eu"), west.get("eu-west-1/plan"));
+            assertEquals(Optional.of("east-named-east"), east.get("us-east-1/plan"));
+            assertEquals(Optional.empty(), east.get("eu-west-1/plan"));
+            assertEquals(Optional.empty(), west.get("us-east-1/plan"));
+            assertEquals(Set.of("sales/2024:orders", "my-cd-1/plan", "eu-west-1/plan"), west.keys());
+            assertEquals(Set.of("older/record", "us-east-1/plan"), east.keys());
+            east.delete("us-east-1/plan");
+            assertEquals(Optional.empty(), east.get("us-east-1/plan"));
+            assertEquals(Optional.of("legacy"), east.get("older/record"));
         } finally {
             factory.shutdownAll();
         }
