@@ -56,7 +56,7 @@ class EcsContainerInsightsIntegrationTest {
               "Service": {"Type": "AWS::ECS::Service", "Properties": {"ServiceName": "web",
                 "Cluster": {"Ref": "Cluster"}, "TaskDefinition": {"Ref": "TaskDef"},
                 "DesiredCount": 1, "LaunchType": "FARGATE", "NetworkConfiguration": {"AwsvpcConfiguration":
-                  {"Subnets": ["subnet-default-us-east-1-a"]}}}}}}
+                  {"Subnets": ["subnet-013f16799e920587a"]}}}}}}
             """.formatted(cluster);
 
         given().contentType("application/x-www-form-urlencoded")

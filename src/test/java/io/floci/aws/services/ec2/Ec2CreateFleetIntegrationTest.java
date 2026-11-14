@@ -132,7 +132,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
-                .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-default-us-east-1-a")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-013f16799e920587a")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.AvailabilityZone", "us-east-1b")
                 .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
                 .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
@@ -157,7 +157,7 @@ class Ec2CreateFleetIntegrationTest {
                 .formParam("LaunchTemplateConfig.1.LaunchTemplateSpecification.Version", "1")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.InstanceType", "t3.micro")
                 .formParam("LaunchTemplateConfig.1.Overrides.1.ImageId", CONTRACT_IMAGE_ID)
-                .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-default-us-east-1-b")
+                .formParam("LaunchTemplateConfig.1.Overrides.1.SubnetId", "subnet-00af8362367af5f99")
                 .formParam("TargetCapacitySpecification.TotalTargetCapacity", "1")
                 .formParam("TargetCapacitySpecification.DefaultTargetCapacityType", "on-demand")
                 .header("Authorization", AUTH_HEADER)
@@ -167,9 +167,9 @@ class Ec2CreateFleetIntegrationTest {
                 .statusCode(200)
                 .body("CreateFleetResponse.fleetInstanceSet.item.availabilityZone", equalTo("us-east-1b"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.subnetId",
-                        equalTo("subnet-default-us-east-1-b"))
+                        equalTo("subnet-00af8362367af5f99"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.overrides.subnetId",
-                        equalTo("subnet-default-us-east-1-b"))
+                        equalTo("subnet-00af8362367af5f99"))
                 .body("CreateFleetResponse.fleetInstanceSet.item.launchTemplateAndOverrides.overrides.availabilityZone",
                         equalTo("us-east-1b"));
     }

@@ -1102,7 +1102,7 @@ class IamPassRoleEnforcementIntegrationTest {
     private static String runTask(String cluster, String family, String taskRoleOverride) {
         return """
                 {"cluster":"%s","taskDefinition":"%s","launchType":"FARGATE","count":1,
-                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-default-us-east-1-a"]}}%s}"""
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-013f16799e920587a"]}}%s}"""
                 .formatted(cluster, family, taskRoleOverride == null ? ""
                         : ",\"overrides\":{\"taskRoleArn\":\"" + taskRoleOverride + "\"}");
     }
@@ -1110,7 +1110,7 @@ class IamPassRoleEnforcementIntegrationTest {
     private static String service(String cluster, String name, String family) {
         return """
                 {"cluster":"%s","serviceName":"%s","taskDefinition":"%s","desiredCount":0,"launchType":"FARGATE",
-                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-default-us-east-1-a"]}}}"""
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-013f16799e920587a"]}}}"""
                 .formatted(cluster, name, family);
     }
 

@@ -37,7 +37,7 @@ class EcsFargateEdgeCaseIntegrationTest {
     private static final String CLUSTER = "fargate-edge-cluster";
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                    + "[\"subnet-default-us-east-1-a\"]}}";
+                    + "[\"subnet-013f16799e920587a\"]}}";
 
     @BeforeAll
     static void configure() {
@@ -446,7 +446,7 @@ class EcsFargateEdgeCaseIntegrationTest {
 
         call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\"" + family
                 + "\",\"launchType\":\"FARGATE\",\"networkConfiguration\":{\"awsvpcConfiguration\":"
-                + "{\"subnets\":[\"subnet-default-us-east-1-a\"],\"securityGroups\":[\"sg-nope\"]}}}", 400)
+                + "{\"subnets\":[\"subnet-013f16799e920587a\"],\"securityGroups\":[\"sg-nope\"]}}}", 400)
                 .then()
                 .body("__type", containsString("InvalidParameterException"))
                 .body("message", containsString("sg-nope"));
@@ -778,7 +778,7 @@ class EcsFargateEdgeCaseIntegrationTest {
         // A changed network configuration starts new tasks, so it rolls.
         call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-roll-svc\","
                 + "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                + "[\"subnet-default-us-east-1-b\"]}}}", 200);
+                + "[\"subnet-00af8362367af5f99\"]}}}", 200);
         assertNotEquals(initial, deploymentId("edge-roll-svc"),
                 "a changed network configuration must roll the deployment");
 
@@ -1070,7 +1070,7 @@ class EcsFargateEdgeCaseIntegrationTest {
                 + "\"launchType\":\"FARGATE\",\"externalId\":\"d-EXAMPLE\","
                 + "\"scale\":{\"value\":50,\"unit\":\"PERCENT\"},"
                 + "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                + "[\"subnet-default-us-east-1-a\"]}},"
+                + "[\"subnet-013f16799e920587a\"]}},"
                 + "\"loadBalancers\":[{\"targetGroupArn\":\"arn:aws:elasticloadbalancing:us-east-1:"
                 + "000000000000:targetgroup/tg/1\",\"containerName\":\"app\",\"containerPort\":80}],"
                 + "\"tags\":[{\"key\":\"team\",\"value\":\"platform\"}]}", 200);

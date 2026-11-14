@@ -20,7 +20,7 @@ import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Image;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
-import io.floci.aws.services.ec2.model.IpPermission;
+import io.floci.aws.services.ec2.model.InternetGateway;
 import io.floci.aws.services.ec2.model.IpPermission;
 import io.floci.aws.services.ec2.model.IpRange;
 import io.floci.aws.services.ec2.model.Ipv6Range;
@@ -30,6 +30,7 @@ import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.ManagedPrefixList;
 import io.floci.aws.services.ec2.model.NatGateway;
 import io.floci.aws.services.ec2.model.NatGatewayAddress;
+import io.floci.aws.services.ec2.model.NetworkAcl;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.NetworkInterfaceAssociation;
 import io.floci.aws.services.ec2.model.NetworkInterfaceListResult;
@@ -39,8 +40,8 @@ import io.floci.aws.services.ec2.model.PrefixList;
 import io.floci.aws.services.ec2.model.PrefixListEntry;
 import io.floci.aws.services.ec2.model.PrefixListId;
 import io.floci.aws.services.ec2.model.Reservation;
+import io.floci.aws.services.ec2.model.RouteTable;
 import io.floci.aws.services.ec2.model.SecurityGroup;
-import io.floci.aws.services.ec2.model.SecurityGroupRule;
 import io.floci.aws.services.ec2.model.SecurityGroupRule;
 import io.floci.aws.services.ec2.model.Snapshot;
 import io.floci.aws.services.ec2.model.Subnet;
@@ -4200,7 +4201,7 @@ class Ec2ServiceTest {
     @Test
     void defaultVpcSubnetAndSecurityGroupIdsAreRegionScoped() {
         // #21: the default VPC/subnets/security group were literal ids ("vpc-default",
-        // "subnet-default-a/b/c", "sg-default") reused as-is in every region. Storage was
+        // "subnet-013f16799e920587a/b/c", "sg-default") reused as-is in every region. Storage was
         // already correctly keyed by region, so nothing actually collided server-side, but every
         // region's DescribeVpcs/DescribeSubnets/DescribeSecurityGroups echoed identical ids back
         // to the caller, making the two regions' default resources indistinguishable from an SDK
@@ -4241,6 +4242,68 @@ class Ec2ServiceTest {
                 "default security group id must differ per region");
         assertEquals(Ec2Service.defaultSecurityGroupId("us-east-1"), usEastSg.getGroupId());
         assertEquals(Ec2Service.defaultSecurityGroupId("eu-west-1"), euWestSg.getGroupId());
+    }
+
+    @Test
+    void defaultNetworkResourceIdsHaveEc2ShapeAndAreRegionUniqueAndStable() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        String[] prefixes = {"igw-", "rtb-", "rtbassoc-", "acl-", "aclassoc-", "vpc-cidr-assoc-"};
+        for (String region : List.of("us-east-1", "eu-west-1")) {
+            InternetGateway igw = service.describeInternetGateways(region, List.of(), Map.of()).getFirst();
+            assertTrue(igw.getInternetGatewayId().startsWith("igw-"));
+            assertTrue(isHex17(igw.getInternetGatewayId().substring(4)));
+
+            List<RouteTable> rts = service.describeRouteTables(region, List.of(), Map.of());
+            RouteTable mainRt = rts.isEmpty() ? null : rts.getFirst();
+            assertTrue(mainRt.getRouteTableId().startsWith("rtb-"));
+            assertTrue(isHex17(mainRt.getRouteTableId().substring(4)));
+            assertTrue(mainRt.getAssociations().stream().allMatch(a ->
+                    a.getRouteTableAssociationId().startsWith("rtbassoc-")
+                            && isHex17(a.getRouteTableAssociationId().substring(9))));
+
+            List<NetworkAcl> acls = service.describeNetworkAcls(region, List.of(), Map.of());
+            NetworkAcl defaultAcl = acls.stream().filter(NetworkAcl::isDefault).findFirst().orElse(acls.getFirst());
+            assertTrue(defaultAcl.getNetworkAclId().startsWith("acl-"));
+            assertTrue(isHex17(defaultAcl.getNetworkAclId().substring(4)));
+            assertTrue(defaultAcl.getAssociations().stream().allMatch(a ->
+                    a.getNetworkAclAssociationId().startsWith("aclassoc-")
+                            && isHex17(a.getNetworkAclAssociationId().substring(9))));
+
+            Vpc vpc = service.describeVpcs(region, List.of(), Map.of()).getFirst();
+            assertTrue(vpc.getCidrBlockAssociationSet().stream().allMatch(c ->
+                    c.getAssociationId().startsWith("vpc-cidr-assoc-")
+                            && isHex17(c.getAssociationId().substring("vpc-cidr-assoc-".length()))));
+        }
+
+        // uniqueness across regions
+        InternetGateway usIgw = service.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst();
+        InternetGateway euIgw = service.describeInternetGateways("eu-west-1", List.of(), Map.of()).getFirst();
+        assertNotEquals(usIgw.getInternetGatewayId(), euIgw.getInternetGatewayId());
+
+        // stability across two seeding runs (new storage)
+        Ec2Service service2 = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        assertEquals(service.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst().getInternetGatewayId(),
+                service2.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst().getInternetGatewayId());
+    }
+
+    private static boolean isHex17(String s) {
+        if (s == null || s.length() != 17) {
+            return false;
+        }
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Test

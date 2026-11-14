@@ -318,14 +318,16 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 | Resource | ID | Details |
 |---|---|---|
-| Default VPC | `vpc-default` | CIDR `172.31.0.0/16` |
-| Default Subnet (AZ a) | `subnet-default-a` | CIDR `172.31.0.0/20` |
-| Default Subnet (AZ b) | `subnet-default-b` | CIDR `172.31.16.0/20` |
-| Default Subnet (AZ c) | `subnet-default-c` | CIDR `172.31.32.0/20` |
-| Default Security Group | `sg-default` | `groupName=default`, all-traffic egress |
-| Default Internet Gateway | `igw-default` | Attached to default VPC |
-| Main Route Table | `rtb-default` | Associated with default VPC |
-| Default Network ACL | `acl-default` | Allow-all, associated with the default subnets |
+| Default VPC | `vpc-<17 hex>` | CIDR `172.31.0.0/16`; derived from the region, stable across restarts |
+| Default Subnet (AZ a) | `subnet-<17 hex>` | CIDR `172.31.0.0/20`; derived from the region and zone |
+| Default Subnet (AZ b) | `subnet-<17 hex>` | CIDR `172.31.16.0/20`; derived from the region and zone |
+| Default Subnet (AZ c) | `subnet-<17 hex>` | CIDR `172.31.32.0/20`; derived from the region and zone |
+| Default Security Group | `sg-<17 hex>` | `groupName=default`, all-traffic egress; derived from the region |
+| Default Internet Gateway | `igw-<17 hex>` | Attached to default VPC; derived from the region |
+| Main Route Table | `rtb-<17 hex>` | Associated with default VPC; derived from the region |
+| Default Network ACL | `acl-<17 hex>` | Allow-all, associated with the default subnets; derived from the region |
+
+The exact ids are region-derived (a hash of the region, plus the zone or subnet where there is more than one) and differ between regions; discover the real ids through the Describe APIs rather than hard-coding them.
 
 ## Supported Actions
 
