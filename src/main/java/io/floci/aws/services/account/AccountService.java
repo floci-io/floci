@@ -10,6 +10,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.account.model.AlternateContact;
+import io.floci.aws.services.account.model.ContactInformation;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationAccount;
@@ -28,15 +29,22 @@ public class AccountService implements Resettable, StoredResourceArns {
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final Pattern EMAIL = Pattern.compile("\\s*[\\w+=.#|!&-]+@[\\w.-]+\\.[\\w]+\\s*");
     private static final Pattern PHONE = Pattern.compile("[\\s0-9()+-]+");
+    private static final Pattern PRIMARY_CONTACT_PHONE = Pattern.compile("[+][\\s0-9()-]+");
     private static final Set<String> CONTACT_TYPES = Set.of("BILLING", "OPERATIONS", "SECURITY");
+    private static final Set<String> COUNTRIES_REQUIRING_STATE_OR_REGION =
+            Set.of("US", "CA", "GB", "DE", "JP", "IN", "BR");
+    private static final String PRIMARY_CONTACT_KEY = "primary";
 
     private final AccountAwareStorageBackend<AlternateContact> contacts;
+    private final AccountAwareStorageBackend<ContactInformation> contactInformation;
     private final OrganizationsService organizationsService;
 
     @Inject
     public AccountService(StorageFactory storageFactory, OrganizationsService organizationsService) {
         this.contacts = storageFactory.create("account", "account-alternate-contacts.json",
                 new TypeReference<Map<String, AlternateContact>>() {});
+        this.contactInformation = storageFactory.create("account", "account-contact-information.json",
+                new TypeReference<Map<String, ContactInformation>>() {});
         this.organizationsService = organizationsService;
     }
 
@@ -66,6 +74,43 @@ public class AccountService implements Resettable, StoredResourceArns {
             throw notFound();
         }
         contacts.deleteForAccount(targetAccountId, type);
+    }
+
+    public void putContactInformation(String callerAccountId, JsonNode request) {
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        JsonNode contact = request == null ? null : request.get("ContactInformation");
+        if (contact == null || contact.isNull()) {
+            throw validation("ContactInformation is required.");
+        }
+        if (!contact.isObject()) {
+            throw new AwsException("SerializationException",
+                    "ContactInformation must be a structure.", 400);
+        }
+        ContactInformation information = new ContactInformation();
+        information.setFullName(requireLength(contact, "FullName", 1, 50));
+        information.setAddressLine1(requireLength(contact, "AddressLine1", 1, 60));
+        information.setAddressLine2(optionalLength(contact, "AddressLine2", 1, 60));
+        information.setAddressLine3(optionalLength(contact, "AddressLine3", 1, 60));
+        information.setCity(requireLength(contact, "City", 1, 50));
+        information.setStateOrRegion(optionalLength(contact, "StateOrRegion", 1, 50));
+        information.setDistrictOrCounty(optionalLength(contact, "DistrictOrCounty", 1, 50));
+        information.setPostalCode(requireLength(contact, "PostalCode", 1, 20));
+        information.setCountryCode(requireLength(contact, "CountryCode", 2, 2));
+        information.setPhoneNumber(requirePattern(contact, "PhoneNumber", 1, 20, PRIMARY_CONTACT_PHONE));
+        information.setCompanyName(optionalLength(contact, "CompanyName", 1, 50));
+        information.setWebsiteUrl(optionalLength(contact, "WebsiteUrl", 1, 256));
+        if (information.getStateOrRegion() == null
+                && COUNTRIES_REQUIRING_STATE_OR_REGION.contains(information.getCountryCode())) {
+            throw validation("StateOrRegion is required when CountryCode is "
+                    + information.getCountryCode() + ".");
+        }
+        contactInformation.putForAccount(targetAccountId, PRIMARY_CONTACT_KEY, information);
+    }
+
+    public ContactInformation getContactInformation(String callerAccountId, JsonNode request) {
+        String targetAccountId = resolveTargetAccount(callerAccountId, request);
+        return contactInformation.getForAccount(targetAccountId, PRIMARY_CONTACT_KEY)
+                .orElseThrow(AccountService::contactInformationNotFound);
     }
 
     private String resolveTargetAccount(String callerAccountId, JsonNode request) {
@@ -118,6 +163,7 @@ public class AccountService implements Resettable, StoredResourceArns {
     @Override
     public void clear() {
         contacts.clear();
+        contactInformation.clear();
     }
 
     /** The namespace of the resource types this service finds, as the request-resources table names it. */
@@ -166,10 +212,20 @@ public class AccountService implements Resettable, StoredResourceArns {
         return value;
     }
 
+    private static String optionalLength(JsonNode request, String field, int min, int max) {
+        JsonNode value = request.get(field);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        return requireLength(request, field, min, max);
+    }
+
     private static String requireLength(JsonNode request, String field, int min, int max) {
         String value = text(request, field);
         if (value == null || value.length() < min || value.length() > max) {
-            throw validation(field + " must be between " + min + " and " + max + " characters.");
+            throw validation(min == max
+                    ? field + " must be exactly " + min + " characters."
+                    : field + " must be between " + min + " and " + max + " characters.");
         }
         return value;
     }
@@ -186,5 +242,10 @@ public class AccountService implements Resettable, StoredResourceArns {
     private static AwsException notFound() {
         return new AwsException("ResourceNotFoundException",
                 "The alternate contact does not exist for the specified account and contact type.", 404);
+    }
+
+    private static AwsException contactInformationNotFound() {
+        return new AwsException("ResourceNotFoundException",
+                "The contact information does not exist for the specified account.", 404);
     }
 }

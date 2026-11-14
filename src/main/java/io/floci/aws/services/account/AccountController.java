@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.account.model.AlternateContact;
+import io.floci.aws.services.account.model.ContactInformation;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -20,6 +21,9 @@ import jakarta.ws.rs.core.Response;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class AccountController {
+    // Floci has no phone verification flow, so every account reports this status.
+    private static final String VERIFICATION_STATUS_NOT_SUPPORTED = "NOT_SUPPORTED";
+
     private final AccountService accountService;
     private final ObjectMapper objectMapper;
     private final RequestContext requestContext;
@@ -52,6 +56,24 @@ public class AccountController {
     public Response deleteAlternateContact(String body) {
         accountService.deleteAlternateContact(requestContext.getAccountId(), readTree(body));
         return Response.ok().build();
+    }
+
+    @POST
+    @Path("/putContactInformation")
+    public Response putContactInformation(String body) {
+        accountService.putContactInformation(requestContext.getAccountId(), readTree(body));
+        return Response.ok().build();
+    }
+
+    @POST
+    @Path("/getContactInformation")
+    public Response getContactInformation(String body) {
+        ContactInformation information = accountService.getContactInformation(
+                requestContext.getAccountId(), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ContactInformation", objectMapper.valueToTree(information));
+        response.put("VerificationStatus", VERIFICATION_STATUS_NOT_SUPPORTED);
+        return Response.ok(response).build();
     }
 
     private JsonNode readTree(String body) {
