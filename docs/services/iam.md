@@ -3088,6 +3088,17 @@ floci populates:
   generates from the Service Reference and pinned botocore. Regenerate with
   `make request-condition-keys-sync`. `redshift:DbName` and `redshift:DurationSeconds` are not
   populated yet.
+- `route53:ChangeResourceRecordSetsActions`, `route53:ChangeResourceRecordSetsRecordTypes` and
+  `route53:ChangeResourceRecordSetsNormalizedRecordNames`: the `Action`, `Type` and `Name` of every change
+  in a `ChangeResourceRecordSets` batch, each read from its own change or record set, so a `Name` elsewhere
+  in the record set is not read, and a second copy of one is refused with `InvalidInput`, as the change is.
+  A record name is spelled as the
+  [Route 53 condition format](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
+  gives it: lowercase, without the final dot, and with every character other than a to z, 0 to 9, hyphen,
+  underscore and the dots between labels as an octal escape code (`*` is `\052`). Use
+  `ForAllValues:StringEquals` with `Null` set to `false` to require every change to match. The actions, the
+  request members, their botocore shapes and the request protocol come from the same
+  `request-condition-keys.json`, and Route 53 spells the names as its `DNSName` shape.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor
@@ -3336,14 +3347,3 @@ aws iam create-access-key --user-name alice --endpoint-url $AWS_ENDPOINT_URL
 # List roles
 aws iam list-roles --endpoint-url $AWS_ENDPOINT_URL
 ```
-
-### Route 53 record change conditions
-
-`ChangeResourceRecordSets` evaluates the actions, record types, and normalized record
-names from every change in the batch under `route53:ChangeResourceRecordSetsActions`,
-`route53:ChangeResourceRecordSetsRecordTypes`, and
-`route53:ChangeResourceRecordSetsNormalizedRecordNames`. Use set operators such as
-`ForAllValues:StringEquals` with `Null: false` to require all changes to match.
-DNS names are lowercased, omit the final dot, and use octal escapes for special
-characters, following the [Route 53 condition format](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html).
-Authorization and mutation share the same change-batch parser.

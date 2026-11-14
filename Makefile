@@ -900,7 +900,7 @@ s3control-tag-condition-keys-verify: ## Check the S3 Control tag condition actio
 	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --verify
 
 .PHONY: request-condition-keys-sync request-condition-keys-check request-condition-keys-verify
-request-condition-keys-sync: ## Regenerate the Lambda Web and Redshift request condition keys from AWS and botocore
+request-condition-keys-sync: ## Regenerate the Lambda Web, Redshift and Route 53 request condition keys from AWS and botocore
 	$(PYTHON) tools/aws/regen_request_condition_keys.py
 request-condition-keys-check: ## Check the request condition key members against pinned botocore
 	$(PYTHON) tools/aws/regen_request_condition_keys.py --check

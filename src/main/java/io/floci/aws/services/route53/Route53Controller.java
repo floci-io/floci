@@ -29,9 +29,14 @@ import javax.xml.stream.XMLStreamReader;
 
 import java.net.URI;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @Path("/2013-04-01")
 public class Route53Controller {
@@ -39,6 +44,16 @@ public class Route53Controller {
     private static final String NS = AwsNamespaces.ROUTE53;
     private static final String XML = "application/xml";
 
+    private static final Set<String> CHANGE_ACTIONS = Set.of("CREATE", "DELETE", "UPSERT");
+    /** Where a change batch's elements sit below the request's root, as Route 53's schema nests them. */
+    private static final String CHANGES = "ChangeBatch/Changes";
+    private static final String CHANGE = CHANGES + "/Change";
+    private static final String RECORD_SET = CHANGE + "/ResourceRecordSet";
+    private static final String RESOURCE_RECORD = RECORD_SET + "/ResourceRecords/ResourceRecord";
+    private static final String ALIAS_TARGET = RECORD_SET + "/AliasTarget";
+    private static final Set<String> RECORD_SET_TEXT = Set.of("Name", "Type", "TTL", "SetIdentifier",
+            "MultiValueAnswer", "Weight", "Region", "Failover", "HealthCheckId");
+    private static final Set<String> ALIAS_TARGET_TEXT = Set.of("HostedZoneId", "DNSName", "EvaluateTargetHealth");
 
     @Inject
     Route53Service service;
@@ -464,7 +479,7 @@ public class Route53Controller {
     public Response changeResourceRecordSets(@PathParam("Id") String id, String body) {
         try {
             String comment = XmlParser.extractFirst(body, "Comment", null);
-            List<Map<String, Object>> changes = Route53ChangeBatch.parse(body);
+            List<Map<String, Object>> changes = parseChangeBatch(body);
             ChangeInfo change = service.changeResourceRecordSets(id, changes, comment);
             String xml = new XmlBuilder()
                     .start("ChangeResourceRecordSetsResponse", NS)
@@ -972,6 +987,219 @@ public class Route53Controller {
             throw new AwsException("InvalidInput",
                     "Invalid value '" + vpcRegion + "' at 'VPCRegion' failed to satisfy constraint: "
                             + "Member must satisfy enum value set.", 400);
+        }
+    }
+
+    private static void requireExactlyOneRecordShape(String action, ResourceRecordSet rrs, boolean hasRecords) {
+        boolean hasAlias = rrs.getAliasTarget() != null;
+        boolean hasTtl = rrs.getTtl() != null;
+        String found;
+        if (hasAlias && (hasTtl || hasRecords)) {
+            found = "more than one";
+        } else if (!hasAlias && !(hasTtl && hasRecords)) {
+            found = "none";
+        } else {
+            return;
+        }
+        throw new AwsException("InvalidInput",
+                "Invalid request: Expected exactly one of [AliasTarget, all of [TTL, and ResourceRecords], "
+                        + "or TrafficPolicyInstanceId], but found " + found + " in Change with [Action=" + action
+                        + ", Name=" + rrs.getName() + ", Type=" + rrs.getType()
+                        + ", SetIdentifier=" + rrs.getSetIdentifier() + "]", 400);
+    }
+
+    /**
+     * Parses the ChangeBatch XML using StAX to correctly handle multiple Change elements,
+     * each containing a ResourceRecordSet with its own set of ResourceRecord/Value children.
+     */
+    private List<Map<String, Object>> parseChangeBatch(String body) {
+        List<Map<String, Object>> result = new ArrayList<>();
+        if (body != null && !body.isEmpty()) {
+            parseChangeBatchInto(body, result);
+        }
+        if (result.isEmpty()) {
+            throw new AwsException("InvalidInput",
+                    "Invalid XML ; cvc-complex-type.2.4.b: The content of element 'Changes' is not complete. "
+                            + "One of '{\"" + NS + "\":Change}' is expected.", 400);
+        }
+        return result;
+    }
+
+    /**
+     * Reads each element only where Route 53's schema puts it below the request's root, so an element of the same
+     * name anywhere else (a {@code Name} inside a {@code GeoLocation}) is skipped, and refuses a second copy of an
+     * element a change, record set or alias target holds once. IAM reads the batch's condition keys from these same
+     * elements, through the request members the generated condition key table names, so both read one batch.
+     */
+    private void parseChangeBatchInto(String body, List<Map<String, Object>> result) {
+        try {
+            XMLStreamReader r = XmlParser.newStreamReader(body);
+            Deque<String> open = new ArrayDeque<>();
+            boolean rootOpen = false;
+            String currentAction = null;
+            ResourceRecordSet currentRrs = null;
+            List<ResourceRecord> currentRecords = null;
+            AliasTarget currentAlias = null;
+            Set<String> changeRead = new HashSet<>();
+            Set<String> recordSetRead = new HashSet<>();
+            Set<String> aliasRead = new HashSet<>();
+
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    if (!rootOpen) {
+                        rootOpen = true;
+                        continue;
+                    }
+                    String name = r.getLocalName();
+                    switch (String.join("/", open)) {
+                        case CHANGES -> {
+                            if ("Change".equals(name)) {
+                                currentAction = null;
+                                currentRrs = null;
+                                currentRecords = null;
+                                changeRead.clear();
+                            }
+                        }
+                        case CHANGE -> {
+                            if ("Action".equals(name)) {
+                                readOnce(changeRead, name);
+                                currentAction = r.getElementText();
+                                if (!CHANGE_ACTIONS.contains(currentAction)) {
+                                    throw new AwsException("InvalidInput",
+                                            "Invalid value '" + currentAction + "' at 'Action' failed to satisfy "
+                                                    + "constraint: Member must satisfy enum value set.", 400);
+                                }
+                                continue;
+                            }
+                            if ("ResourceRecordSet".equals(name)) {
+                                readOnce(changeRead, name);
+                                currentRrs = new ResourceRecordSet();
+                                currentRecords = new ArrayList<>();
+                                recordSetRead.clear();
+                            }
+                        }
+                        case RECORD_SET -> {
+                            if (RECORD_SET_TEXT.contains(name)) {
+                                readOnce(recordSetRead, name);
+                                readRecordSetText(currentRrs, name, r.getElementText());
+                                continue;
+                            }
+                            if ("ResourceRecords".equals(name)) {
+                                readOnce(recordSetRead, name);
+                            } else if ("AliasTarget".equals(name)) {
+                                readOnce(recordSetRead, name);
+                                currentAlias = new AliasTarget();
+                                aliasRead.clear();
+                            }
+                        }
+                        case RESOURCE_RECORD -> {
+                            if ("Value".equals(name)) {
+                                currentRecords.add(new ResourceRecord(r.getElementText()));
+                                continue;
+                            }
+                        }
+                        case ALIAS_TARGET -> {
+                            if (ALIAS_TARGET_TEXT.contains(name)) {
+                                readOnce(aliasRead, name);
+                                String text = r.getElementText();
+                                switch (name) {
+                                    case "HostedZoneId" -> currentAlias.setHostedZoneId(text);
+                                    case "DNSName" -> currentAlias.setDnsName(text);
+                                    default -> currentAlias.setEvaluateTargetHealth("true".equalsIgnoreCase(text));
+                                }
+                                continue;
+                            }
+                        }
+                        default -> {
+                        }
+                    }
+                    open.addLast(name);
+                } else if (event == XMLStreamConstants.END_ELEMENT && !open.isEmpty()) {
+                    String name = open.pollLast();
+                    switch (String.join("/", open)) {
+                        case RECORD_SET -> {
+                            if ("AliasTarget".equals(name)) {
+                                currentRrs.setAliasTarget(currentAlias);
+                                currentAlias = null;
+                            }
+                        }
+                        case CHANGE -> {
+                            if ("ResourceRecordSet".equals(name)) {
+                                if (currentRrs.getName() == null || currentRrs.getType() == null) {
+                                    throw new AwsException("InvalidInput",
+                                            "ResourceRecordSet is missing a required Name or Type element.", 400);
+                                }
+                                boolean hasRecords = !currentRecords.isEmpty();
+                                if (hasRecords) {
+                                    currentRrs.setRecords(currentRecords);
+                                }
+                                requireExactlyOneRecordShape(currentAction, currentRrs, hasRecords);
+                            }
+                        }
+                        case CHANGES -> {
+                            if ("Change".equals(name)) {
+                                if (currentAction == null || currentRrs == null) {
+                                    throw new AwsException("InvalidInput",
+                                            "Change is missing a required Action or ResourceRecordSet element.",
+                                            400);
+                                }
+                                Map<String, Object> change = new HashMap<>();
+                                change.put("action", currentAction);
+                                change.put("rrs", currentRrs);
+                                result.add(change);
+                                currentAction = null;
+                                currentRrs = null;
+                                currentRecords = null;
+                            }
+                        }
+                        default -> {
+                        }
+                    }
+                }
+            }
+            r.close();
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("InvalidInput", "The XML you provided was not well-formed.", 400);
+        }
+    }
+
+    /** Sets the record set's {@code element} from its text, refusing a TTL, weight or answer flag that is not one. */
+    private static void readRecordSetText(ResourceRecordSet rrs, String element, String text) {
+        switch (element) {
+            case "Name" -> rrs.setName(text.endsWith(".") ? text : text + ".");
+            case "Type" -> rrs.setType(text);
+            case "TTL" -> rrs.setTtl(longElement(element, text));
+            case "SetIdentifier" -> rrs.setSetIdentifier(text);
+            case "MultiValueAnswer" -> {
+                if (!"true".equals(text) && !"false".equals(text)) {
+                    throw new AwsException("InvalidInput", "MultiValueAnswer must be true or false.", 400);
+                }
+                rrs.setMultiValueAnswer(Boolean.valueOf(text));
+            }
+            case "Weight" -> rrs.setWeight(longElement(element, text));
+            case "Region" -> rrs.setRegion(text);
+            case "Failover" -> rrs.setFailover(text);
+            default -> rrs.setHealthCheckId(text);
+        }
+    }
+
+    private static long longElement(String element, String text) {
+        try {
+            return Long.parseLong(text);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput", "Invalid value '" + text + "' at '" + element
+                    + "' failed to satisfy constraint: Member must be a valid long.", 400);
+        }
+    }
+
+    /** Records {@code element} as read in the element holding it, refusing a second copy, as Route 53's schema does. */
+    private static void readOnce(Set<String> read, String element) {
+        if (!read.add(element)) {
+            throw new AwsException("InvalidInput", "Invalid XML ; cvc-complex-type.2.4.a: Invalid content was found "
+                    + "starting with element '{\"" + NS + "\":" + element + "}'.", 400);
         }
     }
 
