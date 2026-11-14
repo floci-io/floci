@@ -7,6 +7,8 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshiftserverless.model.ConfigParameter;
@@ -54,6 +56,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -1041,6 +1044,61 @@ class RedshiftServerlessServiceTest {
         AwsException conflict = assertThrows(AwsException.class,
                 () -> service.createSnapshot("snap-one", "snap-a", null, null, REGION));
         assertEquals("ConflictException", conflict.getErrorCode());
+    }
+
+    @Test
+    void aRunningWorkgroupExportsTheLogTypesItsNamespaceSelects() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("audit-ns", "admin", null, null, null, null, List.of("connectionlog", "userlog"),
+                Map.of(), REGION);
+
+        createWorkgroup("audit-wg", "audit-ns");
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        RedshiftAuditTarget target = registered.getValue();
+        assertEquals("serverless_us-east-1_audit-wg", target.identifier());
+        assertEquals("/aws/redshift/audit-ns", target.logGroupPrefix());
+        assertEquals("serverless", target.name());
+        assertEquals("cloudwatch", target.destinationType());
+        assertEquals(List.of("connectionlog", "userlog"), target.exports());
+        assertTrue(target.enabled());
+        assertFalse(target.activityLoggingEnabled());
+
+        service.updateNamespace("audit-ns", null, null, null, null, List.of("useractivitylog"), REGION);
+        service.updateNamespace("audit-ns", null, null, null, null, List.of(), REGION);
+        service.deleteWorkgroup("audit-wg", REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> reregistered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(3)).register(eq(ACCOUNT_ID), eq(REGION), reregistered.capture());
+        assertEquals(List.of("useractivitylog"), reregistered.getAllValues().get(1).exports());
+        assertFalse(reregistered.getAllValues().get(2).enabled());
+        verify(publisher).unregister(ACCOUNT_ID, "serverless_us-east-1_audit-wg");
+    }
+
+    @Test
+    void theUserActivityLogNeedsItsConfigParameterOnTheWorkgroup() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("activity-ns", "admin", null, null, null, null, List.of("useractivitylog"), Map.of(),
+                REGION);
+
+        service.createWorkgroup("activity-wg", "activity-ns", new WorkgroupSettings(null, null, null, null, null,
+                List.of(new ConfigParameter("enable_user_activity_logging", "true")), null, null, null, null, null,
+                null), null, REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertTrue(registered.getValue().activityLoggingEnabled());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Instance<RedshiftAuditLogPublisher> instanceOf(RedshiftAuditLogPublisher publisher) {
+        Instance<RedshiftAuditLogPublisher> instance = mock(Instance.class);
+        when(instance.isUnsatisfied()).thenReturn(false);
+        when(instance.get()).thenReturn(publisher);
+        return instance;
     }
 
     @Test
