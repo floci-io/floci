@@ -11,11 +11,11 @@ import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBInstance;
-import software.amazon.awssdk.services.rds.model.VpcSecurityGroupMembership;
 
 import java.util.List;
 
 import static io.floci.aws.testing.CfnStackWaits.output;
+import static io.floci.aws.testing.RdsRequests.vpcSecurityGroupIds;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -23,8 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@code VPCSecurityGroups} and {@code StorageEncrypted} on {@code AWS::RDS::DBInstance}, read back
- * through the AWS SDK: the groups follow the template in place, through a failed update and when the
- * template drops them, and a change of {@code StorageEncrypted} either way replaces the instance.
+ * through the AWS SDK: the groups follow the template in place, through a failed update, a group of
+ * another VPC that RDS refuses, and a template that drops them, and a change of {@code StorageEncrypted}
+ * either way replaces the instance.
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
@@ -37,19 +38,23 @@ class CloudFormationRdsDbInstanceIntegrationTest {
     void securityGroupsFollowTheTemplateThroughChangeRollbackAndRemoval() {
         Stack created = stack.create(template("First", false, false));
         String id = output(created, "DbId");
-        assertEquals(List.of(output(created, "FirstId")), groups(id));
+        assertEquals(List.of(output(created, "FirstId")), vpcSecurityGroupIds(rds(), id));
 
         Stack changed = stack.update(template("Second", false, false), "UPDATE_COMPLETE");
         assertEquals(id, output(changed, "DbId"));
-        assertEquals(List.of(output(changed, "SecondId")), groups(id));
+        assertEquals(List.of(output(changed, "SecondId")), vpcSecurityGroupIds(rds(), id));
 
         stack.update(template("First", false, true), "UPDATE_ROLLBACK_COMPLETE");
-        assertEquals(List.of(output(changed, "SecondId")), groups(id));
+        assertEquals(List.of(output(changed, "SecondId")), vpcSecurityGroupIds(rds(), id));
+
+        // RDS refuses a group of another VPC, so the update rolls back and the instance keeps its group.
+        stack.update(template("Outside", false, false), "UPDATE_ROLLBACK_COMPLETE");
+        assertEquals(List.of(output(changed, "SecondId")), vpcSecurityGroupIds(rds(), id));
 
         // As AWS's handler does, a template that drops the groups puts the instance on its VPC's default group.
         Stack cleared = stack.update(template(null, false, false), "UPDATE_COMPLETE");
         assertEquals(id, output(cleared, "DbId"));
-        assertEquals(List.of(defaultGroupOf(instance(id).dbSubnetGroup().vpcId())), groups(id));
+        assertEquals(List.of(defaultGroupOf(instance(id).dbSubnetGroup().vpcId())), vpcSecurityGroupIds(rds(), id));
     }
 
     @Test
@@ -74,8 +79,8 @@ class CloudFormationRdsDbInstanceIntegrationTest {
     }
 
     /**
-     * Two security groups and a DB instance on {@code group}, First or Second, or on none when it is
-     * null; with {@code StorageEncrypted: true} when {@code encrypted}, and with a resource that fails
+     * Two security groups of the default VPC, a third, Outside, of another VPC, and a DB instance on
+     * {@code group}, or on none when it is null; with {@code StorageEncrypted: true} when {@code encrypted}, and with a resource that fails
      * after the instance when {@code laterFails}.
      */
     private static String template(String group, boolean encrypted, boolean laterFails) {
@@ -85,6 +90,9 @@ class CloudFormationRdsDbInstanceIntegrationTest {
                 {"Resources": {
                   "First": {"Type": "AWS::EC2::SecurityGroup", "Properties": {"GroupDescription": "first"}},
                   "Second": {"Type": "AWS::EC2::SecurityGroup", "Properties": {"GroupDescription": "second"}},
+                  "Elsewhere": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.43.0.0/16"}},
+                  "Outside": {"Type": "AWS::EC2::SecurityGroup", "Properties": {"GroupDescription": "outside",
+                    "VpcId": {"Ref": "Elsewhere"}}},
                   "Db": {"Type": "AWS::RDS::DBInstance", "Properties": {"Engine": "postgres",
                     "DBInstanceClass": "db.t3.micro", "AllocatedStorage": 20, "MasterUsername": "dbadmin",
                     "MasterUserPassword": "password123"%s%s}}%s
@@ -103,10 +111,6 @@ class CloudFormationRdsDbInstanceIntegrationTest {
 
     private DBInstance instance(String id) {
         return rds().describeDBInstances(request -> request.dbInstanceIdentifier(id)).dbInstances().getFirst();
-    }
-
-    private List<String> groups(String id) {
-        return instance(id).vpcSecurityGroups().stream().map(VpcSecurityGroupMembership::vpcSecurityGroupId).toList();
     }
 
     /** The instances this stack's {@code Db} resource has, by the name CloudFormation generates for it. */

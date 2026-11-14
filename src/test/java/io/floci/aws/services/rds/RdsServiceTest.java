@@ -103,6 +103,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
+import static io.floci.aws.testing.Ec2ServiceFixtures.securityGroup;
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
@@ -110,6 +111,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -169,6 +171,8 @@ class RdsServiceTest {
     private KmsService kmsService;
     private EmulatorConfig config;
     private EmulatorConfig.RdsServiceConfig rdsConfig;
+    /** The security groups the mocked EC2 knows, by id; see {@link #securityGroupsIn}. */
+    private final Map<String, SecurityGroup> securityGroups = new HashMap<>();
 
     @BeforeEach
     void setUp() {
@@ -221,6 +225,11 @@ class RdsServiceTest {
                             .filter(Objects::nonNull)
                             .toList();
                 });
+        when(ec2Service.describeSecurityGroups(any(), anyList(), anyList(), anyMap()))
+                .thenAnswer(invocation -> invocation.<List<String>>getArgument(1).stream()
+                        .map(securityGroups::get)
+                        .filter(Objects::nonNull)
+                        .toList());
     }
 
     @Test
@@ -1563,10 +1572,8 @@ class RdsServiceTest {
 
     @Test
     void vpcSecurityGroupsPersistThroughCreateModifyAndCloudFormationsExactSet() {
-        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
-                "admin", "password", "dbname", "db.t3.micro",
-                20, false, null, null, null, null, false, false, null,
-                Map.of(), List.of("sg-created"));
+        securityGroupsIn("vpc-default", "sg-created", "sg-updated-a", "sg-updated-b");
+        DbInstance instance = createInstanceWithGroups(null, List.of("sg-created"));
 
         assertEquals(List.of("sg-created"), instance.getVpcSecurityGroupIds());
 
@@ -1581,11 +1588,80 @@ class RdsServiceTest {
                 .getVpcSecurityGroupIds());
         assertEquals(List.of(), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
 
-        SecurityGroup defaultGroup = new SecurityGroup();
-        defaultGroup.setGroupId("sg-default");
         when(ec2Service.defaultSecurityGroupOf("us-east-1", rdsService.getDbInstance("mydb").getVpcId()))
-                .thenReturn(Optional.of(defaultGroup));
+                .thenReturn(Optional.of(securityGroup("sg-default", "default", "vpc-default")));
         assertEquals(List.of("sg-default"), rdsService.defaultVpcSecurityGroupIds("us-east-1", "mydb"));
+    }
+
+    @Test
+    void createDbInstanceRefusesGroupsThatDoNotExistAndKeepsNothing() {
+        anotherVpc();
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createInstanceWithGroups(null, List.of("sg-first", "sg-missing", "sg-gone")));
+
+        assertEquals("InvalidParameterValue", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertEquals("Invalid security group , groupId= sg-missing, sg-gone, groupName=.", refused.getMessage());
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("mydb"));
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals(7000, createInstanceWithGroups(null, List.of("sg-first")).getEndpoint().port(),
+                "the refused create gave its proxy port back");
+    }
+
+    @Test
+    void createDbInstanceRefusesAGroupOutsideTheVpcOfItsSubnetGroup() {
+        anotherVpc();
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createInstanceWithGroups("app-subnets", List.of("sg-app", "sg-first")));
+
+        assertEquals("InvalidParameterCombination", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertEquals("The DB instance and EC2 security group are in different VPCs. The DB instance is in vpc-app"
+                + " and the EC2 security group is in vpc-default", refused.getMessage());
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("mydb"));
+    }
+
+    @Test
+    void modifyDbInstanceRefusesAMissingGroupOrOneOfAnotherVpcAndKeepsTheGroups() {
+        instanceBesideAnotherVpc();
+
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbInstance("mydb", null, null, null, List.of("sg-missing"))).getErrorCode());
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbInstance("mydb", null, null, null, List.of("sg-app"))).getErrorCode());
+
+        assertEquals(List.of("sg-first"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void modifyDbInstanceChecksTheGroupsAgainstTheVpcOfANewSubnetGroup() {
+        instanceBesideAnotherVpc();
+
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> rdsService.modifyDbInstance("mydb", null, null, "app-subnets", List.of("sg-first"))).getErrorCode());
+        assertEquals("default", rdsService.getDbInstance("mydb").getDbSubnetGroupName());
+
+        rdsService.modifyDbInstance("mydb", null, null, "app-subnets", List.of("sg-app"));
+        assertEquals("vpc-app", rdsService.getDbInstance("mydb").getVpcId());
+        // The instance is in vpc-app now, so a later change of the groups alone is checked against it.
+        assertEquals(List.of("sg-app-second"), rdsService.modifyDbInstance("mydb", null, null, null,
+                List.of("sg-app-second")).getVpcSecurityGroupIds());
+    }
+
+    @Test
+    void cloudFormationsGroupChangeIsCheckedLikeModifyDbInstance() {
+        instanceBesideAnotherVpc();
+
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> rdsService.setDbInstanceVpcSecurityGroups("us-east-1", "mydb", List.of("sg-missing")))
+                .getErrorCode());
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> rdsService.setDbInstanceVpcSecurityGroups("us-east-1", "mydb", List.of("sg-app")))
+                .getErrorCode());
+
+        assertEquals(List.of("sg-first"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
     }
 
     @Test
@@ -11278,6 +11354,40 @@ class RdsServiceTest {
         return subnet;
     }
 
+    /** Makes {@code groupIds} security groups of {@code vpcId} that the mocked EC2 reports. */
+    private void securityGroupsIn(String vpcId, String... groupIds) {
+        for (String groupId : groupIds) {
+            securityGroups.put(groupId, securityGroup(groupId, groupId, vpcId));
+        }
+    }
+
+    /**
+     * Group sg-first in the default VPC, and beside it vpc-app with DB subnet group app-subnets and the
+     * groups sg-app and sg-app-second.
+     */
+    private void anotherVpc() {
+        securityGroupsIn("vpc-default", "sg-first");
+        securityGroupsIn("vpc-app", "sg-app", "sg-app-second");
+        List<String> subnetIds = List.of("subnet-app-a", "subnet-app-b");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(subnetIds), eq(Map.of()))).thenReturn(List.of(
+                subnet("subnet-app-a", "vpc-app", "us-east-1a"), subnet("subnet-app-b", "vpc-app", "us-east-1b")));
+        rdsService.createDbSubnetGroup("app-subnets", "app", subnetIds);
+    }
+
+    /** {@link #anotherVpc()}, with instance mydb in the default VPC on sg-first. */
+    private void instanceBesideAnotherVpc() {
+        anotherVpc();
+        createInstanceWithGroups(null, List.of("sg-first"));
+    }
+
+    /** PostgreSQL instance mydb on DB subnet group {@code subnetGroup}, the default when null. */
+    private DbInstance createInstanceWithGroups(String subnetGroup, List<String> groupIds) {
+        return rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, subnetGroup, null, null, false, false, null,
+                Map.of(), groupIds);
+    }
+
     @Test
     void createDbSubnetGroupStoresTheTagsItIsGiven() {
         rdsService.createDbSubnetGroup("tagged", "d", List.of("subnet-default-a", "subnet-default-b"), "us-east-1",
@@ -11754,6 +11864,7 @@ class RdsServiceTest {
 
     @Test
     void createReadReplicaHonoursOverridesAndResolvesAnArnSource() {
+        securityGroupsIn("vpc-default", "sg-replica");
         createPostgresSource("primary");
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
 
@@ -11778,6 +11889,7 @@ class RdsServiceTest {
 
     @Test
     void sameRegionReplicaInheritsGroupsAndCrossRegionReplicaGetsDefaultsAndArnLinks() {
+        securityGroupsIn("vpc-default", "sg-source");
         rdsService.createDbParameterGroup("primary-pg", "postgres16", "source group");
         rdsService.createDbInstance("primary", "postgres", "16.3", "admin", "password", "appdb",
                 "db.t3.medium", 50, true, "primary-pg", null, null, null, false, false, null,
@@ -12769,12 +12881,9 @@ class RdsServiceTest {
     @Test
     void proxyEndpointTagsRoundTripAndItDefaultsToTheVpcsDefaultSecurityGroup() {
         DbProxy proxy = proxyForEndpoints("app-proxy", "POSTGRESQL");
-        SecurityGroup defaultGroup = new SecurityGroup();
-        defaultGroup.setGroupId("sg-vpc-default");
-        defaultGroup.setGroupName("default");
         // Picking the group out of the VPC is Ec2Service's job, covered in Ec2ServiceTest.
         when(ec2Service.defaultSecurityGroupOf("us-east-1", proxy.getVpcId()))
-                .thenReturn(Optional.of(defaultGroup));
+                .thenReturn(Optional.of(securityGroup("sg-vpc-default", "default", proxy.getVpcId())));
 
         DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep",
                 PROXY_SUBNET_IDS, List.of(), null, null, Map.of("env", "dev"));

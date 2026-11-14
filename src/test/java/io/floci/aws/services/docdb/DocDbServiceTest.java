@@ -13,7 +13,6 @@ import io.floci.aws.services.docdb.model.DocDbClusterSettings;
 import io.floci.aws.services.docdb.model.DocDbInstance;
 import io.floci.aws.services.docdb.model.DocDbInstanceSettings;
 import io.floci.aws.services.ec2.Ec2Service;
-import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.rds.RdsService;
@@ -27,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.floci.aws.testing.Ec2ServiceFixtures.securityGroup;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -265,9 +265,8 @@ class DocDbServiceTest {
         when(rdsService.getDbSubnetGroup(eq("nope"), any())).thenThrow(new AwsException("DBSubnetGroupNotFoundFault", "x", 404));
         when(rdsService.getDbClusterParameterGroup(eq("pg"), any())).thenReturn(new DbClusterParameterGroup("pg", "docdb5.0", "d"));
         when(rdsService.getDbClusterParameterGroup(eq("nope"), any())).thenThrow(new AwsException("DBClusterParameterGroupNotFound", "x", 404));
-        SecurityGroup sg = new SecurityGroup();
-        sg.setGroupId("sg-1");
-        when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any())).thenReturn(List.of(sg));
+        when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any()))
+                .thenReturn(List.of(securityGroup("sg-1", "app", "vpc-1")));
         when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-nope")), any(), any())).thenReturn(List.of());
         KmsKey key = new KmsKey();
         key.setKeyId("k1");
