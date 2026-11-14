@@ -1078,6 +1078,53 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void updatingTheWorkgroupConfigParameterReregistersTheTarget() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("cfg-ns", "admin", null, null, null, null, List.of("useractivitylog"), Map.of(), REGION);
+        createWorkgroup("cfg-wg", "cfg-ns");
+
+        service.updateWorkgroup("cfg-wg", new WorkgroupSettings(null, null, null, null, null,
+                List.of(new ConfigParameter("enable_user_activity_logging", "true")), null, null, null, null, null,
+                null), REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(2)).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertFalse(registered.getAllValues().get(0).activityLoggingEnabled());
+        assertTrue(registered.getAllValues().get(1).activityLoggingEnabled());
+    }
+
+    @Test
+    void aRestartRegistersTheTargetOfEveryRecoveredWorkgroup() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.createNamespace("boot-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);
+        createWorkgroup("boot-wg", "boot-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals("serverless_us-east-1_boot-wg", registered.getValue().identifier());
+        assertEquals(List.of("connectionlog"), registered.getValue().exports());
+    }
+
+    @Test
+    void aWorkgroupThatFailsToStartRegistersNothing() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("fail-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenThrow(new IllegalStateException("container failed"));
+
+        assertThrows(IllegalStateException.class, () -> createWorkgroup("fail-wg", "fail-ns"));
+
+        verify(publisher, never()).register(any(), any(), any(RedshiftAuditTarget.class));
+    }
+
+    @Test
     void theUserActivityLogNeedsItsConfigParameterOnTheWorkgroup() {
         RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
         service.auditPublisher = instanceOf(publisher);
