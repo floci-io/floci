@@ -94,6 +94,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -117,6 +118,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -1276,7 +1278,7 @@ class EksClusterManagerTest {
         void recreatingAMissingContainerKeepsTheApiServerPortTheEndpointNames() {
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
             stubFreshStart("cid-new", 6440);
-            when(portAllocator.allocate(6453, 6453)).thenReturn(6453);
+            when(portAllocator.allocateIfFree(6453)).thenReturn(OptionalInt.of(6453));
             Cluster cluster = cluster();
             cluster.setEndpoint("https://localhost:6453");
 
@@ -1296,7 +1298,7 @@ class EksClusterManagerTest {
             when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
                     .thenReturn(new ContainerInfo("cid-1", Map.of()));
             stubFreshStart("cid-new", 6440);
-            when(portAllocator.allocate(6457, 6457)).thenReturn(6457);
+            when(portAllocator.allocateIfFree(6457)).thenReturn(OptionalInt.of(6457));
             Cluster cluster = cluster();
             cluster.setEndpoint("https://localhost:6457");
 
@@ -1308,12 +1310,36 @@ class EksClusterManagerTest {
             verify(portAllocator, never()).allocate(6440, 6499);
         }
 
+        /**
+         * A survivor that can't be adopted may still publish the port the endpoint names. It is removed before the
+         * port is asked for, so the new container takes that port and the endpoint stays.
+         */
+        @Test
+        void recreatingASurvivorThatCannotBeAdoptedRemovesItBeforeTakingTheEndpointsPort() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenThrow(new RuntimeException("the survivor did not start"));
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocateIfFree(6457)).thenReturn(OptionalInt.of(6457));
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6457");
+
+            manager.restoreCluster(cluster);
+
+            InOrder order = inOrder(lifecycleManager, portAllocator);
+            order.verify(lifecycleManager).removeIfExistsStrict("floci-eks-demo");
+            order.verify(portAllocator).allocateIfFree(6457);
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://localhost:6457", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
         @Test
         void recreatingAMissingContainerMovesToAFreePortWhenTheEndpointPortIsTaken() {
             when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
             stubFreshStart("cid-new", 6440);
-            when(portAllocator.allocate(6457, 6457))
-                    .thenThrow(new RuntimeException("No free port available in range 6457-6457"));
+            when(portAllocator.allocateIfFree(6457)).thenReturn(OptionalInt.empty());
             Cluster cluster = cluster();
             cluster.setEndpoint("https://localhost:6457");
 
@@ -1323,8 +1349,8 @@ class EksClusterManagerTest {
             assertEquals("https://localhost:6440", cluster.getEndpoint());
             verify(builder).withPortBinding(6443, 6440);
             verify(portAllocator).allocate(6440, 6499);
-            String warning = "API server port 6457 of EKS cluster demo is no longer free (No free port available in "
-                    + "range 6457-6457); moving the cluster to another port changes its endpoint";
+            String warning = "API server port 6457 of EKS cluster demo is taken; moving the cluster to another port "
+                    + "changes its endpoint";
             // Compared by severity, not identity: JBoss LogManager has its own Level constants.
             List<String> warnings = logs.stream()
                     .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
@@ -1351,7 +1377,7 @@ class EksClusterManagerTest {
             assertEquals(6440, cluster.getHostPort());
             assertEquals("https://" + cluster.getDockerName() + ":6443", cluster.getEndpoint());
             verify(builder).withPortBinding(6443, 6440);
-            verify(portAllocator, never()).allocate(6443, 6443);
+            verify(portAllocator, never()).allocateIfFree(6443);
         }
 
         @Test
@@ -1365,7 +1391,7 @@ class EksClusterManagerTest {
 
             assertEquals(6440, cluster.getHostPort());
             assertEquals("https://localhost:6440", cluster.getEndpoint());
-            verify(portAllocator, never()).allocate(6512, 6512);
+            verify(portAllocator, never()).allocateIfFree(6512);
         }
 
         @Test

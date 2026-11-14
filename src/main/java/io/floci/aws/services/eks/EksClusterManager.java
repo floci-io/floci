@@ -93,6 +93,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -701,13 +702,12 @@ public class EksClusterManager
         int maxPort = config.services().eks().apiServerMaxPort();
         int previousPort = networkEndpointMode() ? -1 : endpointPort(cluster.getEndpoint());
         if (previousPort >= basePort && previousPort <= maxPort) {
-            try {
-                return portAllocator.allocate(previousPort, previousPort);
-            } catch (RuntimeException e) {
-                LOG.warnv("API server port {0} of EKS cluster {1} is no longer free ({2}); moving the cluster "
-                        + "to another port changes its endpoint", String.valueOf(previousPort),
-                        cluster.getName(), e.getMessage());
+            OptionalInt kept = portAllocator.allocateIfFree(previousPort);
+            if (kept.isPresent()) {
+                return kept.getAsInt();
             }
+            LOG.warnv("API server port {0} of EKS cluster {1} is taken; moving the cluster to another port "
+                    + "changes its endpoint", String.valueOf(previousPort), cluster.getName());
         }
         return portAllocator.allocate(basePort, maxPort);
     }
@@ -1059,6 +1059,9 @@ public class EksClusterManager
             LOG.infov("Adopting pre-upgrade EKS cluster {0} with local-storage enabled", cluster.getName());
         }
         if (!adoptSurvivingCluster(cluster, existing.get().getId(), certificateHost(existingLabels))) {
+            // The survivor is replaced, and it may still publish the port the endpoint names: it goes before a
+            // port is chosen, so the new container can take that port and the endpoint stays.
+            lifecycleManager.removeIfExistsStrict(containerName);
             startCluster(cluster);
             return;
         }
