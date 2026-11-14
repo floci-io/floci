@@ -119,6 +119,20 @@ class PaymentCryptographyTest {
         return key;
     }
 
+    /** The key encryption key an AS2805 cryptogram is wrapped under. */
+    private static Key createKeyEncryptionKey() {
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(key.keyArn());
+        return key;
+    }
+
     /**
      * The public half of a certificate, held by the service as a key.
      *
@@ -259,15 +273,7 @@ class PaymentCryptographyTest {
 
     @Test
     void aKeyLeavesTheServiceAndComesBackThroughAnAs2805Cryptogram() {
-        Key encryptionKey = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
-                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
-                .exportable(true))
-                .key();
-        keyArns.add(encryptionKey.keyArn());
+        Key encryptionKey = createKeyEncryptionKey();
         Key key = createKey(KeyAlgorithm.AES_256, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
         ExportKeyResponse exported = client.exportKey(r -> r
@@ -303,15 +309,7 @@ class PaymentCryptographyTest {
     void anAs2805ImportKeepsTheExportabilityTheRequestNamed() {
         // The model carries the exportability at the top level of the AS2805 import, so a
         // key imported as one that may not leave is one that may not leave.
-        Key encryptionKey = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
-                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
-                .exportable(true))
-                .key();
-        keyArns.add(encryptionKey.keyArn());
+        Key encryptionKey = createKeyEncryptionKey();
         Key key = createKey(KeyAlgorithm.AES_256, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
         ExportKeyResponse exported = client.exportKey(r -> r
@@ -339,15 +337,7 @@ class PaymentCryptographyTest {
         // The model names four variants, and the service serves every one of them. A
         // variant says what the key is for, so the key that leaves under it is a key of
         // that purpose.
-        Key encryptionKey = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
-                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
-                .exportable(true))
-                .key();
-        keyArns.add(encryptionKey.keyArn());
+        Key encryptionKey = createKeyEncryptionKey();
 
         Map<As2805KeyVariant, KeyUsage> usages = Map.of(
                 As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00,
@@ -384,15 +374,7 @@ class PaymentCryptographyTest {
     void aCryptogramUnderAVariantThatIsNotTheKeysPurposeIsRefused() {
         // The variant says what the key is for, so a key of another purpose cannot leave
         // under it.
-        Key encryptionKey = client.createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.AES_256)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
-                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
-                .exportable(true))
-                .key();
-        keyArns.add(encryptionKey.keyArn());
+        Key encryptionKey = createKeyEncryptionKey();
         Key key = createAesKey();
 
         assertThatThrownBy(() -> client.exportKey(r -> r
