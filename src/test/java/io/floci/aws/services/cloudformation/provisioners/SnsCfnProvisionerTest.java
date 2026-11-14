@@ -412,27 +412,27 @@ class SnsCfnProvisionerTest {
                 "a standard topic must not be renamed into a FIFO one");
     }
 
-    /**
-     * Replacing would displace a topic nothing cleans up, subscriptions included, so it is refused.
-     */
+    /** A custom-named topic cannot be replaced under the same name, so turning it FIFO is refused. */
     @Test
-    void aTopicTurningFifoIsRejectedRatherThanReplaced() {
+    void aNamedTopicTurningFifoIsRefusedAsACustomNamedReplacement() {
         StackResource r = new StackResource();
         r.setLogicalId("Topic");
         r.setResourceType("AWS::SNS::Topic");
-        r.setAttributes(new HashMap<>(Map.of("TopicName", "my-stack-Topic-abc123def456")));
+        r.setAttributes(new HashMap<>(Map.of("TopicName", "events")));
         r.setPhysicalId(TOPIC_ARN);
-        ProvisionContext update =
-                new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", TOPIC_ARN);
+        ProvisionContext update = new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack",
+                TOPIC_ARN, e -> { }, props("""
+                {"TopicName": "events"}
+                """));
         JsonNode turningFifo = props("""
-                {"FifoTopic": true}
+                {"TopicName": "events", "FifoTopic": true}
                 """);
 
         AwsException e = assertThrows(AwsException.class,
                 () -> provisioner.provision(r, turningFifo, update));
 
         assertEquals("ValidationError", e.getErrorCode());
-        assertTrue(e.getMessage().contains("requires resource replacement"), e.getMessage());
+        assertTrue(e.getMessage().contains("custom-named"), e.getMessage());
         verify(sns, never()).createTopic(anyString(), anyMap(), anyMap(), anyString());
     }
 

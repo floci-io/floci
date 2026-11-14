@@ -217,6 +217,11 @@ class CfnReplacementIntegrationTest {
                                 + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-output\","
                                 + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
                         "Subject", "False", false, stack -> createOutputSource()),
+                createOnlyRow("SNS topic TopicName removed", "", "", "AWS::SNS::Topic",
+                        "\"TopicName\": \"repl-sns-named\"", "\"DisplayName\": \"unnamed\"",
+                        "True", false, null),
+                createOnlyRow("SNS topic FifoTopic switched on", "", "", "AWS::SNS::Topic",
+                        "\"FifoTopic\": false", "\"FifoTopic\": true", "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
