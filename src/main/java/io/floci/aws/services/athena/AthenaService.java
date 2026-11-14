@@ -8,6 +8,7 @@ import io.floci.aws.core.common.CsvParser;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.athena.model.CreateWorkGroupConfigurationRequest;
@@ -35,6 +36,7 @@ import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.smallrye.common.vertx.VertxContext;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -184,30 +186,37 @@ public class AthenaService {
             return id;
         }
 
-        // Submit async — caller gets the ID immediately while execution runs in background
-        vertx.executeBlocking(() -> {
-            // Athena fails a query that reads a table with an incomplete location template, or that
-            // leaves an injected partition column unconstrained. It fails the query rather than the
-            // submission, which is what throwing here produces.
-            List<Table> projectionTables = tablesForProjectionCheck(database);
-            PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
-            PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
-            String setupDdl = ddlBuilder.build(database);
-            if (outputLocation != null) {
-                ensureOutputBucket(outputLocation);
-            }
-            duckClient.execute(query, setupDdl, outputLocation);
-            if (outputLocation != null) {
-                resultColumnTypeStore.put(id, describeColumnTypes(query, setupDdl));
-            }
-            return null;
-        }).onSuccess(v -> {
+        // Submit async: the caller gets the ID immediately while execution runs in the background. The
+        // query outlives this request and must not share its CDI context, so it runs in a context of its
+        // own, as ReplayDispatcher runs a replay, as the account and in the Region it was started in: they
+        // decide the Glue catalog it reads and the stores its record and result column types go to.
+        String accountId = regionResolver.getAccountId();
+        String region = regionResolver.getRegion();
+        VertxContext.createNewDuplicatedContext(vertx.getOrCreateContext()).executeBlocking(() ->
+                RequestScopes.callAsChecked(accountId, region, () -> {
+                    // Athena fails a query that reads a table with an incomplete location template, or that
+                    // leaves an injected partition column unconstrained. It fails the query rather than the
+                    // submission, which is what throwing here produces.
+                    List<Table> projectionTables = tablesForProjectionCheck(database);
+                    PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
+                    PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
+                    String setupDdl = ddlBuilder.build(database);
+                    if (outputLocation != null) {
+                        ensureOutputBucket(outputLocation);
+                    }
+                    duckClient.execute(query, setupDdl, outputLocation, accountId);
+                    if (outputLocation != null) {
+                        resultColumnTypeStore.put(id, describeColumnTypes(query, setupDdl, accountId));
+                    }
+                    return null;
+                })
+        ).onSuccess(v -> RequestScopes.runAs(accountId, region, () -> {
             markSucceeded(id, execution);
             LOG.infov("Query {0} succeeded", id);
-        }).onFailure(e -> {
+        })).onFailure(e -> RequestScopes.runAs(accountId, region, () -> {
             markFailed(id, execution, e);
             LOG.warnv("Query {0} failed: {1}", id, e.getMessage());
-        });
+        }));
 
         return id;
     }
@@ -1122,12 +1131,12 @@ public class AthenaService {
 
     /**
      * The DuckDB type of each result column, in order. The result CSV carries only the column names,
-     * so the types come from DuckDB describing the same query. The query has already succeeded, so a
+     * so the types come from DuckDB describing the same query, as the account that ran it. The query has already succeeded, so a
      * failure here only costs the types: its columns are reported as varchar.
      */
-    private List<String> describeColumnTypes(String query, String setupDdl) {
+    private List<String> describeColumnTypes(String query, String setupDdl, String accountId) {
         try {
-            return duckClient.query("DESCRIBE " + query, setupDdl).stream()
+            return duckClient.query("DESCRIBE " + query, setupDdl, accountId).stream()
                     .map(column -> String.valueOf(column.get("column_type")))
                     .toList();
         } catch (RuntimeException e) {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.appconfig.model.ConfigurationSession;
 import io.floci.aws.testing.InMemoryStorageFactory;
@@ -39,7 +40,7 @@ class AppConfigDataServiceTest {
         AppConfigService appConfig = mock(AppConfigService.class);
         RegionResolver regions = new RegionResolver("us-east-1", "000000000000");
         AppConfigDataService service = new AppConfigDataService(factory, appConfig, MAPPER, regions);
-        StorageBackend<String, ConfigurationSession> sessions = new AppConfigStorage<>(factory, regions, "appconfigdata",
+        StorageBackend<String, ConfigurationSession> sessions = new RegionScopedStorage<>(factory, regions, "appconfigdata",
                 "appconfigdata-sessions.json", new TypeReference<Map<String, ConfigurationSession>>() {});
         ConfigurationSession session = new ConfigurationSession();
         session.setApplicationId("app");

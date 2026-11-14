@@ -3,6 +3,8 @@ package io.floci.aws.services.glue;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.WriteProfile;
@@ -91,13 +93,16 @@ public class GlueTriggerService {
 
     @Inject
     public GlueTriggerService(StorageFactory storageFactory, GlueService glueService,
-                              GlueJobRunService jobRunService, GlueCrawlerRunService crawlerRunService) {
-        this(storageFactory.create("glue", "trigger_seen_runs.json", new TypeReference<>() {}),
+                              GlueJobRunService jobRunService, GlueCrawlerRunService crawlerRunService,
+                              RegionResolver regionResolver) {
+        this(new RegionScopedStorage<>(storageFactory, regionResolver,
+                        "glue", "trigger_seen_runs.json", new TypeReference<>() {}),
                 // Every claimed run writes here, so under persistent mode the store is journaled rather
                 // than rewritten in full on each claim.
-                storageFactory.create("glue", "trigger_chain_budgets.json", new TypeReference<>() {},
-                        WriteProfile.APPEND_HEAVY),
-                storageFactory.create("glue", "workflow_runs.json", new TypeReference<>() {}),
+                new RegionScopedStorage<>(storageFactory.create("glue", "trigger_chain_budgets.json",
+                        new TypeReference<>() {}, WriteProfile.APPEND_HEAVY), regionResolver),
+                new RegionScopedStorage<>(storageFactory, regionResolver,
+                        "glue", "workflow_runs.json", new TypeReference<>() {}),
                 glueService, jobRunService, crawlerRunService);
     }
 

@@ -84,7 +84,7 @@ class AthenaServiceTest {
             release.await(10, TimeUnit.SECONDS);
             finished.countDown();
             return null;
-        }).when(duckClient).execute(anyString(), any(), any());
+        }).when(duckClient).execute(anyString(), any(), any(), any());
 
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
         assertTrue(started.await(10, TimeUnit.SECONDS), "the worker never started");
@@ -108,7 +108,7 @@ class AthenaServiceTest {
             release.await(10, TimeUnit.SECONDS);
             finished.countDown();
             throw new IllegalStateException("duck failed");
-        }).when(duckClient).execute(anyString(), any(), any());
+        }).when(duckClient).execute(anyString(), any(), any(), any());
 
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
         assertTrue(started.await(10, TimeUnit.SECONDS), "the worker never started");
@@ -135,7 +135,7 @@ class AthenaServiceTest {
     void stopAfterFailureLeavesTheExecutionFailed() throws Exception {
         doAnswer(invocation -> {
             throw new IllegalStateException("duck failed");
-        }).when(duckClient).execute(anyString(), any(), any());
+        }).when(duckClient).execute(anyString(), any(), any(), any());
 
         String id = service.startQueryExecution("SELECT 1", "primary", null, null);
 
@@ -150,7 +150,7 @@ class AthenaServiceTest {
     void getQueryResultsReportsTheSqlTypeOfEachColumn() throws Exception {
         String query = "SELECT CAST(1 AS BIGINT) AS n, CAST(1.5 AS DOUBLE) AS d, true AS b, "
                 + "DATE '2026-01-01' AS dt, CAST(2.50 AS DECIMAL(10,2)) AS p, 'x' AS s";
-        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+        when(duckClient.query(eq("DESCRIBE " + query), any(), any())).thenReturn(List.of(
                 Map.of("column_name", "n", "column_type", "BIGINT"),
                 Map.of("column_name", "d", "column_type", "DOUBLE"),
                 Map.of("column_name", "b", "column_type", "BOOLEAN"),
@@ -166,7 +166,7 @@ class AthenaServiceTest {
     @Test
     void getQueryResultsReportsThePrecisionAndScaleOfADecimalColumn() throws Exception {
         String query = "SELECT CAST(2.50 AS DECIMAL(10,2)) AS p";
-        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+        when(duckClient.query(eq("DESCRIBE " + query), any(), any())).thenReturn(List.of(
                 Map.of("column_name", "p", "column_type", "DECIMAL(10,2)")));
 
         ResultSet.ColumnInfo column = columnInfo(query, "p\n2.50\n").get(0);
@@ -179,7 +179,7 @@ class AthenaServiceTest {
     @Test
     void getQueryResultsReportsTimeAndTimestampVariantsByTheirAthenaNames() throws Exception {
         String query = "SELECT t, ts_s, ts_ms, ts_ns, ts_tz, t_tz FROM times";
-        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+        when(duckClient.query(eq("DESCRIBE " + query), any(), any())).thenReturn(List.of(
                 Map.of("column_name", "t", "column_type", "TIME"),
                 Map.of("column_name", "ts_s", "column_type", "TIMESTAMP_S"),
                 Map.of("column_name", "ts_ms", "column_type", "TIMESTAMP_MS"),
@@ -195,7 +195,7 @@ class AthenaServiceTest {
 
     @Test
     void getQueryResultsReportsVarcharWhenTheTypesCannotBeDescribed() throws Exception {
-        when(duckClient.query(anyString(), any())).thenThrow(new IllegalStateException("not describable"));
+        when(duckClient.query(anyString(), any(), any())).thenThrow(new IllegalStateException("not describable"));
 
         assertEquals(List.of("varchar", "varchar"), columnInfo("SELECT 1 AS a, 2 AS b", "a,b\n1,2\n").stream()
                 .map(ResultSet.ColumnInfo::getType).toList());

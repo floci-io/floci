@@ -65,9 +65,9 @@ import static org.mockito.Mockito.when;
  */
 class FirehoseParquetConverterTest {
 
-    private static final String BUCKET = "results";
-    private static final String STAGING = "floci-firehose-staging";
-    private static final Instant DELIVERY_TIME = Instant.parse("2026-01-01T00:00:00Z");
+    static final String BUCKET = "results";
+    static final String STAGING = "floci-firehose-staging";
+    static final Instant DELIVERY_TIME = Instant.parse("2026-01-01T00:00:00Z");
     private static final byte[] STAGED_PARQUET = "PAR1staged".getBytes(StandardCharsets.UTF_8);
 
     private GlueService glueService;
@@ -94,7 +94,7 @@ class FirehoseParquetConverterTest {
                 new Column("ts", "timestamp")));
     }
 
-    private static Table table(Column... columns) {
+    static Table table(Column... columns) {
         StorageDescriptor descriptor = new StorageDescriptor();
         descriptor.setColumns(Arrays.asList(columns));
         Table table = new Table();
@@ -102,7 +102,7 @@ class FirehoseParquetConverterTest {
         return table;
     }
 
-    private static DeliveryStreamDescription stream() {
+    static DeliveryStreamDescription stream() {
         SchemaConfiguration schema = new SchemaConfiguration();
         schema.setRoleArn("arn:aws:iam::000000000000:role/firehose-role");
         schema.setDatabaseName("db");
@@ -130,7 +130,7 @@ class FirehoseParquetConverterTest {
         return new DeliveryStreamDescription("stream", "arn:aws:firehose:::stream", s3);
     }
 
-    private static byte[] record(String json) {
+    static byte[] record(String json) {
         return (json + "\n").getBytes(StandardCharsets.UTF_8);
     }
 
