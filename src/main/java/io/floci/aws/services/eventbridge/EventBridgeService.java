@@ -1917,6 +1917,13 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return "events";
     }
 
+    /** The Region's default event bus, which a request naming no bus acts on. */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "event-bus".equals(type) ? Optional.of(regionResolver.buildArn("events", region, "event-bus/default"))
+                : Optional.empty();
+    }
+
     /**
      * The ARN of the caller's connection or API destination of the one name in the Region, which follows the name
      * with the id it was minted with, as its handlers look it up.

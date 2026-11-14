@@ -47,7 +47,8 @@ public class ElbV2QueryHandler {
         ACCOUNT_LIMITS.put("rules-per-application-load-balancer", "100");
         ACCOUNT_LIMITS.put("target-groups-per-application-load-balancer", "100");
         ACCOUNT_LIMITS.put("targets-per-application-load-balancer", "1000");
-        ACCOUNT_LIMITS.put("certificates-per-application-load-balancer", "25");
+        ACCOUNT_LIMITS.put("certificates-per-application-load-balancer",
+                String.valueOf(ElbV2Service.CERTIFICATES_PER_LOAD_BALANCER));
         ACCOUNT_LIMITS.put("condition-values-per-alb-rule", "5");
         ACCOUNT_LIMITS.put("condition-wildcards-per-alb-rule", "5");
     }
@@ -775,13 +776,13 @@ public class ElbV2QueryHandler {
     private Response handleAddListenerCertificates(MultivaluedMap<String, String> p, String region) {
         String listenerArn = p.getFirst("ListenerArn");
         List<String> certs = parseCertificateList(p, "Certificates");
-        service.addListenerCertificates(region, listenerArn, certs);
+        List<String> certificateList = service.addListenerCertificates(region, listenerArn, certs);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("AddListenerCertificatesResponse", AwsNamespaces.ELB_V2)
                 .start("AddListenerCertificatesResult")
                   .start("Certificates");
-        for (String c : certs) {
+        for (String c : certificateList) {
             xml.start("member").elem("CertificateArn", c).end("member");
         }
         xml.end("Certificates")
@@ -800,12 +801,22 @@ public class ElbV2QueryHandler {
 
     private Response handleDescribeListenerCertificates(MultivaluedMap<String, String> p, String region) {
         String listenerArn = p.getFirst("ListenerArn");
-        List<String> certs = service.describeListenerCertificates(region, listenerArn);
+        List<ElbV2Service.ListenerCertificate> certs =
+                service.describeListenerCertificates(region, listenerArn);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeListenerCertificatesResponse", AwsNamespaces.ELB_V2)
                 .start("DescribeListenerCertificatesResult");
-        appendCertificates(xml, certs);
+        if (!certs.isEmpty()) {
+            xml.start("Certificates");
+            for (ElbV2Service.ListenerCertificate certificate : certs) {
+                xml.start("member")
+                     .elem("CertificateArn", certificate.certificateArn())
+                     .elem("IsDefault", String.valueOf(certificate.isDefault()))
+                   .end("member");
+            }
+            xml.end("Certificates");
+        }
         xml.end("DescribeListenerCertificatesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenerCertificatesResponse");
@@ -878,7 +889,8 @@ public class ElbV2QueryHandler {
         if (l.getPort() != null) xml.elem("Port", String.valueOf(l.getPort()));
         xml.elem("Protocol", safe(l.getProtocol()));
         xml.elem("SslPolicy", l.getSslPolicy());
-        appendCertificates(xml, l.getCertificates());
+        appendCertificates(xml, l.getDefaultCertificate() == null ? List.of()
+                : List.of(l.getDefaultCertificate()));
         xml.start("DefaultActions");
         for (Action a : l.getDefaultActions()) {
             xml.start("member").raw(actionXml(a)).end("member");
@@ -892,6 +904,7 @@ public class ElbV2QueryHandler {
         return xml.build();
     }
 
+    /** The {@code Certificates} a listener carries, which is its default certificate alone. */
     private static void appendCertificates(XmlBuilder xml, List<String> certificates) {
         if (!certificates.isEmpty()) {
             xml.start("Certificates");

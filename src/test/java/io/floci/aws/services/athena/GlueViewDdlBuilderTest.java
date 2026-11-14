@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -129,6 +130,102 @@ class GlueViewDdlBuilderTest {
         String ddl = ddlFor(tableWithColumns("t", "s3://b/", List.of(column("we\"ird")), null));
 
         assertTrue(ddl.contains("\"we\"\"ird\" AS \"we\"\"ird\""), ddl);
+    }
+
+    private static Column column(String name, String type) {
+        Column c = column(name);
+        c.setType(type);
+        return c;
+    }
+
+    private Table projectingParquetTable(String location, Map<String, String> parameters) {
+        Table table = createTable("events", location, "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat");
+        table.getStorageDescriptor().setColumns(List.of(column("id")));
+        table.setPartitionKeys(List.of(column("region", "string"), column("dt", "date")));
+        table.setParameters(parameters);
+        return table;
+    }
+
+    /**
+     * A template of bare values, one folder per key. The files hold no partition columns, so each
+     * value comes from the object's path, through the template, as Athena maps it; without this the
+     * view selects columns nothing defines and DuckDB rejects it.
+     */
+    @Test
+    void templatedPartitionKeysAreTakenFromTheObjectPath() {
+        String ddl = ddlFor(projectingParquetTable("s3://b/data/", Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://b/data/${region}/${dt}/")));
+
+        String regex = "'^s3://b/data/([^/]+)/([^/]+)/'";
+        assertEquals("CREATE SCHEMA IF NOT EXISTS \"audit\";\n"
+                + "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT \"id\" AS \"id\", "
+                + "regexp_extract(\"$path\", " + regex + ", 1) AS \"region\", "
+                + "TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS DATE) AS \"dt\" "
+                + "FROM read_parquet('s3://b/data/*/*/**', union_by_name = true, hive_partitioning = false, "
+                + "filename = '$path') "
+                + "WHERE regexp_matches(\"$path\", " + regex + ") "
+                + "AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS DATE) IS NOT NULL;\n", ddl);
+    }
+
+    /** RE2 has no backreferences, so a repeated placeholder's occurrences are compared in the view. */
+    @Test
+    void repeatedPlaceholderMustHoldTheSameValueAtEachOccurrence() {
+        String ddl = ddlFor(projectingParquetTable("s3://b/repeat/", Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://b/repeat/${region}/${dt}/${region}/")));
+
+        String regex = "'^s3://b/repeat/([^/]+)/([^/]+)/([^/]+)/'";
+        assertTrue(ddl.contains("regexp_extract(\"$path\", " + regex + ", 1) = "
+                + "regexp_extract(\"$path\", " + regex + ", 3)"), ddl);
+    }
+
+    /**
+     * A template omitting a partition key leaves that key with nothing to bind to, and one view
+     * failing to bind fails the whole batch. Athena fails only queries on the table, so the table
+     * gets no view and its neighbours are still built.
+     */
+    @Test
+    void tableWhoseTemplateOmitsAPartitionKeyGetsNoViewAndLeavesOthersBuilt() {
+        Table incomplete = projectingParquetTable("s3://b/missing/", Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://b/missing/${region}/"));
+        Table healthy = tableWithColumns("healthy", "s3://b/healthy/", List.of(column("id")), null);
+        Database db = createDatabase("audit");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+        when(glueService.getTables("audit")).thenReturn(List.of(incomplete, healthy));
+
+        String ddl = builder.build(null);
+
+        assertFalse(ddl.contains("\"events\""), ddl);
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"audit\".\"healthy\""), ddl);
+    }
+
+    /** An Iceberg table reads through its metadata, so a template omitting a key costs it no view. */
+    @Test
+    void icebergTableWithAnIncompleteTemplateKeepsItsView() {
+        Table table = icebergTable("orders", "s3://bucket/warehouse/orders",
+                "s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json");
+        table.setPartitionKeys(List.of(column("region", "string"), column("dt", "date")));
+        Map<String, String> parameters = new HashMap<>(table.getParameters());
+        parameters.put("projection.enabled", "true");
+        parameters.put("storage.location.template", "s3://bucket/warehouse/orders/${region}/");
+        table.setParameters(parameters);
+
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"audit\".\"orders\" AS SELECT \"region\" AS \"region\", "
+                + "\"dt\" AS \"dt\" FROM iceberg_scan('s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json');\n"),
+                ddl);
+    }
+
+    /** The default column=value layout is left to DuckDB's Hive partitioning, as before. */
+    @Test
+    void defaultLayoutStillReadsPartitionValuesThroughHivePartitioning() {
+        String ddl = ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true")));
+
+        assertEquals("CREATE SCHEMA IF NOT EXISTS \"audit\";\n"
+                + "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT \"id\" AS \"id\", "
+                + "\"region\" AS \"region\", \"dt\" AS \"dt\" "
+                + "FROM read_parquet('s3://b/hive/region=*/dt=*/**', union_by_name = true);\n", ddl);
     }
 
     @Test

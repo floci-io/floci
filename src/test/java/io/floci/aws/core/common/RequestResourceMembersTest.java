@@ -99,12 +99,13 @@ class RequestResourceMembersTest {
                 "UpdateDeliveryConfiguration", "DeleteDelivery", "DescribeDeliveries")
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
-        expected.add("dynamodb:ListTables");
         expected.add("logs:PutDestination");
+        // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
+        expected.add("dynamodb:ListTables");
         assertEquals(expected, table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),
-                "only explicit corrections and the operations listed to read override hand-built operations");
+                "only the operations listed to read override hand-built operations");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {
@@ -178,7 +179,7 @@ class RequestResourceMembersTest {
     @Test
     void aDataApiSessionNamesTheClusterOrWorkgroupItRunsOnThroughItsSessionId() {
         Resource session = new Resource(List.of("cluster", "workgroup"), null, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of(), null, null, Map.of(), false, List.of(), null, new Member("SessionId", false));
+                null, Map.of(), false, List.of(), null, new Member("SessionId", false));
         for (String operation : List.of("ExecuteStatement", "BatchExecuteStatement")) {
             assertEquals(session, RequestResourceMembers.table().operations().get("redshift-data:" + operation)
                     .getLast(), operation);
@@ -234,31 +235,31 @@ class RequestResourceMembersTest {
             assertThrows(IllegalStateException.class, () -> parse(document(formats,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"" + bad + "\"}}")), bad);
         }
-        // A field of each of a list's structures fills a variable, read as given when absent or as an ARN, which
-        // only a member filling a variable is.
+        // A field of each of a list's structures fills a variable, read as given or as an ARN, which only a member
+        // filling a variable is.
         Member each = new Member("A", true, new Member("Name", false));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(),
-                Map.of("A[].Name", "default"), Map.of("A[].Name", "thing"), null, null, Map.of(), false, null)),
+                Map.of("A[].Name", "thing"), null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"},"
-                        + "\"absent\":{\"A[].Name\":\"default\"},\"arnOf\":{\"A[].Name\":\"thing\"}}"))
+                        + "\"arnOf\":{\"A[].Name\":\"thing\"}}"))
                         .operations().get("a:Op"));
         assertEquals("A[].Name", each.path());
-        for (String bad : List.of("\"absent\":{\"A[].Name\":\"default\"}", "\"arnOf\":{\"A[].Name\":\"thing\"}")) {
+        for (String bad : List.of("\"arnOf\":{\"A[].Name\":\"thing\"}")) {
             assertThrows(IllegalStateException.class, () -> parse(document(formats,
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
         }
         // A field of a structure fills a variable, as one value.
         Member field = new Member("A", false, new Member("Name", false));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", field), Map.of(), Map.of(),
-                Map.of("A.Name", "default"), Map.of(), null, null, Map.of(), false, null)),
-                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"},"
-                        + "\"absent\":{\"A.Name\":\"default\"}}")).operations().get("a:Op"));
+                Map.of(), null, Map.of(), false, null)),
+                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"}}"))
+                        .operations().get("a:Op"));
         assertEquals("A.Name", field.path());
         // A variable fixed to the one value its handler uses, and one fixed that is no variable, that a member fills,
         // or to no value.
         String owned = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${Owner}/${ThingName}\"}}";
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
-                Map.of(), Map.of(), Map.of(), null, null, Map.of("Owner", "Custom"), false, null)),
+                Map.of(), Map.of(), null, Map.of("Owner", "Custom"), false, null)),
                 parseUnchecked(document(owned, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
                         + "\"fixed\":{\"Owner\":\"Custom\"}}")).operations().get("a:Op"));
         for (String bad : List.of("{\"Other\":\"Custom\"}", "{\"ThingName\":\"Custom\"}", "{\"Owner\":\"\"}",
@@ -276,16 +277,15 @@ class RequestResourceMembersTest {
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"made\":" + bad + "}")), bad);
         }
         assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
+                Map.of(), Map.of(), Map.of(), null, Map.of(), false, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
                 .operations().get("a:Op"));
-        // A member read before more than one character, holding an ARN or filling a variable.
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"##\"}")));
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},\"before\":\"##\"}")));
-        // A member filling a variable read up to a character, as a CodeBuild build id names its project.
-        assertEquals(":", parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},"
-                + "\"before\":\":\"}")).operations().get("a:Op").getFirst().before());
+        // A key no resource of its kind has, as one the table no longer writes, fails rather than being ignored.
+        for (String bad : List.of("{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"#\"}",
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},\"before\":\":\"}",
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"absent\":{\"Name\":\"default\"}}",
+                "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"when\":{\"Type\":[\"a\"]}}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats, bad)), bad);
+        }
         // An account from a list, or for a type whose format has no account.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"account\":\"Ids[]\"}")));
@@ -306,22 +306,21 @@ class RequestResourceMembersTest {
         }
         assertTrue(parseUnchecked("{\"namespaces\":{\"a\":[]}," + parts + ",\"mintedIds\":{\"a\":[\"thing\"]},"
                 + "\"operations\":{\"a:Op\":{\"resources\":[]}}}").formats().get("a").get("thing").minted());
-        // A member read when absent as no value, or as an ARN of a type with no format or of more than one variable.
-        for (String bad : List.of("\"absent\":{\"Bus\":\"\"}", "\"absent\":{\"Bus[]\":\"default\"}",
-                "\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}", "\"unless\":{\"Bus\":[]}")) {
+        // A member read as an ARN of a type with no format or of more than one variable.
+        for (String bad : List.of("\"arnOf\":{\"Bus\":\"other\"}", "\"arnOf\":{\"Bus\":\"part\"}",
+                "\"unless\":{\"Bus\":[]}")) {
             assertThrows(IllegalStateException.class, () -> parse(document("\"arnFormats\":{\"a\":{"
                     + "\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${ThingName}\","
                     + "\"part\":\"arn:${Partition}:a:${Region}:${Account}:part/${ThingName}/${PartId}\"}}",
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
         }
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)),
-                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "default"), Map.of("Bus", "thing"), null, null,
-                Map.of(), false, null)),
+                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "thing"), null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
-                        + "\"unless\":{\"Bus\":[\"default\"]},\"absent\":{\"Bus\":\"default\"},"
-                        + "\"arnOf\":{\"Bus\":\"thing\"}}")).operations().get("a:Op"));
+                        + "\"unless\":{\"Bus\":[\"default\"]},\"arnOf\":{\"Bus\":\"thing\"}}"))
+                        .operations().get("a:Op"));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Names", true)), Map.of(),
-                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null, Map.of(), false, null)),
+                        Map.of(), Map.of(), new Member("registryId", false), Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Names[]\"},"
                         + "\"account\":\"registryId\"}")).operations().get("a:Op"));
     }
@@ -342,7 +341,7 @@ class RequestResourceMembersTest {
         // The resource a create acting on no type makes, of its variables alone; and none for a create acting on one.
         String makes = "\"makes\":[{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}}]";
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
-                Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, null)),
+                Map.of(), Map.of(), null, Map.of(), false, null)),
                 parseUnchecked("{\"namespaces\":{\"a\":[]}," + formats + ",\"operations\":{\"a:Op\":{\"types\":[],"
                         + "\"resources\":[]," + makes + "}}}").makes().get("a:Op"));
         for (String bad : List.of("\"types\":[\"thing\"],\"resources\":[]," + makes, "\"types\":[],\"resources\":[],"
@@ -354,7 +353,7 @@ class RequestResourceMembersTest {
         // A field of each of a map's structure values fills a variable, one value for each.
         Member each = new Member("A", false, new Member("Name", false), true);
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(), Map.of(),
-                Map.of(), null, null, Map.of(), false, null)),
+                null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A{}.Name\"}}"))
                         .operations().get("a:Op"));
         assertEquals("A{}.Name", each.path());
@@ -555,6 +554,12 @@ class RequestResourceMembersTest {
         }
         Map<String, String> values = given.entrySet().stream()
                 .collect(Collectors.toMap(entry -> entry.getKey().name(), Map.Entry::getValue, (a, b) -> a));
+        // Of a pair whose formats differ by one variable, the one without it applies when its member is absent (the
+        // test's services give no default), the other when the request gives it.
+        if (resource.whenDefault().keySet().stream().anyMatch(values::containsKey)
+                || resource.unlessDefault().keySet().stream().anyMatch(member -> !values.containsKey(member))) {
+            return false;
+        }
         return resource.when().entrySet().stream()
                 .allMatch(when -> when.getValue().contains(values.getOrDefault(when.getKey(), "")))
                 && resource.unless().entrySet().stream()

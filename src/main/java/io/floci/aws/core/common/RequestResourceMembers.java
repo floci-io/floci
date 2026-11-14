@@ -53,7 +53,12 @@ final class RequestResourceMembers {
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way. */
-    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "fixed", "before");
+    private static final List<String> FOUND_ONLY = List.of("arnOf", "fixed");
+    /** The keys of a resource read from a member holding its ARN. */
+    private static final Set<String> ARN_KEYS = Set.of("types", "arn", "made", "endpoint");
+    /** The keys of a resource whose format's variables members fill, or its service finds by them. */
+    private static final Set<String> FILL_KEYS = Set.of("type", "fill", "when", "unless", "arnOf", "account", "fixed",
+            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
@@ -133,19 +138,15 @@ final class RequestResourceMembers {
      * A resource a request names: by a member holding its ARN, which names a resource of one of {@code types} when
      * it matches the type's format, or by members filling the variables of one type's format, the others open,
      * only {@code when} each member named has one of its values and {@code unless} it has one of those, an empty
-     * one for the member absent or given a JSON null it is not read as a value for, in the account an {@code account} member gives (ECR's {@code registryId}), or else
-     * the request's. A member {@code absent} from the request, or given a JSON null, is read as the value given for
-     * it (an EventBridge request naming no event bus names {@code default}), and one in {@code arnOf} may give an
-     * ARN of the type named for it instead of its name, read as that type's one variable, the resource then in the
-     * ARN's account and Region, or the caller's and the request's where the ARN leaves them empty. A member filling
-     * a variable may be a field of each of a list's structures ({@code Entries[].EventBusName}), which names one
-     * resource for each structure, read as {@code absent} gives for one that lacks it and in the account and Region
-     * of the ARN that structure gives, if any. Such a member is in {@code absent} or {@code arnOf} only when it
-     * fills a variable. A member filling a variable may also be a field of a structure ({@code pipeline.name}). A
-     * variable no member gives may be {@code fixed} to the one value its handler uses (a CodePipeline custom action
-     * type's owner, {@code Custom}). A member's value, an ARN or a variable's, is read up to the character
-     * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
-     * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A create naming other
+     * one for the member absent or given a JSON null, in the account an {@code account} member gives (ECR's
+     * {@code registryId}), or else the request's. A member in {@code arnOf} may give an ARN of the type named for it
+     * instead of its name, read as that type's one variable, the resource then in the ARN's account and Region, or the
+     * caller's and the request's where the ARN leaves them empty. A member filling a variable may be a field of each
+     * of a list's structures ({@code Entries[].EventBusName}), which names one resource for each structure, in the
+     * account and Region of the ARN that structure gives, if any; a member is in {@code arnOf} only when it fills a
+     * variable. A member filling a variable may also be a field of a structure ({@code pipeline.name}). A variable no
+     * member gives may be {@code fixed} to the one value of its enum the operation's name gives (a CodePipeline
+     * custom action type's owner, {@code Custom}). A create naming other
      * resources beside the one it makes marks that one {@code made}, where its tags go (a webhook, not the pipeline
      * it connects to). A type whose ARN is all an id its service mints is named instead by the members its service
      * finds it by, {@code find}, each one value, in the order its service reads them, filling none of its variables
@@ -158,25 +159,34 @@ final class RequestResourceMembers {
      * instance group, by its {@code InstanceGroups[].InstanceGroupId}), {@code when} the request gives the values it
      * names, and read no other way. A resource {@code byDefault} is the one of its type its service acts on for a
      * request naming none of it, {@code when} the request leaves out the member that would (Resource Explorer's
-     * {@code Search} with no {@code ViewArn}, on the Region's default view), read no other way.
+     * {@code Search} with no {@code ViewArn}, on the Region's default view), read no other way. Of two types whose
+     * formats differ by one variable a member fills, the one without it applies {@code whenDefault} that member is
+     * absent or names its type's default resource, which the service gives, and the other {@code unlessDefault}: a
+     * rule on EventBridge's default bus has no bus in its ARN. Each maps the member to that type.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
-                    Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                    Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
-                    String endpoint, Member through, boolean byDefault) {
+                    Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                    Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                    boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault) {
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
-                 Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                 Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
-                 String endpoint, Member through) {
-            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, find, endpoint, through,
-                    false);
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    Map.of(), Map.of());
         }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
-                 Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                 Member account, String before, Map<String, String> fixed, boolean made, String endpoint) {
-            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, List.of(), endpoint, null);
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, false);
+        }
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, String endpoint) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, List.of(), endpoint, null);
         }
     }
 
@@ -384,10 +394,12 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " serves a resource of " + operation
                     + " on no endpoint prefix");
         }
-        String before = resource.has("before") ? resource.path("before").asText("") : null;
-        if (before != null && before.length() != 1) {
-            throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
-                    + " before " + before + ", no one character");
+        Set<String> keys = resource.has("through") ? THROUGH_KEYS : resource.has("arn") ? ARN_KEYS : FILL_KEYS;
+        List<String> unknown = resource.properties().stream().map(Map.Entry::getKey)
+                .filter(key -> !keys.contains(key)).toList();
+        if (!unknown.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " gives a resource of " + operation + " " + unknown
+                    + ", no key of its kind of resource");
         }
         if (resource.has("through")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
@@ -399,7 +411,7 @@ final class RequestResourceMembers {
                         + "members reading it otherwise");
             }
             return new Resource(types, null, Map.of(), values(operation, String.join(", ", types), resource.path("when")),
-                    Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, List.of(), endpoint, through);
+                    Map.of(), Map.of(), null, Map.of(), false, List.of(), endpoint, through);
         }
         if (resource.has("arn")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
@@ -412,7 +424,7 @@ final class RequestResourceMembers {
                         + " and finds its resource by " + resource.path("find") + " too");
             }
             return new Resource(types, arnMember(operation, resource.path("arn").asText("")), Map.of(), Map.of(),
-                    Map.of(), Map.of(), Map.of(), null, before, Map.of(), made, endpoint);
+                    Map.of(), Map.of(), null, Map.of(), made, endpoint);
         }
         String type = resource.path("type").asText("");
         ArnFormat format = formats.get(type);
@@ -461,15 +473,12 @@ final class RequestResourceMembers {
                     + " as its service's default, which is not for a request naming none");
         }
         Set<String> filled = Set.copyOf(fill.values().stream().map(Member::path).toList());
-        Map<String, String> absent = new LinkedHashMap<>();
-        resource.path("absent").properties().forEach(member -> {
-            if (!readAsOne(operation, member.getKey(), filled) || !member.getValue().isTextual()
-                    || member.getValue().asText().isEmpty()) {
-                throw new IllegalStateException(RESOURCE_NAME + " reads " + member.getKey() + " for " + operation
-                        + " when absent as no value");
-            }
-            absent.put(member.getKey(), member.getValue().asText());
-        });
+        Map<String, String> whenDefault = defaultPair(operation, type, resource.path("whenDefault"), formats, null);
+        Map<String, String> unlessDefault = defaultPair(operation, type, resource.path("unlessDefault"), formats, filled);
+        if (!whenDefault.isEmpty() && !unlessDefault.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " names " + type + " for " + operation
+                    + " both when and unless a member names its default");
+        }
         Map<String, String> arnOf = new LinkedHashMap<>();
         resource.path("arnOf").properties().forEach(member -> {
             ArnFormat named = formats.get(member.getValue().asText(""));
@@ -485,8 +494,37 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " takes " + type + "'s account for " + operation
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
-        return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault);
+        return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(arnOf), account,
+                Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault);
+    }
+
+    /**
+     * A {@code whenDefault} or {@code unlessDefault}: one member and the type whose default it may name, a member the
+     * resource fills for {@code unlessDefault} ({@code filled} given); empty when the resource has none.
+     */
+    private static Map<String, String> defaultPair(String operation, String type, JsonNode pair,
+                                                   Map<String, ArnFormat> formats, Set<String> filled) {
+        if (pair.isMissingNode()) {
+            return Map.of();
+        }
+        if (!pair.isObject() || pair.size() != 1) {
+            throw new IllegalStateException(RESOURCE_NAME + " names " + type + " for " + operation
+                    + " by a default of no one member and type");
+        }
+        Map.Entry<String, JsonNode> entry = pair.properties().iterator().next();
+        if (!formats.containsKey(entry.getValue().asText("")) || (filled != null && !filled.contains(entry.getKey()))) {
+            throw new IllegalStateException(RESOURCE_NAME + " names " + type + " for " + operation + " by the default of "
+                    + entry.getValue() + " " + entry.getKey() + " names, no type or no member it fills");
+        }
+        return Map.of(entry.getKey(), entry.getValue().asText());
+    }
+
+    /**
+     * A member of a request by its path, as {@code StoredResourceArns.actedOn} names one: {@code taskToken},
+     * {@code account.accountId}, {@code InstanceGroups[].InstanceGroupId}.
+     */
+    static Member selector(String path) {
+        return arnMember("a service's selector", path);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */
