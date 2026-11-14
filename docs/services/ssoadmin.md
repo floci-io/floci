@@ -109,7 +109,7 @@ the role without changing its ARN or role ID, removes policies no longer configu
 preserves the previous role configuration if that account's desired policies cannot be
 validated. A missing policy or invalid inline document reports a `FAILED` provisioning or
 assignment operation with a failure reason. Failed assignment creation leaves no assignment.
-`ALL_PROVISIONED_ACCOUNTS` refreshes each of the accounts the request was authorized for;
+`ALL_PROVISIONED_ACCOUNTS` refreshes the permission set's currently provisioned accounts;
 an operation can fail after an earlier account was refreshed.
 
 Removing the final assignment for a permission set in an account deletes its generated role.

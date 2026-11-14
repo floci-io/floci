@@ -185,7 +185,16 @@ class LambdaDurableProtocolIntegrationTest {
             .body("Operations", hasSize(2))
             .body("Operations[0].Type", equalTo("EXECUTION"))
             .body("Operations[1].Id", equalTo("s1"))
-            .body("NextMarker", equalTo(""));
+            .body("$", not(hasKey("NextMarker")));
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/state?MaxItems=1&CheckpointToken=" + nextToken)
+        .then()
+            .statusCode(200)
+            .body("Operations", hasSize(1))
+            .body("NextMarker", notNullValue());
 
         given()
             .urlEncodingEnabled(false)
@@ -315,6 +324,41 @@ class LambdaDurableProtocolIntegrationTest {
     }
 
     @Test
+    void aContextClosedWithoutReplayChildrenLeavesItsChildrenOutOfTheState() throws Exception {
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "replay-children-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(invocation.payload());
+        String arn = event.get("DurableExecutionArn").asText();
+        String token = checkpoint(arn, event.get("CheckpointToken").asText(), """
+                {"Id": "c1", "Type": "CONTEXT", "SubType": "RunInChildContext", "Action": "START"},
+                {"Id": "s1", "ParentId": "c1", "Type": "STEP", "SubType": "Step", "Action": "START"}
+                """);
+        token = checkpoint(arn, token, """
+                {"Id": "c1", "Type": "CONTEXT", "SubType": "RunInChildContext", "Action": "SUCCEED"}
+                """);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn + "/state?CheckpointToken=" + token)
+        .then()
+            .statusCode(200)
+            .body("Operations.Id", equalTo(List.of(event.get("InitialExecutionState").get("Operations").get(0)
+                    .get("Id").asText(), "c1")))
+            .body("Operations[1].ContextDetails.ReplayChildren", equalTo(false));
+
+        checkpoint(arn, token, """
+                {"Id": "x", "Type": "EXECUTION", "Action": "SUCCEED", "Payload": "\\"done\\""}
+                """);
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
+    }
+
+    @Test
     void anAsynchronousInvokeIsIdempotentByNameAndCanBeStopped() throws Exception {
         Response accepted = given()
                 .header("X-Amz-Invocation-Type", "Event")
@@ -429,6 +473,38 @@ class LambdaDurableProtocolIntegrationTest {
         .then()
             .statusCode(200)
             .body("Events[0].EventType", equalTo("ExecutionStopped"));
+    }
+
+    @Test
+    void aNewlyStartedStepAnswersAttemptZero() throws Exception {
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "step-attempt-1")
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        JsonNode event = MAPPER.readTree(invocation.payload());
+        String arn = event.get("DurableExecutionArn").asText();
+        String token = given()
+            .urlEncodingEnabled(false)
+            .contentType("application/json")
+            .body("""
+                {
+                    "CheckpointToken": "%s",
+                    "Updates": [{"Id": "s1", "Type": "STEP", "SubType": "Step", "Action": "START"}]
+                }
+                """.formatted(event.get("CheckpointToken").asText()))
+            .post(DURABLE + "/durable-executions/" + arn + "/checkpoint")
+        .then()
+            .statusCode(200)
+            .body("NewExecutionState.Operations[0].Status", equalTo("STARTED"))
+            .body("NewExecutionState.Operations[0].StepDetails.Attempt", equalTo(0))
+            .extract().jsonPath().getString("CheckpointToken");
+        checkpoint(arn, token, """
+                {"Id": "x", "Type": "EXECUTION", "Action": "SUCCEED", "Payload": "\\"done\\""}
+                """);
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
     }
 
     @Test

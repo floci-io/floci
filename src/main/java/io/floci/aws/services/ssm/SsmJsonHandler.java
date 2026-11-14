@@ -31,6 +31,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -185,7 +186,8 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        List<Parameter> orderedParameters = params.stream().sorted(Comparator.comparing(Parameter::getName)).toList();
+        for (Parameter p : orderedParameters) {
             parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);
@@ -236,6 +238,9 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParametersByPath(JsonNode request, String region) {
+        if (!request.path("Path").isTextual()) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("path"));
+        }
         PageRequest pageRequest = pageRequest(request, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
@@ -1202,12 +1207,14 @@ public class SsmJsonHandler {
     }
 
     private Response handleAddTagsToResource(JsonNode request, String region) {
+        requireTaggedResourceType(request);
         ssmService.addTagsToResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
                 requestTags(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
+        requireTaggedResourceType(request);
         Map<String, String> tags = ssmService.listTagsForResource(request.path("ResourceType").asText(),
                 request.path("ResourceId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -1216,6 +1223,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleRemoveTagsFromResource(JsonNode request, String region) {
+        requireTaggedResourceType(request);
         List<String> tagKeys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> tagKeys.add(k.asText()));
         ssmService.removeTagsFromResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
@@ -1235,6 +1243,29 @@ public class SsmJsonHandler {
         tags.forEach((key, value) -> list.addObject().put("Key", key).put("Value", value));
         return list;
     }
+
+    /**
+     * Refuses a tagging request whose {@code ResourceType} is missing, outside the model's enum, or a type whose tags
+     * this service does not keep, so the request acts on the type IAM checked.
+     */
+    private static void requireTaggedResourceType(JsonNode request) {
+        JsonNode resourceType = request.path("ResourceType");
+        if (!resourceType.isTextual()) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("resourceType"));
+        }
+        if (!RESOURCE_TYPES_FOR_TAGGING.contains(resourceType.asText())) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(resourceType.asText(),
+                    "resourceType", RESOURCE_TYPES_FOR_TAGGING));
+        }
+        if (!TAGGED_RESOURCE_TYPES.contains(resourceType.asText())) {
+            throw new AwsException("InvalidResourceType", "The resource type isn't valid.", 400);
+        }
+    }
+
+    private static final List<String> RESOURCE_TYPES_FOR_TAGGING = List.of("Document", "ManagedInstance",
+            "MaintenanceWindow", "Parameter", "PatchBaseline", "OpsItem", "OpsMetadata", "Automation", "Association",
+            "CloudConnector");
+    private static final Set<String> TAGGED_RESOURCE_TYPES = Set.of("Parameter", "Document", "Association");
 
     private static final int GET_RESOURCE_POLICIES_MAX_RESULTS = 50;
     private static final String GET_RESOURCE_POLICIES_TOKEN = "GetResourcePolicies:";

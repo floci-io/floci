@@ -883,6 +883,11 @@ public class RedshiftService implements ManagedSecretRotator {
                 .toList();
     }
 
+    /** Whether {@code accountId} holds the integration, which is gone once it is deleted. */
+    public boolean integrationExists(String accountId, String integrationId) {
+        return integrations.getForAccount(accountId, integrationId).isPresent();
+    }
+
     public List<Integration> listS3AutoCopyIntegrations() {
         return integrations.scanAllAccountEntries(key -> true).stream()
                 .filter(entry -> S3_EVENT_SOURCE_TYPE.equals(entry.value().getSourceType()))
@@ -939,6 +944,27 @@ public class RedshiftService implements ManagedSecretRotator {
             }
             integrations.putForAccount(accountId, key, integration);
             queueStatusChange(integration, previousStatus);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    /**
+     * Records whether the integration's current-state table holds its source's items: true once a backfill has
+     * filled it, false while it is being rebuilt. It is not an integration state, so no event is sent.
+     */
+    public synchronized void updateIntegrationCurrentState(String accountId, String integrationArn,
+                                                           boolean projected) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            if (integration.isCurrentStateProjected() != projected) {
+                integration.setCurrentStateProjected(projected);
+                integrations.putForAccount(accountId, key, integration);
+            }
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);

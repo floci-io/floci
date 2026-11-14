@@ -457,6 +457,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Re-claims a Docker-backed subnet address a persisted container (such as an EKS cluster node)
+     * already holds across a restart.
+     */
+    public boolean reserveVpcPrivateIp(String region, String subnetId, String address) {
+        if (vpcNetworkManager == null || subnetId == null || address == null) {
+            return false;
+        }
+        synchronized (privateIpAllocationLock) {
+            if (!vpcNetworkManager.reservePrivateIp(region, subnetId, address)) {
+                return false;
+            }
+            containerPrivateIps.computeIfAbsent(key(region, subnetId), ignored -> new HashSet<>()).add(address);
+            return true;
+        }
+    }
+
+    public void detachContainerFromVpc(String region, String vpcId, String containerId) {
+        if (vpcNetworkManager != null) {
+            vpcNetworkManager.detach(region, vpcId, containerId);
+        }
+    }
+
     public boolean isVpcNetworkEnabled() {
         return vpcNetworkManager != null && vpcNetworkManager.enabled();
     }
@@ -4157,7 +4180,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
             synchronized (attachmentTopologyLock(region)) {
                 if (finalSubnetId != null) {
@@ -4184,6 +4207,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             Instance inst = new Instance();
                             inst.setInstanceId(instanceId);
                             inst.setOwnerId(callerAccountId());
+                            inst.setReservationId(reservationId);
                             inst.setImageId(imageId);
                             inst.setState(InstanceState.pending());
                             inst.setInstanceType(effectiveInstanceType);
@@ -4933,15 +4957,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(i -> matchesFilters(i, filters, region))
                 .collect(Collectors.toList());
 
-        // Group into reservations (one instance per reservation for simplicity)
+        // An instance without a stored reservation (one Floci did not launch) keeps a stable id of its own
         Map<String, Reservation> reservationMap = new LinkedHashMap<>();
         String ownerAccountId = callerAccountId();
         for (Instance inst : matched) {
-            Reservation res = new Reservation();
-            res.setReservationId("r-" + randomHex(17));
-            res.setOwnerId(ownerAccountId);
+            String reservationId = inst.getReservationId() != null
+                    ? inst.getReservationId() : "r-" + inst.getInstanceId().substring("i-".length());
+            Reservation res = reservationMap.computeIfAbsent(reservationId, id -> {
+                Reservation created = new Reservation();
+                created.setReservationId(id);
+                created.setOwnerId(ownerAccountId);
+                return created;
+            });
             res.getInstances().add(inst);
-            reservationMap.put(inst.getInstanceId(), res);
         }
         return new ArrayList<>(reservationMap.values());
     }
@@ -5207,7 +5235,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Map<String, String>> terminateInstances(String region, List<String> instanceIds) {
+        return terminateInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one TerminateInstances could end, and the
+     * request is then answered with DryRunOperation, nothing terminated.
+     */
+    public List<Map<String, String>> terminateInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> requireEc2ManagedInstance(region, id, "terminated"));
+            throw dryRunOperation();
+        }
         List<Map<String, String>> result = new ArrayList<>();
         // Every instance named here is going away, so none of them counts as a live dependant of
         // a capture -- not the ones already processed, which linger as shutting-down while their
@@ -5218,11 +5258,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // would silently fall back to the default account.
         String owner = callerAccountId();
         for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be terminated through EC2", 400);
-            }
+            Instance inst = requireEc2ManagedInstance(region, id, "terminated");
 
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
@@ -5326,14 +5362,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Map<String, String>> stopInstances(String region, List<String> instanceIds) {
+        return stopInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one StopInstances could stop, and the
+     * request is then answered with DryRunOperation, nothing stopped.
+     */
+    public List<Map<String, String>> stopInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> requireEc2ManagedInstance(region, id, "stopped"));
+            throw dryRunOperation();
+        }
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be stopped through EC2", 400);
-            }
+            Instance inst = requireEc2ManagedInstance(region, id, "stopped");
 
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
@@ -5376,6 +5420,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<Map<String, String>> startInstances(String region, List<String> instanceIds) {
+        return startInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one StartInstances could start, the vCPU
+     * quota and Capacity Reservation admission included, and the request is then answered with
+     * DryRunOperation, nothing started or reserved.
+     */
+    public List<Map<String, String>> startInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
         if (config.services().ec2().enforceVcpuQuotas()) {
             synchronized (privateIpAllocationLock) {
@@ -5383,16 +5436,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 Set<String> legacySpot = spotInstanceIds(region);
                 List<Instance> targets = new ArrayList<>();
                 for (String id : new LinkedHashSet<>(instanceIds)) {
-                    Instance instance = getRequiredInstance(region, id);
-                    if (isExternalInstance(region, id)) {
-                        throw new AwsException("OperationNotPermitted",
-                                "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
-                    }
-                    if ("terminated".equals(instance.getState().getName())) {
-                        throw new AwsException("IncorrectInstanceState",
-                                "The instance '" + id + "' is not in a state from which it can be started.", 400);
-                    }
-                    targets.add(instance);
+                    targets.add(requireStartableInstance(region, id));
                 }
                 for (Instance instance : targets) {
                     String state = instance.getState().getName();
@@ -5404,18 +5448,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 enforceStandardOnDemandQuota(region, additional);
             }
         }
+        if (dryRun) {
+            List<Instance> starting = new ArrayList<>();
+            for (String id : instanceIds) {
+                Instance instance = requireStartableInstance(region, id);
+                String state = instance.getState().getName();
+                if ("stopped".equals(state) || "stopping".equals(state)) {
+                    starting.add(instance);
+                }
+            }
+            // The real start sets each of these pending and admits it into its Capacity Reservation.
+            acquireCapacity(region, starting, true);
+            throw dryRunOperation();
+        }
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-           Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be started through EC2", 400);
-            }
-
-            if ("terminated".equals(inst.getState().getName())) {
-                throw new AwsException("IncorrectInstanceState",
-                        "The instance '" + id + "' is not in a state from which it can be started.", 400);
-            }
+            Instance inst = requireStartableInstance(region, id);
             InstanceState prev = inst.getState();
             synchronized (capacityReservationLock) {
                 if ("stopped".equals(prev.getName()) || "stopping".equals(prev.getName())) {
@@ -5522,13 +5570,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void rebootInstances(String region, List<String> instanceIds) {
+        rebootInstances(region, instanceIds, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} every instance must be one RebootInstances could reboot, and the
+     * request is then answered with DryRunOperation, nothing rebooted.
+     */
+    public void rebootInstances(String region, List<String> instanceIds, boolean dryRun) {
         ensureDefaultResources(region);
+        if (dryRun) {
+            instanceIds.forEach(id -> requireEc2ManagedInstance(region, id, "rebooted"));
+            throw dryRunOperation();
+        }
         for (String id : instanceIds) {
-            Instance inst = getRequiredInstance(region, id);
-            if (isExternalInstance(region, id)) {
-                throw new AwsException("OperationNotPermitted",
-                        "The instance '" + id + "' is a cluster node and cannot be rebooted through EC2", 400);
-            }
+            Instance inst = requireEc2ManagedInstance(region, id, "rebooted");
 
             if (!config.services().ec2().mock()) {
                 containerManager.reboot(inst);
@@ -6035,6 +6091,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         copy.setLaunchTime(source.getLaunchTime());
         copy.setAmiLaunchIndex(source.getAmiLaunchIndex());
         copy.setClientToken(source.getClientToken());
+        copy.setReservationId(source.getReservationId());
         copy.setMonitoring(source.getMonitoring());
         copy.setSourceDestCheck(source.isSourceDestCheck());
         copy.setEbsOptimized(source.isEbsOptimized());
@@ -6107,6 +6164,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private boolean isExternalInstance(String region, String instanceId) {
         return findExternalInstance(callerAccountId(), region, instanceId).isPresent();
+    }
+
+    /**
+     * The instance {@code instanceId} names, if EC2 itself runs it: a cluster node is refused with
+     * OperationNotPermitted, as its cluster runs it. {@code action} words the refusal ("stopped").
+     */
+    private Instance requireEc2ManagedInstance(String region, String instanceId, String action) {
+        Instance inst = getRequiredInstance(region, instanceId);
+        if (isExternalInstance(region, instanceId)) {
+            throw new AwsException("OperationNotPermitted",
+                    "The instance '" + instanceId + "' is a cluster node and cannot be " + action + " through EC2", 400);
+        }
+        return inst;
+    }
+
+    /** As above, for StartInstances, which also refuses an instance that is terminated. */
+    private Instance requireStartableInstance(String region, String instanceId) {
+        Instance inst = requireEc2ManagedInstance(region, instanceId, "started");
+        if ("terminated".equals(inst.getState().getName())) {
+            throw new AwsException("IncorrectInstanceState",
+                    "The instance '" + instanceId + "' is not in a state from which it can be started.", 400);
+        }
+        return inst;
     }
 
     private Instance getRequiredInstance(String region, String instanceId) {
@@ -7988,8 +8068,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             "The security group '" + selectedId + "' has a dependent object", 400);
                 }
                 if (dryRun) {
-                    throw new AwsException("DryRunOperation",
-                            "Request would have succeeded, but DryRun flag is set.", 412);
+                    throw dryRunOperation();
                 }
                 securityGroups.delete(key(region, selectedId));
                 removeTags(region, selectedId);
@@ -9910,7 +9989,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 nextDefault = String.valueOf(requested);
             }
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
             launchTemplate.setDefaultVersionNumber(nextDefault);
             launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
@@ -10076,8 +10155,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (template) {
                 ensureLaunchTemplatePresent(region, template, id);
                 if (dryRun) {
-                    throw new AwsException("DryRunOperation",
-                            "Request would have succeeded, but DryRun flag is set.", 412);
+                    throw dryRunOperation();
                 }
                 ensureLaunchTemplateVersions(template);
                 int lastIssued = lastIssuedLaunchTemplateVersion(template);
@@ -10468,9 +10546,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
+    /**
+     * What EC2 answers a dry run with once the request has passed every check the real call makes:
+     * DryRunOperation, HTTP 412, nothing changed.
+     */
+    static AwsException dryRunOperation() {
+        return new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+    }
+
     // ─── Tags ──────────────────────────────────────────────────────────────────
 
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
+        createTags(region, resourceIds, tagList, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the request passes every check a write makes, the
+     * per-resource limit included, and is then answered with DryRunOperation, nothing written.
+     */
+    public void createTags(String region, List<String> resourceIds, List<Tag> tagList, boolean dryRun) {
         validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
         validateTagLengths(tagList);
@@ -10483,6 +10577,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         withTagWriteLocks(region, resourceIds, () -> {
             for (String resourceId : resourceIds) {
                 requireWithinTagLimit(region, resourceId, tagList);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             createSystemTags(region, resourceIds, tagList);
         });
@@ -10712,8 +10809,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
+        deleteTags(region, resourceIds, tagList, false);
+    }
+
+    /** As above; with {@code dryRun} the request is validated and then answered with DryRunOperation. */
+    public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList, boolean dryRun) {
         validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
+        if (dryRun) {
+            throw dryRunOperation();
+        }
         deleteResourceTags(region, resourceIds, tagList);
     }
 
@@ -11316,9 +11421,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     void acquireCapacity(String region, List<Instance> admitted) {
+        acquireCapacity(region, admitted, false);
+    }
+
+    /**
+     * As above; with {@code dryRun}, {@code admitted} are the stopped instances a StartInstances dry
+     * run names. Each is admitted as the real start admits it once it is pending, the batch counted
+     * against copies of the reservations, and the same refusals are thrown, but nothing is recorded.
+     */
+    private void acquireCapacity(String region, List<Instance> admitted, boolean dryRun) {
         synchronized (capacityReservationLock) {
             Set<String> groupInstances = capacityGroupInstanceIds.get(callerAccountId() + "::" + region);
-            if (groupInstances != null) {
+            if (groupInstances != null && !dryRun) {
                 for (Instance instance : admitted) {
                     if (instance.getCapacityReservationGroupArn() != null) {
                         groupInstances.add(instance.getInstanceId());
@@ -11330,7 +11444,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .stream().map(CapacityReservation::new).toList();
             Map<String, CapacityReservation> changed = new LinkedHashMap<>();
             for (Instance instance : admitted) {
-                if (!holdsCapacity(instance) || instance.isSpot()
+                if ((!dryRun && !holdsCapacity(instance)) || instance.isSpot()
                         || "none".equals(instance.getCapacityReservationPreference())) {
                     continue;
                 }
@@ -11349,7 +11463,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .filter(r -> r.getAvailableInstanceCount() > 0).findFirst().orElse(null);
                 if (selected == null) {
                     if (target != null) {
-                        CapacityReservation reservation = getRequiredCapacityReservation(region, target);
+                        // A dry run counts its batch on the copies, as the real start's save after each
+                        // instance counts it in the store.
+                        CapacityReservation reservation = dryRun
+                                ? candidates.stream().filter(r -> target.equals(r.getCapacityReservationId()))
+                                        .findFirst().orElseGet(() -> getRequiredCapacityReservation(region, target))
+                                : getRequiredCapacityReservation(region, target);
                         if (matchesCapacityReservation(instance, reservation)
                                 && reservation.getAvailableInstanceCount() <= 0) {
                             throw new AwsException("ReservationCapacityExceeded",
@@ -11368,7 +11487,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 selected.setAvailableInstanceCount(selected.getAvailableInstanceCount() - 1);
                 changed.put(key(region, selected.getCapacityReservationId()), selected);
             }
-            if (!changed.isEmpty()) {
+            if (!changed.isEmpty() && !dryRun) {
                 persistCapacityMembership(changed);
             }
         }
@@ -12251,8 +12370,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     : null;
 
             if (dryRun) {
-                throw new AwsException("DryRunOperation",
-                        "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
 
             // The target the request does not name is cleared rather than carried over from the
@@ -13119,7 +13237,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         if (dryRun) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            throw dryRunOperation();
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         if (token != null) {
@@ -14850,6 +14968,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteVolume(String region, String volumeId) {
+        deleteVolume(region, volumeId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the volume must still exist and be detached, and the request
+     * is then answered with DryRunOperation, the volume and its backing storage left in place.
+     */
+    public void deleteVolume(String region, String volumeId, boolean dryRun) {
         if (volumeId == null || volumeId.isBlank()) {
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
@@ -14861,6 +14987,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
                 throw new AwsException("VolumeInUse",
                         "Volume " + volumeId + " is currently attached to an instance", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
                 if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
@@ -15008,7 +15137,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
 
             if (dryRun) {
-                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+                throw dryRunOperation();
             }
 
             Integer originalSize = volume.getSize();
@@ -15147,6 +15276,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device) {
+        return attachVolume(region, volumeId, instanceId, device, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the volume, the instance and the device pass every check an
+     * attachment makes, and the request is then answered with DryRunOperation, nothing attached.
+     */
+    public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device,
+                                         boolean dryRun) {
         ensureDefaultResources(region);
         if (volumeId == null || volumeId.isEmpty()) {
             throw new AwsException("MissingParameter",
@@ -15172,14 +15310,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "The device '" + device + "' is already in use by an attachment in progress", 400);
             }
             try {
-                return attachVolumeToInstance(region, volumeId, instanceId, device);
+                return attachVolumeToInstance(region, volumeId, instanceId, device, dryRun);
             } finally {
                 pendingVolumeAttachments.remove(target);
             }
         });
     }
 
-    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {
+    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device,
+                                                    boolean dryRun) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -15215,6 +15354,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
         }
+        if (dryRun) {
+            throw dryRunOperation();
+        }
 
         if (volumeBlockDeviceManager != null) {
             volumeBlockDeviceManager.attachVolume(volume, inst, device);
@@ -15236,6 +15378,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public VolumeAttachment detachVolume(String region, String volumeId, String instanceId, String device, boolean force) {
+        return detachVolume(region, volumeId, instanceId, device, force, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the attachment passes every check a detach makes, and the
+     * request is then answered with DryRunOperation, the volume left attached.
+     */
+    public VolumeAttachment detachVolume(String region, String volumeId, String instanceId, String device,
+                                         boolean force, boolean dryRun) {
         if (volumeId == null || volumeId.isEmpty()) {
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
@@ -15264,6 +15415,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterCombination",
                     "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
                             "filesystem/partition tables. To force detachment, use the force parameter", 400);
+        }
+        if (dryRun) {
+            throw dryRunOperation();
         }
         target.setState("detached");
         volume.getAttachments().clear();

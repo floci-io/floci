@@ -14,9 +14,9 @@ The listing is not filtered to the caller's individually authorized tables.
 This resource matching was checked against live AWS with isolated role sessions.
 Pagination and ignored table selectors do not change the collection being authorized.
 Other DynamoDB operations retain their own authorization resources.
-The generated IAM request-resource table records `ListTables` as a measured correction to
-the Service Reference. Other DynamoDB operations keep their existing resource builders,
-including batch, transaction and PartiQL table extraction.
+The Service Reference lists no resource type for the action, so the collection comes from that
+measurement, the one thing the generated table of request resources states by hand. Other DynamoDB
+operations keep their existing resource builders, including batch, transaction and PartiQL table extraction.
 
 ## Supported Actions
 
@@ -140,7 +140,7 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 
 Redshift zero-ETL integrations can consume these stream records directly. See the
 [Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported sources and targets,
-landing table, checkpoint, and retry behavior.
+landing table, current-state table, checkpoint, and retry behavior.
 
 Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
 tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before

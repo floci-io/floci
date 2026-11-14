@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerSpec;
@@ -19,8 +20,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -49,6 +48,7 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
     private final DockerClient dockerClient;
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
+    private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
 
     private final Map<String, String> activeLoopDevices = new ConcurrentHashMap<>();
@@ -60,10 +60,12 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
     public Ec2VolumeBlockDeviceManager(DockerClient dockerClient,
                                        ContainerBuilder containerBuilder,
                                        ContainerLifecycleManager lifecycleManager,
+                                       ContainerDetector containerDetector,
                                        EmulatorConfig config) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
+        this.containerDetector = containerDetector;
         this.config = config;
     }
 
@@ -493,9 +495,10 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                 String volumeName = ContainerStorageHelper.dockerName(config, "ec2-volumes");
                 ContainerStorageHelper.applyNamedVolume(builder, lifecycleManager, volumeName, "/volumes");
             } else {
-                Path hostPath = ContainerStorageHelper.hostResourcePath(config, "ec2", "volumes");
-                Files.createDirectories(hostPath);
-                builder.withBind(hostPath.toAbsolutePath().toString(), "/volumes");
+                String hostPath = ContainerStorageHelper.hostResourcePath(config, "ec2", "volumes")
+                        .toAbsolutePath().toString();
+                ContainerStorageHelper.ensureHostDir(containerDetector, hostPath);
+                builder.withBind(hostPath, "/volumes");
             }
 
             ContainerSpec spec = builder.build();

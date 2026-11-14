@@ -103,12 +103,12 @@ class ElbV2CertificatePublicationServiceTest {
         AwsException failure = assertThrows(AwsException.class, request::run);
         assertEquals("CertificateNotFound", failure.getErrorCode());
         assertEquals(1, service.describeListeners(REGION, lb, List.of()).size());
-        assertEquals(List.of(HELD_CERTIFICATE), existing.getCertificates());
+        assertEquals(List.of(HELD_CERTIFICATE), existing.servedCertificates());
         issued.set(true);
         assertDoesNotThrow(request::run);
         assertEquals("create".equals(operation) ? 2 : 1, service.describeListeners(REGION, lb, List.of()).size());
         assertEquals("add".equals(operation) ? List.of(HELD_CERTIFICATE, pending)
-                : "modify".equals(operation) ? List.of(pending) : List.of(HELD_CERTIFICATE), existing.getCertificates());
+                : "modify".equals(operation) ? List.of(pending) : List.of(HELD_CERTIFICATE), existing.servedCertificates());
     }
 
     @ParameterizedTest
@@ -143,7 +143,7 @@ class ElbV2CertificatePublicationServiceTest {
                 null, 9090, null, null, null, null));
         assertEquals("HTTP", moved.getProtocol());
         assertEquals(9090, moved.getPort());
-        assertTrue(moved.getCertificates().isEmpty());
+        assertTrue(moved.servedCertificates().isEmpty());
         assertNull(moved.getSslPolicy());
         assertFalse(first.get());
     }
@@ -236,7 +236,7 @@ class ElbV2CertificatePublicationServiceTest {
         assertEquals(Integer.valueOf(443), listener.getPort());
         assertEquals("HTTPS", listener.getProtocol());
         assertEquals("ELBSecurityPolicy-2016-08", listener.getSslPolicy());
-        assertEquals(List.of(HELD_CERTIFICATE), listener.getCertificates());
+        assertEquals(List.of(HELD_CERTIFICATE), listener.servedCertificates());
         verify(dataPlane, never()).removeListener(anyString(), any(), any());
     }
 

@@ -55,7 +55,8 @@ class CodeArtifactNuGetControllerLeaseTest {
         bagetter = mock(BagetterSidecarClient.class);
         HttpClient http = mock(HttpClient.class);
         controller = new CodeArtifactNuGetController(service, bagetter,
-                mock(CodeArtifactNuGetExternalConnectionImporter.class), http);
+                mock(CodeArtifactNuGetExternalConnectionImporter.class),
+                mock(CodeArtifactNuGetUpstreamRepositoryImporter.class), http);
         headers = mock(HttpHeaders.class);
         when(headers.getHeaderString(HttpHeaders.AUTHORIZATION)).thenReturn("Bearer token");
         when(service.resolveAuthorizationToken("token", DOMAIN))
@@ -78,7 +79,8 @@ class CodeArtifactNuGetControllerLeaseTest {
     void packageVersionsReleasesItsLeaseAfterProxying() throws Exception {
         HttpClient http = mock(HttpClient.class);
         controller = new CodeArtifactNuGetController(service, bagetter,
-                mock(CodeArtifactNuGetExternalConnectionImporter.class), http);
+                mock(CodeArtifactNuGetExternalConnectionImporter.class),
+                mock(CodeArtifactNuGetUpstreamRepositoryImporter.class), http);
         @SuppressWarnings("unchecked")
         HttpResponse<byte[]> reply = mock(HttpResponse.class);
         when(reply.statusCode()).thenReturn(404);
@@ -107,7 +109,8 @@ class CodeArtifactNuGetControllerLeaseTest {
     void packageContentStreamsTheNupkgAndReleasesItsLease() throws Exception {
         HttpClient http = mock(HttpClient.class);
         controller = new CodeArtifactNuGetController(service, bagetter,
-                mock(CodeArtifactNuGetExternalConnectionImporter.class), http);
+                mock(CodeArtifactNuGetExternalConnectionImporter.class),
+                mock(CodeArtifactNuGetUpstreamRepositoryImporter.class), http);
         when(bagetter.packageVersionExists(REPO_ID, DOMAIN, REPOSITORY, null, "pkg", "1.0.0")).thenReturn(true);
         byte[] nupkgBytes = "nupkg-bytes".getBytes(StandardCharsets.UTF_8);
         @SuppressWarnings("unchecked")

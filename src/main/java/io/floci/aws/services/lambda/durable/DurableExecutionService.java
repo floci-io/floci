@@ -305,14 +305,14 @@ public class DurableExecutionService implements Resettable {
         List<DurableOperation> operations;
         synchronized (lockFor(arn)) {
             DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
-            operations = new ArrayList<>(execution.getOperations().values());
+            operations = execution.replayedOperations();
         }
         List<Cursored<DurableOperation>> indexed = new ArrayList<>(operations.size());
         for (int i = 0; i < operations.size(); i++) {
             indexed.add(new Cursored<>(String.format("%010d", i), operations.get(i)));
         }
         PaginatedResult<DurableOperation> page = paginate(indexed, pageSize(maxItems), marker, "durable-state");
-        return new StatePage(page.items(), page.nextToken() != null ? page.nextToken() : "");
+        return new StatePage(page.items(), page.nextToken());
     }
 
     /** Stopping a closed execution changes nothing and reports the time it closed. */

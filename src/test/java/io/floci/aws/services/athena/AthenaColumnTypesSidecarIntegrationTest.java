@@ -41,4 +41,19 @@ class AthenaColumnTypesSidecarIntegrationTest {
         assertEquals(List.of("bigint", "double", "boolean", "date", "decimal", "varchar", "time", "timestamp",
                 "timestamp with time zone"), types);
     }
+
+    /**
+     * Trino returns BIGINT for {@code count_if} and for {@code sum} over a BIGINT; DuckDB widens both
+     * to HUGEINT, which Athena clients must still see as bigint.
+     */
+    @Test
+    void aggregatesDuckDbWidensToHugeintAreReportedAsBigint() {
+        List<String> duckTypes = duck.query("DESCRIBE SELECT count_if(true) AS c, sum(CAST(1 AS BIGINT)) AS s", null)
+                .stream()
+                .map(column -> String.valueOf(column.get("column_type")))
+                .toList();
+
+        assertEquals(List.of("HUGEINT", "HUGEINT"), duckTypes);
+        assertEquals(List.of("bigint", "bigint"), duckTypes.stream().map(AthenaService::athenaType).toList());
+    }
 }

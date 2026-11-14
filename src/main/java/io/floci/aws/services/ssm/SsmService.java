@@ -15,6 +15,7 @@ import io.floci.aws.core.common.DeadlineCharSequence;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -51,7 +52,7 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
 @ApplicationScoped
-public class SsmService implements ResourceProvider {
+public class SsmService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
@@ -1123,7 +1124,7 @@ public class SsmService implements ResourceProvider {
 
     /**
      * {@code AddTagsToResource} on the resource of {@code resourceType}: a document by its name, an
-     * association by its ID, and a parameter, or any type Floci does not tag yet, as before.
+     * association by its ID, and a parameter by its name or ARN.
      */
     public synchronized void addTagsToResource(String resourceType, String resourceId, Map<String, String> tags,
                                                String region) {
@@ -2022,5 +2023,26 @@ public class SsmService implements ResourceProvider {
     @Override
     public Set<SupportedResourceType> getSupportedResourceTypes() {
         return Set.of(new SupportedResourceType("ssm:parameter", "ssm", true));
+    }
+
+    @Override
+    public String namespace() {
+        return "ssm";
+    }
+
+    /**
+     * The {@code parameter/<name>} ARN a legacy {@code parameter<name>} ARN of the caller's partition, Region and
+     * account names, which the tagging operations act on as {@link #parameterTagName} reads it; empty for any other
+     * value, whose ARN is the one its name renders.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (!"parameter".equals(type) || names.size() != 1) {
+            return Optional.empty();
+        }
+        String name = names.getFirst();
+        String arn = withLegacyParameterSlash(name, regionResolver.partitionForRegion(region), region,
+                regionResolver.getAccountId());
+        return arn == null || arn.equals(name) ? Optional.empty() : Optional.of(arn);
     }
 }

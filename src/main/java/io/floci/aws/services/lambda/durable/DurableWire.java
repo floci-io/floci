@@ -12,6 +12,7 @@ import io.floci.aws.services.lambda.durable.model.DurableExecution;
 import io.floci.aws.services.lambda.durable.model.DurableHistoryEvent;
 import io.floci.aws.services.lambda.durable.model.DurableOperation;
 import io.floci.aws.services.lambda.durable.model.DurableOperationAction;
+import io.floci.aws.services.lambda.durable.model.DurableOperationStatus;
 import io.floci.aws.services.lambda.durable.model.DurableOperationType;
 import io.floci.aws.services.lambda.durable.model.DurableOperationUpdate;
 
@@ -60,10 +61,9 @@ public final class DurableWire {
         event.put("CheckpointToken", checkpointToken);
         ObjectNode state = event.putObject("InitialExecutionState");
         ArrayNode operations = state.putArray("Operations");
-        for (DurableOperation operation : execution.getOperations().values()) {
+        for (DurableOperation operation : execution.replayedOperations()) {
             operations.add(operation(operation, true));
         }
-        state.put("NextMarker", "");
         ArrayNode updated = event.putArray("UpdatedOperationIds");
         updatedOperationIds.forEach(updated::add);
         return event;
@@ -107,13 +107,16 @@ public final class DurableWire {
             }
             case STEP -> {
                 ObjectNode details = node.putObject("StepDetails");
-                if (operation.getAttempt() != null) {
-                    details.put("Attempt", operation.getAttempt());
-                }
+                details.put("Attempt", operation.getAttempt() == null ? 0 : operation.getAttempt());
                 if (operation.getNextAttemptTimestamp() != null) {
                     putTimestamp(details, "NextAttemptTimestamp", operation.getNextAttemptTimestamp(), millis);
                 }
-                putResultAndError(details, operation);
+                // AWS shows a step's Result or Error only once it is READY or closed.
+                DurableOperationStatus status = operation.getStatus();
+                if (status == DurableOperationStatus.READY || status == DurableOperationStatus.SUCCEEDED
+                        || status == DurableOperationStatus.FAILED) {
+                    putResultAndError(details, operation);
+                }
             }
             case WAIT -> {
                 ObjectNode details = node.putObject("WaitDetails");

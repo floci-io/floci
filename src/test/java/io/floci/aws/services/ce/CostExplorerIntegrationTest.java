@@ -2,6 +2,7 @@ package io.floci.aws.services.ce;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -59,6 +60,35 @@ class CostExplorerIntegrationTest {
         .then()
             .statusCode(200)
             .body("ResultsByTime", hasSize(3));
+    }
+
+    @Test
+    void costReadsAnswerThePrimaryBillingViewAndRefuseAnother() {
+        String views = "arn:aws:billing::000000000000:billingview/";
+        costRead("GetCostAndUsage", views + "primary").statusCode(200).body("ResultsByTime", hasSize(1));
+        // A view Floci does not hold, a custom one or another account's primary one, does not exist, nor does the
+        // primary one's path under another service or with a Region.
+        for (String view : new String[] {views + "custom-view", "arn:aws:billing::111122223333:billingview/primary",
+                "arn:aws:ce::000000000000:billingview/primary", "arn:aws:billing:us-east-1:000000000000:billingview/primary",
+                "not-an-arn"}) {
+            costRead("GetCostAndUsage", view).statusCode(400).body("__type", equalTo("ResourceNotFoundException"))
+                    .body("message", equalTo("The specified ARN in the request doesn't exist."));
+        }
+        costRead("GetDimensionValues", views + "custom-view").statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static ValidatableResponse costRead(String action, String billingViewArn) {
+        return given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSInsightsIndexService." + action)
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"TimePeriod\":{\"Start\":\"2026-01-01\",\"End\":\"2026-02-01\"},\"Granularity\":\"MONTHLY\","
+                    + "\"Metrics\":[\"UnblendedCost\"],\"Dimension\":\"SERVICE\",\"BillingViewArn\":\""
+                    + billingViewArn + "\"}")
+        .when()
+            .post("/")
+        .then();
     }
 
     @Test

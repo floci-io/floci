@@ -7,6 +7,7 @@ import io.floci.aws.services.glue.model.Table;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -87,9 +88,13 @@ public final class PartitionProjection {
      * lands inside the read path, and the next query fails trying to read it as table data.
      *
      * <p>The layout comes from {@code storage.location.template} when set, and otherwise from the
-     * default {@code column=value} form over the partition keys. Values stay wildcards: narrowing
+     * default {@code column=value} form over the partition keys. A template's placeholder becomes one
+     * wildcard per folder its value spans (see {@link #placeholderFolders}): a single {@code *} stops
+     * at the next slash, so a multi-folder value followed by more of the template would match no
+     * object, and a read matching no object fails its view. Values stay wildcards: narrowing
      * them to the partitions a query actually needs requires that query's predicates, so the read
-     * stays wide and the query itself does the filtering.
+     * stays wide and the query itself does the filtering. The values a templated table's rows carry
+     * come from each object's path, through {@link #locationTemplate(Table)}.
      */
     public static String readPath(Table table, String normalizedLocation) {
         if (!enabled(table)) {
@@ -98,7 +103,8 @@ public final class PartitionProjection {
 
         String template = parameter(table, LOCATION_TEMPLATE);
         if (template != null && !template.isBlank()) {
-            String wildcarded = TEMPLATE_PLACEHOLDER.matcher(template).replaceAll("*");
+            String wildcarded = TEMPLATE_PLACEHOLDER.matcher(template).replaceAll(placeholder ->
+                    "*" + "/*".repeat(placeholderFolders(table, placeholderName(placeholder.group())) - 1));
             return stripTrailingSlash(wildcarded);
         }
 
@@ -112,6 +118,184 @@ public final class PartitionProjection {
                 return normalizedLocation;
             }
             sb.append('/').append(key.getName()).append("=*");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * A {@code storage.location.template} read the other way round: a pattern over object paths
+     * that recovers the partition values an object was stored under.
+     *
+     * <p>{@code regex} matches the start of the path of every object the template's read path can
+     * reach, with one capture group per placeholder, numbered in template order. {@code groups}
+     * maps each partition key the template names, lowercased, to the groups of its placeholders.
+     * A key may appear more than once, as in {@code ${a}/${b}/${a}/}; DuckDB's regex engine (RE2)
+     * has no backreferences, so the regex cannot require the repeats to agree, and the caller
+     * compares them instead.
+     */
+    public record LocationTemplate(String regex, Map<String, List<Integer>> groups) {
+    }
+
+    /**
+     * The {@code storage.location.template} of a projecting table as a {@link LocationTemplate},
+     * or {@code null} when the table does not project its partitions, sets no template, has no
+     * partition keys, or has a template that omits one of them (see
+     * {@link #hasIncompleteLocationTemplate}).
+     *
+     * <p>Athena maps partition values to object paths through the template: "a custom template
+     * enables Athena to properly map partition values to custom Amazon S3 file locations that do
+     * not follow a typical {@code .../column=value/...} pattern". The default {@code column=value}
+     * layout needs none of this, since DuckDB's Hive partitioning reads those values on its own.
+     *
+     * <p>TODO: two placeholders sharing a folder, as in {@code ${hour}-${day}/}, are split
+     * greedily, so a value holding the separator is cut in the wrong place and, for a typed key,
+     * dropped by {@link GlueTableResolver#pathFilter}. Athena builds paths from values and has no
+     * such ambiguity, but its docs rule the layout out: "make sure that each placeholder (and the
+     * S3 path itself) is terminated by a single forward slash".
+     */
+    public static LocationTemplate locationTemplate(Table table) {
+        if (!enabled(table) || table.getPartitionKeys() == null || hasIncompleteLocationTemplate(table)) {
+            return null;
+        }
+        String template = parameter(table, LOCATION_TEMPLATE);
+        if (template == null || template.isBlank()) {
+            return null;
+        }
+        Set<String> keys = partitionKeyNames(table);
+
+        // Each placeholder becomes a group exactly where readPath puts its wildcards, spanning the same
+        // folders (placeholderFolders), so the regex and the read path describe the same objects.
+        StringBuilder regex = new StringBuilder("^");
+        Map<String, List<Integer>> groups = new LinkedHashMap<>();
+        Matcher placeholder = TEMPLATE_PLACEHOLDER.matcher(template);
+        int literalStart = 0;
+        int group = 0;
+        while (placeholder.find()) {
+            String name = placeholderName(placeholder.group());
+            regex.append(regexLiteral(template.substring(literalStart, placeholder.start())))
+                    .append(placeholderGroup(table, name));
+            group++;
+            if (keys.contains(name)) {
+                groups.computeIfAbsent(name, ignored -> new ArrayList<>()).add(group);
+            }
+            literalStart = placeholder.end();
+        }
+        if (groups.isEmpty()) {
+            return null;
+        }
+        // readPath reads below the template with a trailing "/**", so every object sits under it.
+        regex.append(regexLiteral(stripTrailingSlash(template.substring(literalStart)))).append('/');
+        return new LocationTemplate(regex.toString(), groups);
+    }
+
+    /**
+     * Whether {@code table} projects its partitions through a {@code storage.location.template}
+     * that has no placeholder for one of its partition keys.
+     *
+     * <p>Athena's docs call such a template invalid ("the template must contain a placeholder for
+     * each partition column"), and Athena fails every query on the table with
+     * {@code INVALID_TABLE_PROPERTY} rather than reading it some other way; see
+     * {@link #assertLocationTemplatesComplete}.
+     *
+     * <p>An Iceberg table is never incomplete here: floci reads it through its own metadata, which a
+     * template plays no part in (see {@link GlueTableResolver#isIcebergTable}).
+     */
+    public static boolean hasIncompleteLocationTemplate(Table table) {
+        if (GlueTableResolver.isIcebergTable(table) || !enabled(table)
+                || table.getPartitionKeys() == null || table.getPartitionKeys().isEmpty()) {
+            return false;
+        }
+        String template = parameter(table, LOCATION_TEMPLATE);
+        if (template == null || template.isBlank()) {
+            return false;
+        }
+        Set<String> named = new HashSet<>();
+        Matcher placeholder = TEMPLATE_PLACEHOLDER.matcher(template);
+        while (placeholder.find()) {
+            named.add(placeholderName(placeholder.group()));
+        }
+        return !named.containsAll(partitionKeyNames(table));
+    }
+
+    /**
+     * Fails a query that names a table whose {@code storage.location.template} omits one of its
+     * partition keys, with the error Athena reports for it.
+     *
+     * <p>Athena fails the query rather than rejecting its submission, and only a query that reads
+     * the table: the database's other tables stay queryable. floci matches both, which is why the
+     * table gets no view at all ({@code GlueViewDdlBuilder} skips it) and this check reports it
+     * instead. Tables are matched as {@link #assertInjectedColumnsFiltered} matches them.
+     */
+    public static void assertLocationTemplatesComplete(String query, List<Table> tables) {
+        if (query == null || tables == null) {
+            return;
+        }
+        String code = maskLiteralsAndComments(query);
+        for (Table table : tables) {
+            if (table == null || table.getName() == null || !hasIncompleteLocationTemplate(table)
+                    || tableAliases(code, table.getName()).isEmpty()) {
+                continue;
+            }
+            throw new AwsException("InvalidRequestException",
+                    "INVALID_TABLE_PROPERTY: The '" + LOCATION_TEMPLATE + "' table property must contain "
+                            + "templates for all partition columns! Table: " + table.getDatabaseName() + "."
+                            + table.getName() + " Template: " + parameter(table, LOCATION_TEMPLATE), 400);
+        }
+    }
+
+    /** The table's partition key names, lowercased. */
+    private static Set<String> partitionKeyNames(Table table) {
+        Set<String> keys = new HashSet<>();
+        for (Column key : table.getPartitionKeys()) {
+            if (key != null && key.getName() != null) {
+                keys.add(key.getName().toLowerCase(Locale.ROOT));
+            }
+        }
+        return keys;
+    }
+
+    /** The key a {@code ${key}} placeholder names, lowercased. */
+    private static String placeholderName(String placeholder) {
+        return placeholder.substring(2, placeholder.length() - 1).trim().toLowerCase(Locale.ROOT);
+    }
+
+    /** The capture group for one placeholder, spanning the folders its value does. */
+    private static String placeholderGroup(Table table, String key) {
+        return "([^/]+" + "(?:/[^/]+)".repeat(placeholderFolders(table, key) - 1) + ")";
+    }
+
+    /**
+     * How many folders one placeholder's value spans: one, or as many as its key's projected value
+     * does. {@link #readPath} and {@link #locationTemplate} both follow it, so the read glob and the
+     * regex agree on where each value ends.
+     *
+     * <p>A {@code date} projection's {@code format} may itself hold slashes, as in the Firehose
+     * layout AWS documents: a single {@code ${datehour}} placeholder with format
+     * {@code yyyy/MM/dd/HH} stands for four folders, and Athena reports the whole
+     * {@code 2026/11/10/05} as the value. Every other projection type yields a value within one
+     * folder.
+     *
+     * <p>TODO: an {@code enum} value holding a slash spans folders too, and would need a group
+     * per distinct depth among the listed values.
+     */
+    private static int placeholderFolders(Table table, String key) {
+        String type = parameter(table, "projection." + key + ".type");
+        String format = parameter(table, "projection." + key + ".format");
+        if ("date".equalsIgnoreCase(type == null ? null : type.trim()) && format != null) {
+            return 1 + (int) format.chars().filter(c -> c == '/').count();
+        }
+        return 1;
+    }
+
+    /** {@code literal} escaped for RE2, which takes a backslash before any punctuation. */
+    private static String regexLiteral(String literal) {
+        StringBuilder sb = new StringBuilder(literal.length());
+        for (int i = 0; i < literal.length(); i++) {
+            char c = literal.charAt(i);
+            if ("\\.+*?()|[]{}^$".indexOf(c) >= 0) {
+                sb.append('\\');
+            }
+            sb.append(c);
         }
         return sb.toString();
     }
@@ -412,6 +596,14 @@ public final class PartitionProjection {
      * The alias, or the table's own name, under which each {@code FROM}, {@code JOIN} or comma-separated
      * source naming {@code tableName} appears. The name must end at an identifier boundary, so
      * {@code events_daily} is not a reference to {@code events}.
+     *
+     * <p>TODO: this matches the query's text, not its resolved sources. A qualifier is not compared
+     * with the table's database, so {@code other_db.events} counts as a reference to the context
+     * database's {@code events}, and a common table expression named {@code events} counts too.
+     * Its callers are also given only the query context database's tables
+     * ({@code AthenaService.tablesForProjectionCheck}), so a table in another database is not
+     * checked. {@link #assertInjectedColumnsFiltered} and {@link #assertLocationTemplatesComplete}
+     * share these limits; resolving the sources the query reads would lift them for both.
      */
     private static List<String> tableAliases(String code, String tableName) {
         String identifier = identifierPattern(tableName);

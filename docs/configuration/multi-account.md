@@ -202,6 +202,25 @@ When `validate-signatures` is `false` (the default), S3 signatures are verified 
 
 Storage keys are namespaced per account at the persistence layer. When using `persistent`, `hybrid`, or `wal` storage modes, each account's data is stored under its own key prefix. Restarting Floci restores each account's resources independently.
 
+When a normal scoped read misses, the storage wrapper can migrate an older unprefixed
+record. A supplied key such as `222222222222/resource` already contains an account
+prefix, so it is only looked up inside the caller's namespace. It cannot be used as
+an alias that reads or moves the raw record belonging to account `222222222222`.
+The same prefix-shaped logical key still works when it was explicitly stored in
+the caller's namespace.
+
+This rule also applies to the single-key migration helper that checks a legacy
+value's owner. Genuine unprefixed legacy records remain eligible for migration,
+including to a nondefault account when its owner is established by the caller's
+predicate. The separate migration helper for known older key formats continues
+to handle intentional account-prefixed legacy keys.
+
+S3 handles older objects in twelve-digit bucket names explicitly. On a scoped
+miss, it verifies the stored bucket and object key before migrating metadata to
+the bucket owner's namespace. Unscoped data belongs to the configured default
+account, so another account's same-named bucket cannot claim it. This applies
+with either setting of the global bucket namespace; existing scoped data wins.
+
 ## Configuration Reference
 
 | Variable | Default | Description |

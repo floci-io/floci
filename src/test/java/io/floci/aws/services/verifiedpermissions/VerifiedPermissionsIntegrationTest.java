@@ -1,6 +1,7 @@
 package io.floci.aws.services.verifiedpermissions;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SidecarContainersProfile;
@@ -315,6 +316,76 @@ class VerifiedPermissionsIntegrationTest {
     }
 
     @Test
+    void isAuthorizedWithToken_acceptsAccessTokensFromFlocisOwnCognitoPool() throws Exception {
+        JsonNode pool = cognito("CreateUserPool", "{\"PoolName\":\"avp-token-pool\"}");
+        String poolId = pool.path("UserPool").path("Id").asText();
+        String poolArn = pool.path("UserPool").path("Arn").asText();
+        String clientId = cognito("CreateUserPoolClient", objectJson(Map.of(
+                "UserPoolId", poolId, "ClientName", "app",
+                "ExplicitAuthFlows", List.of("ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"))))
+                .path("UserPoolClient").path("ClientId").asText();
+        cognito("AdminCreateUser", objectJson(Map.of(
+                "UserPoolId", poolId, "Username", "alice", "MessageAction", "SUPPRESS")));
+        cognito("AdminSetUserPassword", objectJson(Map.of(
+                "UserPoolId", poolId, "Username", "alice", "Password", "Avp-Token-1!", "Permanent", true)));
+        String accessToken = cognito("AdminInitiateAuth", objectJson(Map.of(
+                "UserPoolId", poolId, "ClientId", clientId, "AuthFlow", "ADMIN_USER_PASSWORD_AUTH",
+                "AuthParameters", Map.of("USERNAME", "alice", "PASSWORD", "Avp-Token-1!"))))
+                .path("AuthenticationResult").path("AccessToken").asText();
+
+        String store = createStore("OFF", "DISABLED");
+        givenAws("CreateIdentitySource", objectJson(Map.of(
+                        "policyStoreId", store, "principalEntityType", "User",
+                        "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
+                                "userPoolArn", poolArn,
+                                "clientIds", List.of(clientId))))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of(
+                        "static", Map.of("statement", "permit(principal, action, resource);")))))
+                .then().statusCode(200);
+
+        // A source naming the same pool id in another account is not this pool: the token's
+        // issuer matches no source there.
+        String foreign = createStore("OFF", "DISABLED");
+        givenAws("CreateIdentitySource", objectJson(Map.of(
+                        "policyStoreId", foreign, "principalEntityType", "User",
+                        "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
+                                "userPoolArn", poolArn.replaceFirst(":\\d{12}:", ":999988887777:"),
+                                "clientIds", List.of(clientId))))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", foreign, "definition", Map.of(
+                        "static", Map.of("statement", "permit(principal, action, resource);")))))
+                .then().statusCode(200);
+
+        Map<String, Object> request = new LinkedHashMap<>();
+        request.put("policyStoreId", store);
+        request.put("accessToken", accessToken);
+        request.put("action", Map.of("actionType", "Action", "actionId", "view"));
+        request.put("resource", Map.of("entityType", "Photo", "entityId", "p1"));
+        givenAws("IsAuthorizedWithToken", objectJson(request))
+                .then().statusCode(200).body("decision", equalTo("ALLOW"));
+
+        Map<String, Object> foreignRequest = new LinkedHashMap<>(request);
+        foreignRequest.put("policyStoreId", foreign);
+        givenAws("IsAuthorizedWithToken", objectJson(foreignRequest))
+                .then().statusCode(400).body("__type", containsString("ValidationException"))
+                .body("message", containsString("issuer"));
+
+        // Same issuer, signature broken: refused, never evaluated.
+        String[] parts = accessToken.split("\\.");
+        String flipped = (parts[2].charAt(0) == 'A' ? "B" : "A") + parts[2].substring(1);
+        request.put("accessToken", parts[0] + "." + parts[1] + "." + flipped);
+        givenAws("IsAuthorizedWithToken", objectJson(request))
+                .then().statusCode(400).body("__type", containsString("ValidationException"))
+                .body("message", containsString("signature"));
+
+        // Same issuer, empty header: a validation error, not a server error.
+        request.put("accessToken", "." + parts[1] + "." + parts[2]);
+        givenAws("IsAuthorizedWithToken", objectJson(request))
+                .then().statusCode(400).body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     void deletePolicyAndPolicyStore_areIdempotentForRetries() {
         String store = createStore("OFF", "DISABLED");
         String policy = givenAws("CreatePolicy", objectJson(Map.of(
@@ -369,6 +440,15 @@ class VerifiedPermissionsIntegrationTest {
                                 "tokenSelection", Map.of("accessTokenOnly", Map.of(
                                         "audiences", emptyAudiences)))))))
                 .then().statusCode(400).body("__type", containsString("ValidationException"));
+    }
+
+    /** A Cognito call signed for the same account as the policy store, as one real deployment makes them. */
+    private static JsonNode cognito(String action, String body) throws JsonProcessingException {
+        String response = given().contentType("application/x-amz-json-1.1")
+                .header("Authorization", AUTH.replace("/verifiedpermissions/", "/cognito-idp/"))
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action).body(body)
+                .when().post("/").then().statusCode(200).extract().asString();
+        return new ObjectMapper().readTree(response);
     }
 
     private static String objectJson(Object value) {

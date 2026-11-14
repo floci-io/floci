@@ -136,7 +136,7 @@ class CurIntegrationTest {
                 "\"ReportName\":\"modify-target\"," +
                 "\"TimeUnit\":\"MONTHLY\",\"Format\":\"Parquet\",\"Compression\":\"Parquet\"," +
                 "\"AdditionalSchemaElements\":[\"RESOURCES\"]," +
-                "\"S3Bucket\":\"new-bucket\",\"S3Region\":\"us-east-1\"" +
+                "\"S3Bucket\":\"new-bucket\",\"S3Prefix\":\"reports/\",\"S3Region\":\"us-east-1\"" +
                 "}}";
         given().contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AWSOrigamiServiceGatewayService.ModifyReportDefinition")
@@ -155,7 +155,7 @@ class CurIntegrationTest {
                 "\"ReportName\":\"missing-report\"," +
                 "\"TimeUnit\":\"DAILY\",\"Format\":\"Parquet\",\"Compression\":\"Parquet\"," +
                 "\"AdditionalSchemaElements\":[]," +
-                "\"S3Bucket\":\"valid-bucket\",\"S3Region\":\"us-east-1\"}}";
+                "\"S3Bucket\":\"valid-bucket\",\"S3Prefix\":\"reports/\",\"S3Region\":\"us-east-1\"}}";
         given().contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AWSOrigamiServiceGatewayService.ModifyReportDefinition")
             .header("Authorization", AUTH).body(modify)
@@ -263,7 +263,7 @@ class CurIntegrationTest {
                 "\"ReportName\":\"csv-attempt\"," +
                 "\"TimeUnit\":\"DAILY\",\"Format\":\"textORcsv\",\"Compression\":\"GZIP\"," +
                 "\"AdditionalSchemaElements\":[]," +
-                "\"S3Bucket\":\"valid-bucket\",\"S3Region\":\"us-east-1\"}}";
+                "\"S3Bucket\":\"valid-bucket\",\"S3Prefix\":\"reports/\",\"S3Region\":\"us-east-1\"}}";
         given().contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AWSOrigamiServiceGatewayService.PutReportDefinition")
             .header("Authorization", AUTH).body(body)

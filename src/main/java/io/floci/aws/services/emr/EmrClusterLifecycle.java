@@ -1,6 +1,7 @@
 package io.floci.aws.services.emr;
 
 import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrStep;
@@ -242,12 +243,14 @@ final class EmrClusterLifecycle {
     /**
      * The bootstrap actions a cluster ran for real have ended: when {@code failureCode} is null they all
      * succeeded and left {@code image}, which its steps run in, and the cluster is ready to run them;
-     * otherwise the cluster ends, for {@code failureCode} and {@code message}.
+     * otherwise the cluster ends, for {@code failureCode} and {@code message}, with {@code errorDetails} as
+     * its Status.ErrorDetails.
      */
-    void bootstrapEnded(EmrCluster cluster, String image, String failureCode, String message, Instant at,
-                        String region) {
+    void bootstrapEnded(EmrCluster cluster, String image, String failureCode, String message,
+                        List<EmrErrorDetail> errorDetails, Instant at, String region) {
         cluster.setBootstrapInContainer(false);
         if (failureCode != null) {
+            cluster.setErrorDetails(new ArrayList<>(errorDetails));
             terminate(cluster, failureCode, message, at, region);
             return;
         }

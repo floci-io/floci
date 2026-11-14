@@ -4187,7 +4187,8 @@ public interface EmulatorConfig {
          * Optional registry/repository base for every Docker image Floci launches.
          * When set, images such as {@code postgres:16-alpine} and
          * {@code public.ecr.aws/docker/library/ubuntu:24.04} resolve under this
-         * base before the container is created.
+         * base before the container is created. An image in a registry on the Docker
+         * host's loopback, Floci's own ECR among them, is launched as it is.
          */
         Optional<String> imageRegistryBase();
 

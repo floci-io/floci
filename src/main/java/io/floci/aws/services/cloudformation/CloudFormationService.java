@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -64,7 +65,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -863,10 +866,38 @@ public class CloudFormationService implements ResourceProvider {
      * any update, which converges it and records them for the next time.
      */
     private ObjectNode comparedDeployedTemplate(Stack stack, JsonNode deployedTemplate, String region) {
-        Map<String, String> digests = stack.dynamicReferenceDigestsSnapshot();
-        return comparedTemplate(deployedTemplate, deployedParameters(stack), stack, region,
-                value -> digests.getOrDefault(value, "unrecorded " + UUID.randomUUID()));
+        return comparedDeployedTemplate(stack, deployedTemplate, region, new HashSet<>());
     }
+
+    /**
+     * As above, collecting into {@code noEvidenceForms} every form made up for a reference the stack
+     * holds no digest for. They are told apart by identity, never by their text, which a value could
+     * share.
+     */
+    private ObjectNode comparedDeployedTemplate(Stack stack, JsonNode deployedTemplate, String region,
+                                                Set<String> noEvidenceForms) {
+        Map<String, String> digests = stack.dynamicReferenceDigestsSnapshot();
+        return comparedTemplate(deployedTemplate, deployedParameters(stack), stack, region, value -> {
+            String digest = digests.get(value);
+            // A digest of "unresolvable" is what an older record may hold; it is no evidence either.
+            if (digest == null || digest.startsWith(UNRESOLVABLE_PREFIX)) {
+                digest = UNRECORDED_DIGEST_PREFIX + UUID.randomUUID();
+                noEvidenceForms.add(digest);
+            }
+            return digest;
+        });
+    }
+
+    /**
+     * Starts the compared form made up for a dynamic reference whose value the stack never recorded
+     * (or could not resolve when it recorded). Such a form differs from any update by construction,
+     * so it is no evidence about the old value. It only builds the text; the forms are recognised by
+     * the set {@code comparedDeployedTemplate} fills.
+     */
+    private static final String UNRECORDED_DIGEST_PREFIX = "unrecorded ";
+
+    /** Starts the compared form made up for a dynamic reference that did not resolve. */
+    private static final String UNRESOLVABLE_PREFIX = "unresolvable ";
 
     /** The parameter values the stack's template was deployed with. */
     private static Map<String, String> deployedParameters(Stack stack) {
@@ -880,13 +911,22 @@ public class CloudFormationService implements ResourceProvider {
      * master credentials with them.
      */
     private UnaryOperator<String> currentDynamicReferences(Stack stack, String region) {
+        return currentDynamicReferences(stack, region, new HashSet<>());
+    }
+
+    /** As above, collecting into {@code unresolvable} the forms made up for references that did not resolve. */
+    private UnaryOperator<String> currentDynamicReferences(Stack stack, String region, Set<String> unresolvable) {
         return value -> {
             try {
                 return dynamicReferenceDigest(stack, dynamicReferences.resolveDynamicReferences(value, region, true));
             } catch (AwsException | IllegalStateException e) {
                 // What CfnDynamicReferences cannot resolve fails the operation when it runs; until
-                // then it is something to change.
-                return "unresolvable " + UUID.randomUUID();
+                // then it is something to change. Only the reference text is logged, never a value.
+                LOG.warnv("Stack {0}: a dynamic reference did not resolve ({1}): {2}", stack.getStackName(),
+                        String.join(", ", CfnDynamicReferences.referencesIn(value)), e.getMessage());
+                String form = UNRESOLVABLE_PREFIX + UUID.randomUUID();
+                unresolvable.add(form);
+                return form;
             }
         };
     }
@@ -898,18 +938,22 @@ public class CloudFormationService implements ResourceProvider {
      * its last deployment recorded; a reference the template no longer has is dropped.
      */
     private void recordDynamicReferenceDigests(Stack stack, JsonNode template, String region) {
-        UnaryOperator<String> current = currentDynamicReferences(stack, region);
+        Set<String> unresolvable = new HashSet<>();
+        UnaryOperator<String> current = currentDynamicReferences(stack, region, unresolvable);
         Map<String, String> digests = new LinkedHashMap<>();
         try {
             comparedTemplate(template, deployedParameters(stack), stack, region, value -> {
                 String digest = current.apply(value);
-                digests.put(value, digest);
+                // A reference that did not resolve is recorded as nothing, so it reads as unrecorded.
+                if (!unresolvable.contains(digest)) {
+                    digests.put(value, digest);
+                }
                 return digest;
             });
         } catch (AwsException e) {
             // Nothing recorded compares as a change, which the next update converges and records.
-            LOG.debugv("Recording no dynamic reference values for stack {0}: {1}", stack.getStackName(),
-                    e.getMessage());
+            LOG.warnv("Stack {0}: recording no dynamic reference digests; the template did not resolve: {1}",
+                    stack.getStackName(), e.getMessage());
             digests.clear();
         }
         stack.replaceDynamicReferenceDigests(digests);
@@ -1116,11 +1160,18 @@ public class CloudFormationService implements ResourceProvider {
             // template that cannot be brought to that form falls back to its definitions as written
             // and the parameters and conditions they read.
             JsonNode[] compared = new JsonNode[2];
+            Set<String> currentReferenceForms = new HashSet<>();
+            Set<String> noEvidenceForms = new HashSet<>();
             if (oldTemplate != null) {
                 try {
-                    compared[0] = comparedDeployedTemplate(stack, oldTemplate, region).path("Resources");
-                    compared[1] = comparedTemplate(newTemplate, newResolvedParams, stack, region,
-                            currentDynamicReferences(stack, region)).path("Resources");
+                    compared[0] = comparedDeployedTemplate(stack, oldTemplate, region, noEvidenceForms)
+                            .path("Resources");
+                    UnaryOperator<String> currentReferences = currentDynamicReferences(stack, region);
+                    compared[1] = comparedTemplate(newTemplate, newResolvedParams, stack, region, value -> {
+                        String form = currentReferences.apply(value);
+                        currentReferenceForms.add(form);
+                        return form;
+                    }).path("Resources");
                 } catch (AwsException e) {
                     // A condition or a mapping the comparison cannot resolve fails the execution
                     // with its own error; the preview diffs the definitions as written until then.
@@ -1129,6 +1180,9 @@ public class CloudFormationService implements ResourceProvider {
                 }
             }
 
+            ReplacementDecider replacementDecider = new ReplacementDecider(stack, region, compared, oldResolvedParams,
+                    newResolvedParams, oldConditions, newConditions, oldTemplate, newTemplate, changedParams,
+                    changedConditions, currentReferenceForms, noEvidenceForms);
             Set<String> replacedResourceIds = new HashSet<>();
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
@@ -1164,7 +1218,7 @@ public class CloudFormationService implements ResourceProvider {
                         || "AWS::CloudFormation::Stack".equals(resourceType))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     boolean replacement = typeChanged
-                            || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions);
+                            || replacementDecider.decide(resourceType, logicalId, oldDef, newDef);
                     if (replacement) {
                         replacedResourceIds.add(logicalId);
                     }
@@ -1175,7 +1229,7 @@ public class CloudFormationService implements ResourceProvider {
                     }
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
-                            replacement ? "True" : "False"));
+                            replacement ? REPLACEMENT_TRUE : REPLACEMENT_FALSE));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -1248,44 +1302,33 @@ public class CloudFormationService implements ResourceProvider {
                             JsonNode oldDef = oldResources.get(logicalId);
                             boolean typeChanged = oldDef != null && !oldDef.path("Type").asText().equals(resourceType);
 
-                            boolean createOnlyReferencesReplaced = false;
                             JsonNode props = newDef.path("Properties");
-                            if (props != null && props.isObject()) {
-                                if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
-                                    for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props)) {
-                                        Set<String> fieldDeps = new LinkedHashSet<>();
-                                        collectDependencies(subtree, allResourceIds, fieldDeps, newConditions);
-                                        if (fieldDeps.stream().anyMatch(replacedResourceIds::contains)) {
-                                            createOnlyReferencesReplaced = true;
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
-                                        String field = it.next();
-                                        if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
-                                            Set<String> fieldDeps = new LinkedHashSet<>();
-                                            collectDependencies(props.get(field), allResourceIds, fieldDeps, newConditions);
-                                            if (fieldDeps.stream().anyMatch(replacedResourceIds::contains)) {
-                                                createOnlyReferencesReplaced = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            boolean createOnlyReferencesReplaced = anyCreateOnlyValue(resourceType, props, subtree -> {
+                                Set<String> fieldDeps = new LinkedHashSet<>();
+                                collectDependencies(subtree, allResourceIds, fieldDeps, newConditions);
+                                return fieldDeps.stream().anyMatch(replacedResourceIds::contains);
+                            });
 
                             boolean replacement = typeChanged
-                                    || (oldDef != null && requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions))
+                                    || (oldDef != null && replacementDecider.decide(resourceType, logicalId, oldDef, newDef))
                                     || createOnlyReferencesReplaced;
+                            // A create-only value that reads an attribute the update changes in place may
+                            // or may not move: only the update knows, as AWS's Conditional says.
+                            boolean conditional = !replacement && anyCreateOnlyValue(resourceType, props,
+                                    subtree -> inPlaceChangedAttributes.entrySet().stream().anyMatch(entry ->
+                                            referencesAnyAttribute(subtree, entry.getKey(), entry.getValue(),
+                                                    newConditions, dependencyEngine)));
+                            String replacementState = replacement ? REPLACEMENT_TRUE
+                                    : conditional ? REPLACEMENT_CONDITIONAL : REPLACEMENT_FALSE;
                             if (replacement && replacedResourceIds.add(logicalId)) {
                                 anyNewChange = true;
                             }
-                            if (!alreadyChangedIds.contains(logicalId)) {
+                            if (alreadyChangedIds.contains(logicalId)) {
+                                raiseReplacement(changes, logicalId, replacementState);
+                            } else {
                                 alreadyChangedIds.add(logicalId);
                                 changes.add(new ResourceChange("Modify", logicalId,
-                                        resourcePhysicalId(stack, logicalId), resourceType,
-                                        replacement ? "True" : "False"));
+                                        resourcePhysicalId(stack, logicalId), resourceType, replacementState));
                                 anyNewChange = true;
                                 Set<String> attrs = expectedChangedAttributes(resourceType, oldDef, newDef);
                                 if (!attrs.isEmpty()) {
@@ -1304,6 +1347,47 @@ public class CloudFormationService implements ResourceProvider {
                     "Unable to compute changes for change set " + cs.getChangeSetName()
                             + ": " + e.getMessage(), 400);
         }
+    }
+
+    /** The values of {@code ResourceChange.Replacement} that AWS defines. */
+    private static final String REPLACEMENT_TRUE = "True";
+    private static final String REPLACEMENT_FALSE = "False";
+    private static final String REPLACEMENT_CONDITIONAL = "Conditional";
+
+    /**
+     * Raises the Replacement of a change already in the list when a later pass of the dependency
+     * walk proves more: False to Conditional or True, Conditional to True. It never lowers one.
+     */
+    private static void raiseReplacement(List<ResourceChange> changes, String logicalId, String replacement) {
+        for (int i = 0; i < changes.size(); i++) {
+            ResourceChange change = changes.get(i);
+            if (change.logicalResourceId().equals(logicalId)
+                    && replacementRank(replacement) > replacementRank(change.replacement())) {
+                changes.set(i, new ResourceChange(change.action(), change.logicalResourceId(),
+                        change.physicalResourceId(), change.resourceType(), replacement));
+            }
+        }
+    }
+
+    private static int replacementRank(String replacement) {
+        return REPLACEMENT_TRUE.equals(replacement) ? 2 : REPLACEMENT_CONDITIONAL.equals(replacement) ? 1 : 0;
+    }
+
+    /** Whether the test holds for any create-only value of the properties: a registry pointer, or a table field. */
+    private static boolean anyCreateOnlyValue(String resourceType, JsonNode props, Predicate<JsonNode> test) {
+        if (props == null || !props.isObject()) {
+            return false;
+        }
+        if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
+            return CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props).stream().anyMatch(test);
+        }
+        for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
+            String field = it.next();
+            if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field) && test.test(props.get(field))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** True if a resource's definition references any of the given (changed) parameter names. */
@@ -1334,6 +1418,239 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return false;
+    }
+
+    /**
+     * Decides whether a modified resource's change replaces it, for the change set. For a type in the
+     * create-only table the values decide, not the template text: both property sets are resolved
+     * against the state the stack is in (parameters, conditions, mappings, imports, the ids and
+     * attributes of its resources), so {@code !Ref App} and {@code !Join ['', [!Ref App]]} are one
+     * value. A dynamic reference is compared through the forms the diff kept, which hold a digest
+     * of the value it resolved to when the stack was last deployed. The template text is the answer only where a
+     * value cannot be resolved. A value that reads a resource replaced in the same update has no id
+     * to compare yet, and stays a replacement through the dependency pass of the diff.
+     *
+     * <p>A dynamic reference on either side of a create-only property sends the decision to the
+     * compared forms. Those hold an HMAC digest of what a reference resolved to, never the value,
+     * so a plain value on the other side is digested under the same key before the two are compared.
+     * A form made up for a reference whose old value the stack never recorded is no evidence about
+     * it (it is recognised by identity, not by its text): that property alone is decided by its
+     * template text, the others by the compared forms. The diff itself still reports such a resource
+     * as changed, which converges it.
+     *
+     * <p>The dependency pass marks a resource whose create-only value reads an attribute that changes
+     * in place as {@code Conditional}, as AWS does for a replacement that depends on a value known
+     * only during the update. {@code ExecuteChangeSet} then decides from the resolved values.
+     */
+    private final class ReplacementDecider {
+        private final Stack stack;
+        private final String region;
+        private final JsonNode[] compared;
+        private final Map<String, String> oldParams;
+        private final Map<String, String> newParams;
+        private final Map<String, Boolean> oldConditions;
+        private final Map<String, Boolean> newConditions;
+        private final JsonNode oldTemplate;
+        private final JsonNode newTemplate;
+        private final Set<String> changedParams;
+        private final Set<String> changedConditions;
+        /** The compared forms that stand for a resolved dynamic reference, not for a plain value. */
+        private final Set<String> referenceForms;
+        /** The compared forms of the deployed template that carry no evidence about the old value. */
+        private final Set<String> noEvidenceForms;
+        /** Logical ids whose resolution failure was logged in this computation. */
+        private final Set<String> warned = new HashSet<>();
+
+        ReplacementDecider(Stack stack, String region, JsonNode[] compared, Map<String, String> oldParams,
+                           Map<String, String> newParams, Map<String, Boolean> oldConditions,
+                           Map<String, Boolean> newConditions, JsonNode oldTemplate, JsonNode newTemplate,
+                           Set<String> changedParams, Set<String> changedConditions,
+                           Set<String> currentReferenceForms, Set<String> noEvidenceForms) {
+            this.stack = stack;
+            this.region = region;
+            this.compared = compared;
+            this.oldParams = oldParams;
+            this.newParams = newParams;
+            this.oldConditions = oldConditions;
+            this.newConditions = newConditions;
+            this.oldTemplate = oldTemplate;
+            this.newTemplate = newTemplate;
+            this.changedParams = changedParams;
+            this.changedConditions = changedConditions;
+            this.referenceForms = new HashSet<>(stack.dynamicReferenceDigestsSnapshot().values());
+            this.referenceForms.addAll(currentReferenceForms);
+            this.referenceForms.addAll(noEvidenceForms);
+            this.noEvidenceForms = noEvidenceForms;
+        }
+
+        boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
+            JsonNode oldProps = oldDef.path("Properties");
+            JsonNode newProps = newDef.path("Properties");
+            boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
+                    changedConditions);
+            if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
+                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps);
+            }
+            boolean dynamic = anyCreateOnlyValue(resourceType, oldProps, ReplacementDecider::holdsDynamicReference)
+                    || anyCreateOnlyValue(resourceType, newProps, ReplacementDecider::holdsDynamicReference);
+            Boolean resolved = resolvedChange(resourceType, logicalId, oldProps, newProps);
+            if (resolved == null) {
+                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps);
+            }
+            if (dynamic) {
+                return compared == null || compared[0] == null
+                        ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
+            }
+            return resolved;
+        }
+
+        private static boolean holdsDynamicReference(JsonNode subtree) {
+            return CfnDynamicReferences.holdsDynamicReference(subtree.toString());
+        }
+
+        /**
+         * Whether a create-only property differs, decided per property: between the compared forms
+         * (a reference's digest against a plain value's), or, where the old form carries no evidence,
+         * by the template text of that property alone.
+         */
+        private boolean comparedChanged(String resourceType, String logicalId, JsonNode oldProps,
+                                        JsonNode newProps) {
+            if (compared == null || compared[0] == null || compared[1] == null
+                    || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
+                return false;
+            }
+            JsonNode before = compared[0].path(logicalId).path("Properties");
+            JsonNode after = compared[1].path(logicalId).path("Properties");
+            if (!before.isObject() || !after.isObject()) {
+                return false;
+            }
+            JsonNode digestedBefore = digested(before);
+            JsonNode digestedAfter = digested(after);
+            for (String pointer : CfnCreateOnlyProperties.getCreateOnlyProperties(resourceType)) {
+                boolean changed = noEvidence(pointer, before)
+                        ? writtenPointerChanged(pointer, oldProps, newProps)
+                        : CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, digestedBefore, digestedAfter);
+                if (changed) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Whether the old compared form under the pointer holds a form made up for a missing digest. */
+        private boolean noEvidence(String pointer, JsonNode oldCompared) {
+            return CfnCreateOnlyProperties.subtreesAt(pointer, oldCompared).stream()
+                    .anyMatch(subtree -> holdsText(subtree, noEvidenceForms::contains));
+        }
+
+        /** The answer of the template text for one pointer, as {@code requiresReplacement} gives it for all. */
+        private boolean writtenPointerChanged(String pointer, JsonNode oldProps, JsonNode newProps) {
+            return CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, oldProps, newProps)
+                    || CfnCreateOnlyProperties.subtreesAt(pointer, newProps).stream().anyMatch(subtree ->
+                            referencesAnyParameter(subtree, changedParams)
+                                    || referencesAnyCondition(subtree, changedConditions));
+        }
+
+        private static boolean holdsText(JsonNode node, Predicate<String> test) {
+            if (node.isTextual()) {
+                return test.test(node.textValue());
+            }
+            for (JsonNode child : node) {
+                if (holdsText(child, test)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** The node with every plain text value replaced by the digest the stack would keep for it. */
+        private JsonNode digested(JsonNode node) {
+            if (node.isTextual()) {
+                return referenceForms.contains(node.textValue()) ? node
+                        : TextNode.valueOf(dynamicReferenceDigest(stack, node.textValue()));
+            }
+            if (node.isObject()) {
+                ObjectNode out = objectMapper.createObjectNode();
+                node.fields().forEachRemaining(e -> out.set(e.getKey(), digested(e.getValue())));
+                return out;
+            }
+            if (node.isArray()) {
+                ArrayNode out = objectMapper.createArrayNode();
+                node.forEach(child -> out.add(digested(child)));
+                return out;
+            }
+            return node;
+        }
+
+        /** Whether a create-only value differs once both sides are resolved; null when one cannot be. */
+        private Boolean resolvedChange(String resourceType, String logicalId, JsonNode oldProps,
+                                       JsonNode newProps) {
+            try {
+                Map<String, String> physicalIds = new HashMap<>();
+                Map<String, Map<String, String>> attributes = new HashMap<>();
+                for (StackResource resource : stack.resourcesSnapshot().values()) {
+                    if (resource.getPhysicalId() != null) {
+                        physicalIds.put(resource.getLogicalId(), resource.getPhysicalId());
+                        attributes.put(resource.getLogicalId(), resource.getAttributes());
+                    }
+                }
+                String accountId = ownerAccount(stack);
+                return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
+                        engineOver(accountId, oldParams, physicalIds, attributes, oldConditions, oldTemplate)
+                                .resolveNode(oldProps),
+                        engineOver(accountId, newParams, physicalIds, attributes, newConditions, newTemplate)
+                                .resolveNode(newProps));
+            } catch (RuntimeException e) {
+                if (warned.add(logicalId)) {
+                    LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
+                            + "the preview falls back to the template text: {2}", logicalId, resourceType,
+                            e.getMessage());
+                }
+                return null;
+            }
+        }
+
+        private CloudFormationTemplateEngine engineOver(String accountId, Map<String, String> params,
+                                                        Map<String, String> physicalIds,
+                                                        Map<String, Map<String, String>> attributes,
+                                                        Map<String, Boolean> conditions, JsonNode template) {
+            return new CloudFormationTemplateEngine(accountId, region, stack.getStackName(), stack.getStackId(),
+                    params, physicalIds, attributes, conditions, templateMappings(template), objectMapper,
+                    name -> exports.get(accountExportKey(accountId, exportKey(region, name))), value -> value);
+        }
+    }
+
+    /**
+     * Whether a create-only property resolves differently now than the previous template resolved
+     * to under the previous deployment: its own parameters, conditions and mappings, and the ids
+     * and attributes the update started from ({@code previous}). The preview cannot see this for a
+     * resource the update itself changed after the preview was computed. A value that cannot be
+     * resolved, or a previous deployment that is not known ({@code previous} null), is no evidence
+     * of a change.
+     */
+    private static boolean resolvedCreateOnlyChanged(String resourceType, String logicalId, JsonNode priorProps,
+                                                     JsonNode props, CloudFormationTemplateEngine current,
+                                                     CloudFormationTemplateEngine previous) {
+        if (previous == null || priorProps == null || props == null
+                || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
+            return false;
+        }
+        boolean dynamic = false;
+        for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props)) {
+            String text = subtree.toString();
+            dynamic |= text.contains("\"Ref\"") || text.contains("\"Fn::");
+        }
+        if (!dynamic) {
+            return false;
+        }
+        try {
+            return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
+                    previous.resolveNode(priorProps), current.resolveNode(props));
+        } catch (RuntimeException e) {
+            LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
+                    + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
+            return false;
+        }
     }
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
@@ -2352,12 +2669,20 @@ public class CloudFormationService implements ResourceProvider {
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
         try {
             Map<String, JsonNode[]> comparedProperties = new HashMap<>();
+            Set<String> replacedResourceIds = new HashSet<>();
             Set<String> changedResourceIds = isCreate
                     ? Set.of()
-                    : changedResourceIds(stack, templateBody, params, region, comparedProperties);
-            JsonNode previousResources = isCreate
-                    ? objectMapper.missingNode()
-                    : previousResources(stack, previousState, region, accountId);
+                    : changedResourceIds(stack, templateBody, params, region, comparedProperties,
+                            replacedResourceIds);
+            // The previous deployment: its template, parameters (as the change-set preview takes
+            // them: raw ones for a stack persisted before resolvedParameters existed) and conditions.
+            Map<String, String> previousParams = previousState.deployedParameters();
+            JsonNode parsedPrevious = isCreate ? objectMapper.missingNode()
+                    : parsePreviousTemplate(stack, previousState.templateBody());
+            Map<String, Boolean> previousConditions = parsedPrevious.isMissingNode() ? null
+                    : previousConditions(stack, parsedPrevious, previousParams, region, accountId);
+            JsonNode previousTemplate = previousConditions == null ? objectMapper.missingNode() : parsedPrevious;
+            JsonNode previousResources = previousResources(previousTemplate, previousConditions);
             JsonNode template = parseTemplate(templateBody);
             stack.setOriginalTemplateBody(templateBody);
 
@@ -2399,8 +2724,7 @@ public class CloudFormationService implements ResourceProvider {
             Map<String, Boolean> conditions = resolveConditions(template, resolvedParams, stack, region, accountId);
 
             // Mappings
-            Map<String, JsonNode> mappings = new HashMap<>();
-            template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+            Map<String, JsonNode> mappings = templateMappings(template);
 
             // Process resources in order
             JsonNode resources = template.path("Resources");
@@ -2421,6 +2745,22 @@ public class CloudFormationService implements ResourceProvider {
                     resourceAttrs.put(r.getLogicalId(), r.getAttributes());
                 }
             }
+
+            // The state the update started from, so a resolved value can be compared with what the
+            // previous template resolved to while the loop below changes ids and attributes.
+            Map<String, String> startPhysicalIds = new LinkedHashMap<>(physicalIds);
+            Map<String, Map<String, String>> startResourceAttrs = new LinkedHashMap<>();
+            resourceAttrs.forEach((id, attrs) -> startResourceAttrs.put(id, new HashMap<>(attrs)));
+
+            BiFunction<Map<String, String>, Map<String, Map<String, String>>, CloudFormationTemplateEngine> engineFor =
+                    (ids, attributes) -> deploymentEngine(stack, region, accountId, resolvedParams, ids, attributes,
+                            conditions, mappings, parameterTypes, resources);
+            // What the previous template resolved to under the deployment it ran in, over the state
+            // the update started from; null when that deployment is not known.
+            CloudFormationTemplateEngine previousEngine = previousTemplate.isMissingNode() ? null
+                    : deploymentEngine(stack, region, accountId, previousParams, startPhysicalIds,
+                            startResourceAttrs, previousConditions, templateMappings(previousTemplate),
+                            parameterTypes(previousTemplate), previousTemplate.path("Resources"));
 
             StackResource failedResource = null;
             if (resources.isObject()) {
@@ -2450,16 +2790,7 @@ public class CloudFormationService implements ResourceProvider {
                     String type = resDef.path("Type").asText();
                     String deletionPolicy = resDef.path("DeletionPolicy").asText(null);
 
-                    CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine(
-                            accountId, region, stack.getStackName(),
-                            stack.getStackId(), resolvedParams, physicalIds, resourceAttrs, conditions, mappings, objectMapper,
-                            name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
-                            value -> dynamicReferences.resolveDynamicReferences(value, region, false),
-                            (name, output, outputRegion, roleArn) ->
-                                    resolveStackOutput(accountId, name, output, outputRegion, roleArn),
-                            parameterTypes,
-                            (id, attribute, value) -> dispatcher.attributeValue(
-                                    resources.path(id).path("Type").asText(), attribute, value));
+                    CloudFormationTemplateEngine engine = engineFor.apply(physicalIds, resourceAttrs);
                     // AWS::NoValue removes the property, wherever the template puts it, so no
                     // provisioner sees it: not a member, a list item or a whole property.
                     JsonNode props = engine.omitNoValue(resDef.path("Properties"));
@@ -2507,11 +2838,19 @@ public class CloudFormationService implements ResourceProvider {
                                 ? previousDefinition.path("Properties") : null;
                         JsonNode provisionProps = props.isMissingNode() ? null : props;
                         JsonNode[] comparedForms = comparedProperties.get(logicalId);
+                        boolean updating = ProvisionContext.isUpdate(resource.getPhysicalId());
+                        // The preview's Replacement, or a create-only value that resolves differently now
+                        // than it did when the stack was last updated: a resource this update changed
+                        // after the preview was computed (a GetAtt of a resource whose attributes moved).
+                        boolean replaces = replacedResourceIds.contains(logicalId)
+                                || (updating && resolvedCreateOnlyChanged(type, logicalId, priorProps, provisionProps, engine,
+                                        previousEngine));
                         PropertyChanges changes = PropertyChanges.between(type,
-                                ProvisionContext.isUpdate(resource.getPhysicalId()), priorProps,
+                                updating, priorProps,
                                 provisionProps,
                                 comparedForms != null ? comparedForms[0] : null,
-                                comparedForms != null ? comparedForms[1] : null);
+                                comparedForms != null ? comparedForms[1] : null,
+                                updating ? replaces : null);
                         resource = dispatcher.provision(logicalId, type, provisionProps,
                                 engine, region, accountId, stack.getStackName(),
                                 resource.getPhysicalId(), resource.getAttributes(),
@@ -2784,10 +3123,13 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * The ids of the resources an update adds or modifies. {@code comparedProperties} receives, for
      * the modified ones the diff compared, the {@code Properties} of the compared forms, previous
-     * then current; see the change-set diff it comes from.
+     * then current; see the change-set diff it comes from. {@code replacedIds} receives the modified
+     * ones whose change says {@code Replacement: True}, so an update replaces exactly what the
+     * preview said it would.
      */
     private Set<String> changedResourceIds(Stack stack, String templateBody, Map<String, String> params,
-                                           String region, Map<String, JsonNode[]> comparedProperties) {
+                                           String region, Map<String, JsonNode[]> comparedProperties,
+                                           Set<String> replacedIds) {
         ChangeSet changeSet = new ChangeSet();
         changeSet.setStackName(stack.getStackName());
         changeSet.setStackId(stack.getStackId());
@@ -2799,6 +3141,9 @@ public class CloudFormationService implements ResourceProvider {
         for (ResourceChange change : computeChangeSetChanges(changeSet, region, comparedProperties)) {
             if ("Add".equals(change.action()) || "Modify".equals(change.action())) {
                 changedResourceIds.add(change.logicalResourceId());
+                if (REPLACEMENT_TRUE.equals(change.replacement())) {
+                    replacedIds.add(change.logicalResourceId());
+                }
             }
         }
         return changedResourceIds;
@@ -3472,34 +3817,74 @@ public class CloudFormationService implements ResourceProvider {
      * was never applied and is left out. Missing when there is no previous template, and when it no
      * longer parses: the update then proceeds as if nothing had been declared.
      */
-    private JsonNode previousResources(Stack stack, StackUpdateSnapshot previousState, String region,
-                                       String accountId) {
-        if (previousState.templateBody() == null) {
+    private JsonNode previousResources(JsonNode previousTemplate, Map<String, Boolean> conditions) {
+        if (previousTemplate.isMissingNode()) {
+            return previousTemplate;
+        }
+        ObjectNode resources = objectMapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> entry : previousTemplate.path("Resources").properties()) {
+            JsonNode definition = entry.getValue();
+            ObjectNode applied = resources.putObject(entry.getKey());
+            applied.set("Type", definition.path("Type"));
+            if (definition.path("Properties").isObject()) {
+                applied.set("Properties", appliedProperties(definition.path("Properties"), conditions));
+            }
+        }
+        return resources;
+    }
+
+    /** The previous template, or a missing node when the stack has none or it no longer parses. */
+    private JsonNode parsePreviousTemplate(Stack stack, String body) {
+        if (body == null) {
             return objectMapper.missingNode();
         }
         try {
-            JsonNode previousTemplate = parseTemplate(previousState.templateBody());
-            // As the change-set preview does: raw parameters for a stack persisted before
-            // resolvedParameters existed.
-            Map<String, String> previousParams = previousState.resolvedParameters().isEmpty()
-                    ? previousState.parameters() : previousState.resolvedParameters();
-            Map<String, Boolean> conditions = resolveConditions(previousTemplate, previousParams, stack, region,
-                    accountId);
-            ObjectNode resources = objectMapper.createObjectNode();
-            for (Map.Entry<String, JsonNode> entry : previousTemplate.path("Resources").properties()) {
-                JsonNode definition = entry.getValue();
-                ObjectNode applied = resources.putObject(entry.getKey());
-                applied.set("Type", definition.path("Type"));
-                if (definition.path("Properties").isObject()) {
-                    applied.set("Properties", appliedProperties(definition.path("Properties"), conditions));
-                }
-            }
-            return resources;
+            return parseTemplate(body);
         } catch (Exception e) {
             LOG.warnv("Previous template of stack {0} could not be evaluated ({1}); its updated resources see no prior properties",
                     stack.getStackName(), e.getMessage());
             return objectMapper.missingNode();
         }
+    }
+
+    /** The previous template's conditions under its own parameters; null when they do not evaluate. */
+    private Map<String, Boolean> previousConditions(Stack stack, JsonNode previousTemplate,
+                                                    Map<String, String> previousParams, String region,
+                                                    String accountId) {
+        try {
+            return resolveConditions(previousTemplate, previousParams, stack, region, accountId);
+        } catch (Exception e) {
+            LOG.warnv("Conditions of the previous template of stack {0} could not be resolved ({1}); its updated "
+                    + "resources see no prior properties", stack.getStackName(), e.getMessage());
+            return null;
+        }
+    }
+
+    private static Map<String, JsonNode> templateMappings(JsonNode template) {
+        Map<String, JsonNode> mappings = new HashMap<>();
+        if (template != null) {
+            template.path("Mappings").fields().forEachRemaining(e -> mappings.put(e.getKey(), e.getValue()));
+        }
+        return mappings;
+    }
+
+    /** An engine for one deployment's template: its parameters, conditions, mappings and resource types. */
+    private CloudFormationTemplateEngine deploymentEngine(Stack stack, String region, String accountId,
+                                                          Map<String, String> params, Map<String, String> ids,
+                                                          Map<String, Map<String, String>> attributes,
+                                                          Map<String, Boolean> conditions,
+                                                          Map<String, JsonNode> mappings,
+                                                          Map<String, String> parameterTypes, JsonNode resources) {
+        return new CloudFormationTemplateEngine(
+                accountId, region, stack.getStackName(),
+                stack.getStackId(), params, ids, attributes, conditions, mappings, objectMapper,
+                name -> exports.get(accountExportKey(accountId, exportKey(region, name))),
+                value -> dynamicReferences.resolveDynamicReferences(value, region, false),
+                (name, output, outputRegion, roleArn) ->
+                        resolveStackOutput(accountId, name, output, outputRegion, roleArn),
+                parameterTypes,
+                (id, attribute, value) -> dispatcher.attributeValue(
+                        resources.path(id).path("Type").asText(), attribute, value));
     }
 
     /**

@@ -232,19 +232,22 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * {@code StartExecution} runs the machine before a Step Functions Local test case's {@code #}, so a grant on
-     * that machine allows a start that names a test case, and a deny on it holds.
+     * A Step Functions Local {@code <stateMachineArn>#<test case>} is checked as given: it is no ARN AWS has, and
+     * nothing botocore or the Service Reference says reads it otherwise. So a grant on the machine alone does not
+     * reach a start naming a test case, a grant covering it does, and a deny on the machine alone does not apply.
      */
     @Test
-    void aStateMachinesTestCaseIsCheckedOnTheMachineItRuns() {
+    void aStateMachinesTestCaseIsCheckedAsGiven() {
         String arn = createStateMachine("res-tc-" + suffix());
         User user = user("res-tc");
         user.policy(allowOn("states:StartExecution", arn));
+        refusedJson(startExecution(user, arn + "#"), "states:StartExecution");
+        user.policy(allowOn("states:StartExecution", arn + "*"));
         startExecution(user, arn + "#").statusCode(200);
 
         user.policy(allowOn("states:StartExecution", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"states:StartExecution\","
                 + "\"Resource\":\"" + arn + "\"}");
-        refusedJson(startExecution(user, arn + "#"), "states:StartExecution");
+        startExecution(user, arn + "#").statusCode(200);
     }
 
     /**
@@ -867,11 +870,12 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * A build is checked on its project, which its id names before its {@code :}, as CodeBuild authorizes builds,
-     * and a project on the ARN its name gives, a list naming it by name and by ARN alike.
+     * A build is checked on the project CodeBuild holds it under, and one it holds none of on {@code *}: nothing
+     * botocore or the Service Reference says gives a build id's project. A project is checked on the ARN its name
+     * gives, a list naming it by name and by ARN alike.
      */
     @Test
-    void aBuildIsCheckedOnTheProjectItsIdNames() {
+    void aBuildIsCheckedOnTheProjectItIsHeldUnder() {
         String project = "res-project-" + suffix();
         String arn = adminJson("codebuild", "CodeBuild_20161006.CreateProject").body("{\"name\":\"" + project
                 + "\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},\"artifacts\":{\"type\":"
@@ -887,12 +891,14 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + allowOn("codebuild:StopBuild", arn));
         codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + project + "\"]}").statusCode(200);
         codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + project + "\",\"" + arn + "\"]}").statusCode(200);
-        codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}").statusCode(200);
-        refusedJson(codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\",\"" + project + "-other:1\"]}"),
-                "codebuild:BatchGetBuilds");
-        codeBuild(user, "StopBuild", "{\"id\":\"" + project + ":1\"}").statusCode(400)
+        // CodeBuild holds no build of these ids, so none names a project and each request is checked on *.
+        refusedJson(codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}"), "codebuild:BatchGetBuilds");
+        refusedJson(codeBuild(user, "StopBuild", "{\"id\":\"" + project + ":1\"}"), "codebuild:StopBuild");
+        User any = user("res-build-any");
+        any.policy(allowOn("codebuild:BatchGetBuilds", "*") + "," + allowOn("codebuild:StopBuild", "*"));
+        codeBuild(any, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}").statusCode(200);
+        codeBuild(any, "StopBuild", "{\"id\":\"" + project + ":1\"}").statusCode(400)
                 .body(containsString("ResourceNotFoundException"));
-        refusedJson(codeBuild(user, "StopBuild", "{\"id\":\"" + project + "-other:1\"}"), "codebuild:StopBuild");
     }
 
     /** A Managed Service for Apache Flink application is checked on the ARN its name gives. */
@@ -942,21 +948,35 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * An Athena catalog read is checked on the catalog its {@code CatalogName} names and on {@code AwsDataCatalog},
-     * the Glue Data Catalog Floci reads whichever it names, so a grant on another catalog alone does not reach it.
+     * An Athena catalog read is checked on the catalog its {@code CatalogName} names, and Floci reads the metadata of
+     * none but the account's Glue Data Catalog: a catalog of another type is refused, so a grant on it does not reach
+     * the Glue data, nor does one on a Glue catalog reach {@code AwsDataCatalog}'s grant.
      */
     @Test
-    void aCatalogReadIsCheckedOnTheGlueCatalogFlociReads() {
+    void aCatalogReadIsCheckedOnTheCatalogItNamesAndReadsNoOther() {
         String catalogs = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/";
-        User both = user("res-catalogs");
-        both.policy(allowOn("athena:ListDatabases", catalogs + "AwsDataCatalog") + ","
-                + allowOn("athena:ListDatabases", catalogs + "res-allowed"));
-        send(both, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-allowed\"}").statusCode(200);
-        refusedJson(send(both, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-other\"}"),
+        String glue = "res-glue-" + suffix();
+        String lambda = "res-lambda-" + suffix();
+        for (String catalog : List.of("{\"Name\":\"" + glue + "\",\"Type\":\"GLUE\",\"Parameters\":{\"catalog-id\":\""
+                        + ACCOUNT + "\"}}",
+                "{\"Name\":\"" + lambda + "\",\"Type\":\"LAMBDA\",\"Parameters\":{\"function\":\"arn:aws:lambda:"
+                        + REGION + ":" + ACCOUNT + ":function:meta\"}}")) {
+            adminJson("athena", "AmazonAthena.CreateDataCatalog").body(catalog).post("/").then().statusCode(200);
+        }
+        for (String name : List.of(glue, lambda)) {
+            cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteDataCatalog")
+                    .body("{\"Name\":\"" + name + "\"}").post("/"));
+        }
+        User user = user("res-catalogs");
+        user.policy(allowOn("athena:ListDatabases", catalogs + glue) + ","
+                + allowOn("athena:ListDatabases", catalogs + lambda));
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"" + glue + "\"}")
+                .statusCode(200);
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"" + lambda + "\"}")
+                .statusCode(400).body("__type", equalTo("MetadataException"));
+        refusedJson(send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"AwsDataCatalog\"}"),
                 "athena:ListDatabases");
-        User named = user("res-catalog");
-        named.policy(allowOn("athena:ListDatabases", catalogs + "res-allowed"));
-        refusedJson(send(named, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-allowed\"}"),
+        refusedJson(send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-other\"}"),
                 "athena:ListDatabases");
     }
 
@@ -1069,17 +1089,34 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
-     * A Cost Explorer cost read is checked on {@code *}, not on the billing view its {@code BillingViewArn} gives:
-     * Floci serves no billing views and answers the account's costs whichever it names.
+     * A Cost Explorer cost read is checked on the billing view its {@code BillingViewArn} gives, and Floci answers the
+     * costs of none but the caller's primary view: another is refused, so a grant on it does not reach the account's
+     * costs, nor does one on the primary view reach another's.
      */
     @Test
-    void aBillingViewGrantDoesNotReachTheAccountsCosts() {
-        String view = "arn:aws:billing::" + ACCOUNT + ":billingview/res-view";
+    void aCostReadIsCheckedOnTheBillingViewItNamesAndAnswersNoOther() {
+        String views = "arn:aws:billing::" + ACCOUNT + ":billingview/";
         User user = user("res-view");
-        user.policy(allowOn("ce:GetCostAndUsage", view));
-        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", "{\"TimePeriod\":{\"Start\":"
-                + "\"2026-01-01\",\"End\":\"2026-02-01\"},\"Granularity\":\"MONTHLY\",\"Metrics\":[\"UnblendedCost\"],"
-                + "\"BillingViewArn\":\"" + view + "\"}"), "ce:GetCostAndUsage");
+        user.policy(allowOn("ce:GetCostAndUsage", views + "primary") + ","
+                + allowOn("ce:GetCostAndUsage", views + "res-view"));
+        send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "primary")).statusCode(200);
+        send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "res-view")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "res-other")),
+                "ce:GetCostAndUsage");
+        User primary = user("res-view-primary");
+        primary.policy(allowOn("ce:GetCostAndUsage", views + "primary"));
+        refusedJson(send(primary, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "res-view")),
+                "ce:GetCostAndUsage");
+        // A deny on the primary view is not sidestepped by naming it under another service, which IAM checks as *.
+        User denied = user("res-view-denied");
+        denied.policy(allowOn("ce:GetCostAndUsage", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"ce:GetCostAndUsage\","
+                + "\"Resource\":\"" + views + "primary\"}");
+        refusedJson(send(denied, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", costs(views + "primary")),
+                "ce:GetCostAndUsage");
+        send(denied, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1",
+                costs("arn:aws:ce::" + ACCOUNT + ":billingview/primary")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     /**
@@ -1233,7 +1270,7 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "}"), "cur:PutReportDefinition");
         cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name, null) + "}").statusCode(200);
         cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "\",\"ReportDefinition\":"
-                + reportDefinition(name, arn + "-other") + "}").statusCode(200);
+                + reportDefinition(name, "arn:aws:billing::" + ACCOUNT + ":billingview/primary") + "}").statusCode(200);
         refusedJson(cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "-other\",\"ReportDefinition\":"
                 + reportDefinition(name + "-other", arn) + "}"), "cur:ModifyReportDefinition");
         cur(user, "DeleteReportDefinition", "{\"ReportName\":\"" + name + "\"}").statusCode(200);
@@ -1556,12 +1593,12 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** An assignment of the permission set to a group, in the account. */
     /**
      * An IAM Identity Center permission set provisioned to all the accounts it is provisioned to, with no
-     * {@code TargetId}, or a null one, is checked on each of those accounts, so a grant on one does not reach the
-     * others, a deny on one holds, and a grant on all of them lets it through. Each request finds the accounts
-     * afresh, so one provisioned to since is checked too.
+     * {@code TargetId} or a null one, is checked on its instance and itself: nothing botocore or the Service Reference
+     * says names those accounts, so a grant on the instance and the permission set lets it through and a deny on one of
+     * its accounts does not apply. One provisioned to an account is checked on that account too.
      */
     @Test
-    void aPermissionSetProvisionedToAllItsAccountsIsCheckedOnEachOfThem() {
+    void aPermissionSetProvisionedToAllItsAccountsIsCheckedOnItsInstanceAndItself() {
         String instance = ssoInstance();
         String permissionSet = permissionSet(instance);
         for (String account : List.of("111111111111", "222222222222")) {
@@ -1577,25 +1614,18 @@ class IamRequestResourceEnforcementIntegrationTest {
 
         User user = user("res-sso-provision");
         user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
+                + allowOn("sso:ProvisionPermissionSet", permissionSet));
+        ssoAdmin(user, "ProvisionPermissionSet", all).statusCode(200);
+        ssoAdmin(user, "ProvisionPermissionSet", provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\","
+                + "\"TargetId\":null}").statusCode(200);
+        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", one), "sso:ProvisionPermissionSet");
+        user.policy(allowOn("sso:ProvisionPermissionSet", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"sso:ProvisionPermissionSet\",\"Resource\":\"arn:aws:sso:::account/222222222222\"}");
+        ssoAdmin(user, "ProvisionPermissionSet", all).statusCode(200);
+        user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
                 + allowOn("sso:ProvisionPermissionSet", permissionSet) + ","
                 + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/111111111111"));
         ssoAdmin(user, "ProvisionPermissionSet", one).statusCode(200);
-        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
-        user.policy(allowOn("sso:ProvisionPermissionSet", "*") + ",{\"Effect\":\"Deny\","
-                + "\"Action\":\"sso:ProvisionPermissionSet\",\"Resource\":\"arn:aws:sso:::account/222222222222\"}");
-        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
-        ssoAdmin(user, "ProvisionPermissionSet", one).statusCode(200);
-        // A grant on both accounts covers it, a null TargetId naming no account of its own.
-        user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
-                + allowOn("sso:ProvisionPermissionSet", permissionSet) + ","
-                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/111111111111") + ","
-                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/222222222222"));
-        ssoAdmin(user, "ProvisionPermissionSet", provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\","
-                + "\"TargetId\":null}").statusCode(200);
-        String third = assignment(instance, permissionSet, "333333333333");
-        adminJson("sso", "SWBExternalService.CreateAccountAssignment").body(third).post("/").then().statusCode(200);
-        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeleteAccountAssignment").body(third).post("/"));
-        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
     }
 
     /**
@@ -1780,6 +1810,12 @@ class IamRequestResourceEnforcementIntegrationTest {
         return user.query("redshift", "RestoreFromClusterSnapshot").formParam("Version", "2012-12-01")
                 .formParam("ClusterIdentifier", cluster).formParam("SnapshotIdentifier", "snap")
                 .formParam("SnapshotClusterIdentifier", snapshotCluster).post("/").then();
+    }
+
+    /** A month's unblended cost of the billing view. */
+    private static String costs(String billingViewArn) {
+        return "{\"TimePeriod\":{\"Start\":\"2026-01-01\",\"End\":\"2026-02-01\"},\"Granularity\":\"MONTHLY\","
+                + "\"Metrics\":[\"UnblendedCost\"],\"BillingViewArn\":\"" + billingViewArn + "\"}";
     }
 
     private static String budget(String name, String billingViewArn) {

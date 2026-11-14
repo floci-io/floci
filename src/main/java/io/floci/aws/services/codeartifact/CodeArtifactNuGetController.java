@@ -72,20 +72,24 @@ public class CodeArtifactNuGetController {
     private final CodeArtifactService service;
     private final BagetterSidecarClient bagetter;
     private final CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter;
+    private final CodeArtifactNuGetUpstreamRepositoryImporter upstreamRepositoryImporter;
     private final HttpClient httpClient;
 
     @Inject
     public CodeArtifactNuGetController(CodeArtifactService service, BagetterSidecarClient bagetter,
-            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter) {
-        this(service, bagetter, externalConnectionImporter,
+            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter,
+            CodeArtifactNuGetUpstreamRepositoryImporter upstreamRepositoryImporter) {
+        this(service, bagetter, externalConnectionImporter, upstreamRepositoryImporter,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     CodeArtifactNuGetController(CodeArtifactService service, BagetterSidecarClient bagetter,
-            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter, HttpClient httpClient) {
+            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter,
+            CodeArtifactNuGetUpstreamRepositoryImporter upstreamRepositoryImporter, HttpClient httpClient) {
         this.service = service;
         this.bagetter = bagetter;
         this.externalConnectionImporter = externalConnectionImporter;
+        this.upstreamRepositoryImporter = upstreamRepositoryImporter;
         this.httpClient = httpClient;
     }
 
@@ -196,8 +200,15 @@ public class CodeArtifactNuGetController {
             // request. Not attempted at all when BaGetter already has it: the only extra cost on
             // every other request is this one cheap local existence check.
             if (!bagetter.packageVersionExists(handle.repoId(), domain, repository, null, id, version)) {
-                externalConnectionImporter.tryImport(handle.region(), domain, handle.owner(), repository,
-                        handle.repoId(), id, version);
+                // A repository has either an external connection or upstreams, never both: at
+                // most one of these two calls ever does real work, and the other's own no-op is a
+                // single cheap in-memory check (see CodeArtifactNuGetUpstreamRepositoryImporter's
+                // own javadoc).
+                if (!externalConnectionImporter.tryImport(handle.region(), domain, handle.owner(), repository,
+                        handle.repoId(), id, version)) {
+                    upstreamRepositoryImporter.tryImport(handle.region(), domain, handle.owner(), repository,
+                            handle.repoId(), id, version);
+                }
             }
             return proxyGetStreamed(baseUrl, "/v3/package/" + lowerId + "/" + encodedVersion + "/"
                     + lowerId + "." + SidecarUriUtils.encodeSegment(version.toLowerCase(Locale.ROOT)) + ".nupkg",

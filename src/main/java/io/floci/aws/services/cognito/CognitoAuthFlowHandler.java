@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.cognito.model.CognitoGroup;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
@@ -34,6 +35,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -444,7 +446,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         String username = responses.get("USERNAME");
-        if (username == null || !service.signInKey(pool, username).equals(service.signInKey(pool, state.username()))) {
+        if (!isSessionUser(pool, username, state.username())) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);
@@ -541,14 +543,14 @@ final class CognitoAuthFlowHandler {
                     consumeCustomSession(session, state);
                     state.history.get(state.history.size() - 1).put("challengeResult", true);
                 }
-                CognitoUser user = applyNewPasswordAttributes(pool, responses);
+                CognitoUser user = applyNewPasswordAttributes(pool, state.username, responses);
                 return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
             }
             String username = responses.get("USERNAME");
             PasswordChangeSession pending = session == null ? null : passwordChangeSessions.get(session);
             if (pending == null || sessionExpired(pending.expiresAt())
                     || !pool.getId().equals(pending.userPoolId()) || !client.getClientId().equals(pending.clientId())
-                    || !service.signInKey(pool, pending.username()).equals(service.signInKey(pool, username))) {
+                    || !isSessionUser(pool, username, pending.username())) {
                 throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
             }
             validateSecretHash(client, responses, username);
@@ -559,7 +561,7 @@ final class CognitoAuthFlowHandler {
                 changePassword(pool, responses);
                 passwordChangeSessions.remove(session, pending);
             }
-            CognitoUser user = applyNewPasswordAttributes(pool, responses);
+            CognitoUser user = applyNewPasswordAttributes(pool, pending.username(), responses);
             return completePrimaryAuth(pool, client, user, "TokenGeneration_NewPasswordChallenge", clientMetadata,
                     pending.authEventId());
         }
@@ -576,8 +578,12 @@ final class CognitoAuthFlowHandler {
         service.adminSetUserPassword(pool.getId(), username, newPassword, true);
     }
 
-    private CognitoUser applyNewPasswordAttributes(UserPool pool, Map<String, String> responses) {
-        String username = responses.get("USERNAME");
+    /**
+     * Applies the attributes of the response, then reads the user back. {@code username} is the user's own username
+     * from the session: the USERNAME of the response may be an alias such as the email, which stops naming the
+     * user once the response changes it.
+     */
+    private CognitoUser applyNewPasswordAttributes(UserPool pool, String username, Map<String, String> responses) {
         Map<String, String> attrUpdates = newPasswordAttributes(responses);
         if (!attrUpdates.isEmpty()) {
             service.adminUpdateUserAttributes(pool.getId(), username, attrUpdates);
@@ -886,6 +892,29 @@ final class CognitoAuthFlowHandler {
                     username, pool.getId(), e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Whether {@code supplied}, the USERNAME of a challenge response, names the user a session was issued for.
+     * The session keeps the user's own username, which in a pool with {@code UsernameAttributes} is the
+     * {@code sub} and not the email or phone number the user signed in with. AWS documents that an SRP
+     * response must use that username and not an alias (the SRP paths here stay strict), and documents
+     * only {@code USERNAME} for the other challenges, without excluding the alias. The custom-auth
+     * challenges here already resolve the alias to the session's user, so the NEW_PASSWORD_REQUIRED and MFA
+     * challenges of the other flows do as well. A direct match of the sign-in keys counts, so a pool
+     * without aliases and its case sensitivity behave as before; only otherwise is the supplied value
+     * resolved to its user, with a single lookup, because every session holds the username of its user
+     * already.
+     */
+    private boolean isSessionUser(UserPool pool, String supplied, String sessionUsername) {
+        if (supplied == null) {
+            return false;
+        }
+        if (service.signInKey(pool, supplied).equals(service.signInKey(pool, sessionUsername))) {
+            return true;
+        }
+        String canonical = resolveToCanonicalUsername(pool, supplied);
+        return canonical != null && service.signInKey(pool, canonical).equals(service.signInKey(pool, sessionUsername));
     }
 
     // ──────────────────────────── SRP ────────────────────────────
@@ -1596,7 +1625,7 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, suppliedUsername);
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
-        if (!user.getUsername().equals(resolveToCanonicalUsername(pool, suppliedUsername))) {
+        if (!isSessionUser(pool, suppliedUsername, user.getUsername())) {
             throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
         }
 
@@ -1736,7 +1765,7 @@ final class CognitoAuthFlowHandler {
     private void validateCustomUsername(UserPool pool, UserPoolClient client, CustomAuthSession state,
                                           Map<String, String> responses) {
         String supplied = responses.get("USERNAME");
-        if (!state.username.equals(resolveToCanonicalUsername(pool, supplied))) {
+        if (!isSessionUser(pool, supplied, state.username)) {
             throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
         }
         validateSecretHash(client, responses, supplied);
@@ -2200,13 +2229,17 @@ final class CognitoAuthFlowHandler {
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
                                                                   Map<String, String> clientMetadata, String triggerSource,
                                                                   List<String> scopes) {
+        if (lambdaService == null || resolveTriggerArn(pool, "PreTokenGeneration") == null) {
+            // No trigger to hand the event to: skip reading the user's groups for it.
+            return null;
+        }
         Map<String, Object> req = new HashMap<>();
         if (user == null) {
             // A machine identity has neither attributes nor groups.
             req.put("userAttributes", Map.of());
             req.put("groupConfiguration", null);
         } else {
-            req.put("groupConfiguration", buildGroupConfiguration(user));
+            req.put("groupConfiguration", buildGroupConfiguration(pool, user));
         }
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         // V2 lambdas (CognitoEventUserPoolsPreTokenGenV2) require `scopes` to deserialize.
@@ -2311,12 +2344,39 @@ final class CognitoAuthFlowHandler {
         return out;
     }
 
-    private static Map<String, Object> buildGroupConfiguration(CognitoUser user) {
+    /**
+     * The groupConfiguration AWS hands the pre token generation trigger: the user's groups, the
+     * IAM roles of those groups, and the preferred role Cognito would put in the token.
+     */
+    private Map<String, Object> buildGroupConfiguration(UserPool pool, CognitoUser user) {
+        List<String> names = user.getGroupNames() == null ? List.of() : new ArrayList<>(user.getGroupNames());
+        // One read of the pool's groups; a membership whose group is gone carries no role.
+        List<CognitoGroup> groups = names.isEmpty() ? List.of() : service.listGroups(pool.getId()).stream()
+                .filter(group -> names.contains(group.getGroupName())).toList();
         Map<String, Object> cfg = new HashMap<>();
-        cfg.put("groupsToOverride", user.getGroupNames() == null ? List.of() : new ArrayList<>(user.getGroupNames()));
-        cfg.put("iamRolesToOverride", List.of());
-        cfg.put("preferredRole", null);
+        cfg.put("groupsToOverride", names);
+        cfg.put("iamRolesToOverride", groups.stream().map(CognitoGroup::getRoleArn)
+                .filter(role -> role != null && !role.isBlank()).distinct().toList());
+        cfg.put("preferredRole", preferredRole(groups));
         return cfg;
+    }
+
+    /**
+     * The role of the group with the lowest Precedence among the groups that have a role; a group
+     * without a Precedence ranks after every group with one. When the groups tied at that rank
+     * name different roles, AWS sets no preferred role.
+     */
+    static String preferredRole(List<CognitoGroup> groups) {
+        List<CognitoGroup> withRole = groups.stream()
+                .filter(group -> group.getRoleArn() != null && !group.getRoleArn().isBlank()).toList();
+        if (withRole.isEmpty()) {
+            return null;
+        }
+        Integer best = withRole.stream().map(CognitoGroup::getPrecedence).filter(Objects::nonNull)
+                .min(Integer::compare).orElse(null);
+        List<String> roles = withRole.stream().filter(group -> Objects.equals(group.getPrecedence(), best))
+                .map(CognitoGroup::getRoleArn).distinct().toList();
+        return roles.size() == 1 ? roles.get(0) : null;
     }
 
     private CognitoUser tryUserMigration(UserPool pool, UserPoolClient client, String username, String password,
@@ -2556,7 +2616,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         String username = responses.get("USERNAME");
-        if (username == null || !service.signInKey(pool, username).equals(service.signInKey(pool, state.username()))) {
+        if (!isSessionUser(pool, username, state.username())) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);

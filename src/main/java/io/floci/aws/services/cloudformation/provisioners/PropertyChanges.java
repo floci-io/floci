@@ -26,7 +26,7 @@ import java.util.Set;
  * {@code Fn::GetAtt} reads a resource this update replaces still reads UNCHANGED, so UNCHANGED
  * alone is no reason to skip a write.
  */
-public record PropertyChanges(Map<String, PropertyChange> byName) {
+public record PropertyChanges(Map<String, PropertyChange> byName, boolean requiresReplacement) {
 
     public enum Kind { ADDED, CHANGED, DROPPED, UNCHANGED }
 
@@ -43,6 +43,11 @@ public record PropertyChanges(Map<String, PropertyChange> byName) {
                 : Collections.unmodifiableMap(new LinkedHashMap<>(byName));
     }
 
+    /** Changes that do not replace the resource. */
+    public PropertyChanges(Map<String, PropertyChange> byName) {
+        this(byName, false);
+    }
+
     /** What the provisioner's own inputs say, values compared as written. */
     public static PropertyChanges between(String resourceType, boolean update,
                                           JsonNode priorProperties, JsonNode properties) {
@@ -56,6 +61,25 @@ public record PropertyChanges(Map<String, PropertyChange> byName) {
     public static PropertyChanges between(String resourceType, boolean update,
                                           JsonNode priorProperties, JsonNode properties,
                                           JsonNode comparedPrior, JsonNode comparedCurrent) {
+        return between(resourceType, update, priorProperties, properties, comparedPrior, comparedCurrent, null);
+    }
+
+    /**
+     * The same, with the engine's own decision whether the update replaces the resource: the
+     * change set's {@code Replacement}, which sees resolved values and the resources replaced
+     * earlier in the same update. Without it, the decision is
+     * {@link CfnCreateOnlyProperties#createOnlyValueChanged} on the two property sets, the rule
+     * the change set applies to a template diff.
+     */
+    public static PropertyChanges between(String resourceType, boolean update,
+                                          JsonNode priorProperties, JsonNode properties,
+                                          JsonNode comparedPrior, JsonNode comparedCurrent,
+                                          Boolean engineReplacement) {
+        boolean replaces = engineReplacement != null
+                ? engineReplacement
+                : update && resourceType != null && priorProperties != null && priorProperties.isObject()
+                        && properties != null && properties.isObject()
+                        && CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, priorProperties, properties);
         Map<String, PropertyChange> changes = new LinkedHashMap<>();
         boolean currentIsObject = properties != null && properties.isObject();
         if (!update || priorProperties == null || !priorProperties.isObject()) {
@@ -63,7 +87,7 @@ public record PropertyChanges(Map<String, PropertyChange> byName) {
                 properties.fieldNames().forEachRemaining(name -> changes.put(name,
                         change(resourceType, name, Kind.ADDED, null, properties.get(name))));
             }
-            return new PropertyChanges(changes);
+            return new PropertyChanges(changes, replaces);
         }
         priorProperties.fieldNames().forEachRemaining(name -> {
             JsonNode before = priorProperties.get(name);
@@ -86,7 +110,7 @@ public record PropertyChanges(Map<String, PropertyChange> byName) {
                 }
             });
         }
-        return new PropertyChanges(changes);
+        return new PropertyChanges(changes, replaces);
     }
 
     private static PropertyChange change(String resourceType, String name, Kind kind,

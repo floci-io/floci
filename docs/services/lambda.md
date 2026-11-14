@@ -238,6 +238,11 @@ other than the `{Status, Result, Error}` envelope fails its execution with
 1, 2, 4 and 8 seconds, and then fails the execution with its error. AWS does the same over a few
 minutes.
 
+The operations under a child context closed without `ReplayChildren=true` are left out of the
+invocation event and `GetDurableExecutionState`, as the API reference describes.
+
+`DeleteFunction` of a durable function or one of its versions answers 202.
+
 A callback (`createCallback`, `waitForCallback`) gets a callback id that the
 `SendDurableExecutionCallback*` APIs complete. Its `TimeoutSeconds` and `HeartbeatTimeoutSeconds`
 fail it with `Callback.Timeout` or `Callback.Heartbeat`, and each heartbeat restarts the heartbeat
@@ -283,6 +288,8 @@ Not emulated yet:
   executions.
 - The `Lineage` field AWS adds to the trace header.
 - The per-execution limits of 3,000 operations and 100 MB of persisted payload.
+- The `Deleting` state AWS shows for about a minute after `DeleteFunction` of a durable function.
+  Floci removes it at once.
 
 ## Code signing configuration pagination
 

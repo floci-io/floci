@@ -4,6 +4,7 @@
 # without a reason.
 account	the one ARN it builds is the member account an IAM check names, in the partition of the caller's organization's own ARN, and it never reaches the wire, so a case has nothing to assert
 appintegrations	no non-commercial partition publishes the service, so a case would be skipped in every partition
+athena	the only ARNs it builds are the default workgroup and data catalog an IAM check names for a request naming none, in the request Region's partition, and they never reach the wire, so a case has nothing to assert
 cloudformation	covered by PartitionArnMintingIntegrationTest (all partitions)
 cloudhsmv2	the only ARN on the wire is the automatic backup's, and a backup is never removed (DeleteBackup only marks it), so a case would leak state into the shared emulator
 cloudtrail	covered by CloudTrailSelfDeliveryTest (one partition)

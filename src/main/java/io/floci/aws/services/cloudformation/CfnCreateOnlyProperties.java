@@ -82,12 +82,24 @@ public final class CfnCreateOnlyProperties {
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
         for (String pointer : getCreateOnlyProperties(resourceType)) {
-            String[] segments = pointer.split("/");
-            if (pointerChanged(oldProps, newProps, segments, 0, segments.length == 1)) {
+            if (createOnlyPointerChanged(pointer, oldProps, newProps)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** {@link #createOnlyValueChanged} for one pointer of the type's table. */
+    public static boolean createOnlyPointerChanged(String pointer, JsonNode oldProps, JsonNode newProps) {
+        String[] segments = pointer.split("/");
+        return pointerChanged(oldProps, newProps, segments, 0, segments.length == 1);
+    }
+
+    /** The subtrees of the properties that sit under one create-only pointer. */
+    public static List<JsonNode> subtreesAt(String pointer, JsonNode props) {
+        List<JsonNode> out = new ArrayList<>();
+        collect(props, pointer.split("/"), 0, out);
+        return out;
     }
 
     /** The subtrees of the new properties that sit under a create-only pointer of the type. */

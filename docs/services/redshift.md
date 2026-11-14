@@ -478,6 +478,52 @@ approximation to indicate that initial backfill is in progress); it becomes `act
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
 
+#### Current-state table
+
+Beside the landing log, the integration projects the source table's current item state into a table
+shaped as AWS shapes it: in the target database's `public` schema, under the DynamoDB table's name,
+with one column per key attribute and a `value` column holding the whole item in DynamoDB JSON. AWS
+types `value` as SUPER. Floci's data plane is PostgreSQL, so `value` is `jsonb` and a path is read with
+the JSON operators: `value->'payload'->'L'->0->>'S'` here is `"value"."payload"."L"[0]."S"` on Redshift.
+
+```sql
+SELECT id, value->'note'->>'S' AS note FROM public."orders";
+```
+
+- Key columns take the DynamoDB key types: `S` is `TEXT`, `N` is an unbounded `NUMERIC`, which holds
+  every DynamoDB number exactly where AWS's `NUMERIC(38,18)` would round or overflow, `B` is `BYTEA`. The
+  partition key comes first, then the sort key, and together they are the primary key. Every other
+  attribute lives only in `value`, so items of differing shape need no schema change.
+- The backfill scan upserts each item it reads. A stream record names a key, and the key is projected as
+  the source holds it at that moment: the item is upserted, or deleted when the source no longer has it.
+  The record's own images, and its event type, are not used, so a record replayed after the scan read a
+  newer version of its item, or after the item changed again, cannot put an older image over the newer
+  row: every record of a key projects the same state, and a batch projects each key once. The cost is one
+  `GetItem` per key per batch, and the table shows each key's latest state, not every intermediate one,
+  as AWS's incremental exports do. AWS refreshes every 15 to 30 minutes; Floci applies each poll.
+- Changes are applied after the batch has landed, in one transaction. The projection is idempotent, so an
+  item projected twice, once from the scan and once from the stream, leaves the same state.
+- The integration marks its table as its own, with a comment naming the integration
+  (`floci-zetl-integration:<integration-id>`, see `obj_description`). A table that an earlier integration
+  of the source marked is dropped and made afresh by the next one, so an item deleted from the source in
+  between does not survive and a source made again with other keys, or the same key name under another
+  type, does not meet its predecessor's columns. A table nobody marked, one the user already has under that
+  name, is refused and left alone, and so is one that another integration still running marked (two
+  sources sharing a table name, such as the same name in two Regions, cannot share one target table).
+- The current-state table never holds back the landing log. A projection that cannot be written (a
+  refused table, a table dropped under the integration, an unreachable target) is logged as a warning
+  once, and the integration keeps landing and checkpointing its records. Each poll tries to make the table
+  again, and once it can, the backfill starts over (`syncing`) and the scan fills it, since changes that
+  landed in the meantime never reached it. A table dropped and made again while the integration runs is
+  filled the same way.
+- A table name or key column name longer than 63 bytes is refused. AWS accepts up to 127 characters, but
+  PostgreSQL truncates identifiers past 63 bytes, so two longer names could silently share a table.
+- The table lives in the same database as the user's own tables (`dev` on a cluster, the namespace's
+  database on Serverless), not in a database created from the integration, and is kept when the
+  integration is deleted, as AWS keeps replicated data.
+- An integration persisted before this table existed scans its source again at the next start to fill
+  it; the landing log keeps each event once, so the rerun adds no rows there.
+
 ### S3 event integrations
 
 `CreateIntegration` also takes an Amazon S3 bucket as the source (`arn:aws:s3:::<bucket>`), the first step of
@@ -557,7 +603,7 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-Schema inference, relational projection and `CREATE DATABASE ... FROM INTEGRATION` are not
+`CREATE DATABASE ... FROM INTEGRATION`, history mode and `SVV_INTEGRATION*` views are not
 supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
 is not accepted as a target.
 
@@ -1070,7 +1116,7 @@ runs the `COPY` over a connection to the cluster proxy. See [Firehose](firehose.
 - The rewrite is textual (regex-based). It masks single-quoted string literals first, so `DEFAULT` / `CHECK` string values are safe, but it is **not** comment-aware and does not recognize escape strings (`E'...'`): an apostrophe inside a `--` or `/* */` comment can make the rewrite skip a Redshift clause. That fails safe: the statement then reaches PostgreSQL, which returns its own syntax error, but avoid apostrophes-in-comments in `CREATE TABLE` / `ALTER TABLE`.
 - A `rewrite` failure or any statement the interceptor does not recognize is forwarded unmodified (fail-open); PostgreSQL then rejects the Redshift-only syntax itself.
 - Simple Query ('Q') messages larger than 16 MiB bypass the interceptor and stream through verbatim without heap buffering; non-query traffic also streams through with no size limit.
-- `GetClusterCredentials` / `GetClusterCredentialsWithIAM` mint a short-lived password held in memory (lost on restart). As in AWS, `GetClusterCredentials` prefixes the returned `DbUser` with `IAM:` when `AutoCreate` is false and `IAMA:` when it is true; that prefixed name is what the auth proxy and Data API accept. The returned `DbUser` is nominal: the session runs as the cluster master, not a distinct PostgreSQL role, so `current_user`, `GRANT`, and object ownership are the master's.
+- `GetClusterCredentials` / `GetClusterCredentialsWithIAM` mint a short-lived password held in memory (lost on restart). As in AWS, `GetClusterCredentials` prefixes the returned `DbUser` with `IAM:` when `AutoCreate` is false and `IAMA:` when it is true; that prefixed name is what the auth proxy and Data API accept, and the session runs as the unprefixed PostgreSQL role (`<DbUser>`), creating it as a non-superuser login role when `AutoCreate` is true and failing when it is false and missing. The session authenticates to PostgreSQL as that role itself (Floci sets a random password on the role for the life of the session and restores the stored one afterwards), so PostgreSQL, not Floci, refuses any switch to another user, the role's own `ALTER USER ... SET` defaults apply, and a master or superuser `DbUser` runs with its own permissions. Every user gets `CREATE` and `USAGE` on the `public` schema, as in Redshift. A password login by that role is refused while a temporary credential session holds it. `GetClusterCredentialsWithIAM` runs as the `IAM:<user>` or `IAMR:<role>` PostgreSQL role (auto-created if missing). `DbGroups` grants temporary session-scoped membership in existing database groups (`GRANT ...` while the session is open, revoked on close) and fails if a named group does not exist.
 
 ### UNLOAD to S3
 

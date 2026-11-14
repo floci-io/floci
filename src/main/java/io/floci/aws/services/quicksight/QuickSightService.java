@@ -234,9 +234,9 @@ public class QuickSightService implements Resettable, StoredResourceArns {
 
     @Override
     public Optional<String> find(String type, List<String> names, String region) {
-        if ("user".equals(type) && names.size() == 3) {
+        if (("user".equals(type) || "group".equals(type)) && names.size() == 3) {
             return Optional.of(regions.buildArn("quicksight", region, names.getFirst(),
-                    "user/" + names.get(1) + "/" + names.get(2)));
+                    type + "/" + names.get(1) + "/" + names.get(2)));
         }
         return Optional.empty();
     }
