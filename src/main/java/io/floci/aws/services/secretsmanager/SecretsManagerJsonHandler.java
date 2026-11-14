@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.StreamSupport;
 
@@ -46,6 +47,11 @@ public class SecretsManagerJsonHandler {
         this.objectMapper = objectMapper;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.eventPublisher = eventPublisher;
+    }
+
+    /** The ARN the secret {@code secretId} names is stored under, for a caller authorizing a request naming it. */
+    public Optional<String> storedArn(String accountId, String secretId, String region) {
+        return service.findArn(accountId, secretId, region);
     }
 
     /**

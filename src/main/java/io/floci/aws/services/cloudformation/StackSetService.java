@@ -204,6 +204,11 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         organizationsAccess.put(ORGANIZATIONS_ACCESS_KEY, "ENABLED");
     }
 
+    /** The id of the stack set of this name, reading only. */
+    public Optional<String> stackSetId(String name) {
+        return stackSets.get(name).map(StackSet::getStackSetId);
+    }
+
     public StackSet describeStackSet(String name) {
         return getStackSetOrThrow(name);
     }

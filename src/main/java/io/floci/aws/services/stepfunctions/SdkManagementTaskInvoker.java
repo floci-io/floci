@@ -13,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.util.Optional;
 import java.util.Set;
 
 import static io.floci.aws.services.stepfunctions.AslExecutor.FailStateException;
@@ -52,6 +53,11 @@ public class SdkManagementTaskInvoker {
             case "secretsmanager" -> "describeSecret".equals(integration.api());
             default -> false;
         };
+    }
+
+    /** The ARN of the secret {@code secretId} names, as {@code DescribeSecret} finds it. */
+    Optional<String> secretArn(String accountId, String secretId, String region) {
+        return secrets.storedArn(accountId, secretId, region);
     }
 
     JsonNode invoke(StatesIntegration integration, JsonNode input, String region) throws Exception {

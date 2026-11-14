@@ -1260,9 +1260,14 @@ public class AslExecutor {
     /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
     private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials,
                                String taskToken) {
+        // NestedTaskCredentials has decided this one. Its callback form does not reach it, so it is decided here.
+        if (credentials != null && taskToken == null && NestedTaskCredentials.isNested(integration)) {
+            return;
+        }
         Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
                 redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns(), ecsService,
-                taskToken != null);
+                taskToken != null, new TaskPermissions.ControlServices(cloudFormationHandler, sdkManagementTaskInvoker,
+                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get()));
         if (required.isEmpty()) {
             return;
         }
@@ -1270,7 +1275,7 @@ public class AslExecutor {
             NestedTaskCredentials.validateShape(credentials);
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
-                required.get().deniedError(), required.get().permissions());
+                required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
     }
 
     private boolean iamEnforcementEnabled() {
