@@ -2,6 +2,7 @@ package io.floci.aws.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.firehose.model.DeliveryStreamDescription;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
@@ -21,22 +22,28 @@ import static org.mockito.Mockito.when;
 /**
  * A Parquet conversion reads its Glue table in SchemaConfiguration.Region when the stream names one, as
  * AWS does, and in the Region the delivery runs in otherwise. The Glue catalog is Regional, so the Region
- * decides which table is found. Runs under Quarkus, where a scoped call can set the Region.
+ * decides which table is found. Runs under Quarkus, where a scoped call can set the Region; each delivery
+ * runs in a Region that is not the default, as a scheduled flush runs in its stream's.
  */
 @QuarkusTest
 class FirehoseParquetSchemaRegionTest {
+
+    private static final String ACCOUNT = "000000000000";
+    private static final String DELIVERY_REGION = "ap-southeast-2";
 
     @Inject
     RegionResolver regionResolver;
 
     @Test
     void theSchemasTableIsReadInTheRegionItsConfigurationNames() {
-        assertEquals("eu-west-1", regionOfTheTableRead("eu-west-1"));
+        assertEquals("eu-west-1", RequestScopes.callAs(ACCOUNT, DELIVERY_REGION,
+                () -> regionOfTheTableRead("eu-west-1")));
     }
 
     @Test
     void withoutARegionTheTableIsReadInTheDeliverysOwnRegion() {
-        assertEquals(regionResolver.getDefaultRegion(), regionOfTheTableRead(null));
+        assertEquals(DELIVERY_REGION, RequestScopes.callAs(ACCOUNT, DELIVERY_REGION,
+                () -> regionOfTheTableRead(null)));
     }
 
     /** The Region current when the converter read the Glue table, for a schema naming {@code schemaRegion}. */
