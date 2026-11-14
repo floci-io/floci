@@ -211,10 +211,7 @@ class RedshiftSnapshotCopyServiceTest {
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
         fixture.service(SOURCE).deleteSnapshot("nightly");
-        Cluster replica = seedCluster(fixture, "replica", null);
-        replica.setSnapshotRegion(DESTINATION);
-        replica.setSnapshotCopyDestinationRegion(null);
-        fixture.clusters().putForAccount(ACCOUNT, "replica", replica);
+        seedCluster(fixture, "replica", DESTINATION, null, null);
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> fixture.service(DESTINATION).createSnapshot("nightly", "replica"));
@@ -351,14 +348,20 @@ class RedshiftSnapshotCopyServiceTest {
     }
 
     private static Cluster seedCluster(Fixture fixture, String id, Instant copyEnabledAt) {
+        return seedCluster(fixture, id, SOURCE, DESTINATION, copyEnabledAt);
+    }
+
+    /** An available cluster of {@code region}, copying its snapshots to {@code copyDestination} when not null. */
+    private static Cluster seedCluster(Fixture fixture, String id, String region, String copyDestination,
+                                       Instant copyEnabledAt) {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(id);
         cluster.setNodeType("dc2.large");
         cluster.setMasterUsername("admin");
         cluster.setMasterPassword("Secret123!");
         cluster.setClusterStatus("available");
-        cluster.setSnapshotRegion(SOURCE);
-        cluster.setSnapshotCopyDestinationRegion(DESTINATION);
+        cluster.setSnapshotRegion(region);
+        cluster.setSnapshotCopyDestinationRegion(copyDestination);
         cluster.setSnapshotCopyRetentionPeriod(7);
         cluster.setSnapshotCopyManualRetentionPeriod(-1);
         cluster.setSnapshotCopyEnabledAt(copyEnabledAt);

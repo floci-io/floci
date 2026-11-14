@@ -8,6 +8,7 @@ import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
 import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
 import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
+import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.s3.S3Service;
 import org.jboss.logging.Logger;
 import org.postgresql.ds.PGSimpleDataSource;
@@ -331,9 +332,8 @@ public class RedshiftAuthProxy {
             return;
         }
         String remoteAddress = client.getInetAddress() == null ? null : client.getInetAddress().getHostAddress();
-        String clusterIdentifier = clusterKey.substring(clusterKey.indexOf(':') + 1);
-        auditLogPublisher.publishRegisteredConnection(clusterAccountId, clusterIdentifier, login.database, login.username,
-                event, remoteAddress, client.getPort());
+        auditLogPublisher.publishRegisteredConnection(clusterAccountId, SpectrumSession.clusterIdentifier(clusterKey),
+                login.database, login.username, event, remoteAddress, client.getPort());
     }
 
     private static void closeQuietly(Socket s) {

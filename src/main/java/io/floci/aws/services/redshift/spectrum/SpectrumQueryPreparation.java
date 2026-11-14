@@ -74,11 +74,8 @@ public class SpectrumQueryPreparation {
      * Data API request's.
      */
     private String catalogRegion(SpectrumSession session) {
-        String clusterKey = session.clusterKey();
-        if (clusterKey == null || clusterKey.indexOf(':') < 0) {
-            return null;
-        }
-        return clusterRegion.apply(session.accountId(), clusterKey.substring(clusterKey.indexOf(':') + 1));
+        String clusterIdentifier = session.clusterIdentifier();
+        return clusterIdentifier == null ? null : clusterRegion.apply(session.accountId(), clusterIdentifier);
     }
 
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend) {

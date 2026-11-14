@@ -403,12 +403,21 @@ class RedshiftServiceTest {
                 service.describeTags(null, "cluster", null));
         assertEquals(List.of(), west.describeClusters(null));
         assertEquals(List.of(), west.describeTags(null, "cluster", null));
+        assertEquals(Optional.empty(), west.findClusterByArn("arn:aws:redshift:eu-west-1:111111111111:cluster:analytics"));
         for (Executable call : List.<Executable>of(
                 () -> west.describeClusters("analytics"),
+                () -> west.modifyCluster("analytics", null, null, null, null, List.of()),
                 () -> west.modifyClusterIamRoles("analytics", List.of(), List.of()),
                 () -> west.describeLoggingStatus("analytics"),
+                () -> west.enableLogging("analytics", null, null, "cloudwatch", List.of("connectionlog")),
+                () -> west.disableLogging("analytics"),
                 () -> west.pauseCluster("analytics"),
+                () -> west.resumeCluster("analytics"),
                 () -> west.rebootCluster("analytics"),
+                () -> west.createSnapshot("nightly", "analytics"),
+                () -> west.enableSnapshotCopy("analytics", "us-west-2", null, null, null),
+                () -> west.modifyClusterSnapshotSchedule("analytics", null, true),
+                () -> west.createTags("arn:aws:redshift:eu-west-1:111111111111:cluster:analytics", Map.of("k", "v")),
                 () -> west.deleteCluster("analytics"))) {
             assertEquals("ClusterNotFound", assertThrows(AwsException.class, call).getErrorCode());
         }
