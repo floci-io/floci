@@ -1,14 +1,12 @@
 package io.floci.aws.services.configservice;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.config.ConfigClient;
 import software.amazon.awssdk.services.config.model.ConfigurationRecorder;
@@ -39,12 +37,8 @@ class ConfigurationRecorderSelectorSdkIntegrationTest {
 
     @BeforeEach
     void createOwnedRecorder() {
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create(ACCOUNT, "test"));
-        config = ConfigClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(credentials).httpClientBuilder(UrlConnectionHttpClient.builder()).build();
-        iam = IamClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(credentials).httpClientBuilder(UrlConnectionHttpClient.builder()).build();
+        config = AwsTestClients.create(ConfigClient.builder(), ACCOUNT, "test", Region.US_EAST_1, endpoint);
+        iam = AwsTestClients.create(IamClient.builder(), ACCOUNT, "test", Region.US_EAST_1, endpoint);
         name = "recorder-selector-" + Long.toString(System.nanoTime(), 36);
         String roleArn = iam.createRole(request -> request.roleName(name).assumeRolePolicyDocument("""
                 {
