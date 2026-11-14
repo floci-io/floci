@@ -115,9 +115,9 @@ final class RdsEngineCatalog {
         return FEATURE_NAMES.getOrDefault(catalogued, List.of());
     }
 
-    /** Floci creates read replicas of PostgreSQL instances only. */
+    /** Floci creates read replicas of PostgreSQL, MySQL and MariaDB instances. */
     static boolean supportsReadReplica(EngineVersion version) {
-        return version.engine().equals("postgres");
+        return RdsService.READ_REPLICA_ENGINES.contains(version.engine());
     }
 
     static boolean supportsGlobalDatabases(EngineVersion version) {
