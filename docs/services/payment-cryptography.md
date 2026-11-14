@@ -122,9 +122,8 @@
   parameters issued, and a request that names none, or that names a wrapping key instead,
   is refused with the reason rather than with a key that is not found.
 - **The headers a TR-34 export names:** a request may narrow the modes of use and the
-  exportability of the key, and the header the block carries says so, the same as it does
-  for a TR-31 block. A TR-34 block's header names the key and carries nothing else, so a
-  request that names optional blocks is refused.
+  exportability of the key, and it may name a version and optional blocks, and the header
+  the block carries says so, the same as it does for a TR-31 block.
 - **The nonce of a TR-34 block:** the nonce binds the block to the exchange, and it is
   optional in the model, so a block made without one is read without the freshness it
   carries. A request that names no nonce expects a block that carries none, so a block that
