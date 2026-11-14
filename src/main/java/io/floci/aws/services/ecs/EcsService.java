@@ -5425,20 +5425,49 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
         updateHealth(task, handle);
 
-        // Inspect every container; abort if any are still running. A container that exited on its
-        // own has a finish time of its own, read here while the daemon still remembers it.
+        // Keep inspecting after a live container: an exited essential sibling stops the task.
         Map<String, Integer> exitCodes = new LinkedHashMap<>();
         Map<String, Instant> finishedAt = new LinkedHashMap<>();
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
-            Integer code = containerManager.getExitCodeIfStopped(entry.getValue());
+            String name = entry.getKey();
+            Integer code = handle.getRecordedExitCode(name);
             if (code == null) {
+                code = containerManager.getExitCodeIfStopped(entry.getValue());
+            }
+            if (code == null) {
+                continue;
+            }
+            handle.recordExitCode(name, code);
+            exitCodes.put(name, code);
+            Instant finished = handle.getFinishedAt().get(name);
+            if (finished == null) {
+                finished = containerManager.getFinishedAtIfStopped(entry.getValue());
+                handle.recordFinishedAt(name, finished);
+            }
+            if (finished != null) {
+                finishedAt.put(name, finished);
+            }
+        }
+
+        boolean containersChanged = updateStoppedContainers(task, exitCodes, finishedAt);
+        if (exitCodes.size() != handle.getContainerIds().size()) {
+            if (exitCodes.isEmpty()) {
                 return;
             }
-            exitCodes.put(entry.getKey(), code);
-            Instant finished = containerManager.getFinishedAtIfStopped(entry.getValue());
-            if (finished != null) {
-                finishedAt.put(entry.getKey(), finished);
+            String region = taskRegion(task);
+            TaskDefinition definition = findTaskDefinition(task.getTaskDefinitionArn(), region);
+            boolean essentialExited = definition != null && definition.getContainerDefinitions().stream()
+                    .anyMatch(container -> container.isEssential() && exitCodes.containsKey(container.getName()));
+            if (essentialExited) {
+                stopTaskLocked(task, "Essential container in task exited", STOP_CODE_ESSENTIAL_CONTAINER_EXITED,
+                        region, true);
+            } else if (containersChanged) {
+                task.bumpVersion();
+                if (eventPublisher != null) {
+                    eventPublisher.emitTaskStateChange(task, region);
+                }
             }
+            return;
         }
 
         // All containers have exited. Atomically claim the handle to avoid
@@ -5451,20 +5480,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // Close log streams and remove the stopped Docker containers without re-inspecting.
         containerManager.cleanupStoppedTask(claimed);
         retainPendingCleanupHandle(taskArn, claimed);
-
-        if (task.getContainers() != null) {
-            task.getContainers().forEach(c -> {
-                c.setLastStatus("STOPPED");
-                Integer code = exitCodes.get(c.getName());
-                if (code != null) {
-                    c.setExitCode(code);
-                }
-                Instant finished = finishedAt.get(c.getName());
-                if (finished != null) {
-                    c.setFinishedAt(finished);
-                }
-            });
-        }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
         task.setDesiredStatus(TaskStatus.STOPPED.name());
@@ -5486,6 +5501,31 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (eventPublisher != null) {
             eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
         }
+    }
+
+    /** Updates observed container exits even when another container keeps the task running. */
+    private boolean updateStoppedContainers(EcsTask task, Map<String, Integer> exitCodes,
+                                            Map<String, Instant> finishedAt) {
+        boolean changed = false;
+        if (task.getContainers() == null) {
+            return false;
+        }
+        for (Container container : task.getContainers()) {
+            Integer code = exitCodes.get(container.getName());
+            if (code == null) {
+                continue;
+            }
+            Instant finished = finishedAt.get(container.getName());
+            changed |= !TaskStatus.STOPPED.name().equals(container.getLastStatus())
+                    || !Objects.equals(code, container.getExitCode())
+                    || (finished != null && !finished.equals(container.getFinishedAt()));
+            container.setLastStatus(TaskStatus.STOPPED.name());
+            container.setExitCode(code);
+            if (finished != null) {
+                container.setFinishedAt(finished);
+            }
+        }
+        return changed;
     }
 
     /**
