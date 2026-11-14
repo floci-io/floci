@@ -100,6 +100,14 @@ public final class CfnRollback {
             "__FlociListenerCertificatesUpdateSnapshot";
 
     /**
+     * The ARNs of the inline subscriptions a displaced SNS topic carried, kept while a replacing update
+     * is in flight so a failed stack update can put them back. Written and spent by
+     * {@code SnsCfnProvisioner}; the revert skips {@code __Floci} keys, so the key stays on the
+     * resource until the update settles.
+     */
+    public static final String SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR = "__FlociSnsPriorInlineSubscriptions";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent

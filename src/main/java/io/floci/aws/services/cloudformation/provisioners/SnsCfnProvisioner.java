@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /** Provisions {@code AWS::SNS::Topic}, {@code AWS::SNS::Subscription} and {@code AWS::SNS::TopicPolicy}. */
 @ApplicationScoped
@@ -27,6 +28,7 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     private static final int TOPIC_NAME_MAX_LENGTH = 256;
     private static final String FIFO_SUFFIX = ".fifo";
     private static final String INLINE_SUBSCRIPTION_PREFIX = "__FlociInlineSubscription:";
+    private static final String PRIOR_INLINE_ATTR = CfnRollback.SNS_PRIOR_INLINE_SUBSCRIPTIONS_ATTR;
 
     private final SnsService snsService;
 
@@ -67,15 +69,33 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(PRIOR_INLINE_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        return ReplacementCleanup.rollback(resource, this::delete);
+        if (!ReplacementCleanup.rollback(resource, this::delete)) {
+            return false;
+        }
+        String prior = resource.getAttributes().remove(PRIOR_INLINE_ATTR);
+        if (prior != null) {
+            resource.getAttributes().keySet().removeIf(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX));
+            for (String arn : prior.split(",")) {
+                if (!arn.isEmpty()) {
+                    resource.getAttributes().put(INLINE_SUBSCRIPTION_PREFIX + arn, "true");
+                }
+            }
+        }
+        return true;
     }
 
     private void provisionTopic(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String topicName = ctx.resolveOptional(props, "TopicName");
         String contentBasedDedupFlag = ctx.resolveOptional(props, "ContentBasedDeduplication");
@@ -175,7 +195,17 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
                 () -> added.forEach(arn -> snsService.unsubscribe(arn, ctx.region())),
                 () -> reconcileInlineSubscriptions(r, topic.getTopicArn(), ctx.region(),
                         desiredSubscriptions, existing, added));
-        ReplacementCleanup.record(r, ctx, attributesBefore);
+        boolean replaced = ctx.isUpdate() && !ctx.priorPhysicalId().equals(r.getPhysicalId());
+        if (replaced) {
+            r.getAttributes().put(PRIOR_INLINE_ATTR, attributesBefore.keySet().stream()
+                    .filter(key -> key.startsWith(INLINE_SUBSCRIPTION_PREFIX))
+                    .map(key -> key.substring(INLINE_SUBSCRIPTION_PREFIX.length()))
+                    .collect(Collectors.joining(",")));
+        } else {
+            r.getAttributes().remove(PRIOR_INLINE_ATTR);
+        }
+        // A topic the update only adopted, because its name already existed, is not deleted by a rollback.
+        ReplacementCleanup.record(r, ctx, attributesBefore, replaced, created);
     }
 
     private void reconcileInlineSubscriptions(StackResource r, String topicArn, String region,
@@ -305,7 +335,8 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
-            case TOPIC -> snsService.deleteTopic(physicalId, region);
+            case TOPIC -> CfnDeletes.safeDelete("topic", physicalId,
+                    () -> snsService.deleteTopic(physicalId, region), "NotFound");
             case SUBSCRIPTION -> snsService.unsubscribe(physicalId, region);
             // No entity to remove. The topics keep the last policy written, the same choice
             // SqsCfnProvisioner makes for AWS::SQS::QueuePolicy.
