@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.stream.IntStream;
 
@@ -600,6 +601,38 @@ class SecretsManagerServiceTest {
         // the ARN as, before it looks in the account the ARN names.
         Secret callers = svc.createSecret("app/core-AbCdEf", "value", null, null, null, null, REGION);
         assertEquals(callers.getArn(), svc.findArn("000000000000", otherAccount.getArn(), REGION).orElseThrow());
+        assertFindArnNamesTheSecretTheOperationActsOn(svc, otherAccount.getArn(), REGION);
+    }
+
+    @Test
+    void anArnResolvesToTheSecretTheOperationsReadItAsTheCallersBeforeTheOneItsAccountHolds() {
+        AccountAwareStorageBackend<Secret> accountAware =
+                AccountAwareStorageBackend.inMemory("000000000000");
+        SecretsManagerService svc = new SecretsManagerService(accountAware, 30);
+        Secret otherAccount = new Secret();
+        otherAccount.setName("app/core");
+        otherAccount.setArn("arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core-AbCdEf");
+        accountAware.putForAccount("111122223333", REGION + "::app/core", otherAccount);
+        String partialArn = "arn:aws:secretsmanager:" + REGION + ":111122223333:secret:app/core";
+        Secret west = svc.createSecret("app/west", "value", null, null, null, null, "eu-west-1");
+
+        assertEquals(Optional.of(otherAccount.getArn()), svc.resolveStoredArn(otherAccount.getArn()));
+        // The caller's own secret, a partial ARN of it in another Region included.
+        assertEquals(Optional.of(west.getArn()), svc.resolveStoredArn(west.getArn()));
+        assertEquals(Optional.of(west.getArn()),
+                svc.resolveStoredArn("arn:aws:secretsmanager:eu-west-1:000000000000:secret:app/west"));
+        assertEquals(west.getArn(), svc.describeSecret(
+                "arn:aws:secretsmanager:eu-west-1:000000000000:secret:app/west", REGION).getArn());
+        // The operations read a partial ARN, or a suffix that account holds nothing under, in the caller's account.
+        assertTrue(svc.resolveStoredArn(partialArn).isEmpty());
+        assertTrue(svc.resolveStoredArn(otherAccount.getArn().replace("AbCdEf", "XyZ789")).isEmpty());
+        // A name or an ARN of no secret resolves nothing.
+        assertTrue(svc.resolveStoredArn("app/west").isEmpty());
+        assertTrue(svc.resolveStoredArn("arn:aws:s3:::app/west").isEmpty());
+
+        // A secret of the caller's own named like the ARN's resource is the one the operations read the ARN as.
+        Secret callers = svc.createSecret("app/core-AbCdEf", "value", null, null, null, null, REGION);
+        assertEquals(Optional.of(callers.getArn()), svc.resolveStoredArn(otherAccount.getArn()));
         assertFindArnNamesTheSecretTheOperationActsOn(svc, otherAccount.getArn(), REGION);
     }
 

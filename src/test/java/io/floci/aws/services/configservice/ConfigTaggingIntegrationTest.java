@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -144,6 +146,53 @@ class ConfigTaggingIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /** ResourceArn is an AmazonResourceName, 1-1000 characters, on all three tag operations. */
+    @Test
+    @Order(6)
+    void aResourceArnOutsideItsModeledLengthIsAValidationException() {
+        Map<String, String> requests = Map.of(
+            "TagResource", "{\"ResourceArn\": \"%s\", \"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]}",
+            "UntagResource", "{\"ResourceArn\": \"%s\", \"TagKeys\": [\"k\"]}",
+            "ListTagsForResource", "{\"ResourceArn\": \"%s\"}");
+        requests.forEach((action, body) -> {
+            RestAssuredJsonUtils.awsAction("StarlingDoveService", action, body.formatted(""))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Invalid parameter at 'ResourceArn' failed to satisfy constraint: "
+                        + "'Member must have length greater than or equal to 1'"));
+            RestAssuredJsonUtils.awsAction("StarlingDoveService", action, body.formatted("a".repeat(1001)))
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Invalid parameter at 'ResourceArn' failed to satisfy constraint: "
+                        + "'Member must have length less than or equal to 1000'"));
+        });
+    }
+
+    /** A missing required member and a member of the wrong JSON type fail before the operation runs;
+     *  ListTagsForResource models InvalidLimitException for a Limit out of range. */
+    @Test
+    @Order(7)
+    void requestsOutsideTheModeledShapesFailBeforeTheOperationRuns() {
+        String arn = getConfigRuleArn("tag-test-rule");
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "UntagResource", """
+            {"ResourceArn": "%s"}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Invalid parameter at 'TagKeys' failed to satisfy constraint: "
+                    + "'Member must not be null'"));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "TagResource", """
+            {"ResourceArn": "%s", "Tags": {"Key": "k", "Value": "v"}}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "ListTagsForResource", """
+            {"ResourceArn": "%s", "Limit": 101}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("InvalidLimitException"));
     }
 
     private String getConfigRuleArn(String ruleName) {

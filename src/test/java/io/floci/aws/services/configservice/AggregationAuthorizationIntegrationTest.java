@@ -182,11 +182,23 @@ class AggregationAuthorizationIntegrationTest {
             """)
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValueException"));
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    /** DescribeAggregationAuthorizations models InvalidLimitException for a Limit out of range. */
+    @Test
+    @Order(9)
+    void describeRejectsALimitAboveTheModeledMaximum() {
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeAggregationAuthorizations", """
+            {"Limit": 101}
+            """)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidLimitException"));
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void unrelatedActionsStillReportInvalidAction() {
         call("PutAggregationAuthorizations", authorizationBody())
         .then()

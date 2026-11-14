@@ -38,6 +38,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Pattern;
 
 import static io.floci.aws.services.ses.SesV2Json.intMemberOrAbsent;
 
@@ -81,6 +82,8 @@ public class SesExportJobService implements Resettable {
     private static final DateTimeFormatter OBJECT_STAMP =
             DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.ROOT).withZone(ZoneOffset.UTC);
     private static final int PRESIGNED_URL_EXPIRY_SECONDS = 3600;
+    private static final Pattern JOB_ID_SHAPE = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
     private final StorageBackend<String, ExportJob> exportJobStore;
     private final SesSentEmailService sentEmailService;
@@ -362,9 +365,20 @@ public class SesExportJobService implements Resettable {
         return kept;
     }
 
+    /**
+     * Probed 2026-11-14: an id shaped like a UUID that names no job is a 404, anything else a 400.
+     * The probe used one random UUID and one plain word, so the canonical UUID form is Floci's
+     * reading of where SES draws that line.
+     */
     public ExportJob getExportJob(String region, String jobId) {
-        return exportJobStore.get(key(region, jobId))
-                .orElseThrow(() -> new AwsException("BadRequestException", "Invalid JobId", 400));
+        return exportJobStore.get(key(region, jobId)).orElseThrow(() -> unknownJob(jobId));
+    }
+
+    private static AwsException unknownJob(String jobId) {
+        if (JOB_ID_SHAPE.matcher(jobId).matches()) {
+            return new AwsException("NotFoundException", "Job ID: <" + jobId + "> not found", 404);
+        }
+        return new AwsException("BadRequestException", "Invalid JobId", 400);
     }
 
     /**
@@ -412,16 +426,22 @@ public class SesExportJobService implements Resettable {
         return SesListPaging.newestFirst(job.getCreatedTimestamp(), job.getJobId());
     }
 
+    /**
+     * Probed 2026-11-14: cancelling a cancelled job again succeeds, and a cancelled job never gains
+     * a CompletedTimestamp.
+     */
     public void cancelExportJob(String region, String jobId) {
         synchronized (createLock) {
             ExportJob job = getExportJob(region, jobId);
+            if (ExportJob.STATUS_CANCELLED.equals(job.getJobStatus())) {
+                return;
+            }
             if (job.isTerminal()) {
                 throw new AwsException("BadRequestException",
                         "Cannot cancel an export job that has a <" + job.getJobStatus()
                                 + "> status.", 400);
             }
             job.setJobStatus(ExportJob.STATUS_CANCELLED);
-            job.setCompletedTimestamp(Instant.now(clock));
             exportJobStore.put(key(region, jobId), job);
         }
     }

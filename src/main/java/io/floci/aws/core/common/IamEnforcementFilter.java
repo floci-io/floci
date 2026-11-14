@@ -1176,7 +1176,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                              String region, String accountId, String akid) {
         // A create tags the resource it makes, not the parent it makes it in (see RequestResources.created).
         List<String> created = RequestResources.created(operation, tagging.action(), ctx,
-                AwsRegions.partitionFor(region), region, accountId, IamActionRegistry.pathLabels(credentialScope, ctx));
+                requestPartition(), region, accountId, IamActionRegistry.pathLabels(credentialScope, ctx));
         List<String> made = created.isEmpty() ? resources : created;
         for (TagOnCreate.TagSet set : tagging.checked()) {
             Map<String, List<String>> context = TagOnCreate.conditionContext(tagging, set, operation);
@@ -1851,9 +1851,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("logs".equals(credentialScope)) {
             return arnBuilder.buildLogResources(action, ctx, region, accountId, requestPartition());
         }
-        if ("secretsmanager".equals(credentialScope)) {
-            return arnBuilder.buildSecretsManagerResources(action, ctx, region, accountId, requestPartition());
-        }
         if ("kms".equals(credentialScope)) {
             return arnBuilder.buildKmsResources(action, ctx, region, accountId, requestPartition());
         }
@@ -1864,8 +1861,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 || "apigateway".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
-        String partition = "route53".equals(credentialScope) ? requestPartition() : AwsRegions.partitionFor(region);
-        return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, partition);
+        // ARNs the table renders take the request's partition, which a Region Floci does not know cannot be mapped to.
+        return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, requestPartition());
     }
 
     /**
