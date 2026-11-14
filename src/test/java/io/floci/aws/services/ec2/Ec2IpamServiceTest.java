@@ -11,15 +11,19 @@ import io.floci.aws.services.ec2.model.IpamPool;
 import io.floci.aws.services.ec2.model.IpamPoolAllocation;
 import io.floci.aws.services.ec2.model.IpamPoolCidr;
 import io.floci.aws.services.ec2.model.Tag;
+import io.floci.aws.testing.Ec2ServiceFixtures;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -37,14 +41,17 @@ class Ec2IpamServiceTest {
 
     private static final String REGION = "us-east-1";
 
+    private Ec2Service ec2;
     private Ec2IpamService service;
 
     @BeforeEach
     void setUp() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
+        ec2 = Ec2ServiceFixtures.mockModeService();
         service = new Ec2IpamService(config,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                ec2);
     }
 
     // --- organization admin delegation (the Organization-stage blocker, LZA
@@ -88,7 +95,7 @@ class Ec2IpamServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("222222222222");
         Ec2IpamService orgService = new Ec2IpamService(config, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), settings, new InMemoryStorage<>(), contextInstance);
+                new InMemoryStorage<>(), settings, new InMemoryStorage<>(), mock(Ec2Service.class), contextInstance);
 
         orgService.enableIpamOrganizationAdminAccount("333333333333");
 
@@ -120,7 +127,7 @@ class Ec2IpamServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("222222222222");
         Ec2IpamService orgService = new Ec2IpamService(config, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), settings, new InMemoryStorage<>(), contextInstance);
+                new InMemoryStorage<>(), settings, new InMemoryStorage<>(), mock(Ec2Service.class), contextInstance);
 
         orgService.enableIpamOrganizationAdminAccount("333333333333");
 
@@ -206,10 +213,10 @@ class Ec2IpamServiceTest {
         when(config.defaultAccountId()).thenReturn("000000000000");
         InMemoryStorage<String, AsnAssociation> backend = new InMemoryStorage<>();
         Ec2IpamService firstService = new Ec2IpamService(config,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), backend);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), backend, mock(Ec2Service.class));
         firstService.associateIpamByoasn("us-west-2", "65001", "192.168.0.0/16");
         Ec2IpamService secondService = new Ec2IpamService(config,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), backend);
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), backend, mock(Ec2Service.class));
         assertTrue(secondService.hasAsnAssociation("us-west-2", "65001", "192.168.0.0/16"));
     }
 
@@ -281,9 +288,7 @@ class Ec2IpamServiceTest {
     void describeIpamPoolsFiltersOnTags() {
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
         IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
-                REGION, null, "ipv4", null);
-        // no API path tags a pool yet, so seed the stored object directly
-        pool.getTags().add(new Tag("Env", "prod"));
+                REGION, null, "ipv4", null, null, null, List.of(new Tag("Env", "prod")));
         assertEquals(1, service.describeIpamPools(REGION, List.of(),
                 List.of(Map.entry("tag:Env", List.of("prod")))).size());
         assertEquals(0, service.describeIpamPools(REGION, List.of(),
@@ -294,10 +299,86 @@ class Ec2IpamServiceTest {
                 List.of(Map.entry("tag-key", List.of("Team")))).size());
         assertEquals(1, service.describeIpamPools(REGION, List.of(),
                 List.of(Map.entry("tag:Env", List.of("pr*")))).size());
-        // a pool restored with a null tag list matches no tag filter instead of failing the request
-        pool.setTags(null);
-        assertEquals(0, service.describeIpamPools(REGION, List.of(),
-                List.of(Map.entry("tag:Env", List.of("prod")))).size());
+        // the filters read EC2's tag store, so a tag added later with CreateTags counts too
+        ec2.createTags(REGION, List.of(pool.getIpamPoolId()), List.of(new Tag("Team", "red")));
+        assertEquals(1, service.describeIpamPools(REGION, List.of(),
+                List.of(Map.entry("tag-key", List.of("Team")))).size());
+    }
+
+    @Test
+    void createIpamPoolTagsOnlyThePoolItCreates() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", null, null, "pool-token", List.of(new Tag("team", "red")));
+        assertEquals("red", ec2.resourceTags(REGION, pool.getIpamPoolId()).getFirst().getValue());
+
+        ec2.deleteTags(REGION, List.of(pool.getIpamPoolId()), List.of());
+        service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                REGION, null, "ipv4", null, null, "pool-token", List.of(new Tag("team", "red")));
+        assertTrue(ec2.resourceTags(REGION, pool.getIpamPoolId()).isEmpty(),
+                "a ClientToken replay returns the pool without tagging it again");
+    }
+
+    @Test
+    void allocationTagsLastUntilTheAllocationIsReleased() {
+        IpamPool pool = poolWith("10.0.0.0/16");
+        IpamPoolAllocation allocation = service.allocateIpamPoolCidr(REGION, pool.getIpamPoolId(), 24,
+                null, null, null, List.of(new Tag("team", "red")));
+        assertEquals("red", ec2.resourceTags(REGION, allocation.getIpamPoolAllocationId()).getFirst().getValue());
+
+        service.releaseIpamPoolAllocation(REGION, pool.getIpamPoolId(), allocation.getIpamPoolAllocationId(), null);
+        assertTrue(ec2.resourceTags(REGION, allocation.getIpamPoolAllocationId()).isEmpty());
+    }
+
+    @Test
+    void deletingAPoolOrItsIpamDropsThePoolAndAllocationTags() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
+        List<String> tagged = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+            IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
+                    REGION, null, "ipv4", null, null, null, List.of(new Tag("team", "red")));
+            service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10." + i + ".0.0/16");
+            IpamPoolAllocation allocation = service.allocateIpamPoolCidr(REGION, pool.getIpamPoolId(), 24,
+                    null, null, null, List.of(new Tag("team", "red")));
+            tagged.add(pool.getIpamPoolId());
+            tagged.add(allocation.getIpamPoolAllocationId());
+        }
+
+        service.deleteIpamPool(REGION, tagged.getFirst());
+        assertTrue(ec2.resourceTags(REGION, tagged.get(0)).isEmpty());
+        assertTrue(ec2.resourceTags(REGION, tagged.get(1)).isEmpty());
+        assertEquals(1, ec2.resourceTags(REGION, tagged.get(2)).size());
+
+        service.deleteIpam(REGION, ipam.getIpamId());
+        assertTrue(ec2.resourceTags(REGION, tagged.get(2)).isEmpty());
+        assertTrue(ec2.resourceTags(REGION, tagged.get(3)).isEmpty());
+    }
+
+    @Test
+    void deletingAnIpamDropsTheTagsOfItsPoolsInOtherRegions() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION, "us-west-2"));
+        IpamPool pool = service.createIpamPool("us-west-2", ipam.getPrivateDefaultScopeId(),
+                "us-west-2", null, "ipv4", null, null, null, List.of(new Tag("team", "red")));
+        service.deleteIpam(REGION, ipam.getIpamId());
+        assertTrue(ec2.resourceTags("us-west-2", pool.getIpamPoolId()).isEmpty());
+    }
+
+    @Test
+    void allocationTagsAndTagFiltersUseThePoolsOwnRegion() {
+        Ipam ipam = service.createIpam(REGION, null, List.of(REGION, "us-west-2"));
+        IpamPool pool = service.createIpamPool("us-west-2", ipam.getPrivateDefaultScopeId(),
+                "us-west-2", null, "ipv4", null, null, null, List.of(new Tag("team", "red")));
+        String poolId = pool.getIpamPoolId();
+        service.provisionIpamPoolCidr("us-west-2", poolId, "10.0.0.0/16");
+        IpamPoolAllocation allocation = service.allocateIpamPoolCidr(REGION, poolId, 24,
+                null, null, null, List.of(new Tag("team", "red")));
+        String allocationId = allocation.getIpamPoolAllocationId();
+        assertEquals(1, ec2.resourceTags("us-west-2", allocationId).size());
+        service.releaseIpamPoolAllocation(REGION, poolId, allocationId, null);
+        assertTrue(ec2.resourceTags("us-west-2", allocationId).isEmpty());
+
+        assertEquals(1, service.describeIpamPools(REGION, List.of(poolId),
+                List.of(Map.entry("tag:team", List.of("red")))).size());
     }
 
     @Test
@@ -442,9 +523,9 @@ class Ec2IpamServiceTest {
     void replayingAnAllocationClientTokenReturnsTheOriginalAllocation() {
         IpamPool pool = poolWith("10.0.0.0/16");
         IpamPoolAllocation first = service.allocateIpamPoolCidr(
-                REGION, pool.getIpamPoolId(), 24, null, "subnet-a", "alloc-token");
+                REGION, pool.getIpamPoolId(), 24, null, "subnet-a", "alloc-token", List.of());
         IpamPoolAllocation replay = service.allocateIpamPoolCidr(
-                REGION, pool.getIpamPoolId(), 24, null, "subnet-a", "alloc-token");
+                REGION, pool.getIpamPoolId(), 24, null, "subnet-a", "alloc-token", List.of());
 
         assertEquals(first.getIpamPoolAllocationId(), replay.getIpamPoolAllocationId());
         assertEquals(first.getCidr(), replay.getCidr());
@@ -456,9 +537,9 @@ class Ec2IpamServiceTest {
     void distinctAllocationClientTokensStillConsumeDistinctCidrs() {
         IpamPool pool = poolWith("10.0.0.0/16");
         IpamPoolAllocation first = service.allocateIpamPoolCidr(
-                REGION, pool.getIpamPoolId(), 24, null, null, "token-a");
+                REGION, pool.getIpamPoolId(), 24, null, null, "token-a", List.of());
         IpamPoolAllocation second = service.allocateIpamPoolCidr(
-                REGION, pool.getIpamPoolId(), 24, null, null, "token-b");
+                REGION, pool.getIpamPoolId(), 24, null, null, "token-b", List.of());
         assertEquals("10.0.0.0/24", first.getCidr());
         assertEquals("10.0.1.0/24", second.getCidr());
     }
@@ -479,9 +560,9 @@ class Ec2IpamServiceTest {
     void replayingAPoolCreateClientTokenReturnsTheOriginalPool() {
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION));
         IpamPool first = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
-                REGION, null, "ipv4", "first", "000000000000", "pool-token");
+                REGION, null, "ipv4", "first", "000000000000", "pool-token", List.of());
         IpamPool replay = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
-                REGION, null, "ipv4", "second", "000000000000", "pool-token");
+                REGION, null, "ipv4", "second", "000000000000", "pool-token", List.of());
 
         assertEquals(first.getIpamPoolId(), replay.getIpamPoolId());
         assertEquals(1, service.describeIpamPools(REGION, List.of(), List.of()).size());
@@ -511,7 +592,7 @@ class Ec2IpamServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn(workloadAccount);
         Ec2IpamService accountAwareService = new Ec2IpamService(
-                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(), mock(Ec2Service.class),
                 contextInstance);
 
         Ipam ipam = accountAwareService.createIpam(REGION, null, List.of(REGION), ownerAccount);
@@ -539,7 +620,8 @@ class Ec2IpamServiceTest {
     @SuppressWarnings("unchecked")
     private record SharedPoolFixture(Ec2IpamService service, AccountAwareStorageBackend<IpamPool> pools,
                                      AccountAwareStorageBackend<Ipam> ipams, AtomicReference<String> caller,
-                                     Ipam ipam, IpamPool pool) {}
+                                     Ipam ipam, IpamPool pool, Ec2Service ec2,
+                                     AccountAwareStorageBackend<List<Tag>> tags) {}
 
     @SuppressWarnings("unchecked")
     private SharedPoolFixture sharedPoolOwnedByAnotherAccount() {
@@ -555,11 +637,14 @@ class Ec2IpamServiceTest {
                 new InMemoryStorage<>(), contextInstance, "000000000000");
         AccountAwareStorageBackend<IpamPool> pools = new AccountAwareStorageBackend<>(
                 new InMemoryStorage<>(), contextInstance, "000000000000");
+        AccountAwareStorageBackend<List<Tag>> tags = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), contextInstance, "000000000000");
+        Ec2Service ec2 = Ec2ServiceFixtures.mockModeService(
+                new InMemoryStorageFactory(Ec2ServiceFixtures.ACCOUNT).withStore("ec2-tags.json", tags));
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn(workloadAccount);
         Ec2IpamService service = new Ec2IpamService(
-                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                contextInstance);
+                config, ipams, pools, new InMemoryStorage<>(), new InMemoryStorage<>(), ec2, contextInstance);
 
         Ipam ipam = service.createIpam(REGION, null, List.of(REGION), ownerAccount);
         IpamPool pool = service.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(),
@@ -567,7 +652,50 @@ class Ec2IpamServiceTest {
         service.provisionIpamPoolCidr(REGION, pool.getIpamPoolId(), "10.0.0.0/16");
 
         caller.set(workloadAccount);
-        return new SharedPoolFixture(service, pools, ipams, caller, ipam, pool);
+        return new SharedPoolFixture(service, pools, ipams, caller, ipam, pool, ec2, tags);
+    }
+
+    @Test
+    void anotherAccountsAllocationTagsLeaveNoEntryInEitherAccount() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        String poolId = fixture.pool().getIpamPoolId();
+        List<String> ids = new ArrayList<>(List.of(poolId));
+        for (int i = 0; i < 2; i++) {
+            IpamPoolAllocation allocation = fixture.service().allocateIpamPoolCidr(REGION, poolId, 24,
+                    null, null, null, List.of(new Tag("team", "workload")));
+            assertEquals("222222222222", allocation.getResourceOwner());
+            ids.add(allocation.getIpamPoolAllocationId());
+        }
+        fixture.caller().set("111111111111");
+        fixture.ec2().createTags(REGION, ids, List.of(new Tag("team", "owner")));
+        Function<String, Integer> entries = id ->
+                fixture.tags().scanAllAccountEntries(key -> key.endsWith(id)).size();
+        assertEquals(2, entries.apply(ids.get(1)));
+
+        fixture.service().releaseIpamPoolAllocation(REGION, poolId, ids.get(1), null);
+        assertEquals(0, entries.apply(ids.get(1)));
+        assertEquals(2, entries.apply(ids.get(2)));
+
+        fixture.service().deleteIpamPool(REGION, poolId);
+        for (String id : ids) {
+            assertEquals(0, entries.apply(id), id);
+        }
+    }
+
+    @Test
+    void anAllocationStoredWithoutAResourceOwnerFallsBackToThePoolOwnersAccount() {
+        SharedPoolFixture fixture = sharedPoolOwnedByAnotherAccount();
+        String poolId = fixture.pool().getIpamPoolId();
+        fixture.caller().set("111111111111");
+        String allocationId = fixture.service().allocateIpamPoolCidr(REGION, poolId, 24,
+                null, null, null, List.of(new Tag("team", "owner"))).getIpamPoolAllocationId();
+        fixture.pools().getForAccount("111111111111", REGION + "|" + poolId).orElseThrow()
+                .getAllocations().getFirst().setResourceOwner(null);
+
+        fixture.caller().set("222222222222");
+        fixture.service().releaseIpamPoolAllocation(REGION, poolId, allocationId, null);
+
+        assertTrue(fixture.tags().scanAllAccountEntries(key -> key.endsWith(allocationId)).isEmpty());
     }
 
     @Test
@@ -592,7 +720,7 @@ class Ec2IpamServiceTest {
         when(config.defaultAccountId()).thenReturn("000000000000");
         InMemoryStorage<String, Ipam> ipams = spy(new InMemoryStorage<>());
         Ec2IpamService spied = new Ec2IpamService(config,
-                ipams, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+                ipams, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), mock(Ec2Service.class));
         Ipam ipam = spied.createIpam(REGION, null, List.of(REGION));
         spied.createIpamPool(REGION, ipam.getPrivateDefaultScopeId(), REGION, null, "ipv4", "d");
         clearInvocations(ipams);
