@@ -11,6 +11,7 @@ import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
@@ -39,6 +40,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -53,11 +55,14 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -148,7 +153,7 @@ class IamConditionContextResolverTest {
                 dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
                 crossAccountServiceInstance, iamServiceInstance,
                 lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()),
-                requestContext, config,
+                requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
     }
 
@@ -624,6 +629,41 @@ class IamConditionContextResolverTest {
                 resolver.resolve("iam", "iam:AttachRolePolicy", queryRequest("iam", query)));
     }
 
+    @Test
+    void aTagBatchLooksUpItsInterfacesOnceAndGivesEachTargetItsOwnKeys() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "DeleteTags");
+        query.add("ResourceId.1", "eni-1");
+        query.add("ResourceId.2", "eni-2");
+        query.add("ResourceId.3", "eni-3");
+        ContainerRequestContext request = queryRequest("ec2", query);
+        Map<String, Object> properties = new HashMap<>();
+        properties.put(AwsProtocolClaimFilter.CLAIM_PROPERTY,
+                request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY));
+        when(request.getProperty(anyString())).thenAnswer(call -> properties.get(call.<String>getArgument(0)));
+        doAnswer(call -> properties.put(call.getArgument(0), call.getArgument(1)))
+                .when(request).setProperty(anyString(), any());
+        when(ec2Service.heldResources(eq("us-east-1"), eq("network-interface"), anyCollection())).thenReturn(Map.of(
+                "eni-1", networkInterface("eni-1", "vpc-a"), "eni-2", networkInterface("eni-2", "vpc-b"),
+                "eni-3", networkInterface("eni-3", "vpc-a")));
+
+        Map<String, List<String>> first = resolver.resolve("ec2", "ec2:DeleteTags", request);
+        List<Map<String, List<String>>> rest = resolver.resolveRemainingTargets("ec2", "ec2:DeleteTags", request);
+
+        assertEquals(List.of("arn:aws:ec2:us-east-1:123456789012:vpc/vpc-a"), first.get("ec2:Vpc"));
+        assertEquals(List.of("arn:aws:ec2:us-east-1:123456789012:vpc/vpc-b"), rest.get(0).get("ec2:Vpc"));
+        assertEquals(List.of("eni-3"), rest.get(1).get("ec2:NetworkInterfaceID"));
+        verify(ec2Service, times(1)).heldResources(anyString(), anyString(), anyCollection());
+        verify(ec2Service).heldResources("us-east-1", "network-interface", Set.of("eni-1", "eni-2", "eni-3"));
+    }
+
+    private static NetworkInterface networkInterface(String id, String vpcId) {
+        NetworkInterface networkInterface = new NetworkInterface();
+        networkInterface.setNetworkInterfaceId(id);
+        networkInterface.setVpcId(vpcId);
+        return networkInterface;
+    }
+
     private static ContainerRequestContext queryRequest(String service, MultivaluedMap<String, String> query) {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         UriInfo uri = mock(UriInfo.class);
@@ -806,7 +846,7 @@ class IamConditionContextResolverTest {
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                spellings(), requestContext, config, null,
+                spellings(), requestContext, new RegionResolver("us-east-1", "123456789012"), config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 

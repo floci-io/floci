@@ -2,6 +2,15 @@
 
 **Protocol:** EC2 Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+A request acting on a network interface carries its `ec2:Vpc` and `ec2:Subnet` (as ARNs),
+`ec2:AvailabilityZone` and `ec2:NetworkInterfaceID`, read from the interface Floci holds:
+stored, held by an instance as its primary interface, or owned by a VPC endpoint, NAT
+gateway or Instance Connect endpoint. Which keys a resource type takes, and the member of
+its botocore shape each comes from, are generated from the Service Reference and botocore
+(`resourceKeys` in `iam-request-resources.json`). In a `CreateTags` or `DeleteTags` batch
+every interface is checked against its own keys and tags before any tag changes; another
+interface's VPC or tags cannot authorize it. Authorization reads do not create default resources.
+
 ## Instance IAM authorization
 
 With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.

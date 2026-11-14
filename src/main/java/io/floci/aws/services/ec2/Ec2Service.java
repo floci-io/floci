@@ -15636,6 +15636,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                          List<String> networkInterfaceIds,
                                                          List<Map.Entry<String, List<String>>> filters,
                                                          int maxResults, String nextToken) {
+        return describeNetworkInterfaces(accountId, region, networkInterfaceIds, filters, maxResults, nextToken, true);
+    }
+
+    /**
+     * The resources of {@code type} EC2 holds for the caller under {@code ids}, keyed by id, as its Describe operation
+     * answers them, which the IAM condition keys the request-resources table reads from a resource's members are
+     * valued from: a network interface of any kind, stored, held by an instance or owned by an endpoint or a NAT
+     * gateway. All of them come from one pass over the stores, so a request naming many costs no more lookups than one
+     * naming a single resource. Empty for a type it does not answer for. An id it holds nothing under is absent, and
+     * the request fails on it. Reads only: it creates no default resources.
+     */
+    public Map<String, Object> heldResources(String region, String type, Collection<String> ids) {
+        if (!"network-interface".equals(type) || ids.isEmpty()) {
+            return Map.of();
+        }
+        // The id filter rather than the id list: a filter leaves out what it does not match, where an id the store
+        // lacks would fail the whole lookup with InvalidNetworkInterfaceID.NotFound.
+        Map<String, Object> held = new HashMap<>();
+        describeNetworkInterfaces(callerAccountId(), region, List.of(),
+                List.of(Map.entry("network-interface-id", List.copyOf(ids))), 0, null, false)
+                .networkInterfaces().stream()
+                .filter(ni -> ids.contains(ni.getNetworkInterfaceId()))
+                .forEach(ni -> held.put(ni.getNetworkInterfaceId(), ni));
+        return held;
+    }
+
+    private NetworkInterfaceListResult describeNetworkInterfaces(String accountId, String region,
+                                                                 List<String> networkInterfaceIds,
+                                                                 List<Map.Entry<String, List<String>>> filters,
+                                                                 int maxResults, String nextToken,
+                                                                 boolean createDefaults) {
         // Validate pagination parameters
         if (maxResults > 0 && !networkInterfaceIds.isEmpty()) {
             throw new AwsException("InvalidParameterCombination",
@@ -15656,7 +15687,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
-        ensureDefaultResources(region);
+        if (createDefaults) {
+            ensureDefaultResources(region);
+        }
         String safeAccount = accountId != null ? accountId : callerAccountId();
         List<NetworkInterface> result = new ArrayList<>();
         Set<String> foundIds = new HashSet<>();

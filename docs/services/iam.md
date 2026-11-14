@@ -3009,6 +3009,13 @@ floci populates:
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
   `logs:DeleteRetentionPolicy` use the owning log group's tags.
+- EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
+  `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
+  key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
+  `iam-request-resources.json` gives each type's keys and members, generated from the Service Reference
+  and botocore by `tools/aws/regen_iam_request_resources.py`; network interfaces are read so far, and a
+  key of a type EC2 does not yet answer for stays absent. A batch is evaluated once per resource, each
+  with its own keys.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
