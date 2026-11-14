@@ -2,13 +2,10 @@ package io.floci.aws.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
-import jakarta.ws.rs.core.MultivaluedHashMap;
-import jakarta.ws.rs.core.MultivaluedMap;
-import jakarta.ws.rs.core.Response;
+import io.floci.aws.testing.Ec2QueryHandlerFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -24,6 +21,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.testing.Ec2QueryHandlerFixtures.queryHandler;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -60,9 +58,7 @@ class Ec2RepeatedFilterNamesTest {
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
         service = new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 new AmiImageResolver(imageCatalog), imageCatalog, new Ec2InstanceTypeCatalog(), new MemoryFactory());
-        handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
-                mock(Ec2IpamService.class), new RegionResolver(REGION, "000000000000"));
+        handler = queryHandler(service);
     }
 
     /**
@@ -704,14 +700,7 @@ class Ec2RepeatedFilterNamesTest {
     }
 
     private String ok(String action, String... params) {
-        MultivaluedMap<String, String> form = new MultivaluedHashMap<>();
-        for (int i = 0; i < params.length; i += 2) {
-            form.add(params[i], params[i + 1]);
-        }
-        Response response = handler.handle(action, form, REGION);
-        String body = String.valueOf(response.getEntity());
-        assertEquals(200, response.getStatus(), action + ": " + body);
-        return body;
+        return Ec2QueryHandlerFixtures.ok(handler, action, params);
     }
 
     private String first(String xml, String element) {

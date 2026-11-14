@@ -103,6 +103,7 @@ public class IamConditionContextResolver {
     private final Instance<CloudWatchLogsCrossAccountService> crossAccountService;
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
+    private final Instance<RequestConditionSpelling> requestConditionSpellings;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
@@ -121,12 +122,13 @@ public class IamConditionContextResolver {
                                        Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
+                                       Instance<RequestConditionSpelling> requestConditionSpellings,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
         this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
-                lambdaWebService, requestContext,
+                lambdaWebService, requestConditionSpellings, requestContext,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -137,6 +139,7 @@ public class IamConditionContextResolver {
                                 Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
+                                Instance<RequestConditionSpelling> requestConditionSpellings,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
@@ -148,6 +151,7 @@ public class IamConditionContextResolver {
         this.crossAccountService = crossAccountService;
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
+        this.requestConditionSpellings = requestConditionSpellings;
         this.requestContext = requestContext;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
@@ -164,9 +168,7 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
-            case "redshift" -> RequestConditionKeys.requestKeys(action).isEmpty() ? null
-                    : requestConditions(action, formParameters(ctx)::get);
-            default -> null;
+            default -> requestMemberConditions(action, ctx);
         };
     }
 
@@ -322,18 +324,80 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser or an
-     * OpenTunnel remotePort, read through {@code parameter} from the table in
-     * {@code request-condition-keys.json}; null when it carries none.
+     * The keys a request for {@code action} carries in its own members, such as an OpenTunnel remotePort, read
+     * through {@code parameter} from the table in {@code request-condition-keys.json}; null when it carries none.
      */
     static Map<String, List<String>> requestConditions(String action, Function<String, String> parameter) {
+        return requestConditions(action, member -> {
+            String value = parameter.apply(member);
+            return value == null ? List.of() : List.of(value);
+        }, null);
+    }
+
+    /**
+     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser or the record names
+     * of a Route 53 change batch, read as its namespace's protocol carries them (a Query form, an XML body), from the
+     * table in {@code request-condition-keys.json}; null when it carries none, or is sent in a protocol no reader here
+     * reads yet.
+     */
+    private Map<String, List<String>> requestMemberConditions(String action, ContainerRequestContext ctx) {
+        List<String> keys = RequestConditionKeys.requestKeys(action);
+        if (keys.isEmpty()) {
+            return null;
+        }
+        String namespace = action.substring(0, action.indexOf(':'));
+        String protocol = RequestConditionKeys.protocol(namespace);
+        Function<String, List<String>> values;
+        if ("query".equals(protocol) || "ec2".equals(protocol)) {
+            Map<String, String> form = formParameters(ctx);
+            values = member -> form.containsKey(member) ? List.of(form.get(member)) : List.of();
+        } else if ("rest-xml".equals(protocol)) {
+            List<String> members = keys.stream()
+                    .flatMap(key -> RequestConditionKeys.members(action, key).stream()).toList();
+            Map<String, List<String>> read = XmlParser.valuesAt(bodyText(ctx), members);
+            if (read == null) {
+                // The handler refuses a body it cannot read the same elements from, so nothing is checked on it.
+                return null;
+            }
+            values = member -> read.getOrDefault(member, List.of());
+        } else {
+            return null;
+        }
+        return requestConditions(action, values, requestConditionSpelling(namespace));
+    }
+
+    /**
+     * Every value {@code values} reads for each member the table names for each key {@code action} takes, spelled by
+     * {@code spelling} as the namespace's service spells the member's shape; null when there are none.
+     */
+    private static Map<String, List<String>> requestConditions(String action, Function<String, List<String>> values,
+                                                               RequestConditionSpelling spelling) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         for (String key : RequestConditionKeys.requestKeys(action)) {
             for (String member : RequestConditionKeys.members(action, key)) {
-                putIfPresent(conditions, key, parameter.apply(member));
+                String shape = RequestConditionKeys.shape(action, member);
+                for (String value : values.apply(member)) {
+                    if (value != null && !value.isBlank()) {
+                        conditions.computeIfAbsent(key, ignored -> new ArrayList<>())
+                                .add(spelling == null ? value : spelling.spell(shape, value));
+                    }
+                }
             }
         }
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** The registered spelling of the namespace's request members; null when there is none. */
+    private RequestConditionSpelling requestConditionSpelling(String namespace) {
+        if (requestConditionSpellings == null || requestConditionSpellings.isUnsatisfied()) {
+            return null;
+        }
+        for (RequestConditionSpelling spelling : requestConditionSpellings) {
+            if (spelling.namespace().equals(namespace)) {
+                return spelling;
+            }
+        }
+        return null;
     }
 
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
@@ -825,6 +889,33 @@ public class IamConditionContextResolver {
         }
     }
 
+    /** Stored tags for one generated EC2 ARN, never borrowed from another target in the same request. */
+    public Map<String, List<String>> withEc2ResourceTags(String scope, String action, String resource,
+                                                        String region, String accountId,
+                                                        Map<String, List<String>> context) {
+        if (!"ec2".equals(scope) || RequestResources.hasIndividualTargets(action)
+                || !AwsArnUtils.isArn(resource) || !ec2Service.isResolvable()) {
+            return context;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
+        if (!"ec2".equals(arn.service()) || !region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+            return context;
+        }
+        String[] parts = arn.resource().split("/", 2);
+        if (parts.length != 2 || parts[1].contains("*") || parts[1].contains("?")) {
+            return context;
+        }
+        List<String> prefixes = RequestResourceMembers.table().resourceTagKeys()
+                .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], List.of());
+        if (prefixes.isEmpty()) {
+            return context;
+        }
+        Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
+        result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith));
+        putStoredTags(result, region, parts[1], prefixes);
+        return result;
+    }
+
     private void addResourceTags(Map<String, List<String>> conditions, String resourceId,
                                  RequestResourceMembers.Targets targets) {
         if (resourceId == null || resourceId.isBlank() || !ec2Service.isResolvable()) {
@@ -839,6 +930,11 @@ public class IamConditionContextResolver {
                 break;
             }
         }
+        putStoredTags(conditions, region, resourceId, prefixes);
+    }
+
+    private void putStoredTags(Map<String, List<String>> conditions, String region, String resourceId,
+                               List<String> prefixes) {
         for (Tag tag : ec2Service.get().resourceTags(region, resourceId)) {
             for (String prefix : prefixes) {
                 conditions.put(prefix + tag.getKey(), List.of(tag.getValue() == null ? "" : tag.getValue()));

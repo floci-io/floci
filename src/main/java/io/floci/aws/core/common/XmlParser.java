@@ -13,6 +13,7 @@ import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -132,6 +133,47 @@ public final class XmlParser {
             return null;
         }
         return root;
+    }
+
+    /**
+     * The text of every element at each of {@code paths}, in document order. A path names elements by their local
+     * names below the root element, joined by dots ({@code ChangeBatch.Changes.Change.Action}), so an element of the
+     * same name elsewhere is not read. Null when the body is empty or does not parse, or when an element at a path
+     * holds elements rather than text, which a handler reading it with {@link XMLStreamReader#getElementText}
+     * refuses too.
+     */
+    public static Map<String, List<String>> valuesAt(String xml, Collection<String> paths) {
+        if (xml == null || xml.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> values = new LinkedHashMap<>();
+        List<String> open = new ArrayList<>();
+        boolean rootOpen = false;
+        try {
+            XMLStreamReader r = FACTORY.createXMLStreamReader(new StringReader(xml));
+            while (r.hasNext()) {
+                int event = r.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    if (!rootOpen) {
+                        rootOpen = true;
+                        continue;
+                    }
+                    open.add(r.getLocalName());
+                    String path = String.join(".", open);
+                    if (paths.contains(path)) {
+                        values.computeIfAbsent(path, ignored -> new ArrayList<>()).add(r.getElementText());
+                        open.removeLast();
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT && !open.isEmpty()) {
+                    open.removeLast();
+                }
+            }
+            r.close();
+        } catch (Exception e) {
+            LOG.debugv("Ignoring malformed XML during parse: {0}", e.getMessage());
+            return null;
+        }
+        return values;
     }
 
     /**

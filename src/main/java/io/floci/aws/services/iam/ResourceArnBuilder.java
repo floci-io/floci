@@ -254,6 +254,19 @@ public class ResourceArnBuilder {
         return named.isEmpty() ? List.of("*") : named;
     }
 
+    /**
+     * The requests the service of {@code operation}, the one the request is dispatched as, makes to another service as
+     * the caller on what the resources it is checked on hold (see {@link RequestResources#forwarded}), each resource
+     * looked up in its own service's stored state; none when the table gives the operation none.
+     */
+    public List<RequestResources.Forwarded> forwarded(String operation, List<String> resources, String accountId) {
+        if (operation == null || operation.indexOf(':') < 0) {
+            return List.of();
+        }
+        return RequestResources.forwarded(operation, resources, accountId,
+                storedResourceArns(operation.substring(0, operation.indexOf(':'))), this::storedResourceArns);
+    }
+
     /** The registered finder of the namespace's stored ARNs; null when there is none. */
     private StoredResourceArns storedResourceArns(String namespace) {
         if (storedResourceArns == null || storedResourceArns.isUnsatisfied()) {

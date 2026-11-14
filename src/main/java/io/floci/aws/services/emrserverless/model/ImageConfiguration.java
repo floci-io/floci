@@ -1,8 +1,10 @@
 package io.floci.aws.services.emrserverless.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class ImageConfiguration {
     private String imageUri;
     private String resolvedImageDigest;

@@ -49,13 +49,16 @@ public class CodeArtifactMavenController {
     private final CodeArtifactService service;
     private final ReposiliteSidecarClient reposilite;
     private final CodeArtifactMavenExternalConnectionImporter externalConnectionImporter;
+    private final CodeArtifactMavenUpstreamRepositoryImporter upstreamRepositoryImporter;
 
     @Inject
     public CodeArtifactMavenController(CodeArtifactService service, ReposiliteSidecarClient reposilite,
-                                        CodeArtifactMavenExternalConnectionImporter externalConnectionImporter) {
+                                        CodeArtifactMavenExternalConnectionImporter externalConnectionImporter,
+                                        CodeArtifactMavenUpstreamRepositoryImporter upstreamRepositoryImporter) {
         this.service = service;
         this.reposilite = reposilite;
         this.externalConnectionImporter = externalConnectionImporter;
+        this.upstreamRepositoryImporter = upstreamRepositoryImporter;
     }
 
     @PUT
@@ -232,9 +235,14 @@ public class CodeArtifactMavenController {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
         Optional<StreamedArtifact> artifact = reposilite.fetchArtifactStreamed(scope.repoId(), gav);
+        // A repository has either an external connection or upstreams, never both: at most one
+        // of these two calls ever does real work, and the other's own no-op is a single cheap
+        // in-memory check (see CodeArtifactMavenUpstreamRepositoryImporter's own javadoc).
         if ((artifact.isEmpty() || isBareMavenMetadataFile(gav))
-                && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
-                        scope.repoId(), gav)) {
+                && (externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav)
+                    || upstreamRepositoryImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav))) {
             artifact.ifPresent(a -> StreamingResponses.closeQuietly(a.content()));
             artifact = reposilite.fetchArtifactStreamed(scope.repoId(), gav);
         }
@@ -254,8 +262,10 @@ public class CodeArtifactMavenController {
         // ever gets the chance to retain it.
         boolean exists = reposilite.artifactExists(scope.repoId(), gav);
         if ((!exists || isBareMavenMetadataFile(gav))
-                && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
-                        scope.repoId(), gav)) {
+                && (externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav)
+                    || upstreamRepositoryImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav))) {
             exists = reposilite.artifactExists(scope.repoId(), gav);
         }
         return exists ? Response.ok().build() : Response.status(Response.Status.NOT_FOUND).build();

@@ -76,6 +76,7 @@ class CodeArtifactPypiControllerTest {
     private CodeArtifactService service;
     private PypiserverSidecarClient pypiserver;
     private CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
+    private CodeArtifactPypiUpstreamRepositoryImporter upstreamRepositoryImporter;
     private CodeArtifactPypiController controller;
     private final AtomicReference<Path> lastStagedWholeBody = new AtomicReference<>();
 
@@ -102,6 +103,7 @@ class CodeArtifactPypiControllerTest {
         // method here, matching a repository with no pypi external connection configured at all;
         // individual tests below override specific calls to exercise the merge/retention paths.
         externalConnectionImporter = mock(CodeArtifactPypiExternalConnectionImporter.class);
+        upstreamRepositoryImporter = mock(CodeArtifactPypiUpstreamRepositoryImporter.class);
         // service is a mock, so its own real stageAssetBody (which the controller now calls to
         // stage the whole raw multipart body before scanning it) never runs; stubbed here to
         // actually stage to a real temp file, the same real behavior the controller depends on to
@@ -120,7 +122,8 @@ class CodeArtifactPypiControllerTest {
         }).when(service).deleteStagedAssetBody(any());
 
         HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-        controller = new CodeArtifactPypiController(service, pypiserver, externalConnectionImporter, httpClient);
+        controller = new CodeArtifactPypiController(service, pypiserver, externalConnectionImporter,
+                upstreamRepositoryImporter, httpClient);
     }
 
     @AfterEach

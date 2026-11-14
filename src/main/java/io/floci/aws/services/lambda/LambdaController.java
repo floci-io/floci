@@ -224,7 +224,9 @@ public class LambdaController {
                                    @PathParam("functionName") String functionName,
                                    @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
-        lambdaService.deleteFunction(region, functionName, qualifier);
+        if (lambdaService.deleteFunction(region, functionName, qualifier)) {
+            return Response.accepted(objectMapper.createObjectNode()).build();
+        }
         return Response.noContent().build();
     }
 

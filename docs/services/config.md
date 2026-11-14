@@ -40,6 +40,12 @@
 | `StopConfigurationRecorder` | Stop recording configuration changes |
 | `DescribeConfigurationRecorderStatus` | Get the status of configuration recorders. Whether a recorder is recording, and when it last started and stopped, persist with the recorder, so a started recorder is still recording after a restart |
 
+`DescribeConfigurationRecorders` and `DescribeConfigurationRecorderStatus` accept at
+most one entry in `ConfigurationRecorderNames`. More than one entry returns HTTP 400
+`ValidationException`, including repeated names and requests made before any recorder exists.
+An omitted or empty list selects all recorders; one unknown name returns
+`NoSuchConfigurationRecorderException`.
+
 ### Delivery Channel
 
 | Action | Description |

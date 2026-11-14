@@ -841,9 +841,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         // Legacy host-path mode: host-persistent-path is an absolute path
         String hostDataPath = ContainerStorageHelper.hostResourcePath(
                 config, "rds", storageResourceId).toString();
-        if (!containerDetector.isRunningInContainer()) {
-            ContainerStorageHelper.ensureHostDir(hostDataPath);
-        }
+        ContainerStorageHelper.ensureHostDir(containerDetector, hostDataPath);
         specBuilder.withBind(hostDataPath, engineDefaultDataPath(engine, image));
     }
 

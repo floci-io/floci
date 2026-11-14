@@ -74,6 +74,7 @@ public class CodeArtifactNpmDataPlane {
     private final CodeArtifactService service;
     private final VerdaccioSidecarClient verdaccioClient;
     private final CodeArtifactNpmExternalConnectionImporter externalConnectionImporter;
+    private final CodeArtifactNpmUpstreamRepositoryImporter upstreamRepositoryImporter;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient proxyClient;
@@ -84,10 +85,12 @@ public class CodeArtifactNpmDataPlane {
     @Inject
     public CodeArtifactNpmDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
                                      CodeArtifactNpmExternalConnectionImporter externalConnectionImporter,
+                                     CodeArtifactNpmUpstreamRepositoryImporter upstreamRepositoryImporter,
                                      ServiceConfigAccess serviceConfigAccess, Vertx vertx, ObjectMapper mapper) {
         this.service = service;
         this.verdaccioClient = verdaccioClient;
         this.externalConnectionImporter = externalConnectionImporter;
+        this.upstreamRepositoryImporter = upstreamRepositoryImporter;
         this.serviceConfigAccess = serviceConfigAccess;
         this.vertx = vertx;
         this.proxyClient = vertx.createHttpClient(new HttpClientOptions()
@@ -174,9 +177,8 @@ public class CodeArtifactNpmDataPlane {
             PackageIdentity identity = packumentTarget.get();
             boolean fullMetadata = !acceptsCorgi(context.request().getHeader("Accept"));
             use.retain();
-            vertx.<ObjectNode>executeBlocking(promise -> promise.complete(externalConnectionImporter.mergedPackument(
-                    tokenScope.region(), npmRequest.domain(), tokenScope.owner(), npmRequest.repository(), repoId,
-                    identity.namespace(), identity.packageName(), fullMetadata).orElse(null)), false).onComplete(
+            vertx.<ObjectNode>executeBlocking(promise -> promise.complete(mergedPackumentFromEitherSource(tokenScope,
+                    npmRequest, repoId, identity, fullMetadata)), false).onComplete(
                     mergeResult -> {
                         if (mergeResult.succeeded() && mergeResult.result() != null) {
                             context.request().resume();
@@ -189,6 +191,24 @@ public class CodeArtifactNpmDataPlane {
             return;
         }
         proceedToProxy(context, npmRequest, repoId, tokenScope, use);
+    }
+
+    /**
+     * Tries {@code externalConnectionImporter}'s own merge first, then {@code
+     * upstreamRepositoryImporter}'s: a repository has either an external connection or upstreams,
+     * never both, so at most one of these two ever finds anything, and the other's own no-op is a
+     * single cheap in-memory check (see {@code CodeArtifactNpmUpstreamRepositoryImporter}'s own
+     * javadoc). Runs on the blocking worker thread {@link #handle}'s own {@code executeBlocking}
+     * call already dispatched to; both calls only ever touch local sidecar state here, never a
+     * real external network call for the upstream one.
+     */
+    private ObjectNode mergedPackumentFromEitherSource(AuthorizationTokenScope tokenScope, NpmRequest npmRequest,
+            String repoId, PackageIdentity identity, boolean fullMetadata) {
+        return externalConnectionImporter.mergedPackument(tokenScope.region(), npmRequest.domain(),
+                tokenScope.owner(), npmRequest.repository(), repoId, identity.namespace(), identity.packageName(),
+                fullMetadata).or(() -> upstreamRepositoryImporter.mergedPackument(tokenScope.region(),
+                        npmRequest.domain(), tokenScope.owner(), npmRequest.repository(), repoId,
+                        identity.namespace(), identity.packageName())).orElse(null);
     }
 
     /**
@@ -307,8 +327,13 @@ public class CodeArtifactNpmDataPlane {
                 target.identity().namespace(), bareName, version)) {
             return;
         }
-        externalConnectionImporter.tryImportAsset(tokenScope.region(), npmRequest.domain(), tokenScope.owner(),
-                npmRequest.repository(), repoId, target.identity().namespace(), bareName, version, filename);
+        // A repository has either an external connection or upstreams, never both: at most one
+        // of these two ever does real work (see mergedPackumentFromEitherSource's own javadoc).
+        if (!externalConnectionImporter.tryImportAsset(tokenScope.region(), npmRequest.domain(), tokenScope.owner(),
+                npmRequest.repository(), repoId, target.identity().namespace(), bareName, version, filename)) {
+            upstreamRepositoryImporter.tryImportAsset(tokenScope.region(), npmRequest.domain(), tokenScope.owner(),
+                    npmRequest.repository(), repoId, target.identity().namespace(), bareName, version, filename);
+        }
     }
 
     /**

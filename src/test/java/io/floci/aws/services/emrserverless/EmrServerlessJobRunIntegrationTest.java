@@ -18,6 +18,7 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.*;
@@ -123,7 +124,27 @@ class EmrServerlessJobRunIntegrationTest {
                 .body("jobRun.attempt", equalTo(1))
                 .body("jobRun.attemptCreatedAt", instanceOf(Number.class))
                 .body("jobRun.attemptUpdatedAt", instanceOf(Number.class))
-                .body("jobRun", not(hasKey("hive")));
+                .body("jobRun", not(hasKey("hive")))
+                .body("jobRun", not(hasKey("imageConfiguration")))
+                .body("jobRun", not(hasKey("workerTypeSpecifications")));
+    }
+
+    @Test
+    void getJobRunReportsTheImageConfigurationsTheRunApplies() {
+        String applicationImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String driverImage = "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/driver:7.5.0";
+        String applicationId = createApplication("""
+                , "imageConfiguration": {"imageUri": "%s", "applicationLevelDigestResolution": false},
+                "workerTypeSpecifications": {"Driver": {"imageConfiguration": {"imageUri": "%s"}}}"""
+                .formatted(applicationImage, driverImage));
+        String jobRunId = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+
+        // Without the docker runner mode no image is pulled, so neither has a digest.
+        givenReq().when().get("/applications/" + applicationId + "/jobruns/" + jobRunId)
+                .then().statusCode(200)
+                .body("jobRun.imageConfiguration", equalTo(Map.of("imageUri", applicationImage)))
+                .body("jobRun.workerTypeSpecifications",
+                        equalTo(Map.of("Driver", Map.of("imageConfiguration", Map.of("imageUri", driverImage)))));
     }
 
     @Test

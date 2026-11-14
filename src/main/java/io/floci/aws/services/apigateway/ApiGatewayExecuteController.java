@@ -48,6 +48,7 @@ import io.floci.aws.services.apigatewayv2.model.Route;
 import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
 import io.floci.aws.services.apigatewayv2.proxy.CloudMapInstanceResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpApiForwardedHeaders;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import io.floci.aws.services.apigatewayv2.websocket.ConnectionInfo;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.floci.aws.services.elbv2.ElbV2Service;
@@ -146,6 +147,7 @@ public class ApiGatewayExecuteController {
     private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
     private final CloudMapInstanceResolver cloudMapInstanceResolver;
     private final AwsServiceIntegrationMapper awsServiceIntegrationMapper;
+    private final HttpProxyInvoker httpProxyInvoker;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -161,7 +163,8 @@ public class ApiGatewayExecuteController {
                                        RequestContext requestContext,
                                        ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
                                        AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
-                                       CloudMapInstanceResolver cloudMapInstanceResolver) {
+                                       CloudMapInstanceResolver cloudMapInstanceResolver,
+                                       HttpProxyInvoker httpProxyInvoker) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -185,6 +188,7 @@ public class ApiGatewayExecuteController {
         this.restLambdaAuthorizer = restLambdaAuthorizer;
         this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
         this.cloudMapInstanceResolver = cloudMapInstanceResolver;
+        this.httpProxyInvoker = httpProxyInvoker;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -3061,9 +3065,6 @@ public class ApiGatewayExecuteController {
                 .entity(awsServiceIntegrationMapper.actionError(code, message, status, requestId).toString())
                 .type(MediaType.APPLICATION_JSON).build();
     }
-
-    private final io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker httpProxyInvoker =
-            new io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker();
 
     /** REST integrations default to AWS's 29s and may opt out of backend TLS verification. */
     private static io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions

@@ -84,13 +84,10 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
     // ── Endpoints ──
 
     public synchronized ClientVpnEndpoint createEndpoint(String region, EndpointRequest request, List<Tag> tags) {
-        if (request.clientToken() != null) {
-            Optional<ClientVpnEndpoint> replay = all(region).stream()
-                    .filter(endpoint -> request.clientToken().equals(endpoint.getClientToken()))
-                    .findFirst();
-            if (replay.isPresent()) {
-                return replay.get();
-            }
+        Optional<ClientVpnEndpoint> replay = Ec2ClientTokens.replay(request.clientToken(), () -> all(region).stream(),
+                ClientVpnEndpoint::getClientToken);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         if (request.clientCidrBlock() == null || !Ipv4Cidrs.isIpv4(request.clientCidrBlock())) {
             throw invalid("ClientCidrBlock must be an IPv4 CIDR block.");
@@ -278,12 +275,10 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
 
     private TargetNetwork associateWithSubnetsHeld(String region, String id, String subnetId, String clientToken) {
         ClientVpnEndpoint endpoint = require(region, id);
-        if (clientToken != null) {
-            Optional<TargetNetwork> replay = endpoint.getTargetNetworks().stream()
-                    .filter(network -> clientToken.equals(network.getClientToken())).findFirst();
-            if (replay.isPresent()) {
-                return replay.get();
-            }
+        Optional<TargetNetwork> replay = Ec2ClientTokens.replay(clientToken, () -> endpoint.getTargetNetworks().stream(),
+                TargetNetwork::getClientToken);
+        if (replay.isPresent()) {
+            return replay.get();
         }
         if (blank(subnetId)) {
             throw missing("SubnetId");

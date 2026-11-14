@@ -112,7 +112,7 @@ class S3GlobalLegacyListingTest {
         AccountResolver accounts = mock(AccountResolver.class);
         when(accounts.extractS3AccessKeyId(anyString())).thenAnswer(invocation -> request.getAccountId());
         controller = new S3Controller(s3, null, region, null, vertx, null, trail, accounts,
-                request, null, null, config, Clock.systemUTC());
+                request, null, null, config, new S3VirtualHostFilter(), Clock.systemUTC());
         headers = mock(HttpHeaders.class);
         uri = mock(UriInfo.class);
         when(uri.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());

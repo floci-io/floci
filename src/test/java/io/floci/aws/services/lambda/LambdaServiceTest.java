@@ -646,6 +646,22 @@ class LambdaServiceTest {
     }
 
     @Test
+    void deleteFunctionReportsWhetherADurableFunctionOrItsVersionWasDeleted() {
+        Map<String, Object> durable = baseRequest("del-durable-fn");
+        durable.put("DurableConfig", Map.of("ExecutionTimeout", 3600));
+        service.createFunction(REGION, durable);
+        service.publishVersion(REGION, "del-durable-fn", null);
+        service.createFunction(REGION, baseRequest("del-plain-fn"));
+        service.publishVersion(REGION, "del-plain-fn", null);
+
+        assertFalse(service.deleteFunction(REGION, "del-durable-fn", "5"));
+        assertTrue(service.deleteFunction(REGION, "del-durable-fn", "1"));
+        assertTrue(service.deleteFunction(REGION, "del-durable-fn", null));
+        assertFalse(service.deleteFunction(REGION, "del-plain-fn", "1"));
+        assertFalse(service.deleteFunction(REGION, "del-plain-fn", null));
+    }
+
+    @Test
     void deleteFunctionThrows404WhenNotFound() {
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.deleteFunction(REGION, "ghost"));

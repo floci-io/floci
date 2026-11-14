@@ -400,7 +400,7 @@ after template. `$util.error` fails the field with its selected type and details
 `$util.appendError` reports an error beside the returned data.
 
 The existing VTL loop, output-size, timeout, and reflection-sandbox limits apply. The
-`2017-02-28` template version and VTL-backed HTTP, EventBridge, OpenSearch, and Bedrock data sources
+`2017-02-28` template version and VTL-backed EventBridge, OpenSearch, and Bedrock data sources
 are not included.
 
 | Setting | Env | Default |
@@ -457,10 +457,69 @@ environment variables). `ctx.request.headers` is empty: the GraphQL context does
 | `AWS_LAMBDA` | `Invoke` and `BatchInvoke` for APPSYNC_JS, and `Invoke` for `2018-05-29` VTL UNIT resolvers and pipeline functions. Both runtimes send only the resolved `payload` to the function; `BatchInvoke` sends the payload list. A function error fails the field rather than resolving to the error object: `ctx.error.type` is `Lambda:` and the invoke's `FunctionError` (`Lambda:Unhandled` for a thrown error), and `ctx.error.message` is the function's `errorMessage`, or the raw error payload when it has none. |
 | `RELATIONAL_DATABASE` | Statements run over the RDS Data API against `rdsHttpEndpointConfig`. Accepts `{statements, variableMap}`, the `{statement, parameters}` the `/rds` helpers build, a list of either, or a bare SQL string. `variableTypeHintMap` is honoured, without it a bound date binds as text and PostgreSQL refuses the comparison (`operator does not exist: timestamp with time zone >= character varying`), so a resolver's date filters need it. The result is wrapped as `{sqlStatementResults: […]}`, which is what `toJsonObject()` reads. Supports APPSYNC_JS plus `2018-05-29` VTL UNIT resolvers and pipeline functions. |
 | `AMAZON_DYNAMODB` | `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `Scan`, through the native DynamoDB path so expressions, conditions and indexes all apply. Items come back as **plain JSON**, not attribute values, as AppSync returns them. `nextToken` is an opaque encoding of `LastEvaluatedKey`. `BatchGetItem`, `TransactWriteItems` and `Sync` are not implemented and say so. Supports APPSYNC_JS plus `2018-05-29` VTL UNIT resolvers and pipeline functions. |
-| `HTTP`, `AMAZON_EVENTBRIDGE`, `AMAZON_OPENSEARCH_SERVICE`, `AMAZON_BEDROCK_RUNTIME` | Not implemented; a resolver using one fails its field naming the type. |
+| `HTTP` | HTTP requests from APPSYNC_JS and `2018-05-29` VTL UNIT resolvers and pipeline functions. Returns `{statusCode, headers, body}`, including non-success responses. See [HTTP requests](#http-requests) for endpoint and signing limits. |
+| `AMAZON_EVENTBRIDGE`, `AMAZON_OPENSEARCH_SERVICE`, `AMAZON_BEDROCK_RUNTIME` | Not implemented; a resolver using one fails its field naming the type. |
 
 A field with no resolver falls back to reading its value off the parent object, which is how the
 fields of an object a resolver returned are populated.
+
+### HTTP requests
+
+An HTTP data source uses `httpConfig.endpoint`. Its resolver returns `method`, `resourcePath`,
+and optional `params.headers`, `params.query`, and `params.body`. Methods are `GET`, `POST`,
+`PUT`, `PATCH`, and `DELETE`. Header and query values must be strings; query values are URL-encoded.
+A string body is sent as text and an object body is JSON-encoded. The resource path is appended
+to the configured endpoint's base path and cannot select another host.
+
+For example, a VTL request template can return:
+
+```json
+{"version":"2018-05-29","method":"GET","resourcePath":"/items","params":{"query":{"limit":"10"}}}
+```
+
+The response handler receives `ctx.result.statusCode`, `ctx.result.headers`, and the text
+`ctx.result.body`. A 4xx or 5xx response is still a result for the handler to inspect. Transport
+failures use `HttpException`; invalid request mappings use `MappingTemplate`. Requests and responses
+are limited to 5 MiB, and transport work has a 30-second deadline. Redirects and automatic retries
+are disabled. Supported response charsets are respected; a missing, blank, or unrecognized charset
+falls back to UTF-8. HTTPS keeps certificate and hostname verification enabled.
+HTTP resolver callbacks use separate batches so independent query fields can run concurrently;
+root mutation fields retain their selection order.
+
+Unsigned requests support public HTTP(S) endpoints and local development services on localhost
+or private container networks. Floci rejects IPv4 and IPv6 link-local addresses
+(`169.254.0.0/16` and `fe80::/10`) and the AWS IPv6 metadata address (`fd00:ec2::254`),
+including IPv4-mapped equivalents and hostnames with any such DNS answer. It connects using
+the validated DNS snapshot. This shared policy does not block Alibaba metadata at
+`100.100.100.200`; that address remains reachable if the host can route to it.
+Unsigned HTTP data sources do not require a service role. Transport capacity is bounded to
+four active requests and sixteen queued requests. The caller deadline also covers DNS lookup,
+but system DNS can ignore cancellation: a stuck lookup retains its worker until it returns.
+If all four workers are stuck in DNS, other endpoints also lose transport capacity; excess
+requests fail with `HttpException`.
+
+For the following local AWS operations, set `httpConfig.authorizationConfig.authorizationType`
+to `AWS_IAM` and supply `awsIamConfig.signingRegion`, `awsIamConfig.signingServiceName`, and the
+data source's `serviceRoleArn`:
+
+| Signing service | Supported requests |
+|---|---|
+| `scheduler` | `POST`, `GET`, and `DELETE` on `/schedules/<name>` for CreateSchedule, GetSchedule, and DeleteSchedule. Query parameters are limited to `groupName` and `clientToken`. |
+| `states` | `POST /` with `X-Amz-Target: AWSStepFunctions.SendTaskSuccess` or `AWSStepFunctions.SendTaskFailure`, using `application/json` or `application/x-amz-json-1.0`. |
+
+The endpoint must be the service's standard regional HTTPS hostname, for example
+`https://scheduler.us-west-2.amazonaws.com`. The signing region must be a canonical published region
+in the API's partition. The target region may differ from the API's region. The role ARN must belong
+to the API's account and partition, and the target service must be enabled. Requests go to Floci's
+own listener with temporary role credentials that are removed on completion or failure. With
+`floci.services.iam.enforcement-enabled=true`, the role must exist and trust `appsync.amazonaws.com`,
+including any source conditions, and the native service applies its IAM policies. With enforcement
+off (the default), role existence, trust and permission checks are permissive, as for other local
+data sources. Removing temporary credentials does not make permissive IAM mode enforce revocation
+against a delayed or replayed request. Enable IAM enforcement when that check is required.
+The native service's response is preserved in either mode. Step Functions tokens remain bound to
+their owning account and region. Other signing services, operations, endpoint forms, and authorization
+types are unsupported and fail before credentials or a request are sent.
 
 ## Pagination
 
@@ -560,7 +619,7 @@ reaches `CREATE_COMPLETE` and nothing is created for it. Set
 These AWS AppSync capabilities are not yet implemented and are tracked in future phases:
 
 - **VTL resolver expansion**: the `2017-02-28` version and the remaining data sources
-- **Data source adapters**: HTTP, EventBridge, OpenSearch, and Bedrock connectors
+- **Data source adapters**: EventBridge, OpenSearch, and Bedrock connectors
 - **Guardrails** (Phase 10): query depth / complexity limits and related errors
 - **Realtime subscriptions** (Phase 11+): WebSocket real-time subscriptions
 - **Caching**: API-level and per-resolver caching

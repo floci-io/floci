@@ -68,6 +68,8 @@ public class EmrCluster {
     private Instant endDateTime;
     // When the cluster began TERMINATING; Floci's own, as the API's Timeline has no such time.
     private Instant terminatingDateTime;
+    // Status.ErrorDetails: the errors that ended the cluster, empty unless one of those with an ErrorDetail code did.
+    private List<EmrErrorDetail> errorDetails = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
     private List<EmrStep> steps = new ArrayList<>();
     private List<EmrInstanceGroup> instanceGroups = new ArrayList<>();
@@ -216,6 +218,9 @@ public class EmrCluster {
 
     public Instant getTerminatingDateTime() { return terminatingDateTime; }
     public void setTerminatingDateTime(Instant terminatingDateTime) { this.terminatingDateTime = terminatingDateTime; }
+
+    public List<EmrErrorDetail> getErrorDetails() { return errorDetails; }
+    public void setErrorDetails(List<EmrErrorDetail> errorDetails) { this.errorDetails = errorDetails; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

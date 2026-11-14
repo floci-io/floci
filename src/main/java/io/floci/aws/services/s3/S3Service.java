@@ -7773,6 +7773,11 @@ public class S3Service implements Resettable, ResourceProvider {
      * {@code globalBucketNamespace} is enabled, otherwise account-scoped.
      */
     private Optional<S3Object> resolveObject(String storeKey) {
+        String numericBucket = numericBucketName(storeKey);
+        if (numericBucket != null) {
+            return resolveBucketEntry(numericBucket)
+                    .flatMap(bucket -> resolveObjectForAccount(bucket.account(), storeKey));
+        }
         if (globalBucketNamespace && objectStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
@@ -7786,9 +7791,44 @@ public class S3Service implements Resettable, ResourceProvider {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
             return typed.getForAccount(accountId, storeKey)
-                    .or(() -> typed.getLegacyForAccount(accountId, storeKey));
+                    .or(() -> typed.getLegacyForAccount(accountId, storeKey))
+                    .or(() -> migrateNumericBucketObject(typed, accountId, storeKey));
         }
         return objectStore.get(storeKey);
+    }
+
+    private Optional<S3Object> migrateNumericBucketObject(
+            AccountAwareStorageBackend<S3Object> objects, String accountId, String storeKey) {
+        String bucketName = numericBucketName(storeKey);
+        if (bucketName == null || !accountId.equals(objects.defaultAccountId())) {
+            return Optional.empty();
+        }
+        AccountAwareStorageBackend.OwnedEntry<Bucket> bucket = resolveBucketEntry(bucketName).orElse(null);
+        if (bucket == null || !accountId.equals(bucket.account())
+                || !bucketName.equals(bucket.value().getName())) {
+            return Optional.empty();
+        }
+        synchronized (bucket.value()) {
+            // A numeric bucket can look like an account prefix. Only the stored S3 identity
+            // distinguishes its legacy object from another account's unrelated scoped entry.
+            return objects.getForAccountMigratingLegacyKeys(accountId, storeKey, List.of(),
+                    object -> matchesStoredObjectKey(bucketName, storeKey, object));
+        }
+    }
+
+    private static String numericBucketName(String storeKey) {
+        if (!AccountAwareStorageBackend.hasAccountPrefix(storeKey)) {
+            return null;
+        }
+        return storeKey.substring(0, 12);
+    }
+
+    private boolean matchesStoredObjectKey(String bucketName, String storeKey, S3Object object) {
+        if (!bucketName.equals(object.getBucketName()) || object.getKey() == null) {
+            return false;
+        }
+        return storeKey.equals(objectKey(bucketName, object.getKey()))
+                || storeKey.equals(versionedKey(bucketName, object.getKey(), storedVersionId(object)));
     }
 
     private void putObjectForAccount(String accountId, String storeKey, S3Object object) {

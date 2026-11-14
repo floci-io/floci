@@ -203,19 +203,32 @@ final class RequestResourceMembers {
     }
 
     /**
+     * A request an operation's service makes to another service as the caller: {@code action}, on that service's
+     * resource of {@code type} which the record of the operation's resource of type {@code of} holds in
+     * {@code member} (a Redshift Serverless snapshot's {@code kmsKeyId}), sent from the operation's endpoint prefix
+     * {@code endpoint}, which the action's namespace's {@code viaService} key names where the Service Reference lists
+     * one for the action, null otherwise.
+     */
+    record Forwarded(String action, String type, String of, String member, String endpoint, String viaService) {
+    }
+
+    /**
      * The file: each operation's resources, the resource types its action acts on, the resources it creates under a
      * parent and the one a create whose action acts on no type makes ({@code makes}), as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
      * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
      * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
-     * query, {@code ?name}, by the member's name.
+     * query, {@code ?name}, by the member's name. Each operation's {@code forwarded} requests are those its service
+     * makes to another as the caller.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<String>> types,
                  Map<String, List<Created>> creates, Map<String, List<Resource>> makes,
                  Map<String, Targets> targets,
+                 Map<String, Map<Member, String>> ec2Query,
                  Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
                  Map<String, Map<String, List<String>>> resourceTagKeys,
-                 Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces) {
+                 Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
+                 Map<String, List<Forwarded>> forwarded) {
     }
 
     private static final class Holder {
@@ -299,7 +312,10 @@ final class RequestResourceMembers {
         Map<String, List<Created>> creates = new LinkedHashMap<>();
         Map<String, List<Resource>> makes = new LinkedHashMap<>();
         Map<String, Targets> targets = new LinkedHashMap<>();
+        Map<String, Map<Member, String>> ec2Query = new LinkedHashMap<>();
         Map<String, Map<String, String>> located = new LinkedHashMap<>();
+        Map<String, List<Forwarded>> forwarded = new LinkedHashMap<>();
+        JsonNode forwardedActions = document.path("forwardedActions");
         operations.properties().forEach(operation -> {
             String namespace = operation.getKey().substring(0, Math.max(0, operation.getKey().indexOf(':')));
             if (!namespaces.contains(namespace)) {
@@ -359,6 +375,20 @@ final class RequestResourceMembers {
             if (!under.isEmpty()) {
                 creates.put(operation.getKey(), List.copyOf(under));
             }
+            Map<Member, String> queryMembers = new LinkedHashMap<>();
+            operation.getValue().path("ec2Query").properties().forEach(member -> {
+                String path = member.getKey();
+                String wire = member.getValue().asText("");
+                if (!namespace.equals("ec2") || !path.matches("[A-Za-z][A-Za-z0-9_]*(\\[\\])?")
+                        || !LOCATED_MEMBER.matcher(wire).matches()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " has invalid EC2 Query member: " + path);
+                }
+                boolean list = path.endsWith("[]");
+                queryMembers.put(new Member(list ? path.substring(0, path.length() - 2) : path, list), wire);
+            });
+            if (!queryMembers.isEmpty()) {
+                ec2Query.put(operation.getKey(), Map.copyOf(queryMembers));
+            }
             Map<String, String> where = new LinkedHashMap<>();
             operation.getValue().path("located").properties().forEach(member -> {
                 if (!LOCATED_MEMBER.matcher(member.getKey()).matches()
@@ -371,12 +401,44 @@ final class RequestResourceMembers {
             if (!where.isEmpty()) {
                 located.put(operation.getKey(), Map.copyOf(where));
             }
+            List<Forwarded> forwards = new ArrayList<>();
+            for (JsonNode use : operation.getValue().path("forwarded")) {
+                forwards.add(forwarded(operation.getKey(), use, types, formats.getOrDefault(namespace, Map.of()),
+                        forwardedActions));
+            }
+            if (!forwards.isEmpty()) {
+                forwarded.put(operation.getKey(), List.copyOf(forwards));
+            }
         });
         return new Table(Map.copyOf(entries), Map.copyOf(actsOn), Map.copyOf(creates), Map.copyOf(makes),
-                Map.copyOf(targets), Map.copyOf(located), Map.copyOf(formats), Map.copyOf(resourceTagKeys), namespaces,
+                Map.copyOf(targets), Map.copyOf(ec2Query), Map.copyOf(located), Map.copyOf(formats),
+                Map.copyOf(resourceTagKeys), namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
-                names(document.path("otherNamespaces")));
+                names(document.path("otherNamespaces")), Map.copyOf(forwarded));
+    }
+
+    /**
+     * A request the operation's service makes to another as the caller, joined with what the file records of its
+     * action: the type it acts on and the {@code ViaService} key of its namespace, if any.
+     */
+    private static Forwarded forwarded(String operation, JsonNode use, List<String> types,
+                                       Map<String, ArnFormat> formats, JsonNode actions) {
+        String action = use.path("action").asText("");
+        JsonNode facts = actions.path(action);
+        String type = facts.path("type").asText("");
+        String of = use.path("of").asText("");
+        String member = use.path("member").asText("");
+        String endpoint = use.path("endpoint").asText("");
+        String viaService = facts.has("viaService") ? facts.path("viaService").asText("") : null;
+        if (!use.isObject() || use.size() != 4 || !facts.isObject() || type.isEmpty() || !types.contains(of)
+                || !formats.containsKey(of) || !LOCATED_MEMBER.matcher(member).matches() || endpoint.isEmpty()
+                || viaService != null
+                && !viaService.equals(action.substring(0, action.indexOf(':') + 1) + "ViaService")) {
+            throw new IllegalStateException(RESOURCE_NAME + " forwards " + use + " for " + operation
+                    + ", no recorded action on a member of the record of a type it acts on");
+        }
+        return new Forwarded(action, type, of, member, endpoint, viaService);
     }
 
     private static Set<String> names(JsonNode list) {
