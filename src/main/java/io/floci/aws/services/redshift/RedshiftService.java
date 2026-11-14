@@ -74,6 +74,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -2159,6 +2160,33 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }
         return named;
+    }
+
+    /**
+     * The snapshot an ARN names in its account, as a restore finds it, a cluster the ARN leaves open ({@code *})
+     * matching any: in the caller's account the copy kept in the ARN's Region before the snapshot itself, and in
+     * another account the snapshot itself alone, taken in the ARN's Region, as a shared one is restored.
+     */
+    public Optional<Snapshot> findSnapshotAt(String snapshotArn) {
+        if (!AwsArnUtils.isArnFor(snapshotArn, "redshift")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshotArn);
+        String resource = arn.resource();
+        int slash = resource.indexOf('/');
+        if (!resource.startsWith("snapshot:") || slash < 0) {
+            return Optional.empty();
+        }
+        String cluster = resource.substring("snapshot:".length(), slash);
+        String identifier = resource.substring(slash + 1);
+        Predicate<Snapshot> ofCluster = snapshot -> "*".equals(cluster) || cluster.equals(snapshot.getClusterIdentifier());
+        if (!arn.accountId().equals(clusters.accountId())) {
+            return snapshots.getForAccount(arn.accountId(), identifier).filter(ofCluster)
+                    .filter(snapshot -> snapshot.getSnapshotArn() == null
+                            || AwsArnUtils.parse(snapshot.getSnapshotArn()).region().equals(arn.region()));
+        }
+        return snapshotCopies.getForAccount(arn.accountId(), copyKey(arn.region(), identifier)).filter(ofCluster)
+                .or(() -> snapshots.getForAccount(arn.accountId(), identifier).filter(ofCluster));
     }
 
     private boolean isInRequestRegion(Snapshot snapshot) {

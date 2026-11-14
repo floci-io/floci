@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from regen_request_condition_keys import OUTPUT, action_keys, request_members, validate
+from regen_request_condition_keys import OUTPUT, action_keys, member_shapes, request_members, validate
 
 
 def test_resource_and_action_keys_are_combined():
@@ -70,7 +70,55 @@ def test_a_nested_member_of_a_query_request_fails():
         request_members("redshift", model, {"redshift:GetClusterCredentials": ["redshift:DbUser"]})
 
 
-def test_the_vendored_table_covers_both_namespaces():
+def xml_model(location=None, flattened=False):
+    """A REST-XML request whose list names its elements, as Route 53's change batch does."""
+    batch = {"shape": "Batch", **({"location": location} if location else {})}
+    return {"metadata": {"protocol": "rest-xml"},
+            "operations": {"ChangeResourceRecordSets": {"input": {"shape": "Input"}}}, "shapes": {
+                "Input": {"members": {"ChangeBatch": batch}},
+                "Batch": {"members": {"Changes": {"shape": "Changes"}}},
+                "Changes": {"type": "list", "member": {"shape": "Change", "locationName": "Change"},
+                            **({"flattened": True} if flattened else {})},
+                "Change": {"members": {"Action": {"shape": "ChangeAction"},
+                                       "ResourceRecordSet": {"shape": "Record"}}},
+                "Record": {"members": {"Name": {"shape": "DNSName"}, "Type": {"shape": "RRType"}}},
+                "ChangeAction": {}, "DNSName": {}, "RRType": {}}}
+
+
+ROUTE53_ACTIONS = {"route53:ChangeResourceRecordSets": ["route53:ChangeResourceRecordSetsActions",
+                                                        "route53:ChangeResourceRecordSetsNormalizedRecordNames",
+                                                        "route53:ChangeResourceRecordSetsRecordTypes"]}
+
+
+def test_an_xml_member_is_carried_by_its_elements_with_its_shape():
+    assert request_members("route53", xml_model(), ROUTE53_ACTIONS) == {"route53:ChangeResourceRecordSets": {
+        "route53:ChangeResourceRecordSetsActions": ["ChangeBatch.Changes.Change.Action"],
+        "route53:ChangeResourceRecordSetsNormalizedRecordNames": ["ChangeBatch.Changes.Change.ResourceRecordSet.Name"],
+        "route53:ChangeResourceRecordSetsRecordTypes": ["ChangeBatch.Changes.Change.ResourceRecordSet.Type"]}}
+    assert member_shapes("route53", xml_model(), ROUTE53_ACTIONS) == {"route53:ChangeResourceRecordSets": {
+        "ChangeBatch.Changes.Change.Action": "ChangeAction",
+        "ChangeBatch.Changes.Change.ResourceRecordSet.Name": "DNSName",
+        "ChangeBatch.Changes.Change.ResourceRecordSet.Type": "RRType"}}
+
+
+def test_a_json_member_keeps_its_member_names_and_has_a_shape():
+    model = {"metadata": {"protocol": "rest-json"},
+             "operations": {"CreateWebFunctionEndpoint": {"input": {"shape": "Input"}}},
+             "shapes": {"Input": {"members": {"authType": {"shape": "AuthType"}}}, "AuthType": {}}}
+    assert member_shapes("lambda", model, {"lambda:CreateWebFunctionEndpoint": [
+        "lambda:Request/WebFunctionAuthType"]}) == {"lambda:CreateWebFunctionEndpoint": {"authType": "AuthType"}}
+
+
+@pytest.mark.parametrize("model, problem", [
+    (xml_model(location="uri"), "carried in the uri"),
+    (xml_model(flattened=True), "a map or a flattened list"),
+])
+def test_an_xml_member_the_body_does_not_nest_fails(model, problem):
+    with pytest.raises(ValueError, match=problem):
+        request_members("route53", model, ROUTE53_ACTIONS)
+
+
+def test_the_vendored_table_covers_its_namespaces():
     document = json.loads(OUTPUT.read_text())
     assert validate(document) == []
     assert document["actions"]["lambda:UpdateWebFunctionEndpoint"] == [
@@ -80,6 +128,11 @@ def test_the_vendored_table_covers_both_namespaces():
     assert document["actions"]["redshift:CreateClusterUser"] == ["redshift:DbUser"]
     assert "redshift:CreateClusterUser" not in document["members"]
     assert document["members"]["redshift:GetClusterCredentials"] == {"redshift:DbUser": ["DbUser"]}
+    assert document["actions"]["route53:ChangeResourceRecordSets"] == ROUTE53_ACTIONS[
+        "route53:ChangeResourceRecordSets"]
+    assert document["memberShapes"]["route53:ChangeResourceRecordSets"][
+        "ChangeBatch.Changes.Change.ResourceRecordSet.Name"] == "DNSName"
+    assert document["protocols"] == {"lambda": "rest-json", "redshift": "query", "route53": "rest-xml"}
 
 
 @pytest.mark.parametrize("changed", [

@@ -6,11 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsEndpoints;
-import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.ServicePrincipals;
-import io.floci.aws.core.common.auth.CredentialScope;
+import io.floci.aws.core.common.auth.LocalAwsSigningSession;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
-import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import io.floci.aws.services.apigateway.ApiGatewayService;
 import io.floci.aws.services.apigateway.model.EndpointType;
 import io.floci.aws.services.apigateway.model.RestApi;
@@ -30,13 +28,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.security.SecureRandom;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -48,13 +41,10 @@ import java.util.stream.Collectors;
 /** Regional, same-account REST API requests under the state machine's IAM execution role. */
 @ApplicationScoped
 public class ApiGatewayTaskInvoker {
-    private static final SecureRandom RANDOM = new SecureRandom();
     private static final Set<String> RESERVED_HEADERS = Set.of(
             "authorization", "connection", "content-md5", "expect", "host", "max-forwards",
             "proxy-authenticate", "server", "te", "transfer-encoding", "trailer", "upgrade", "via",
             "www-authenticate");
-    private static final DateTimeFormatter AMZ_DATE =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
     private final ApiGatewayService apiGateway;
     private final IamService iam;
     private final AssumeRolePolicyEvaluator trust;
@@ -125,7 +115,7 @@ public class ApiGatewayTaskInvoker {
         AwsArnUtils.Arn roleId = AwsArnUtils.parse(roleArn);
         String roleName = roleId.resource().substring(roleId.resource().lastIndexOf('/') + 1);
         String principalId = iam.findRole(roleId.accountId(), roleName).map(IamRole::getRoleId).orElse(roleName);
-        TreeMap<String, List<String>> headers = requestHeaders(input.path("Headers"));
+        Map<String, List<String>> headers = requestHeaders(input.path("Headers"));
         headers.putIfAbsent("content-type", List.of("application/json"));
         JsonNode body = input.path("RequestBody");
         if (!body.isObject() || containsNull(body)) {
@@ -143,17 +133,13 @@ public class ApiGatewayTaskInvoker {
         String encodedPath = List.of(path.split("/", -1)).stream()
                 .map(SigV4Canonicalization::uriEncode).collect(Collectors.joining("/"));
         URI uri = listener.resolve("/restapis/" + apiId + "/" + stage + "/_user_request_/" + encodedPath);
-        String accessKey = accessKey();
-        String secret = randomSecret(30);
-        String token = randomSecret(48);
         String sessionName = "StepFunctions-" + UUID.randomUUID();
-        iam.registerSession(accessKey, secret, token, roleArn, Instant.now().plusSeconds(120),
-                null, roleId.accountId(), sessionName, principalId + ":" + sessionName);
-        try {
-            sign(headers, uri, payload, owner.region(), accessKey, secret, token);
+        try (LocalAwsSigningSession session = LocalAwsSigningSession.assumedRole(iam, roleId.accountId(), roleArn,
+                sessionName, principalId + ":" + sessionName)) {
+            Map<String, List<String>> signed = session.sign("POST", uri, payload, owner.region(), "execute-api", headers);
             HttpRequest.Builder request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(60))
                     .POST(HttpRequest.BodyPublishers.ofByteArray(payload));
-            headers.forEach((name, value) -> {
+            signed.forEach((name, value) -> {
                 if (!"host".equals(name)) {
                     value.forEach(item -> request.header(name, item));
                 }
@@ -177,8 +163,6 @@ public class ApiGatewayTaskInvoker {
         } catch (IOException error) {
             throw new AslExecutor.FailStateException("ApiGateway." + error.getClass().getSimpleName(),
                     "API request could not complete");
-        } finally {
-            iam.unregisterSession(roleId.accountId(), accessKey);
         }
     }
 
@@ -254,41 +238,6 @@ public class ApiGatewayTaskInvoker {
     static boolean isReservedDefinitionHeader(String lowerName) {
         return RESERVED_HEADERS.contains(lowerName) || lowerName.startsWith("x-amz-")
                 || lowerName.startsWith("x-amzn-") || lowerName.startsWith("x-forwarded-");
-    }
-
-    private static void sign(TreeMap<String, List<String>> headers, URI uri, byte[] payload, String region,
-                             String accessKey, String secret, String token) throws Exception {
-        String stamp = AMZ_DATE.format(Instant.now());
-        headers.put("host", List.of(uri.getAuthority()));
-        headers.put("x-amz-date", List.of(stamp));
-        headers.put("x-amz-security-token", List.of(token));
-        String signed = String.join(";", headers.keySet());
-        CredentialScope scope = new CredentialScope(accessKey, stamp.substring(0, 8), region, "execute-api");
-        String canonical = "POST\n" + uri.getRawPath() + "\n\n"
-                + SigV4Canonicalization.canonicalHeaders(signed, name -> headers.get(name).stream()
-                        .map(SigV4RequestValidator::normalizeHeaderValue).collect(Collectors.joining(","))) + "\n" + signed + "\n"
-                + Digests.sha256Hex(payload);
-        String toSign = "AWS4-HMAC-SHA256\n" + stamp + "\n" + scope.credentialScope() + "\n"
-                + Digests.sha256Hex(canonical);
-        String signature = SigV4RequestValidator.hexEncode(SigV4RequestValidator.hmacSha256(
-                SigV4RequestValidator.deriveSigningKey(secret, scope.date(), region, "execute-api"), toSign));
-        headers.put("authorization", List.of("AWS4-HMAC-SHA256 Credential=" + accessKey + "/" + scope.credentialScope()
-                + ", SignedHeaders=" + signed + ", Signature=" + signature));
-    }
-
-    private static String accessKey() {
-        String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        StringBuilder value = new StringBuilder("ASIA");
-        for (int index = 0; index < 16; index++) {
-            value.append(alphabet.charAt(RANDOM.nextInt(alphabet.length())));
-        }
-        return value.toString();
-    }
-
-    private static String randomSecret(int size) {
-        byte[] bytes = new byte[size];
-        RANDOM.nextBytes(bytes);
-        return Base64.getEncoder().withoutPadding().encodeToString(bytes);
     }
 
     private static AslExecutor.FailStateException failure(int status, String cause) {

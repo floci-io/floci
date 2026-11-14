@@ -1252,10 +1252,22 @@ public class EksClusterManager
                 disableSslVerification(https);
             }
             int code = conn.getResponseCode();
-            return code == 200 || code == 401 || code == 403;
+            return (code == 200 || code == 401 || code == 403) && addonsDeployed(cluster.getContainerId());
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * k3s creates its Addon objects only after its embedded CRDs are established. A k3s stopped
+     * before that leaves a CRD unestablished for good, and every later start waits on it forever.
+     */
+    private boolean addonsDeployed(String containerId) {
+        ContainerExec.Result addons = execInContainerForResult(containerId,
+                new String[]{"kubectl", "--request-timeout=2s", "get", "addons.k3s.cattle.io",
+                        "-n", "kube-system", "-o", "name"}, 10);
+        return addons.exitCode() == 0 && addons.stdout() != null
+                && addons.stdout().contains("addon.k3s.cattle.io/");
     }
 
     /**

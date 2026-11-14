@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DomainNames;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestConditionSpelling;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.dns.DnsLookupHelper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -40,7 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
-public class Route53Service implements Resettable {
+public class Route53Service implements Resettable, RequestConditionSpelling {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -1114,15 +1115,7 @@ public class Route53Service implements Resettable {
     }
 
     public static String normalizeRecordName(String name) {
-        String normalized = normalizeName(name);
-        if (normalized == null) {
-            return null;
-        }
-        StringBuilder result = new StringBuilder(normalized.length());
-        for (int i = 0; i < normalized.length(); i++) {
-            result.append(asciiLower(normalized.charAt(i)));
-        }
-        return result.toString();
+        return Route53RecordName.recordName(name);
     }
 
     private static String generateZoneId() {
@@ -1307,5 +1300,17 @@ public class Route53Service implements Resettable {
         authorizationMutationBusyUntilNanos.clear();
         privateZoneNameCounts.clear();
         publicZoneNameCounts.clear();
+    }
+
+    /** The namespace whose request members this spells, as the generated condition key table names it. */
+    @Override
+    public String namespace() {
+        return "route53";
+    }
+
+    /** A {@code DNSName} as a record name is spelled for a condition key; a member of any other shape as given. */
+    @Override
+    public String spell(String shape, String value) {
+        return "DNSName".equals(shape) ? Route53RecordName.conditionName(value) : value;
     }
 }

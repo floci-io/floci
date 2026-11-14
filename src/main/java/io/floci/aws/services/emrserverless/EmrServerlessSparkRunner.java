@@ -24,6 +24,7 @@ import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.iam.model.SessionCreds;
+import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -432,9 +433,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             List<String> awsEnvironment = awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials,
                     job.accountId());
             // Pulled, when it is not the driver's, before the driver starts rather than while it waits for executors.
-            String executorImage = job.executors() != null ? executorImage(job) : null;
+            String executorImage = job.executors() != null ? executorImage(job, progress) : null;
             String secret = job.executors() != null ? newSecret() : null;
-            ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job))
+            ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job, progress))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(environment(awsEnvironment, job.environment()));
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
@@ -810,13 +811,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     // The image a job's executors run in: the application's for its executors, pulled for every run as the driver's
     // custom image is, else the release's, pulled when missing, as a driver with a custom image does not pull it.
-    private String executorImage(Job job) {
+    private String executorImage(Job job, Progress progress) {
         if (job.executors().image() == null) {
             return lifecycleManager.resolveImageForLaunch(image(job.imageTemplate(), job.releaseLabel(), Engine.SPARK),
                     ImagePullBehavior.PREFER_CACHED, job.platform()).imageId();
         }
-        String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.executors().image()));
-        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, job.platform()).imageId();
+        return customImageForLaunch(job, WorkerType.EXECUTOR, job.executors().image(), progress);
     }
 
     /**
@@ -885,12 +885,26 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * starts from the image id that pull resolved, which a later push cannot move. Either is pulled for the run's
      * platform, its application's architecture.
      */
-    private String launchImage(Job job) {
+    private String launchImage(Job job, Progress progress) {
         if (job.customImage() == null) {
             return image(job.imageTemplate(), job.releaseLabel(), job.engine());
         }
-        String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.customImage()));
-        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, job.platform()).imageId();
+        return customImageForLaunch(job, WorkerType.DRIVER, job.customImage(), progress);
+    }
+
+    /**
+     * The image id a custom image resolves to for this run's {@code workerType}, pulled from Floci's own registry for
+     * the run's platform, {@code progress} told its manifest digest, which GetJobRun reports: "To identify which image
+     * version each job is running, the GetJobRun API response returns the resolvedImageDigest for that specific job".
+     * An image the registry holds no digest for, one never pulled from or pushed to it, reports none.
+     */
+    private String customImageForLaunch(Job job, WorkerType workerType, String customImage, Progress progress) {
+        String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(customImage));
+        LaunchImage launched = lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, job.platform());
+        if (launched.manifestDigest() != null) {
+            progress.imageResolved(workerType, launched.manifestDigest());
+        }
+        return launched.imageId();
     }
 
     /**

@@ -2440,13 +2440,16 @@ class NativeDynamoDbJsonHandlerTest {
             SET a = if_not_exists(:n, :u)    | An expression attribute value used in expression is not defined; attribute value: :u
             SET a = list_append(:l, :l) + :u | The function is not allowed to be used this way in an expression; function: list_append
             SET a = :s + :u                  | An expression attribute value used in expression is not defined; attribute value: :u
-            SET out = foo(:n)                | Attribute name is a reserved keyword; reserved word: out
+            SET out = foo(:n)                | Attribute name is a reserved keyword; reserved keyword: out
             SET a = foo(:n), out = :n        | Invalid function name; function: foo
-            SET out = :u                     | Attribute name is a reserved keyword; reserved word: out
+            SET out = :u                     | Attribute name is a reserved keyword; reserved keyword: out
             ADD c :u SET a = foo(:n)         | An expression attribute value used in expression is not defined; attribute value: :u
             ADD b :s SET a = foo(:n)         | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
             SET a = foo(:n) ADD b :s         | Invalid function name; function: foo
             SET a = foo(:n) SET b = :n       | Invalid function name; function: foo
+            SET a = true                     | Attribute name is a reserved keyword; reserved keyword: true
+            ADD true :s                      | Attribute name is a reserved keyword; reserved keyword: true
+            REMOVE false                     | Attribute name is a reserved keyword; reserved keyword: false
             """)
     void updateItemChecksNamesValuesAndCallsInWrittenOrder(String expression, String message) {
         ObjectNode request = updateUserRequest();
@@ -2478,7 +2481,7 @@ class NativeDynamoDbJsonHandlerTest {
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
             SET a = foo(:n)           | Invalid function name; function: foo
-            SET out = :n              | Attribute name is a reserved keyword; reserved word: out
+            SET out = :n              | Attribute name is a reserved keyword; reserved keyword: out
             SET a = foo(:n), out = :n | Invalid function name; function: foo
             DELETE a :n               | Incorrect operand type for operator or function; operator: DELETE, operand type: NUMBER, typeSet: ALLOWED_FOR_DELETE_OPERAND
             """)
@@ -2495,6 +2498,72 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            Scan               | {"TableName":"Missing","FilterExpression":"name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | Invalid FilterExpression
+            Scan               | {"TableName":"Missing","ProjectionExpression":"name"} | Invalid ProjectionExpression
+            Query              | {"TableName":"Missing","KeyConditionExpression":"userId = :w AND name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | Invalid KeyConditionExpression
+            Query              | {"TableName":"Missing","KeyConditionExpression":"userId = :w","FilterExpression":"name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | Invalid FilterExpression
+            GetItem            | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ProjectionExpression":"a.name"} | Invalid ProjectionExpression
+            TransactGetItems   | {"TransactItems":[{"Get":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ProjectionExpression":"a"}},{"Get":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ProjectionExpression":"name"}}]} | Invalid ProjectionExpression
+            PutItem            | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"ConditionExpression":"attribute_exists(name)"} | 1 validation error detected: Invalid ConditionExpression
+            DeleteItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ConditionExpression":"a[0].name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | 1 validation error detected: Invalid ConditionExpression
+            UpdateItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET status = :w","ConditionExpression":"name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | 1 validation error detected: Invalid ConditionExpression
+            UpdateItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}} | 1 validation error detected: Invalid UpdateExpression
+            TransactWriteItems | {"TransactItems":[{"ConditionCheck":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ConditionExpression":"NOT name = :w","ExpressionAttributeValues":{":w":{"S":"w"}}}}]} | Invalid ConditionExpression
+            """)
+    void everyExpressionRefusesAReservedWordBeforeTheTableLookup(String operation, String request, String prefix)
+            throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(prefix + ": Attribute name is a reserved keyword; reserved keyword: name", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            name = :missing             | Attribute name is a reserved keyword; reserved keyword: name
+            :missing = name             | An expression attribute value used in expression is not defined; attribute value: :missing
+            name.#u = :w                | Attribute name is a reserved keyword; reserved keyword: name
+            '#u.name = :w'              | An expression attribute name used in the document path is not defined; attribute name: #u
+            name < :b                   | Attribute name is a reserved keyword; reserved keyword: name
+            a < :b AND name = :w        | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            name = :w AND a < :b        | Attribute name is a reserved keyword; reserved keyword: name
+            contains(name, name)        | Attribute name is a reserved keyword; reserved keyword: name
+            status = :w AND name = :w   | Attribute name is a reserved keyword; reserved keyword: status
+            NaMe = :w                   | Attribute name is a reserved keyword; reserved keyword: NaMe
+            true = :w                   | Attribute name is a reserved keyword; reserved keyword: true
+            attribute_exists(false)     | Attribute name is a reserved keyword; reserved keyword: false
+            """)
+    void conditionExpressionChecksReservedWordsInWrittenOrder(String expression, String message) throws Exception {
+        ObjectNode request = (ObjectNode) mapper.readTree("""
+                {"TableName":"Missing","Item":{"userId":{"S":"u1"}},
+                 "ExpressionAttributeValues":{":w":{"S":"w"},":b":{"BOOL":true},":z":{"S":"z"}}}
+                """);
+        request.put("ConditionExpression", expression);
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid ConditionExpression: " + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            userId = :w AND name = :w           | status | Invalid KeyConditionExpression: Attribute name is a reserved keyword; reserved keyword: name
+            userId = :w AND sk > :w AND sk < :w | a, a   | Invalid KeyConditionExpression: KeyConditionExpressions must only contain one condition per key
+            userId = :w                         | status | Invalid ProjectionExpression: Attribute name is a reserved keyword; reserved keyword: status
+            """)
+    void queryChecksTheKeyConditionBeforeTheProjection(String keyCondition, String projection, String message)
+            throws Exception {
+        ObjectNode request = (ObjectNode) mapper.readTree("""
+                {"TableName":"Missing","ExpressionAttributeValues":{":w":{"S":"w"}}}
+                """);
+        request.put("KeyConditionExpression", keyCondition);
+        request.put("ProjectionExpression", projection);
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("Query", request, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
     }
 
     @ParameterizedTest

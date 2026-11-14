@@ -215,7 +215,7 @@ class Route53ServiceTest {
         lower.setType("AAAA");
         assertFalse(Route53Service.sameRecord(upper, lower));
         assertFalse(Route53Service.sameRecord(aRecord("Ä.example", 60), aRecord("ä.example", 60)));
-        assertFalse(Route53Service.sameRecord(aRecord("\\127.example", 60), aRecord("w.example", 60)));
+        assertTrue(Route53Service.sameRecord(aRecord("\\127.example", 60), aRecord("w.example", 60)));
     }
 
     @Test

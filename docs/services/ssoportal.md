@@ -21,7 +21,14 @@ Floci emulates the IAM Identity Center access portal API used by authenticated w
 
 `ListAccountRoles` accepts `account_id`, `max_result`, and `next_token` exactly as the AWS Portal API documents. Each effective SSO Admin permission-set assignment is exposed using the permission set's friendly name as `roleName`, with duplicate direct/group paths collapsed.
 
-`GetRoleCredentials` validates that the requested permission-set name is effectively assigned to the authenticated user for the requested account. It returns AWS-shaped `ASIA...` temporary credentials, registers the session with Floci IAM so those credentials route subsequent signed requests to the target account, and uses the permission set session duration for the expiration timestamp. AWS returns this expiration as Unix epoch milliseconds.
+`GetRoleCredentials` validates that the requested permission-set name is effectively assigned to the authenticated user for the requested account. It returns AWS-shaped `ASIA...` temporary credentials, registers the session with Floci IAM so those credentials route subsequent signed requests to the target account, and uses the provisioned role session duration for the expiration timestamp. AWS returns this expiration as Unix epoch milliseconds.
+
+The session uses the real IAM role created when SSO Admin provisioned the permission set or
+created its account assignment. With IAM enforcement enabled, that role's policies and
+permissions boundary govern subsequent requests. Permission-set edits do not change the
+role's permissions or session duration until reprovisioning succeeds. A stale provisioned
+copy remains usable; a missing role or legacy provisioning record without a role requires
+explicit reprovisioning before credentials are issued.
 
 `Logout` invalidates the current server-side OIDC access and refresh token pair and returns an empty HTTP 200 response. Refresh exchanges rotate the stored token pair so an older refresh token cannot recreate a session after logout. As AWS documents, IAM role credentials already returned by `GetRoleCredentials` are independent and remain usable until their configured expiration.
 

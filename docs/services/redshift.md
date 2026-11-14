@@ -669,8 +669,12 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
   `AccountsWithRestoreAccess` and `RevokeSnapshotAccess` removes it, so a snapshot deleted and taken again under
   the same name starts with no grant. Only a manual, available snapshot can be shared. A shared snapshot can be
   described and restored by the account it is shared with, and by no other action. The caller's own identity
-  policies are the IAM filter's to check when IAM enforcement is on. KMS key grants are not checked, and a
-  snapshot copied to another Region is shared only through the Region it was taken in.
+  policies are the IAM filter's to check when IAM enforcement is on. A snapshot carrying a `KmsKeyId`, which in
+  Floci is a copy made into another Region under a snapshot copy grant, also needs `kms:Decrypt` on that key under
+  IAM enforcement, from the key policy and the caller's own policies, with `kms:ViaService` as
+  `redshift.<region>.amazonaws.com`, unless the grant was made without a key, whose copies use the AWS managed
+  `alias/aws/redshift` and need nothing from KMS. KMS grants are not evaluated, and a snapshot copied to another
+  Region is shared only through the Region it was taken in.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
 ## Configuration

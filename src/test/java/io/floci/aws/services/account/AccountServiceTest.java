@@ -14,8 +14,10 @@ import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationAccount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.floci.aws.services.account.AlternateContactRequests.alternateContactRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactInformationRequest;
 import static io.floci.aws.services.account.ContactInformationRequests.contactOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -36,6 +39,7 @@ import static org.mockito.Mockito.when;
 
 class AccountServiceTest {
     private static final String ACCOUNT_ID = "123456789012";
+    private static final String MANAGEMENT_ACCOUNT_ID = "444455556666";
     private final ObjectMapper mapper = new ObjectMapper();
     private AccountService service;
     private OrganizationsService organizations;
@@ -56,7 +60,7 @@ class AccountServiceTest {
 
     @Test
     void ownAccountPutAndGetRoundTrip() {
-        ObjectNode request = contactRequest();
+        ObjectNode request = alternateContactRequest();
         service.putAlternateContact(ACCOUNT_ID, request);
         AlternateContact contact = service.getAlternateContact(ACCOUNT_ID, request);
         assertEquals("security@example.com", contact.getEmailAddress());
@@ -65,16 +69,17 @@ class AccountServiceTest {
 
     @Test
     void nonStringAccountIdReturnsSerializationException() {
-        ObjectNode request = contactRequest();
+        ObjectNode request = alternateContactRequest();
         request.put("AccountId", 123456789012L);
         AwsException error = assertThrows(AwsException.class,
                 () -> service.putAlternateContact(ACCOUNT_ID, request));
         assertEquals("SerializationException", error.getErrorCode());
+        assertEquals("AccountId must be a string.", error.getMessage());
     }
 
     @Test
     void clearRemovesContacts() {
-        ObjectNode request = contactRequest();
+        ObjectNode request = alternateContactRequest();
         service.putAlternateContact(ACCOUNT_ID, request);
         service.clear();
         AwsException error = assertThrows(AwsException.class,
@@ -84,7 +89,7 @@ class AccountServiceTest {
 
     @Test
     void deleteRemovesContactAndDeletingUnsetThrows() {
-        ObjectNode request = contactRequest();
+        ObjectNode request = alternateContactRequest();
         service.putAlternateContact(ACCOUNT_ID, request);
         service.deleteAlternateContact(ACCOUNT_ID, request);
         AwsException getError = assertThrows(AwsException.class,
@@ -93,6 +98,105 @@ class AccountServiceTest {
         AwsException deleteError = assertThrows(AwsException.class,
                 () -> service.deleteAlternateContact(ACCOUNT_ID, request));
         assertEquals("ResourceNotFoundException", deleteError.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AlternateContactType", "Name", "Title", "EmailAddress", "PhoneNumber"})
+    void putAlternateContactRejectsAMissingRequiredMember(String member) {
+        ObjectNode request = alternateContactRequest();
+        request.remove(member);
+        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BILLING", "OPERATIONS", "SECURITY"})
+    void putAlternateContactAcceptsEachContactType(String type) {
+        ObjectNode request = alternateContactRequest();
+        request.put("AlternateContactType", type);
+        service.putAlternateContact(ACCOUNT_ID, request);
+
+        assertEquals(type, service.getAlternateContact(ACCOUNT_ID, request).getAlternateContactType());
+    }
+
+    @Test
+    void putAlternateContactAcceptsAPhoneNumberWithoutAPlus() {
+        ObjectNode request = alternateContactRequest();
+        request.put("PhoneNumber", "12025550123");
+        service.putAlternateContact(ACCOUNT_ID, request);
+
+        assertEquals("12025550123", service.getAlternateContact(ACCOUNT_ID, request).getPhoneNumber());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"Name,64", "Title,50", "PhoneNumber,25"})
+    void putAlternateContactEnforcesTheMaximumLengthOfEachMember(String member, int maximum) {
+        ObjectNode request = alternateContactRequest();
+        request.put(member, "1".repeat(maximum));
+        service.putAlternateContact(ACCOUNT_ID, request);
+
+        request.put(member, "1".repeat(maximum + 1));
+        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
+    }
+
+    @Test
+    void putAlternateContactLimitsTheEmailAddressTo254Characters() {
+        ObjectNode request = alternateContactRequest();
+        request.put("EmailAddress", "a".repeat(242) + "@example.com");
+        service.putAlternateContact(ACCOUNT_ID, request);
+
+        request.put("EmailAddress", "a".repeat(243) + "@example.com");
+        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), "EmailAddress");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"EmailAddress,security.example.com", "EmailAddress,security@example", "PhoneNumber,555-CALL",
+            "Name,''"})
+    void putAlternateContactRejectsAMemberOutsideItsConstraints(String member, String value) {
+        ObjectNode request = alternateContactRequest();
+        request.put(member, value);
+        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), member);
+    }
+
+    @Test
+    void putAlternateContactWithANonStringMemberThrowsSerialization() {
+        ObjectNode request = alternateContactRequest();
+        request.put("PhoneNumber", 15550100);
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putAlternateContact(ACCOUNT_ID, request));
+        assertEquals("SerializationException", error.getErrorCode());
+        assertEquals("PhoneNumber must be a string.", error.getMessage());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"OTHER", "security"})
+    void getAndDeleteAlternateContactRequireAKnownContactType(String type) {
+        ObjectNode request = mapper.createObjectNode().put("AlternateContactType", type);
+
+        assertAlternateContactRejected(() -> service.getAlternateContact(ACCOUNT_ID, request), "AlternateContactType");
+        assertAlternateContactRejected(() -> service.deleteAlternateContact(ACCOUNT_ID, request),
+                "AlternateContactType");
+    }
+
+    @Test
+    void alternateContactChecksTheRequestBeforeTheTargetAccount() {
+        when(organizations.describeOrganization(ACCOUNT_ID))
+                .thenThrow(new AwsException("AWSOrganizationsNotInUseException", "no organization", 400));
+        ObjectNode request = mapper.createObjectNode();
+        request.put("AccountId", "111122223333");
+        request.put("AlternateContactType", "OTHER");
+
+        assertAlternateContactRejected(() -> service.getAlternateContact(ACCOUNT_ID, request), "AlternateContactType");
+    }
+
+    @Test
+    void alternateContactRejectsAMalformedAccountId() {
+        ObjectNode request = alternateContactRequest();
+        request.put("AccountId", "1234");
+
+        assertAlternateContactRejected(() -> service.putAlternateContact(ACCOUNT_ID, request), "AccountId");
+        assertAlternateContactRejected(() -> service.getAlternateContact(ACCOUNT_ID, request), "AccountId");
+        assertAlternateContactRejected(() -> service.deleteAlternateContact(ACCOUNT_ID, request), "AccountId");
     }
 
     @Test
@@ -318,12 +422,7 @@ class AccountServiceTest {
     @Test
     void managementAccountPutsContactInformationForAMemberAccount() {
         String member = "111122223333";
-        Organization organization = new Organization();
-        organization.setFeatureSet("ALL");
-        organization.setMasterAccountId(ACCOUNT_ID);
-        organization.setEnabledServicePrincipals(Map.of(ServicePrincipals.of("account"), Instant.EPOCH));
-        when(organizations.describeOrganization(ACCOUNT_ID)).thenReturn(organization);
-        when(organizations.describeAccount(ACCOUNT_ID, ACCOUNT_ID)).thenReturn(new OrganizationAccount());
+        callerIsInAnOrganizationManagedBy(ACCOUNT_ID, new OrganizationAccount());
         ObjectNode request = contactInformationRequest();
         request.put("AccountId", member);
 
@@ -336,6 +435,42 @@ class AccountServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.getContactInformation(ACCOUNT_ID, mapper.createObjectNode()));
         assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    @Test
+    void delegatedAdministratorCannotNameTheManagementAccount() {
+        callerIsInAnOrganizationManagedBy(MANAGEMENT_ACCOUNT_ID, delegatedAdministrator());
+        ObjectNode alternateContact = alternateContactRequest();
+        alternateContact.put("AccountId", MANAGEMENT_ACCOUNT_ID);
+        ObjectNode contactInformation = contactInformationRequest();
+        contactInformation.put("AccountId", MANAGEMENT_ACCOUNT_ID);
+
+        assertManagementAccountRefused(() -> service.putAlternateContact(ACCOUNT_ID, alternateContact));
+        assertManagementAccountRefused(() -> service.getAlternateContact(ACCOUNT_ID, alternateContact));
+        assertManagementAccountRefused(() -> service.deleteAlternateContact(ACCOUNT_ID, alternateContact));
+        assertManagementAccountRefused(() -> service.putContactInformation(ACCOUNT_ID, contactInformation));
+        assertManagementAccountRefused(() -> service.getContactInformation(ACCOUNT_ID, contactInformation));
+    }
+
+    @Test
+    void managementAccountCannotNameItself() {
+        callerIsInAnOrganizationManagedBy(ACCOUNT_ID, new OrganizationAccount());
+        ObjectNode request = alternateContactRequest();
+        request.put("AccountId", ACCOUNT_ID);
+
+        assertManagementAccountRefused(() -> service.putAlternateContact(ACCOUNT_ID, request));
+    }
+
+    @Test
+    void delegatedAdministratorCanNameItsOwnAccount() {
+        callerIsInAnOrganizationManagedBy(MANAGEMENT_ACCOUNT_ID, delegatedAdministrator());
+        ObjectNode request = alternateContactRequest();
+        request.put("AccountId", ACCOUNT_ID);
+
+        service.putAlternateContact(ACCOUNT_ID, request);
+
+        assertEquals("security@example.com",
+                service.getAlternateContact(ACCOUNT_ID, alternateContactRequest()).getEmailAddress());
     }
 
     @Test
@@ -357,13 +492,31 @@ class AccountServiceTest {
         assertTrue(error.getMessage().contains(member), error.getMessage());
     }
 
-    private ObjectNode contactRequest() {
-        ObjectNode request = mapper.createObjectNode();
-        request.put("AlternateContactType", "SECURITY");
-        request.put("EmailAddress", "security@example.com");
-        request.put("Name", "Security Team");
-        request.put("PhoneNumber", "+1 555 0100");
-        request.put("Title", "Security");
-        return request;
+    private static void assertAlternateContactRejected(Executable call, String member) {
+        AwsException error = assertThrows(AwsException.class, call, member);
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().startsWith("Invalid parameter at '" + member + "'"), error.getMessage());
+    }
+
+    private void callerIsInAnOrganizationManagedBy(String managementAccountId, OrganizationAccount caller) {
+        Organization organization = new Organization();
+        organization.setFeatureSet("ALL");
+        organization.setMasterAccountId(managementAccountId);
+        organization.setEnabledServicePrincipals(Map.of(ServicePrincipals.of("account"), Instant.EPOCH));
+        when(organizations.describeOrganization(ACCOUNT_ID)).thenReturn(organization);
+        when(organizations.describeAccount(ACCOUNT_ID, ACCOUNT_ID)).thenReturn(caller);
+    }
+
+    private static OrganizationAccount delegatedAdministrator() {
+        OrganizationAccount account = new OrganizationAccount();
+        account.setDelegatedServices(Map.of(ServicePrincipals.of("account"), Instant.EPOCH));
+        return account;
+    }
+
+    private static void assertManagementAccountRefused(Executable call) {
+        AwsException error = assertThrows(AwsException.class, call);
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals(403, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("management account of the organization"), error.getMessage());
     }
 }
