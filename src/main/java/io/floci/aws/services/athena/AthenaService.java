@@ -1150,7 +1150,11 @@ public class AthenaService {
         }
         int parameters = type.indexOf('(');
         return switch (parameters < 0 ? type : type.substring(0, parameters)) {
-            case "BIGINT" -> "bigint";
+            // DuckDB widens COUNT_IF and SUM over a BIGINT to HUGEINT, where Trino keeps BIGINT.
+            // TODO: Athena (engine v3) fails a sum past BIGINT's range with NUMERIC_VALUE_OUT_OF_RANGE;
+            // DuckDB's HUGEINT holds it, so floci returns the out-of-range value typed bigint instead.
+            // Casting HUGEINT result columns back to BIGINT would make DuckDB fail the query too.
+            case "BIGINT", "HUGEINT" -> "bigint";
             case "INTEGER" -> "integer";
             case "SMALLINT" -> "smallint";
             case "TINYINT" -> "tinyint";
