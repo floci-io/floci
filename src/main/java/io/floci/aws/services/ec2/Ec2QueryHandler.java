@@ -264,6 +264,9 @@ public class Ec2QueryHandler {
                 case "DeregisterImage" -> handleDeregisterImage(params, region);
                 case "CopyImage" -> handleCopyImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
+                case "CreateSnapshot" -> handleCreateSnapshot(params, region);
+                case "DeleteSnapshot" -> handleDeleteSnapshot(params, region);
+                case "CopySnapshot" -> handleCopySnapshot(params, region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
                 case "DeleteTags" -> handleDeleteTags(params, region);
@@ -4209,6 +4212,42 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    /**
+     * CreateSnapshot. The response reports {@code pending} with no progress yet, as AWS does for
+     * a snapshot it has just started; DescribeSnapshots then reports it {@code completed}.
+     */
+    private Response handleCreateSnapshot(MultivaluedMap<String, String> p, String region) {
+        List<Tag> snapshotTags = parseTagsForResource(p, "snapshot", Set.of("snapshot"));
+        Snapshot snapshot = service.createSnapshot(region, p.getFirst("VolumeId"),
+                p.getFirst("Description"), snapshotTags, dryRun(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateSnapshotResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .raw(snapshotXml(snapshot, "pending", ""))
+                .end("CreateSnapshotResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteSnapshot(MultivaluedMap<String, String> p, String region) {
+        service.deleteSnapshot(region, p.getFirst("SnapshotId"), dryRun(p));
+        return booleanResponse("DeleteSnapshot");
+    }
+
+    private Response handleCopySnapshot(MultivaluedMap<String, String> p, String region) {
+        List<Tag> snapshotTags = parseTagsForResource(p, "snapshot", Set.of("snapshot"));
+        boolean encrypted = Boolean.TRUE.equals(parseOptionalBoolean(p.getFirst("Encrypted"), "Encrypted"));
+        Snapshot copy = service.copySnapshot(region, p.getFirst("SourceRegion"),
+                p.getFirst("SourceSnapshotId"), p.getFirst("Description"), encrypted, snapshotTags,
+                dryRun(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CopySnapshotResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("snapshotId", copy.getSnapshotId())
+                .raw(tagSetXml(copy.getTags()))
+                .end("CopySnapshotResponse");
+        return xmlResponse(xml.build());
+    }
+
     // ─── Tag handlers ─────────────────────────────────────────────────────────
 
     // AWS stores a tag created without a Value as an empty string. DeleteTags is the exception:
@@ -6740,11 +6779,15 @@ public class Ec2QueryHandler {
     }
 
     private String snapshotXml(Snapshot snapshot) {
+        return snapshotXml(snapshot, snapshot.getState(), snapshot.getProgress());
+    }
+
+    private String snapshotXml(Snapshot snapshot, String status, String progress) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("snapshotId", snapshot.getSnapshotId())
                 .elem("ownerId", snapshot.getOwnerId())
-                .elem("status", snapshot.getState())
-                .elem("progress", snapshot.getProgress())
+                .elem("status", status)
+                .elem("progress", progress)
                 .elem("encrypted", String.valueOf(snapshot.isEncrypted()))
                 .elem("description", snapshot.getDescription());
         if (snapshot.getVolumeId() != null) {

@@ -1276,6 +1276,11 @@ Validation matches AWS behavior:
 | Action | Description |
 |--------|-------------|
 | DescribeSnapshots | Lists or returns stored snapshots, filterable by id and owner. |
+| CreateSnapshot | Snapshots a volume. The snapshot takes the volume's size and encryption, is owned by the caller and accepts `snapshot` tags from `TagSpecification`. |
+| DeleteSnapshot | Deletes a snapshot and its tags. A snapshot a registered AMI still uses fails with `InvalidSnapshot.InUse`. |
+| CopySnapshot | Copies a snapshot from `SourceRegion` into the request's region as a new snapshot the caller owns. |
+
+`CreateSnapshot` answers `pending`, as AWS does, and the copy completes within the call, so `DescribeSnapshots` reports the snapshot `completed` on the first poll. Snapshots hold no volume data: a volume created from one gets its size and encryption, not its contents. A copy reports `vol-ffffffff` as its volume, stays encrypted when its source is, and is encrypted when `Encrypted=true` or the destination region's encryption by default says so. The source's tags are not copied. All three actions honor `DryRun`: a request the real call would refuse keeps that error, and one that would succeed returns `DryRunOperation` and changes nothing.
 
 ### Flow Logs
 

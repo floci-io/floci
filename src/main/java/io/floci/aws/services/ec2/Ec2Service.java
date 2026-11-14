@@ -2253,6 +2253,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     private final Object imageRegistryLock = new Object();
 
+    /** The volume id AWS reports on a snapshot made by CopySnapshot, which has no source volume. */
+    private static final String COPIED_SNAPSHOT_VOLUME_ID = "vol-ffffffff";
+
     /**
      * The monitor guarding the AMI registry against a launch and a deregistration interleaving.
      * Exposed package-private so a test can hold it and land a tombstone at a chosen point in a
@@ -9819,6 +9822,137 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
+    /**
+     * CreateSnapshot of an EBS volume. The snapshot takes the volume's size and encryption and is
+     * owned by the caller. AWS reports it as {@code pending} until the data is copied; Floci's
+     * copy completes within the call, so the stored snapshot is {@code completed} and a caller
+     * that waits for that state returns on its first poll. With {@code dryRun} the volume must
+     * still exist, and the request is then answered with DryRunOperation, nothing created.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CreateSnapshot.html">CreateSnapshot</a>
+     */
+    public Snapshot createSnapshot(String region, String volumeId, String description, List<Tag> snapshotTags,
+                                   boolean dryRun) {
+        if (volumeId == null || volumeId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter VolumeId", 400);
+        }
+        return withVolumeLock(volumeId, () -> {
+            Volume volume = volumes.get(key(region, volumeId)).flatMap(v -> settleEndedHolders(region, v))
+                    .orElseThrow(() -> new AwsException("InvalidVolume.NotFound",
+                            "The volume '" + volumeId + "' does not exist.", 400));
+            if (dryRun) {
+                throw dryRunOperation();
+            }
+            Snapshot snapshot = newSnapshot(region, volumeId, volume.getSize(), description,
+                    volume.isEncrypted());
+            storeSnapshot(region, snapshot, snapshotTags);
+            return snapshot;
+        });
+    }
+
+    /**
+     * DeleteSnapshot. A snapshot backing a registered AMI is refused with InvalidSnapshot.InUse:
+     * "You cannot delete a snapshot of the root device of an EBS volume used by a registered AMI.
+     * You must first deregister the AMI before you can delete the snapshot." With {@code dryRun}
+     * the snapshot must still exist and be unused, and the request is then answered with
+     * DryRunOperation, the snapshot and its tags left in place.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DeleteSnapshot.html">DeleteSnapshot</a>
+     */
+    public void deleteSnapshot(String region, String snapshotId, boolean dryRun) {
+        if (snapshotId == null || snapshotId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SnapshotId", 400);
+        }
+        // Under the lock registration publishes snapshot references under, so an AMI being
+        // registered on this snapshot is either seen here or sees the snapshot gone, and under the
+        // snapshot's own lock, which a tag write holds, so CreateTags cannot tag it after it is gone.
+        synchronized (imageRegistryLock) {
+            synchronized (lockFor(key(region, snapshotId))) {
+                deleteSnapshotLocked(region, snapshotId, dryRun);
+            }
+        }
+    }
+
+    private void deleteSnapshotLocked(String region, String snapshotId, boolean dryRun) {
+        if (snapshots.get(key(region, snapshotId)).isEmpty()) {
+            throw new AwsException("InvalidSnapshot.NotFound",
+                    "The snapshot '" + snapshotId + "' does not exist.", 400);
+        }
+        Optional<Image> user = registeredImages.scan(k -> true).stream()
+                .filter(image -> region.equals(image.getRegion()))
+                .filter(image -> !DEREGISTERED_STATE.equals(image.getState()))
+                .filter(image -> image.getBlockDeviceMappings().stream()
+                        .map(BlockDeviceMapping::getEbs)
+                        .filter(Objects::nonNull)
+                        .anyMatch(ebs -> snapshotId.equals(ebs.getSnapshotId())))
+                .findFirst();
+        if (user.isPresent()) {
+            throw new AwsException("InvalidSnapshot.InUse",
+                    "The snapshot " + snapshotId + " is currently in use by " + user.get().getImageId(), 400);
+        }
+        if (dryRun) {
+            throw dryRunOperation();
+        }
+        snapshots.delete(key(region, snapshotId));
+        removeTags(region, snapshotId);
+    }
+
+    /**
+     * CopySnapshot. As with CopyImage the request's own region is the destination and
+     * {@code SourceRegion} names where the source lives. The copy is an independent snapshot with
+     * its own id, owned by the caller; it stays encrypted when the source is, and becomes
+     * encrypted when the request or the destination's encryption by default says so. Tags are not
+     * copied: "User-defined tags are not copied from the source snapshot to the new snapshot."
+     * With {@code dryRun} the source must still exist, and the request is then answered with
+     * DryRunOperation, nothing copied.
+     *
+     * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopySnapshot.html">CopySnapshot</a>
+     */
+    public Snapshot copySnapshot(String destinationRegion, String sourceRegion, String sourceSnapshotId,
+                                 String description, boolean encrypted, List<Tag> snapshotTags,
+                                 boolean dryRun) {
+        if (sourceRegion == null || sourceRegion.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SourceRegion", 400);
+        }
+        if (sourceSnapshotId == null || sourceSnapshotId.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter SourceSnapshotId", 400);
+        }
+        Snapshot source = snapshots.get(key(sourceRegion, sourceSnapshotId))
+                .orElseThrow(() -> new AwsException("InvalidSnapshot.NotFound",
+                        "The snapshot '" + sourceSnapshotId + "' does not exist.", 400));
+        if (dryRun) {
+            throw dryRunOperation();
+        }
+        Snapshot copy = newSnapshot(destinationRegion, COPIED_SNAPSHOT_VOLUME_ID, source.getVolumeSize(),
+                description, source.isEncrypted() || encrypted || ebsEncryptionByDefault(destinationRegion));
+        storeSnapshot(destinationRegion, copy, snapshotTags);
+        return copy;
+    }
+
+    private Snapshot newSnapshot(String region, String volumeId, Integer volumeSize, String description,
+                                 boolean encrypted) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotId("snap-" + randomHex(17));
+        snapshot.setVolumeId(volumeId);
+        snapshot.setVolumeSize(volumeSize);
+        snapshot.setOwnerId(callerAccountId());
+        snapshot.setState("completed");
+        snapshot.setDescription(description != null ? description : "");
+        snapshot.setStartTime(Instant.now());
+        snapshot.setEncrypted(encrypted);
+        snapshot.setRegion(region);
+        return snapshot;
+    }
+
+    private void storeSnapshot(String region, Snapshot snapshot, List<Tag> snapshotTags) {
+        if (snapshotTags != null && !snapshotTags.isEmpty()) {
+            snapshot.setTags(new ArrayList<>(snapshotTags));
+            putTags(region, snapshot.getSnapshotId(), new ArrayList<>(snapshotTags));
+        }
+        snapshots.put(key(region, snapshot.getSnapshotId()), snapshot);
+    }
+
     // ─── Launch Templates ─────────────────────────────────────────────────────
 
     public LaunchTemplate createLaunchTemplate(String region, String name, LaunchTemplateData data,
@@ -10679,6 +10813,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // it and then together exceed it, and a rejected request writes nothing.
         withTagWriteLocks(region, resourceIds, () -> {
             for (String resourceId : resourceIds) {
+                // Checked again under the lock DeleteSnapshot deletes under, so a snapshot deleted
+                // since the check above is not left with tags and no resource.
+                if (resourceId.startsWith("snap-")) {
+                    requireFound(snapshots.get(key(region, resourceId)).isPresent(),
+                            "InvalidSnapshot.NotFound", "The snapshot '" + resourceId + "' does not exist.");
+                }
                 requireWithinTagLimit(region, resourceId, tagList);
             }
             if (dryRun) {

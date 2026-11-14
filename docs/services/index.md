@@ -89,7 +89,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 12 |
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 59 |
 | [EFS](efs.md) | `/2015-02-01/...` | REST JSON | 26 |
-| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 225 |
+| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 228 |
 | [EC2 Instance Connect](ec2-instance-connect.md) | `POST /` + `X-Amz-Target: AWSEC2InstanceConnectService.*` | JSON 1.1 | 2 |
 | [Lightsail](lightsail.md) | `POST /` + `X-Amz-Target: Lightsail_20161128.*` | JSON 1.1 | 79 local responses; 161 recognized actions |
 | [ACM](acm.md) | `POST /` + `X-Amz-Target: CertificateManager.*` | JSON 1.1 | 16 |
