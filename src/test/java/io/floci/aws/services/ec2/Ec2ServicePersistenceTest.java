@@ -3,7 +3,6 @@ package io.floci.aws.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -35,8 +34,6 @@ import io.floci.aws.services.ec2.model.Volume;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.model.VpcEndpoint;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
-import jakarta.ws.rs.core.MultivaluedHashMap;
-import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -49,6 +46,9 @@ import java.util.Map;
 
 import static io.floci.aws.services.ec2.Ec2KeyPairFixtures.ED25519_FINGERPRINT;
 import static io.floci.aws.services.ec2.Ec2KeyPairFixtures.ED25519_KEY;
+import static io.floci.aws.testing.Ec2QueryHandlerFixtures.ok;
+import static io.floci.aws.testing.Ec2QueryHandlerFixtures.queryHandler;
+import static io.floci.aws.testing.Ec2QueryHandlerFixtures.send;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -765,10 +765,7 @@ class Ec2ServicePersistenceTest {
                 Map.of("key-type", List.of("ed25519"), "tag:Team", List.of("blue"))).stream()
                 .map(KeyPair::getKeyName).toList());
 
-        String xml = (String) new Ec2QueryHandler(restarted, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
-                mock(Ec2IpamService.class), new RegionResolver(REGION, "000000000000"))
-                .handle("DescribeKeyPairs", new MultivaluedHashMap<>(), REGION).getEntity();
+        String xml = (String) send(queryHandler(restarted), "DescribeKeyPairs").getEntity();
         assertTrue(xml.contains("<keyType>rsa</keyType>"), xml);
         assertTrue(xml.contains("<keyType>ed25519</keyType>"), xml);
         assertFalse(xml.contains("<createTime>"), xml);
@@ -881,18 +878,7 @@ class Ec2ServicePersistenceTest {
     }
 
     private static String query(Ec2Service service, String action, String... params) {
-        MultivaluedHashMap<String, String> form = new MultivaluedHashMap<>();
-        for (int i = 0; i < params.length; i += 2) {
-            form.add(params[i], params[i + 1]);
-        }
-        Response response = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
-                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2BlockPublicAccessService.class), mock(Ec2IpamService.class),
-                new RegionResolver(REGION, "000000000000"))
-                .handle(action, form, REGION);
-        String body = String.valueOf(response.getEntity());
-        assertEquals(200, response.getStatus(), action + ": " + body);
-        return body;
+        return ok(queryHandler(service), action, params);
     }
 
     private static String jsonString(String value) {
