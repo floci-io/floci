@@ -121,8 +121,7 @@ public class LogsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", AwsArnUtils.Arn
                 .of("logs", ctx.region(), ctx.accountId(), "log-group:" + name + ":*").toString());
         // createLogGroup fails on an existing name, so a replacing update always created its group.
-        ReplacementCleanup.record(r, ctx, attributesBefore,
-                ctx.isUpdate() && !priorPhysicalId.equals(name));
+        ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
     private void reconcileLogGroup(String name, Integer retentionInDays, Map<String, String> tags,
