@@ -1103,6 +1103,22 @@ class ElbV2ServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"100.64.0.1", "100.100.100.200", "100.127.255.254"})
+    void registerTargetsAcceptsCarrierGradeIpAddresses(String address) {
+        TargetGroup group = service.createTargetGroup(
+                REGION, "carrier-grade-tg", "HTTP", "HTTP1", 9999, "vpc-a", "ip",
+                "HTTP", "traffic-port", true, "/v1/ready", 30, 5, 5, 2, "200", "ipv4", Map.of());
+        TargetDescription target = new TargetDescription();
+        target.setId(address);
+
+        service.registerTargets(REGION, group.getTargetGroupArn(), List.of(target));
+
+        assertEquals(List.of(address), service.describeTargetGroups(REGION, null,
+                List.of(group.getTargetGroupArn()), null).getFirst().getTargets().stream()
+                .map(TargetDescription::getId).toList());
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void registerTargetsUsesEffectivePortForIdentity(boolean initiallyExplicit) {
         String tgArn = createTargetGroup("default-port-tg");

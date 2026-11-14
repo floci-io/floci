@@ -4,8 +4,8 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.appsync.model.DataSource;
 import io.floci.aws.services.appsync.model.DataSourceType;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.ValidateSignaturesProfile;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import jakarta.inject.Inject;
@@ -28,19 +28,12 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.verify;
 
 @QuarkusTest
-@TestProfile(AwsIamHttpDataSourcePermissiveIntegrationTest.PermissiveSignatures.class)
+@TestProfile(ValidateSignaturesProfile.class)
 class AwsIamHttpDataSourcePermissiveIntegrationTest {
 
     private static final String ACCOUNT = "724600001234";
     private static final String API_REGION = "us-east-1";
     private static final String TARGET_REGION = "us-west-2";
-
-    public static class PermissiveSignatures implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.iam.enforcement-enabled", "false", "floci.auth.validate-signatures", "true");
-        }
-    }
 
     @Inject
     AppSyncDataSourceInvokers invokers;
