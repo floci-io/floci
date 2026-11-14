@@ -1332,8 +1332,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 }
             }
             for (Map<String, List<String>> targetContext : resourceContexts) {
+                Map<String, List<String>> taggedContext = targetContext;
+                if ("ec2".equals(credentialScope) && !RequestResources.hasIndividualTargets(operationAction)
+                        && AwsArnUtils.isArn(resource)) {
+                    taggedContext = conditionContextResolver.withEc2ResourceTags(
+                            credentialScope, operationAction, resource, region, accountId, targetContext);
+                }
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
-                        targetContext, resource, region, accountId, resourceOwnerAccountId, action);
+                        taggedContext, resource, region, accountId, resourceOwnerAccountId, action);
                 ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
                         effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(

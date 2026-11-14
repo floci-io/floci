@@ -889,6 +889,33 @@ public class IamConditionContextResolver {
         }
     }
 
+    /** Stored tags for one generated EC2 ARN, never borrowed from another target in the same request. */
+    public Map<String, List<String>> withEc2ResourceTags(String scope, String action, String resource,
+                                                        String region, String accountId,
+                                                        Map<String, List<String>> context) {
+        if (!"ec2".equals(scope) || RequestResources.hasIndividualTargets(action)
+                || !AwsArnUtils.isArn(resource) || !ec2Service.isResolvable()) {
+            return context;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
+        if (!"ec2".equals(arn.service()) || !region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+            return context;
+        }
+        String[] parts = arn.resource().split("/", 2);
+        if (parts.length != 2 || parts[1].contains("*") || parts[1].contains("?")) {
+            return context;
+        }
+        List<String> prefixes = RequestResourceMembers.table().resourceTagKeys()
+                .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], List.of());
+        if (prefixes.isEmpty()) {
+            return context;
+        }
+        Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
+        result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith));
+        putStoredTags(result, region, parts[1], prefixes);
+        return result;
+    }
+
     private void addResourceTags(Map<String, List<String>> conditions, String resourceId,
                                  RequestResourceMembers.Targets targets) {
         if (resourceId == null || resourceId.isBlank() || !ec2Service.isResolvable()) {
@@ -903,6 +930,11 @@ public class IamConditionContextResolver {
                 break;
             }
         }
+        putStoredTags(conditions, region, resourceId, prefixes);
+    }
+
+    private void putStoredTags(Map<String, List<String>> conditions, String region, String resourceId,
+                               List<String> prefixes) {
         for (Tag tag : ec2Service.get().resourceTags(region, resourceId)) {
             for (String prefix : prefixes) {
                 conditions.put(prefix + tag.getKey(), List.of(tag.getValue() == null ? "" : tag.getValue()));
