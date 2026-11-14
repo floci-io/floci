@@ -1534,6 +1534,15 @@ These are what AWS calls Git credentials when they are used with CodeCommit. A s
 support them is `NoSuchEntity` with status 404 and the message "No such service `<name>` is
 supported for Service Specific Credentials".
 
+A request wrong in both halves answers for the user. Recordings validated against AWS answer a
+`UserName` that names no user with "The user with name `<name>` cannot be found." whether the
+`ServiceName` beside it is supported or not, so the user is looked up before the service name is
+read, on `CreateServiceSpecificCredential` and on `ListServiceSpecificCredentials` alike. Under
+`AllUsers` there is no user to look up and the filter is the only thing left to be wrong about. What
+the bounds of `CredentialAgeDays` say is settled ahead of both, by the constraints every request is
+held to; whether the service takes the member at all cannot be asked before the service is known,
+so that answer stays behind them.
+
 That is not what the wire model would suggest. The model declares `ServiceNotSupportedException`,
 code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
 `ListServiceSpecificCredentials`, and AWS never raises it: recordings validated against AWS answer
