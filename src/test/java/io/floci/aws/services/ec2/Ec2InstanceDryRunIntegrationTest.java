@@ -223,13 +223,10 @@ class Ec2InstanceDryRunIntegrationTest {
                 body("DescribeSpotInstanceRequests"));
     }
 
-    /**
-     * A describe call's answer without the ids that differ on every call: the request id, and the
-     * reservation ids DescribeInstances gives each instance anew.
-     */
+    /** A describe call's answer without the request id, the one part that differs on every call. */
     private String body(String action, String... params) {
         return request(action, params).post("/").then().statusCode(200).extract().asString()
-                .replaceAll("<(requestId|reservationId)>[^<]*</\\1>", "");
+                .replaceAll("<requestId>[^<]*</requestId>", "");
     }
 
     /** {@code Key=Value} pairs separated by spaces, with {running} and {stopped} standing for the fixture's ids. */
