@@ -600,6 +600,25 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     @Test
+    void theAwsRuntimeForApacheSparksBatchRunsTimeoutIsOneToTenThousandEightyMinutesToo() {
+        for (String release : List.of("emr-spark-8.0.0", "emr-spark-8.0-preview")) {
+            String runtime = createApplicationOn(release, "");
+            for (String timeout : List.of(", \"executionTimeoutMinutes\": 0", ", \"executionTimeoutMinutes\": 10081")) {
+                startJobRun(runtime, sparkRun(UUID.randomUUID().toString(), timeout))
+                        .then().statusCode(400)
+                        .body("__type", equalTo("ValidationException"))
+                        .body("message", equalTo("executionTimeoutMinutes must be between 1 and 10080 for a BATCH "
+                                + "job run on release emr-7.11.0 or later."));
+            }
+            startJobRun(runtime, sparkRun(UUID.randomUUID().toString(), ", \"executionTimeoutMinutes\": 10080"))
+                    .then().statusCode(200);
+            startJobRun(runtime, sparkRun(UUID.randomUUID().toString(),
+                    ", \"mode\": \"STREAMING\", \"executionTimeoutMinutes\": 0"))
+                    .then().statusCode(200);
+        }
+    }
+
+    @Test
     void aRunIsItsOneAttempt() {
         String applicationId = createApplication("");
         String path = "/applications/" + applicationId + "/jobruns/"
