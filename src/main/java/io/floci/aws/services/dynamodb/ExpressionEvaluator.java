@@ -537,6 +537,9 @@ final class ExpressionEvaluator {
                     if (segment.startsWith("#") && (names == null || !names.has(segment))) {
                         throw undefinedName(exprType, segment);
                     }
+                    if (DynamoDbReservedWords.isReserved(segment)) {
+                        throw DynamoDbReservedWords.reservedWord(exprType, segment);
+                    }
                 }
             }
             case PlaceholderOperand placeholder -> {

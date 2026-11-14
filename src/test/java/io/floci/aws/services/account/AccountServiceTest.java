@@ -14,6 +14,7 @@ import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationAccount;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -36,6 +37,7 @@ import static org.mockito.Mockito.when;
 
 class AccountServiceTest {
     private static final String ACCOUNT_ID = "123456789012";
+    private static final String MANAGEMENT_ACCOUNT_ID = "444455556666";
     private final ObjectMapper mapper = new ObjectMapper();
     private AccountService service;
     private OrganizationsService organizations;
@@ -318,12 +320,7 @@ class AccountServiceTest {
     @Test
     void managementAccountPutsContactInformationForAMemberAccount() {
         String member = "111122223333";
-        Organization organization = new Organization();
-        organization.setFeatureSet("ALL");
-        organization.setMasterAccountId(ACCOUNT_ID);
-        organization.setEnabledServicePrincipals(Map.of(ServicePrincipals.of("account"), Instant.EPOCH));
-        when(organizations.describeOrganization(ACCOUNT_ID)).thenReturn(organization);
-        when(organizations.describeAccount(ACCOUNT_ID, ACCOUNT_ID)).thenReturn(new OrganizationAccount());
+        callerIsInAnOrganizationManagedBy(ACCOUNT_ID, new OrganizationAccount());
         ObjectNode request = contactInformationRequest();
         request.put("AccountId", member);
 
@@ -336,6 +333,42 @@ class AccountServiceTest {
         AwsException error = assertThrows(AwsException.class,
                 () -> service.getContactInformation(ACCOUNT_ID, mapper.createObjectNode()));
         assertEquals("ResourceNotFoundException", error.getErrorCode());
+    }
+
+    @Test
+    void delegatedAdministratorCannotNameTheManagementAccount() {
+        callerIsInAnOrganizationManagedBy(MANAGEMENT_ACCOUNT_ID, delegatedAdministrator());
+        ObjectNode alternateContact = contactRequest();
+        alternateContact.put("AccountId", MANAGEMENT_ACCOUNT_ID);
+        ObjectNode contactInformation = contactInformationRequest();
+        contactInformation.put("AccountId", MANAGEMENT_ACCOUNT_ID);
+
+        assertManagementAccountRefused(() -> service.putAlternateContact(ACCOUNT_ID, alternateContact));
+        assertManagementAccountRefused(() -> service.getAlternateContact(ACCOUNT_ID, alternateContact));
+        assertManagementAccountRefused(() -> service.deleteAlternateContact(ACCOUNT_ID, alternateContact));
+        assertManagementAccountRefused(() -> service.putContactInformation(ACCOUNT_ID, contactInformation));
+        assertManagementAccountRefused(() -> service.getContactInformation(ACCOUNT_ID, contactInformation));
+    }
+
+    @Test
+    void managementAccountCannotNameItself() {
+        callerIsInAnOrganizationManagedBy(ACCOUNT_ID, new OrganizationAccount());
+        ObjectNode request = contactRequest();
+        request.put("AccountId", ACCOUNT_ID);
+
+        assertManagementAccountRefused(() -> service.putAlternateContact(ACCOUNT_ID, request));
+    }
+
+    @Test
+    void delegatedAdministratorCanNameItsOwnAccount() {
+        callerIsInAnOrganizationManagedBy(MANAGEMENT_ACCOUNT_ID, delegatedAdministrator());
+        ObjectNode request = contactRequest();
+        request.put("AccountId", ACCOUNT_ID);
+
+        service.putAlternateContact(ACCOUNT_ID, request);
+
+        assertEquals("security@example.com",
+                service.getAlternateContact(ACCOUNT_ID, contactRequest()).getEmailAddress());
     }
 
     @Test
@@ -355,6 +388,28 @@ class AccountServiceTest {
                 member + "=" + value);
         assertEquals("ValidationException", error.getErrorCode());
         assertTrue(error.getMessage().contains(member), error.getMessage());
+    }
+
+    private void callerIsInAnOrganizationManagedBy(String managementAccountId, OrganizationAccount caller) {
+        Organization organization = new Organization();
+        organization.setFeatureSet("ALL");
+        organization.setMasterAccountId(managementAccountId);
+        organization.setEnabledServicePrincipals(Map.of(ServicePrincipals.of("account"), Instant.EPOCH));
+        when(organizations.describeOrganization(ACCOUNT_ID)).thenReturn(organization);
+        when(organizations.describeAccount(ACCOUNT_ID, ACCOUNT_ID)).thenReturn(caller);
+    }
+
+    private static OrganizationAccount delegatedAdministrator() {
+        OrganizationAccount account = new OrganizationAccount();
+        account.setDelegatedServices(Map.of(ServicePrincipals.of("account"), Instant.EPOCH));
+        return account;
+    }
+
+    private static void assertManagementAccountRefused(Executable call) {
+        AwsException error = assertThrows(AwsException.class, call);
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals(403, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("management account of the organization"), error.getMessage());
     }
 
     private ObjectNode contactRequest() {

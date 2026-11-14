@@ -150,8 +150,9 @@ public class AccountService implements Resettable, StoredResourceArns {
             throw new AwsException("AccessDeniedException",
                     "The calling account is not the management account or a delegated administrator.", 403);
         }
-        if (managementAccount && requestedAccountId.equals(callerAccountId)) {
-            throw validation("The management account cannot specify its own AccountId.");
+        if (requestedAccountId.equals(organization.getMasterAccountId())) {
+            throw new AwsException("AccessDeniedException",
+                    "AccountId must name a member account, not the management account of the organization.", 403);
         }
         return requestedAccountId;
     }
