@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Set;
 
@@ -328,6 +330,24 @@ class ProjectionEvaluatorTest {
         assertEquals("Invalid ProjectionExpression: Two document paths overlap with each other; "
                 + "must remove or rewrite one of these paths; path one: [a, b], path two: [a]",
                 ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            '#u, name'     | An expression attribute name used in the document path is not defined; attribute name: #u
+            name, #u       | Attribute name is a reserved keyword; reserved keyword: name
+            a[0].name      | Attribute name is a reserved keyword; reserved keyword: name
+            STATUS         | Attribute name is a reserved keyword; reserved keyword: STATUS
+            true           | Attribute name is a reserved keyword; reserved keyword: true
+            a, a.b, name   | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [a], path two: [a, b]
+            a, name, a.b   | Attribute name is a reserved keyword; reserved keyword: name
+            a, a.b, #u     | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [a], path two: [a, b]
+            a.b, c.d, c, a | Two document paths overlap with each other; must remove or rewrite one of these paths; path one: [c, d], path two: [c]
+            """)
+    void checksEachPathInWrittenOrder(String expression, String message) {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> ProjectionEvaluator.validateExpression(expression, null));
+        assertEquals("Invalid ProjectionExpression: " + message, ex.getMessage());
     }
 
     @Test

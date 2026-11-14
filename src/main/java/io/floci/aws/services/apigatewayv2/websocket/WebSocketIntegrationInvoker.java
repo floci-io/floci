@@ -2,6 +2,8 @@ package io.floci.aws.services.apigatewayv2.websocket;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.config.ContainerCaBundle;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.SsrfProtection;
 import io.floci.aws.services.apigateway.AwsServiceRouter;
 import io.floci.aws.services.apigateway.VtlTemplateEngine;
@@ -16,6 +18,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.URI;
@@ -60,6 +63,13 @@ public class WebSocketIntegrationInvoker {
 
     @Inject
     public WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
+                                       ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
+                                       EmulatorConfig config) {
+        this(lambdaService, serviceRouter, objectMapper, vtlEngine, InetAddress::getAllByName,
+                ContainerCaBundle.sslContext(config).orElse(null));
+    }
+
+    public WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine) {
         this(lambdaService, serviceRouter, objectMapper, vtlEngine, InetAddress::getAllByName);
     }
@@ -67,12 +77,29 @@ public class WebSocketIntegrationInvoker {
     WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
                                 ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
                                 AddressResolver addressResolver) {
+        this(lambdaService, serviceRouter, objectMapper, vtlEngine, addressResolver, null);
+    }
+
+    private WebSocketIntegrationInvoker(LambdaService lambdaService, AwsServiceRouter serviceRouter,
+                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
+                                        AddressResolver addressResolver, SSLContext sslContext) {
         this.lambdaService = lambdaService;
         this.serviceRouter = serviceRouter;
         this.objectMapper = objectMapper;
         this.vtlEngine = vtlEngine;
-        this.httpClient = HttpClient.newHttpClient();
+        this.httpClient = backendClient(sslContext);
         this.addressResolver = addressResolver;
+    }
+
+    // The client HTTP and HTTP_PROXY integrations reach https:// backends with. sslContext, when
+    // given, adds the extra CAs in floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the
+    // JVM's roots.
+    private static HttpClient backendClient(SSLContext sslContext) {
+        HttpClient.Builder builder = HttpClient.newBuilder();
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
+        return builder.build();
     }
 
     @FunctionalInterface

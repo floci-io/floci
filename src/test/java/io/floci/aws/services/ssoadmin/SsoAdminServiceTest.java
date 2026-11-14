@@ -50,6 +50,7 @@ class SsoAdminServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private SsoAdminService service;
+    private SsoPermissionSetRoleProvisioner roleProvisioner;
     private final MutableClock clock = new MutableClock();
     private IdentityStoreService identityStoreService;
     private OrganizationsService organizationsService;
@@ -60,6 +61,7 @@ class SsoAdminServiceTest {
 
     @BeforeEach
     void setUp() {
+        roleProvisioner = Mockito.mock(SsoPermissionSetRoleProvisioner.class, Mockito.RETURNS_MOCKS);
         identityStoreService = Mockito.mock(IdentityStoreService.class);
         organizationsService = Mockito.mock(OrganizationsService.class);
         applicationAccessScopes = new InMemoryStorage<>();
@@ -96,7 +98,7 @@ class SsoAdminServiceTest {
                 organizationsService,
                 ACCOUNT_ID,
                 "us-east-1",
-                clock);
+                clock, roleProvisioner);
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
     }
 
@@ -332,6 +334,21 @@ class SsoAdminServiceTest {
         recreate.put("ClientToken", "replacement-instance-token");
         SsoInstance replacement = emptyService.createInstance(recreate, ACCOUNT_ID, "us-west-2");
         assertFalse(replacement.instanceArn().equals(instance.instanceArn()));
+    }
+
+    @Test
+    void deletingAnInstanceCleansUpItsProvisionedTargetRoles() {
+        PermissionSet permissionSet = service.createPermissionSet(mapper.createObjectNode()
+                .put("InstanceArn", service.getInstanceArn()).put("Name", "Provisioned"));
+        service.provisionPermissionSet(mapper.createObjectNode()
+                .put("InstanceArn", service.getInstanceArn()).put("PermissionSetArn", permissionSet.arn())
+                .put("TargetType", "AWS_ACCOUNT").put("TargetId", "210987654321"));
+
+        service.deleteInstance(mapper.createObjectNode().put("InstanceArn", service.getInstanceArn()), ACCOUNT_ID);
+
+        Mockito.verify(roleProvisioner).remove(Mockito.argThat(provisioning ->
+                permissionSet.arn().equals(provisioning.permissionSetArn())
+                        && "210987654321".equals(provisioning.accountId())), Mockito.eq("us-east-1"));
     }
 
     @Test
@@ -1928,7 +1945,7 @@ class SsoAdminServiceTest {
                 organizationsService,
                 "999999999999",
                 defaultRegion,
-                Clock.systemUTC());
+                Clock.systemUTC(), Mockito.mock(SsoPermissionSetRoleProvisioner.class, Mockito.RETURNS_MOCKS));
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {
