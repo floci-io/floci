@@ -2,14 +2,17 @@ package io.floci.aws.services.ec2;
 
 import com.github.dockerjava.api.model.ContainerNetwork;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
- * Shared commands and network resolution helpers for installing and starting
- * the link-local IMDS proxy (169.254.169.254:80) inside containers.
+ * Shared commands and network resolution helpers for link-local metadata proxies.
  */
 public final class Ec2MetadataProxy {
+
+    private static final int EC2_IMDS_RELAY_PORT = 42169;
 
     /**
      * Run first in the shells that install and start these proxies and in the sshd install probe.
@@ -43,14 +46,24 @@ public final class Ec2MetadataProxy {
                     + " fi";
 
     public static String[] installCommand() {
-        return new String[]{"sh", "-c", String.join("\n",
+        return installCommand(false);
+    }
+
+    static String[] installEc2Command() {
+        return installCommand(true);
+    }
+
+    private static String[] installCommand(boolean requireIptables) {
+        List<String> lines = new ArrayList<>(List.of(
                 "set -eu",
                 LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
-                "if command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then exit 0; fi",
+                "if command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1"
+                        + " && command -v curl >/dev/null 2>&1; then exit 0; fi",
                 "if command -v apt-get >/dev/null 2>&1; then",
                 "  apt-get update -qq >/dev/null",
-                "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends iproute2 socat curl ca-certificates >/dev/null",
+                "  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends"
+                        + " iproute2 socat curl ca-certificates >/dev/null",
                 "elif command -v dnf >/dev/null 2>&1; then",
                 // --allowerasing lets dnf swap the curl-minimal that
                 // public.ecr.aws/amazonlinux/amazonlinux:2023 ships by default for the full
@@ -69,12 +82,34 @@ public final class Ec2MetadataProxy {
                 "else",
                 "  echo 'No supported package manager found for IMDS proxy dependencies' >&2",
                 "  exit 1",
-                "fi")};
+                "fi"));
+        if (requireIptables) {
+            // A guest without a NAT tool can still use the pre-upgrade TCP/80 relay.
+            lines.add("if ! command -v iptables >/dev/null 2>&1 && ! command -v nft >/dev/null 2>&1; then");
+            lines.add("  if command -v apt-get >/dev/null 2>&1; then");
+            lines.add("    { apt-get update -qq >/dev/null"
+                    + " && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends"
+                    + " iptables >/dev/null; } || true");
+            lines.add("  elif command -v dnf >/dev/null 2>&1; then");
+            lines.add("    dnf install -y --allowerasing iptables-nft >/dev/null || true");
+            lines.add("  elif command -v yum >/dev/null 2>&1; then");
+            lines.add("    yum install -y iptables >/dev/null || true");
+            lines.add("  elif command -v apk >/dev/null 2>&1; then");
+            lines.add("    apk add --no-cache iptables >/dev/null || true");
+            lines.add("  fi");
+            lines.add("fi");
+        }
+        return new String[]{"sh", "-c", String.join("\n", lines)};
     }
 
     public static String[] startCommand(String flociHost, int imdsPort) {
         return startCommand("imds", "169.254.169.254", 80, flociHost, imdsPort,
                 imdsProbeCommand("http://169.254.169.254"));
+    }
+
+    static String[] startEc2Command(String flociHost, int imdsPort) {
+        return startCommand("imds", "169.254.169.254", EC2_IMDS_RELAY_PORT, flociHost, imdsPort,
+                imdsProbeCommand("http://169.254.169.254"), true);
     }
 
     /**
@@ -108,32 +143,186 @@ public final class Ec2MetadataProxy {
 
     public static String[] startCommand(String name, String bindIp, int bindPort,
                                         String targetHost, int targetPort, String probeCommand) {
-        String pidFile = "/tmp/floci-" + name + "-proxy.pid";
+        return startCommand(name, bindIp, bindPort, targetHost, targetPort, probeCommand, false);
+    }
+
+    private static String[] startCommand(String name, String bindIp, int bindPort,
+                                         String targetHost, int targetPort, String probeCommand,
+                                         boolean routeImdsPort) {
+        String legacyPidFile = "/tmp/floci-" + name + "-proxy.pid";
+        String pidFile = routeImdsPort ? "/tmp/floci-" + name + "-proxy-" + bindPort + ".pid" : legacyPidFile;
         String logFile = "/tmp/floci-" + name + "-proxy.log";
-        return new String[]{"sh", "-c", String.join("\n",
+        String listener = "TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",";
+        String ruleMatch = "-d " + bindIp + "/32 -p tcp --dport 80 -j DNAT --to-destination "
+                + bindIp + ":" + bindPort;
+        String nftRuleMarker = "floci-imds-relay-" + bindPort;
+        List<String> lines = new ArrayList<>(List.of(
                 "set -eu",
                 LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
-                "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo",
-                // The pid file is on the container's writable layer, so it outlives a restart while
-                // the PID namespace does not: only a pid that is still this socat listener counts.
-                // The command name matters as well as the arguments: the shell running this script
-                // carries the listener string in its own command line.
-                "if [ -f " + pidFile + " ] && pid=\"$(cat " + pidFile + ")\""
-                        + " && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
-                        + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\""
-                        + " | grep -q 'TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",'; then",
-                "  exit 0",
-                "fi",
-                "nohup socat TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",fork,reuseaddr TCP:"
-                        + targetHost + ":" + targetPort + " >" + logFile + " 2>&1 &",
-                "echo $! > " + pidFile,
-                "for i in 1 2 3 4 5 6 7 8 9 10 11 12; do",
-                "  " + probeCommand,
-                "  sleep 1",
-                "done",
-                "cat " + logFile + " >&2 || true",
-                "exit 1")};
+                "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo"));
+        lines.add("is_socat_listener() {");
+        lines.add("  [ \"$(cat \"/proc/$1/comm\" 2>/dev/null)\" = socat ]"
+                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$1/cmdline\" | grep -Fq \"$2\"");
+        lines.add("}");
+
+        // The writable-layer PID file survives a container restart, so verify the process name and
+        // listener arguments before reusing it or retiring a pre-upgrade TCP/80 listener.
+        if (routeImdsPort) {
+            lines.add("legacy_pid=");
+            lines.add(socatPidCheck(legacyPidFile, "TCP-LISTEN:80,bind=" + bindIp + ","));
+            lines.add("  legacy_pid=$pid");
+            lines.add("fi");
+            lines.add("proxy_running=0");
+            lines.add("new_pid=");
+            lines.add("rule_added=0");
+            lines.add("rule_backend=");
+            lines.add("nft_chain_created=0");
+            lines.add("nft_rule_marker=" + nftRuleMarker + "-$$");
+            lines.add("legacy_new_pid=");
+            lines.add("fallback_legacy=0");
+            lines.add("remove_nft_rule() {");
+            lines.add("  nft -a list chain ip floci_imds output 2>/dev/null"
+                    + " | grep -F \"comment \\\"$1\\\"\" | while IFS= read -r rule; do");
+            lines.add("    case \"$rule\" in");
+            lines.add("      *'# handle '*) nft delete rule ip floci_imds output"
+                    + " handle \"${rule##*# handle }\" 2>/dev/null || true ;;");
+            lines.add("    esac");
+            lines.add("  done");
+            lines.add("}");
+            lines.add("cleanup_new_proxy() {");
+            lines.add("  if [ -n \"$new_pid\" ]; then");
+            lines.add("    if is_socat_listener \"$new_pid\" '" + listener + "'; then");
+            lines.add("      kill \"$new_pid\" 2>/dev/null || true");
+            lines.add("    fi");
+            lines.add("    if [ \"$(cat " + pidFile + " 2>/dev/null)\" = \"$new_pid\" ]; then");
+            lines.add("      rm -f " + pidFile);
+            lines.add("    fi");
+            lines.add("  fi");
+            lines.add("  if [ \"$rule_added\" -eq 1 ]; then");
+            lines.add("    if [ \"$rule_backend\" = nft ]; then");
+            lines.add("      remove_nft_rule \"$nft_rule_marker\" || true");
+            lines.add("    else");
+            lines.add("      iptables -t nat -D OUTPUT " + ruleMatch + " 2>/dev/null || true");
+            lines.add("    fi");
+            lines.add("  fi");
+            lines.add("  if [ \"$nft_chain_created\" -eq 1 ]; then");
+            lines.add("    nft delete chain ip floci_imds output 2>/dev/null || true");
+            lines.add("  fi");
+            lines.add("  if [ -n \"$legacy_new_pid\" ]; then");
+            lines.add("    if is_socat_listener \"$legacy_new_pid\" 'TCP-LISTEN:80,bind=" + bindIp + ",'; then");
+            lines.add("      kill \"$legacy_new_pid\" 2>/dev/null || true");
+            lines.add("    fi");
+            lines.add("    if [ \"$(cat " + legacyPidFile + " 2>/dev/null)\" = \"$legacy_new_pid\" ]; then");
+            lines.add("      rm -f " + legacyPidFile);
+            lines.add("    fi");
+            lines.add("  fi");
+            lines.add("}");
+        }
+        lines.add(socatPidCheck(pidFile, listener));
+        if (routeImdsPort) {
+            lines.add("  proxy_running=1");
+            lines.add("fi");
+            lines.add("if [ \"$proxy_running\" -eq 0 ]; then");
+        } else {
+            lines.add("  exit 0");
+            lines.add("fi");
+        }
+        lines.add((routeImdsPort ? "  " : "") + "nohup socat " + listener + "fork,reuseaddr TCP:"
+                + targetHost + ":" + targetPort + " >" + logFile + " 2>&1 &");
+        if (routeImdsPort) {
+            lines.add("  new_pid=$!");
+            lines.add("  echo \"$new_pid\" > " + pidFile);
+        } else {
+            lines.add("echo $! > " + pidFile);
+        }
+        if (routeImdsPort) {
+            lines.add("fi");
+            lines.add("if command -v nft >/dev/null 2>&1"
+                    + " && nft list chain ip floci_imds output 2>/dev/null"
+                    + " | grep -F 'comment \"" + nftRuleMarker + "'"
+                    + " | grep -Fq 'ip daddr " + bindIp + " tcp dport 80 dnat to "
+                    + bindIp + ":" + bindPort + "'; then");
+            lines.add("  rule_backend=nft");
+            lines.add("fi");
+            lines.add("if [ -z \"$rule_backend\" ] && command -v iptables >/dev/null 2>&1; then");
+            lines.add("  if iptables -t nat -C OUTPUT " + ruleMatch + " 2>/dev/null; then");
+            lines.add("    rule_backend=iptables");
+            lines.add("  elif ! { command -v nft >/dev/null 2>&1"
+                    + " && nft list table ip floci_imds >/dev/null 2>&1; }"
+                    + " && iptables -t nat -I OUTPUT 1 " + ruleMatch + "; then");
+            lines.add("    rule_backend=iptables");
+            lines.add("    rule_added=1");
+            lines.add("  fi");
+            lines.add("fi");
+            lines.add("if [ -z \"$rule_backend\" ] && command -v nft >/dev/null 2>&1; then");
+            lines.add("  nft_ready=1");
+            lines.add("  if ! nft list table ip floci_imds >/dev/null 2>&1; then");
+            lines.add("    nft add table ip floci_imds || nft_ready=0");
+            lines.add("  fi");
+            lines.add("  if [ \"$nft_ready\" -eq 1 ]"
+                    + " && ! nft list chain ip floci_imds output >/dev/null 2>&1; then");
+            lines.add("    if printf '%s\\n'"
+                    + " 'add chain ip floci_imds output { type nat hook output priority -100; policy accept; }'"
+                    + " | nft -f -; then");
+            lines.add("      nft_chain_created=1");
+            lines.add("    else");
+            lines.add("      nft_ready=0");
+            lines.add("    fi");
+            lines.add("  fi");
+            lines.add("  if [ \"$nft_ready\" -eq 1 ]; then");
+            lines.add("    if printf '%s\\n' \"insert rule ip floci_imds output ip daddr " + bindIp
+                    + " tcp dport 80 dnat to " + bindIp + ":" + bindPort
+                    + " comment \\\"$nft_rule_marker\\\"\" | nft -f -; then");
+            lines.add("      rule_backend=nft");
+            lines.add("      rule_added=1");
+            lines.add("    fi");
+            lines.add("  fi");
+            lines.add("fi");
+            lines.add("if [ -z \"$rule_backend\" ] && command -v iptables >/dev/null 2>&1"
+                    + " && iptables -t nat -I OUTPUT 1 " + ruleMatch + "; then");
+            lines.add("  rule_backend=iptables");
+            lines.add("  rule_added=1");
+            lines.add("fi");
+            lines.add("if [ -z \"$rule_backend\" ]; then");
+            lines.add("  cleanup_new_proxy");
+            lines.add("  fallback_legacy=1");
+            lines.add("  if [ -z \"$legacy_pid\" ]; then");
+            lines.add("    nohup socat TCP-LISTEN:80,bind=" + bindIp + ",fork,reuseaddr TCP:"
+                    + targetHost + ":" + targetPort + " >" + logFile + " 2>&1 &");
+            lines.add("    legacy_new_pid=$!");
+            lines.add("    echo \"$legacy_new_pid\" > " + legacyPidFile);
+            lines.add("  fi");
+            lines.add("fi");
+        }
+        lines.add("for i in 1 2 3 4 5 6 7 8 9 10 11 12; do");
+        if (routeImdsPort) {
+            lines.add("  if (" + probeCommand + "); then");
+            lines.add("    if [ \"$fallback_legacy\" -eq 0 ] && [ -n \"$legacy_pid\" ]"
+                    + " && is_socat_listener \"$legacy_pid\" 'TCP-LISTEN:80,bind=" + bindIp + ",'; then");
+            lines.add("      kill \"$legacy_pid\" 2>/dev/null || true");
+            lines.add("      if [ \"$(cat " + legacyPidFile + " 2>/dev/null)\" = \"$legacy_pid\" ]; then");
+            lines.add("        rm -f " + legacyPidFile);
+            lines.add("      fi");
+            lines.add("    fi");
+            lines.add("    exit 0");
+            lines.add("  fi");
+        } else {
+            lines.add("  " + probeCommand);
+        }
+        lines.add("  sleep 1");
+        lines.add("done");
+        if (routeImdsPort) {
+            lines.add("cleanup_new_proxy");
+        }
+        lines.add("cat " + logFile + " >&2 || true");
+        lines.add("exit 1");
+        return new String[]{"sh", "-c", String.join("\n", lines)};
+    }
+
+    private static String socatPidCheck(String pidFile, String listener) {
+        return "if [ -f " + pidFile + " ] && pid=\"$(cat " + pidFile + ")\""
+                + " && is_socat_listener \"$pid\" '" + listener + "'; then";
     }
 
     public static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {

@@ -45,7 +45,7 @@ class Ec2StartRequestScopeIntegrationTest {
     void backgroundStartUsesOwnerOrCallerAndClearsItsScopeAfterFailure(boolean ownerless) throws Exception {
         try (ExecutorService worker = Executors.newSingleThreadExecutor();
              ExecutorService retries = Executors.newSingleThreadExecutor()) {
-            DockerClient docker = mock(DockerClient.class);
+            DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
             Ec2ContainerManager manager = manager(docker, mock(ContainerLifecycleManager.class), worker, retries);
             Scope caller = new Scope("999900001111", "ap-southeast-1", "aws");
             for (Scope owner : List.of(new Scope("111122223333", "eu-west-1", "aws"),
