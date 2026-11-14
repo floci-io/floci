@@ -23,7 +23,8 @@ import java.util.Optional;
  * Redshift Serverless workgroups it runs statements on and the targets of its sessions; Payment Cryptography, for
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
- * invitations and shares of other accounts they act on); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
+ * invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an ARN names,
+ * random suffix included); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
  * for the namespace a request is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
@@ -45,7 +46,9 @@ public interface StoredResourceArns {
 
     /**
      * The resource resolved by an ARN in its own account and Region, without substituting the caller's
-     * coordinates. Empty when the service has no such resource or does not resolve ARN selectors this way.
+     * coordinates (a layer version), or as the service's handler reads the ARN where it reads it first as the
+     * caller's (a secret a full or partial ARN names, in the ARN's Region, before one another account holds under
+     * that full ARN). Empty when the service has no such resource or does not resolve ARN selectors this way.
      * Used only for operations read by the generated request-resource table.
      */
     default Optional<String> resolveStoredArn(String arn) {

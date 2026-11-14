@@ -824,7 +824,8 @@ public final class RequestResources {
      * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
      * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
      * alias points at. A type whose service follows its name with an id it mints has that id open when the service
-     * stores none, and any other type's is as rendered.
+     * stores none, one whose service follows it with characters it mints those characters open (a secret's
+     * {@code -??????}, as a create names the secret it makes), and any other type's is as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
@@ -834,7 +835,10 @@ public final class RequestResources {
                 return found.get();
             }
         }
-        return format.minted() ? arn + "/*" : arn;
+        if (format.minted()) {
+            return arn + "/*";
+        }
+        return format.mintedSuffix() != null ? arn + format.mintedSuffix() : arn;
     }
 
     /**
@@ -884,7 +888,8 @@ public final class RequestResources {
      * and one of a type AWS owns ({@code awsOwned}) its account, {@code aws}, which is no caller's. One naming another
      * account whose resource {@code stored} says the service acts on there (an OAM sink a link is made to, a RAM
      * invitation sent to the caller) is that resource alone. When the service resolves the complete ARN to a stored
-     * resource in its own coordinates, that stored ARN alone is checked.
+     * resource, that stored ARN alone is checked: a layer version in its own coordinates, or the secret a full or
+     * partial ARN names in the ARN's Region, as its handler reads it.
      */
     private static void addNamed(Set<String> arns, String arn, boolean awsOwned, String partition, String region,
                                  String accountId, StoredResourceArns stored) {
