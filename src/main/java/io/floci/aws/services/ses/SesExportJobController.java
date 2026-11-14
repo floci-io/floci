@@ -87,11 +87,11 @@ public class SesExportJobController {
 
         putTimestamp(result, "CreatedTimestamp", job.getCreatedTimestamp());
         putTimestamp(result, "CompletedTimestamp", job.getCompletedTimestamp());
+        // AWS returns the structure even before a count exists. It never fills
+        // ExportedRecordsCount, so Floci leaves that out although the model carries it.
+        ObjectNode statistics = result.putObject("Statistics");
         if (job.getProcessedRecordsCount() != null) {
-            // AWS returns only ProcessedRecordsCount, never ExportedRecordsCount, so neither does
-            // Floci even though the model carries both.
-            result.putObject("Statistics")
-                    .put("ProcessedRecordsCount", job.getProcessedRecordsCount());
+            statistics.put("ProcessedRecordsCount", job.getProcessedRecordsCount());
         }
         if (job.getErrorMessage() != null) {
             result.putObject("FailureInfo").put("ErrorMessage", job.getErrorMessage());
