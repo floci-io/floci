@@ -1074,7 +1074,9 @@ public class KmsService implements ResourceProvider {
 
     /**
      * Unwraps and installs key material, which takes the key from PendingImport to Enabled. The
-     * import token is spent by the call that uses it, as it is on real KMS.
+     * import token stays valid until it expires, so concurrent imports of the same material all
+     * succeed; a different material is refused by {@code requireSameMaterialAsFirstImport}, not by
+     * the token. Unlike AWS, a later GetParametersForImport still replaces the earlier token.
      */
     public KmsKey importKeyMaterial(String keyId, String importToken, byte[] encryptedKeyMaterial,
                                     String expirationModel, Long validTo, String importType, String region) {
@@ -1108,7 +1110,6 @@ public class KmsService implements ResourceProvider {
             key.setValidTo(KEY_MATERIAL_EXPIRES.equals(effectiveExpirationModel) ? validTo : 0L);
             key.setKeyState("Enabled");
             key.setEnabled(true);
-            key.setImportParameters(null);
             keyStore.put(region + "::" + key.getKeyId(), key);
 
             LOG.infov("Imported key material into KMS key {0} in {1} ({2})",
