@@ -93,6 +93,7 @@ class SsoPortalIntegrationTest {
             .extract().path("roleCredentials.accessKeyId");
 
         // IAM Identity Center names the role session after the user.
+        String roleName = ssoAdminService.provisionedRoleForPortal(directPermissionSet, "111111111111").getRoleName();
         given()
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + roleAccessKeyId
                         + "/20260101/us-east-1/sts/aws4_request, SignedHeaders=host, Signature=abc")
@@ -101,8 +102,8 @@ class SsoPortalIntegrationTest {
             .when().post("/")
             .then().statusCode(200)
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn", Matchers.equalTo(
-                        "arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_PortalDirect" + suffix
-                                + "_floci/portal-" + suffix + "@example.com"));
+                        "arn:aws:sts::111111111111:assumed-role/" + roleName
+                                + "/portal-" + suffix + "@example.com"));
 
         given()
                 .header("x-amz-sso_bearer_token", accessToken)
