@@ -1,5 +1,6 @@
 package io.floci.aws.services.emr;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -41,6 +42,8 @@ import java.util.Map;
 public class EmrHandler {
 
     private static final Logger LOG = Logger.getLogger(EmrHandler.class);
+    /** "There is a limit of 25 volumes per instance." (Amazon EMR Management Guide, Instance storage) */
+    private static final int EBS_VOLUMES_PER_INSTANCE = 25;
     // ListInstances "Provides information for all active Amazon EC2 instances and Amazon EC2 instances terminated in the
     // last 30 days, up to a maximum of 2,000": that many to a call, the rest after its Marker.
     static final int INSTANCES_PER_PAGE = 2000;
@@ -304,6 +307,7 @@ public class EmrHandler {
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
+        requireEbsVolumeLimit(request.path("InstanceFleet"));
         String id = service.addInstanceFleet(text(request, "ClusterId"), fleet);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ClusterId", text(request, "ClusterId"));
@@ -850,8 +854,80 @@ public class EmrHandler {
         node.put("TargetSpotCapacity", f.getTargetSpotCapacity());
         node.put("ProvisionedOnDemandCapacity", f.getProvisionedOnDemandCapacity());
         node.put("ProvisionedSpotCapacity", f.getProvisionedSpotCapacity());
+        node.set("InstanceTypeSpecifications", instanceTypeSpecifications(f));
         node.putObject("Status").put("State", f.getState());
         return node;
+    }
+
+    /**
+     * Each InstanceTypeConfig the fleet was given, as the InstanceTypeSpecification it describes. A config that sets
+     * no WeightedCapacity has 1, and one that sets neither bid price has BidPriceAsPercentageOfOnDemandPrice 100, the
+     * defaults the API reference gives for both. Its EbsConfiguration becomes one EbsBlockDevice per volume, the way
+     * VolumesPerInstance counts them, named {@code /dev/sdb} on: the reference gives no device names. A fleet stored
+     * before its configs were kept has its instance types alone, with those same defaults.
+     */
+    private ArrayNode instanceTypeSpecifications(EmrInstanceFleet f) {
+        ArrayNode specifications = objectMapper.createArrayNode();
+        JsonNode configs = readRawArray(f.getInstanceTypeConfigs());
+        if (configs == null) {
+            ArrayNode named = objectMapper.createArrayNode();
+            f.getInstanceTypes().forEach(type -> named.addObject().put("InstanceType", type));
+            configs = named;
+        }
+        for (JsonNode config : configs) {
+            ObjectNode specification = specifications.addObject();
+            specification.put("InstanceType", config.path("InstanceType").asText(null));
+            specification.put("WeightedCapacity", config.path("WeightedCapacity").asInt(1));
+            boolean bidPrice = config.hasNonNull("BidPrice");
+            if (bidPrice) {
+                specification.put("BidPrice", config.path("BidPrice").asText());
+            }
+            if (config.hasNonNull("BidPriceAsPercentageOfOnDemandPrice")) {
+                specification.put("BidPriceAsPercentageOfOnDemandPrice",
+                        config.path("BidPriceAsPercentageOfOnDemandPrice").asDouble());
+            } else if (!bidPrice) {
+                specification.put("BidPriceAsPercentageOfOnDemandPrice", 100.0);
+            }
+            if (config.hasNonNull("Configurations")) {
+                specification.set("Configurations", config.get("Configurations"));
+            }
+            JsonNode ebs = config.path("EbsConfiguration");
+            ArrayNode devices = objectMapper.createArrayNode();
+            for (JsonNode device : ebs.path("EbsBlockDeviceConfigs")) {
+                // Bounded for a config stored before the limit was held at create.
+                int volumes = Math.min(device.path("VolumesPerInstance").asInt(1),
+                        EBS_VOLUMES_PER_INSTANCE - devices.size());
+                for (int volume = 0; volume < volumes; volume++) {
+                    ObjectNode blockDevice = devices.addObject();
+                    if (device.hasNonNull("VolumeSpecification")) {
+                        blockDevice.set("VolumeSpecification", device.get("VolumeSpecification"));
+                    }
+                    blockDevice.put("Device", deviceName(devices.size() - 1));
+                }
+            }
+            if (!devices.isEmpty()) {
+                specification.set("EbsBlockDevices", devices);
+            }
+            if (ebs.hasNonNull("EbsOptimized")) {
+                specification.put("EbsOptimized", ebs.path("EbsOptimized").asBoolean());
+            }
+            if (config.hasNonNull("CustomAmiId")) {
+                specification.put("CustomAmiId", config.path("CustomAmiId").asText());
+            }
+            if (config.hasNonNull("Priority")) {
+                specification.put("Priority", config.path("Priority").asDouble());
+            }
+        }
+        return specifications;
+    }
+
+    /** {@code /dev/sdb}, {@code /dev/sdc} and on for the volumes of an instance, past {@code sdz} as Linux goes on. */
+    static String deviceName(int index) {
+        StringBuilder letters = new StringBuilder();
+        for (int n = index + 1; n >= 0; n = n / 26 - 1) {
+            letters.insert(0, (char) ('a' + n % 26));
+        }
+        return "/dev/sd" + letters;
     }
 
     private ObjectNode syntheticInstanceNode(EmrCluster cluster, ListedInstances set, long index, long ordinal,
@@ -956,7 +1032,25 @@ public class EmrHandler {
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
+        fleetsNode.forEach(EmrHandler::requireEbsVolumeLimit);
         return fleets;
+    }
+
+    /**
+     * Refuses an InstanceTypeConfig whose EbsConfiguration attaches more volumes to an instance than the Management
+     * Guide allows: "There is a limit of 25 volumes per instance." AWS's error for it is not documented, so the
+     * ValidationException carrying that sentence is Floci's.
+     */
+    private static void requireEbsVolumeLimit(JsonNode fleet) {
+        for (JsonNode config : fleet.path("InstanceTypeConfigs")) {
+            long volumes = 0;
+            for (JsonNode device : config.path("EbsConfiguration").path("EbsBlockDeviceConfigs")) {
+                volumes += device.path("VolumesPerInstance").asLong(1);
+            }
+            if (volumes > EBS_VOLUMES_PER_INSTANCE) {
+                throw new AwsException("ValidationException", "There is a limit of 25 volumes per instance.", 400);
+            }
+        }
     }
 
     /**
@@ -983,6 +1077,7 @@ public class EmrHandler {
             position++;
         }
         fleet.setInstanceTypes(instanceTypes);
+        fleet.setInstanceTypeConfigs(rawArray(f.path("InstanceTypeConfigs")));
         fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
         fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
         return fleet;
@@ -1052,6 +1147,20 @@ public class EmrHandler {
 
     private String rawArray(JsonNode node) {
         return (node != null && node.isArray() && !node.isEmpty()) ? node.toString() : null;
+    }
+
+    /** A stored raw JSON array, or null when there is none or it cannot be read. */
+    private JsonNode readRawArray(String rawJson) {
+        if (rawJson == null) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(rawJson);
+            return node.isArray() ? node : null;
+        } catch (JsonProcessingException e) {
+            LOG.warnv(e, "Failed to parse stored JSON array; ignored. Value: {0}", rawJson);
+            return null;
+        }
     }
 
     private void setRawJson(ObjectNode target, String field, String rawJson) {

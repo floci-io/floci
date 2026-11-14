@@ -68,12 +68,21 @@ API reference says. Each call finds the clusters it reads as they stand at that 
 duration at its default of 0, a cluster is ready, and its steps complete, before the call that started
 them returns.
 
-`CancelSteps` cancels a `PENDING` step, and a `RUNNING` one from release `emr-5.28.0`, as its API
-reference says. A cancelled `RUNNING` step makes room for the next `PENDING` one. Its container stops, and what the
-applications it started on YARN have logged goes to `containers/` (see **Output**), while an application in
-`--deploy-mode cluster` runs on to its end: EMR's cancel signals the step and its descendant processes, and
-"asynchronous processes are not affected", as the Management Guide puts it. On an earlier release
-a `RUNNING` step answers `FAILED` with "Step is not in a cancellable state: RUNNING".
+`CancelSteps` cancels a `PENDING` step, and a `RUNNING` one from release `emr-5.28.0`, as its API reference says,
+adding that it "is idempotent but asynchronous". On an earlier release a `RUNNING` step answers `FAILED` with "Step
+is not in a cancellable state: RUNNING".
+
+In the `docker` runner mode a cancelled `RUNNING` step is `CANCEL_PENDING` while its driver stops, and keeps its
+place among the running steps until the driver is gone: then it is `CANCELLED`, and the next `PENDING` step starts.
+That is Floci's reading of the Management Guide's "Canceling a running step does not allow a pending step to start
+running, assuming no change to stepConcurrencyLevel", beside "Canceling a running or pending step removes that step
+from the active step count"; its step events have a `CANCEL_PENDING` row, "was cancelled at Time and is pending
+cancellation". Cancelling a `CANCEL_PENDING` step again answers `SUBMITTED`, and the step is `CANCELLED` however
+its driver ends. The step's container stops, and what the applications it started on YARN have logged goes to
+`containers/` (see **Output**), while an application in `--deploy-mode cluster` runs on to its end: EMR's cancel
+signals the step and its descendant processes, and "asynchronous processes are not affected", as the Management
+Guide puts it. In the `immediate` mode nothing runs, so a cancelled `RUNNING` step is `CANCELLED` at once and makes
+room for the next.
 
 A cluster created with `Instances.KeepJobFlowAliveWhenNoSteps` set to `false` terminates after its
 initial steps or steps added later complete, reporting `ALL_STEPS_COMPLETED`, without waiting first. A
@@ -113,6 +122,13 @@ InstanceFleets parameters or InstanceGroups parameters, but not both.", the API 
 instance groups with `InvalidRequestException`, each saying the cluster uses the other kind; AWS's wording for these is
 not documented, so it is Floci's. A fleet without its `InstanceFleetType`, or with an `InstanceTypeConfigs` member
 without its `InstanceType`, both required, is refused with the framework's `ValidationException`.
+`ListInstanceFleets` gives each fleet's `InstanceTypeConfigs` back as its `InstanceTypeSpecifications`, with a
+`WeightedCapacity` of 1 where a config sets none and a `BidPriceAsPercentageOfOnDemandPrice` of 100 where it sets
+neither bid price, the defaults the API reference gives, and its `EbsConfiguration` as one `EbsBlockDevice` per volume.
+The reference names no devices, so Floci names them `/dev/sdb`, `/dev/sdc` and on. A config attaching more than 25
+volumes to an instance is refused with `ValidationException` "There is a limit of 25 volumes per instance.", the
+Management Guide's own limit and sentence; AWS's error for it is not documented. `ModifyInstanceFleet` changes a
+fleet's target capacities only; the `InstanceTypeConfigs` it takes are not applied.
 
 A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
@@ -439,11 +455,12 @@ holding the driver and its executors, or a command or a script. The cluster itse
   its steps. A cluster a step failure ends cancels its other steps and goes `TERMINATING`, then
   `TERMINATED_WITH_ERRORS`, with the reason `STEP_FAILURE` and the message "Shut down as step failed".
   While `StepConcurrencyLevel` is above 1 no action is taken, and with level 1 and other steps still
-  running `CANCEL_AND_WAIT` is not either, as the guide says.
+  running, a `CANCEL_PENDING` one among them, `CANCEL_AND_WAIT` is not either, as the guide says.
 * **Cancelling**: `CancelSteps` on a `RUNNING` step, and `TerminateJobFlows`, stop its driver at once; a
   cancelled step takes no `ActionOnFailure`. A step Floci was running when it stopped is `FAILED` once
-  Floci is back, and its `ActionOnFailure` is taken then. Floci's shutdown and a state reset stop every
-  driver, then the clusters' HDFS, a step not yet at its driver as if its driver were stopped, and start no other
+  Floci is back, and its `ActionOnFailure` is taken then; one it was cancelling is `CANCELLED`, in either runner
+  mode. Floci's
+  shutdown and a state reset stop every driver, then the clusters' HDFS, a step not yet at its driver as if its driver were stopped, and start no other
   step; a driver a hard stop left running is removed when the EMR service
   starts, before any step can start, unless `reconcile-containers-on-startup` is off.
 * **What `spark-submit` gets**: the step's arguments, after the `spark-defaults` properties of the
@@ -551,7 +568,7 @@ Each change sends its events:
 | The cluster is ready, or a step completes | the step `COMPLETED`; each step it makes room for `RUNNING`; once none is left, the cluster `WAITING`, or `TERMINATED` with `ALL_STEPS_COMPLETED` when it ends after its steps |
 | A step fails (`docker` runner mode) | the step `FAILED`; then as its `ActionOnFailure` goes: as a completed step, or `CANCELLED` for each step it cancels and the cluster `WAITING`, or `CANCELLED` for each step not yet completed and the cluster `TERMINATED_WITH_ERRORS` with `STEP_FAILURE` |
 | `TerminateJobFlows` | `CANCELLED` for each step not yet completed; the cluster `TERMINATED` with `USER_REQUEST` once it has been `TERMINATING` for the delay, also when a protected cluster fails the call |
-| `CancelSteps` | `CANCELLED` for each step it cancels, and `RUNNING` for the step a cancelled `RUNNING` one makes room for |
+| `CancelSteps` | `CANCELLED` for each `PENDING` step it cancels; for a `RUNNING` one, `CANCEL_PENDING`, then `CANCELLED` once its driver is gone (at once in the `immediate` runner mode), and `RUNNING` for the step it makes room for |
 
 A change that falls due between calls, such as a step completing after `step-duration-seconds`, is
 made at that time and its events sent then, whether or not anything reads the cluster.
@@ -560,7 +577,7 @@ A `STARTING` or `WAITING` cluster's `stateChangeReason` is `{"code":""}`, as in 
 and a terminated one's carries the reason's code and message, such as
 `{"code":"USER_REQUEST","message":"Terminated by user request"}`. `TERMINATED` is `INFO` for
 `USER_REQUEST` and `ALL_STEPS_COMPLETED` and `CRITICAL` for any other reason, and
-`TERMINATED_WITH_ERRORS` is `CRITICAL`; a cancelled step is `WARN` and a failed one `ERROR`. The tables have no row for a cluster's `BOOTSTRAPPING`, `RUNNING` or `TERMINATING`, which
+`TERMINATED_WITH_ERRORS` is `CRITICAL`; a `CANCEL_PENDING` or cancelled step is `WARN` and a failed one `ERROR`. The tables have no row for a cluster's `BOOTSTRAPPING`, `RUNNING` or `TERMINATING`, which
 send nothing, so a `WAITING` cluster that runs added steps sends `WAITING` again when they are done.
 The guide gives two `WAITING` messages without saying when each applies: a cluster that ran steps
 reports it "finished running all pending steps", one that did not that it "was created ... and is
