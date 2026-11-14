@@ -228,7 +228,15 @@ worker of its own on EMR Serverless (see **Executors** below).
   a `repositoryUri` from Floci's ECR, is in another Region, both with `ValidationException` in Floci's own
   wording. An update that leaves `imageUri` out removes that image configuration. Without a custom image,
   `image-template` names another image than the release's, such as a mirror or a dated tag of it:
-  `registry.internal/emr-serverless/spark/%s:20250425`.
+  `registry.internal/emr-serverless/spark/%s:20250425`. `GetJobRun` reports the image configurations each attempt
+  applies, as its application had them when the attempt was made: its `imageConfiguration`, and its worker types'
+  in `workerTypeSpecifications`, as AWS's do when digests are resolved for each run ("To identify which image
+  version each job is running, the GetJobRun API response returns the resolvedImageDigest for that specific job").
+  The driver's configuration, its worker type's or else the application's, has the `resolvedImageDigest` of the
+  image the attempt pulled for the driver, its manifest digest in Floci's ECR; the executors' has theirs, or the
+  driver's where the two share one. No other has a digest, even one naming the same image, such as the `Executor`
+  image while local mode runs the executors in the driver's container, or a Hive run's `TezTask` image. Nor does
+  one built locally under that URI, nor any without the `docker` runner mode, which pulls no image.
 * **Architecture**: a run's containers, its driver's and its executors', run on the Docker host's own platform by
   default. With `honour-architectures` on (`FLOCI_SERVICES_EMRSERVERLESS_HONOUR_ARCHITECTURES=true`) they run the
   image for its application's `architecture`, `linux/amd64` for `X86_64` and `linux/arm64` for `ARM64`, the
@@ -281,7 +289,7 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
 * **Archives**: only the archives of `spark.archives` that are in S3 are unpacked into the driver's working
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
-* **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. Every run resolves its image again, as releases from 7.14 do and earlier ones with `applicationLevelDigestResolution` false: Floci keeps no digest from the application's start, and reports no `resolvedImageDigest`, on the application or on a job run.
+* **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. Every run resolves its image again, as releases from 7.14 do and earlier ones with `applicationLevelDigestResolution` false: Floci keeps no digest from the application's start, and reports no `resolvedImageDigest` on the application; a job run's comes from its attempt's own pull (see **Image** above), and its image configurations carry no `applicationLevelDigestResolution`.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Data Plane**: Floci does not implement the data-plane API, such as interactive sessions.
