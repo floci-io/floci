@@ -937,7 +937,7 @@ class ReposiliteSidecarClientTest {
                 + "<version>1.1</version><version>1.2</version></versions></versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
@@ -979,7 +979,7 @@ class ReposiliteSidecarClientTest {
                 + "</versioning></metadata>";
 
         client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertEquals(Digests.sha1Hex(putBody.get()), new String(sha1Body.get(), StandardCharsets.UTF_8));
         assertEquals(Digests.md5Hex(putBody.get()), new String(md5Body.get(), StandardCharsets.UTF_8));
@@ -1009,7 +1009,7 @@ class ReposiliteSidecarClientTest {
         // own metadata has no idea that happened, so a merge must never let a rejected version
         // back in just because the public source still lists it.
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> !v.equals("1.1"));
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> !v.equals("1.1"), false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
@@ -1036,7 +1036,7 @@ class ReposiliteSidecarClientTest {
                 + "</versioning></metadata>";
 
         assertThrows(IllegalStateException.class, () -> client.mergeExternalConnectionReleaseVersions("dom--repo",
-                "com.example", "a", externalXml.getBytes(StandardCharsets.UTF_8), v -> true));
+                "com.example", "a", externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false));
     }
 
     /**
@@ -1070,7 +1070,7 @@ class ReposiliteSidecarClientTest {
                 + "<version>1.1</version></versions></versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
@@ -1100,12 +1100,45 @@ class ReposiliteSidecarClientTest {
                 + "<version>1.1-SNAPSHOT</version></versions></versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertTrue(merged);
         String xml = new String(putBody.get(), StandardCharsets.UTF_8);
         assertEquals(List.of("1.0"), XmlParser.extractAll(xml, "version"));
         assertEquals("1.0", XmlParser.extractFirst(xml, "latest", null));
+    }
+
+    /**
+     * {@code allowSnapshots=true} (16f-UPSTREAM-REPO's same-domain upstream case) keeps a
+     * {@code -SNAPSHOT} version that {@code allowSnapshots=false} (the real-registry external
+     * connection case, covered just above) would have filtered out.
+     */
+    @Test
+    void mergeExternalConnectionReleaseVersionsKeepsSnapshotVersionsWhenAllowed() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.1-SNAPSHOT</latest><versions><version>1.0</version>"
+                + "<version>1.1-SNAPSHOT</version></versions></versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, true);
+
+        assertTrue(merged);
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0", "1.1-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
     }
 
     @Test
@@ -1132,7 +1165,7 @@ class ReposiliteSidecarClientTest {
                 + "versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
         assertNull(putBody.get());
@@ -1174,7 +1207,7 @@ class ReposiliteSidecarClientTest {
                 + "versioning></metadata>";
 
         boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
-                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
         assertEquals(Digests.sha1Hex(existing.getBytes(StandardCharsets.UTF_8)),

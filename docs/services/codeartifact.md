@@ -91,13 +91,15 @@ connection), the standard `.pom`/`.jar`/`-javadoc.jar`/`-sources.jar` set import
 standard-named request, a non-standard asset name imported individually and only on demand, a
 retained version's own origin checked against any later asset request for the same version
 (rejecting one that would mix in a different connection's bytes), and a direct `mvn deploy` of a
-version already present in the connection rejected with `ConflictException`. See the
-upstream-resolution limitation further down for exactly what this does not yet cover (a
-repository-to-repository `upstreams` chain, for any format including Maven). npm's own `public:npmjs`
-external connection and NuGet's own `public:nuget-org` one resolve the same way, each against its
-own format's one real public connection and documented rules; see their own repository endpoint
-sections and the known-limitations entry below for exactly how. pypi's own external connection does
-not yet.
+version already present in the connection rejected with `ConflictException`. npm's own
+`public:npmjs` external connection, NuGet's own `public:nuget-org` one, and pypi's own
+`public:pypi` one all resolve the same way, each against its own format's one real public
+connection and documented rules; see their own repository endpoint sections and the
+known-limitations entry below for exactly how. A repository-to-repository `upstreams` chain
+resolves the same way too, for every format including Maven, reusing the same mechanism against
+another repository in the domain instead of a real public registry; see the known-limitations
+entry below for the real behavioral differences (Archived/Disposed propagation, and a candidate
+upstream's own real content only, not its own external connection).
 
 `PublishPackageVersion` creates a package version in the `Unfinished` state when the `unfinished`
 flag is set, and `Published` otherwise. While still `Unfinished`, publishing a new asset name is
@@ -276,9 +278,6 @@ state.
 
 ## Known limitations
 
-- **Upstream cycles are not rejected.** `CreateRepository`/`UpdateRepository` reject a repository
-  naming itself as its own upstream and require each named upstream to already exist, but a longer
-  cycle (repository A has B as an upstream, B has A) is not detected.
 - **`DeleteRepository` does not check whether other repositories still reference it as an
   upstream.** Deleting a repository leaves any repository that named it as an upstream pointing at
   one that no longer exists.
@@ -319,10 +318,13 @@ state.
   time, since neither sidecar can answer for one after the fact (`GetPackageVersionReadme`'s own
   constraint, described earlier in this document); `nuget` needs no equivalent step, since
   `GetPackageVersionReadme` already answers it live from the `.nupkg` this action already copies
-  in full. `includeFromUpstream` is accepted but has no effect: it names a source repository's
-  own upstream-repository chain specifically, which this emulator does not resolve for any
-  format yet (see the upstream-resolution limitation below). Maven's own external-connection
-  retention is a different mechanism and does not change this.
+  in full. `includeFromUpstream` (default `false`) is real: on a miss against the literal source
+  repository, it searches that repository's own `upstreams` chain, transitively and in priority
+  order, for the first repository with a usable (not Archived, not Disposed) copy of the
+  version, and copies from there instead, for every format. A version resolved this way records
+  its real origin (the actual, possibly several-hops-deep source repository, not the one named in
+  the request) the same way the native-protocol upstream-repository retention below does; a
+  version found directly at the named source repository records no new claim.
 - **`CopyPackageVersions` holds this service's one write lock for the whole call, including the
   disk staging and sidecar streaming a large batch now needs.** Every package-mutating method
   here (`CreateDomain`, `PublishPackageVersion`, `DeletePackageVersions`, ...) shares one lock, so
@@ -385,11 +387,12 @@ state.
   would mean isolating each sidecar on its own Docker network reachable only from Floci's own
   process, a change that would need to apply uniformly across all four sidecar-backed formats, not
   a one-off fix to any single proxy.
-- **The Maven, NuGet, and npm endpoints' own external connections resolve; pypi's does not.**
-  On real CodeArtifact, a repository with another repository configured as an upstream
-  (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a public
-  repository serves packages from those sources too, not just its own. Floci's Maven endpoint
-  does this for a direct external connection to one of the 5 real public Maven repositories
+- **Every native endpoint's own external connections and repository-to-repository upstreams both
+  resolve, for all four formats.** On real CodeArtifact, a repository with another repository
+  configured as an upstream (`UpdateRepository`'s `upstreams`) or with an
+  `AssociateExternalConnection` to a public repository serves packages from those sources too, not
+  just its own; a repository has one or the other, never both. Floci's Maven endpoint does this
+  for a direct external connection to one of the 5 real public Maven repositories
   (`public:maven-central`, `public:maven-clojars`, `public:maven-commonsware`,
   `public:maven-googleandroid`, `public:maven-gradleplugins`): a GET/HEAD miss fetches and
   retains the package version from the real public repository, following AWS's own documented
@@ -407,12 +410,28 @@ state.
   knows (never written back to Verdaccio itself, since its publish protocol has no way to record a
   version's metadata without that version's real tarball bytes in the same call), and a tarball
   download for a version not yet genuinely retained triggers the real fetch and retention, using
-  the same claim/fence/origin-tracking machinery. None of this applies to a repository-to-
-  repository upstream (`UpdateRepository`'s `upstreams`, for any format including Maven, NuGet,
-  and npm, which is a materially different mechanism, not yet built) or to pypi's own external
-  connection, which still 404s exactly as before: the pypi proxy's pypiserver container is started
-  with `--disable-fallback`, specifically so it never silently redirects a missing package to the
-  real, public PyPI.
+  the same claim/fence/origin-tracking machinery. pypi's own `public:pypi` external connection
+  works the same way again, importing every real asset of a resolved version together (AWS's own
+  documented "will import all the assets in that package version," unlike npm/NuGet's one-asset
+  rule), with the requested file imported synchronously and its siblings handed to a background
+  task so a popular package's first install doesn't risk outlasting a real `pip`/`twine` client's
+  own default read timeout.
+
+  A repository-to-repository upstream chain resolves the same way, for all four formats, reusing
+  the exact claim/fence/origin-tracking machinery above: a GET/HEAD/tarball-download/packument
+  miss searches the repository's own `upstreams`, transitively (an upstream's own upstreams are
+  searched too, breadth-first, matching AWS's documented priority order) and not just its direct
+  list, for the first repository with a usable copy. Two real differences from the
+  external-connection case: an Archived or Disposed version *at the resolved upstream repository
+  itself* is skipped, the walk continuing to the next candidate, since a same-domain upstream has
+  a real CodeArtifact-shaped status to check that a public registry never does; and each candidate
+  is checked only for what it already has retained, not what it could itself still pull from its
+  own configured external connection (AWS documents a downstream request chaining through an
+  upstream's own external connection too, so a version a candidate upstream hasn't fetched yet
+  from its own `public:*` connection stays a miss here, even though AWS would resolve it). Since a
+  same-domain upstream read never leaves this process, pypi's own version here needs none of the
+  real external connection's PEP 691 sha256 re-verification or background-thread split: every
+  asset of the resolved version is imported synchronously, in one pass.
 - **Maven external-connection retention is the one place this emulator makes a real outbound
   call to the public internet**, rather than only ever talking to a container it started itself.
   An offline environment, or a real outage of the public repository being connected to, means a
@@ -465,11 +484,12 @@ state.
   begin with; Maven, npm, pypi, and nuget publishes go through their own native wire protocol (`mvn
   deploy`, `npm publish`, `twine upload`, `nuget push`) directly against the repository endpoint,
   which does not yet check this setting. `upstream` is stored and reported faithfully for every
-  format; it gates Maven's own external-connection retention (see the upstream-resolution
-  limitation above) but is not enforced anywhere else, since Floci has no other upstream
-  ingestion path to block yet. `CopyPackageVersions` deliberately does not check `publish: BLOCK`
-  either, for any format: the User Guide's own definition of that control scopes it to direct
-  publish "using package managers or similar tools," a mechanism Copy is not.
+  format, and gates every format's own external-connection retention and repository-to-repository
+  upstream retention (both resolve for Maven, npm, pypi, and nuget; see above). `CopyPackageVersions`
+  deliberately does not check `publish: BLOCK`/`upstream: BLOCK` either, for any format, including
+  its own `includeFromUpstream` search: the User Guide's own definition of both controls scopes
+  them to direct publish/retention "using package managers or similar tools," a mechanism Copy is
+  not.
 - **`DescribeDomain`'s `assetSizeBytes` only counts what was published after this field started
   being computed.** Generic-format bytes are summed live from the still-existing
   `PublishPackageVersion` records, so they're always current. Maven, npm, pypi, and nuget have no
@@ -500,17 +520,18 @@ state.
   too, which this correctly attributes to the real artifact; only the rarer, version-scoped
   snapshot form gets a package name this way. The bytes are still counted toward the domain total
   either way, just under an internal accounting bucket nothing else ever looks up by name.
-- **Package groups enforce `PUBLISH` and `EXTERNAL_UPSTREAM`; `INTERNAL_UPSTREAM` is stored and
-  resolved but never gates anything.** `PUBLISH` is wired into the one package-level origin check
-  every direct-publish path already shares (`PublishPackageVersion`'s own `generic`-format path
-  and every native proxy controller's own publish guard — `mvn deploy`, `npm publish`, `twine
-  upload`, `nuget push` — alike), and every format's external-connection retention (Maven, npm,
-  pypi, NuGet) is wired to the resolved `EXTERNAL_UPSTREAM` mode, both following the "`BLOCK`
-  always wins over `ALLOW`" interaction between a package's own origin configuration and its
-  associated group's, and both blocking a weak pattern match outright regardless of the group's
-  configured mode. `INTERNAL_UPSTREAM` has nothing to gate yet: it governs a repository-to-
-  repository upstream chain (`UpdateRepository`'s `upstreams`), which this emulator does not
-  simulate for any format.
+- **Package groups enforce `PUBLISH`, `EXTERNAL_UPSTREAM`, and `INTERNAL_UPSTREAM`.** `PUBLISH` is
+  wired into the one package-level origin check every direct-publish path already shares
+  (`PublishPackageVersion`'s own `generic`-format path and every native proxy controller's own
+  publish guard, `mvn deploy`/`npm publish`/`twine upload`/`nuget push` alike); every
+  format's external-connection retention (Maven, npm, pypi, NuGet) is wired to the resolved
+  `EXTERNAL_UPSTREAM` mode; and every format's repository-to-repository upstream retention
+  (`UpdateRepository`'s `upstreams`) is wired to the resolved `INTERNAL_UPSTREAM` mode the same
+  way. All three follow the "`BLOCK` always wins over `ALLOW`" interaction between a package's own
+  origin configuration and its associated group's, and all three block a weak pattern match
+  outright regardless of the group's configured mode (the User Guide's own pattern-matching page
+  states this generically, "pulled from upstreams or published," not scoped to one restriction
+  type by name).
 - **Package group weak-match normalization does not model Unicode confusable characters.** The
   User Guide's own "Additional variations" section mentions visually-similar characters from
   different alphabets only in passing, with no concrete testable rule; this emulator's weak match

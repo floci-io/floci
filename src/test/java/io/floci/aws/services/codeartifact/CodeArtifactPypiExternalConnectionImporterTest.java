@@ -90,13 +90,14 @@ class CodeArtifactPypiExternalConnectionImporterTest {
         repository.setExternalConnections(List.of(new ExternalConnection("public:pypi", "pypi", "AVAILABLE")));
         when(service.describeRepository(REGION, DOMAIN, OWNER, REPOSITORY)).thenReturn(repository);
         when(service.isUpstreamRetentionBlocked(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString())).thenReturn(false);
+                any(), anyString(),
+                eq("EXTERNAL_UPSTREAM"))).thenReturn(false);
         when(service.currentContainerBackedPackageFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString())).thenReturn(42L);
         when(service.currentContainerBackedVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString())).thenReturn(99L);
         when(service.claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyString(), anyLong()))
+                any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong()))
                 .thenReturn(new CodeArtifactService.RetainedVersionOriginClaimOutcome(true, EPISODE_ID));
         when(pypiserver.listPackageVersionAssetNames(anyString(), anyString(), anyString(), any(), anyString(),
                 anyString())).thenReturn(List.of());
@@ -188,12 +189,13 @@ class CodeArtifactPypiExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyString(), anyLong());
+                anyString(), any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong());
     }
 
     @Test
     void returnsFalseWhenUpstreamRetentionIsBlocked() {
-        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null, PACKAGE_NAME))
+        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null, PACKAGE_NAME,
+                "EXTERNAL_UPSTREAM"))
                 .thenReturn(true);
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, SDIST_FILENAME);
@@ -220,13 +222,13 @@ class CodeArtifactPypiExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyString(), anyLong());
+                anyString(), any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong());
     }
 
     @Test
     void returnsFalseWithoutFinishingWhenTheClaimIsRefused() {
         when(service.claimRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null, PACKAGE_NAME,
-                VERSION, "public:pypi", 42L))
+                VERSION, "public:pypi", RetentionOriginKind.EXTERNAL_CONNECTION, 42L))
                 .thenReturn(new CodeArtifactService.RetainedVersionOriginClaimOutcome(false, 0L));
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, SDIST_FILENAME);
@@ -383,7 +385,8 @@ class CodeArtifactPypiExternalConnectionImporterTest {
 
     @Test
     void additionalExternalFilenamesReturnsEmptyWhenUpstreamRetentionIsBlocked() {
-        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null, PACKAGE_NAME))
+        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null, PACKAGE_NAME,
+                "EXTERNAL_UPSTREAM"))
                 .thenReturn(true);
 
         List<CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile> additional =

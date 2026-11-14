@@ -502,6 +502,8 @@ public class CodeArtifactController {
             ObjectNode domainEntryPoint = origin.putObject("domainEntryPoint");
             if (summary.externalConnectionName() != null) {
                 domainEntryPoint.put("externalConnectionName", summary.externalConnectionName());
+            } else if (summary.upstreamRepositoryName() != null) {
+                domainEntryPoint.put("repositoryName", summary.upstreamRepositoryName());
             } else {
                 domainEntryPoint.put("repositoryName", repository);
             }

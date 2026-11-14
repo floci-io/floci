@@ -776,15 +776,40 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
      * request for this exact package would keep finding nothing new to add and keep taking this
      * same no-op path, never repairing it, so a client verifying checksums could keep failing
      * indefinitely even once the sidecar itself has long since recovered.
+     *
+     * <p>{@code allowSnapshots}: {@code false} for an external connection (AWS's own "release
+     * versions only" restriction, cited above); {@code true} for a same-domain upstream repository
+     * (16f-UPSTREAM-REPO), which has no such restriction, since a SNAPSHOT already published into
+     * one is a perfectly real, already-retained artifact.
      */
-    public boolean mergeExternalConnectionReleaseVersions(String repositoryContainerId, String namespace,
-            String packageName, byte[] externalMetadataXml, Predicate<String> versionAllowed) {
-        ensureRepository(repositoryContainerId);
-        String externalXml = new String(externalMetadataXml, StandardCharsets.UTF_8);
-        List<String> externalReleaseVersions = XmlParser.extractAll(externalXml, "version").stream()
-                .filter(v -> !v.endsWith("-SNAPSHOT"))
+    /**
+     * The read-only half of {@link #mergeExternalConnectionReleaseVersions}'s own eligibility
+     * filter (SNAPSHOT exclusion plus {@code versionAllowed}), exposed so a caller searching
+     * several candidates in priority order (16f-UPSTREAM-REPO's {@code
+     * CodeArtifactMavenUpstreamRepositoryImporter}) can tell "this candidate's metadata names
+     * nothing usable, try the next one" apart from "this candidate is the one, merge it," without
+     * provisioning this repository or writing anything for a candidate it is about to skip.
+     */
+    static List<String> eligibleReleaseVersions(byte[] metadataXml, Predicate<String> versionAllowed,
+            boolean allowSnapshots) {
+        return eligibleReleaseVersions(new String(metadataXml, StandardCharsets.UTF_8), versionAllowed,
+                allowSnapshots);
+    }
+
+    private static List<String> eligibleReleaseVersions(String xml, Predicate<String> versionAllowed,
+            boolean allowSnapshots) {
+        return XmlParser.extractAll(xml, "version").stream()
+                .filter(v -> allowSnapshots || !v.endsWith("-SNAPSHOT"))
                 .filter(versionAllowed)
                 .toList();
+    }
+
+    public boolean mergeExternalConnectionReleaseVersions(String repositoryContainerId, String namespace,
+            String packageName, byte[] externalMetadataXml, Predicate<String> versionAllowed,
+            boolean allowSnapshots) {
+        ensureRepository(repositoryContainerId);
+        String externalXml = new String(externalMetadataXml, StandardCharsets.UTF_8);
+        List<String> externalReleaseVersions = eligibleReleaseVersions(externalXml, versionAllowed, allowSnapshots);
         if (externalReleaseVersions.isEmpty()) {
             return false;
         }

@@ -130,7 +130,8 @@ public class CodeArtifactNpmExternalConnectionImporter {
         if (externalConnectionName == null) {
             return Optional.empty();
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName)) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName,
+                "EXTERNAL_UPSTREAM")) {
             return Optional.empty();
         }
         Optional<NpmExternalConnectionClient.FetchedAsset> fetched;
@@ -265,7 +266,8 @@ public class CodeArtifactNpmExternalConnectionImporter {
         if (externalConnectionName == null) {
             return false;
         }
-        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName)) {
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "npm", namespace, packageName,
+                "EXTERNAL_UPSTREAM")) {
             return false;
         }
 
@@ -275,7 +277,7 @@ public class CodeArtifactNpmExternalConnectionImporter {
                 "npm", namespace, packageName, version);
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
                 domain, owner, repository, "npm", namespace, packageName, version, externalConnectionName,
-                packageFenceSnapshot);
+                RetentionOriginKind.EXTERNAL_CONNECTION, packageFenceSnapshot);
         if (!claim.claimed()) {
             return false;
         }
