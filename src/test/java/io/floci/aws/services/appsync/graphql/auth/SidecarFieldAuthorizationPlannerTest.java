@@ -93,6 +93,22 @@ class SidecarFieldAuthorizationPlannerTest {
     }
 
     @Test
+    void cognitoDirectiveOnlyChecksGroupMembershipWhenGroupsAreListed() {
+        GraphqlApi api = api(AuthenticationType.API_KEY);
+        withAdditional(api, AuthenticationType.AMAZON_COGNITO_USER_POOLS);
+        Map<String, Object> identity = Map.of("groups", List.of("Readers"));
+        AppSyncAuthContext cognito = new AppSyncAuthContext(identity, AppSyncAuth.AUTH_TYPE_COGNITO,
+                AuthenticationType.AMAZON_COGNITO_USER_POOLS, Set.of(), api, null, "us-east-1", "000000000000");
+        PlanResult bare = plan(field("Query", "todo", List.of(directive("aws_cognito_user_pools")), List.of()));
+        PlanResult restricted = plan(field("Query", "secret", List.of(directive("aws_cognito_user_pools",
+                Map.of("cognito_groups", List.of("Admins")))), List.of()));
+
+        assertAllowed(planner.planDenyFields(bare, cognito));
+        assertDenied(planner.planDenyFields(bare, apiKeyContext(api)));
+        assertDenied(planner.planDenyFields(restricted, cognito));
+    }
+
+    @Test
     void awsAuthIgnoredWhenAdditionalModesExist() {
         PlanResult plan = plan(field("Query", "secret",
                 List.of(directive("aws_auth", Map.of("cognito_groups", List.of("admin")))), List.of()));

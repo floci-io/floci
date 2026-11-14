@@ -207,7 +207,7 @@ The following **AppSync directives** are pre-defined and recognized in schemas:
 |-----------|-----------|---------|
 | `@aws_api_key` | OBJECT, FIELD_DEFINITION | Require API key auth |
 | `@aws_iam` | OBJECT, FIELD_DEFINITION | Require IAM auth |
-| `@aws_cognito_user_pools(cognito_groups: [String!]!)` | OBJECT, FIELD_DEFINITION | Require Cognito user pool auth |
+| `@aws_cognito_user_pools(cognito_groups: [String!])` | OBJECT, FIELD_DEFINITION | Require Cognito user pool auth |
 | `@aws_oidc` | OBJECT, FIELD_DEFINITION | Require OIDC auth |
 | `@aws_lambda` | OBJECT, FIELD_DEFINITION | Require Lambda auth |
 | `@aws_subscribe(mutations: [String!]!)` | FIELD_DEFINITION | Link subscription to mutation |
