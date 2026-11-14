@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -59,12 +60,13 @@ class AthenaQueryScopeTest {
     void aQueryReadsTheCatalogOfTheAccountAndRegionItWasStartedIn() throws Exception {
         String account = TestAccounts.randomId();
         String database = "scope_" + account;
-        CompletableFuture<String> setupDdl = new CompletableFuture<>();
+        // The setup DDL the query reads the catalog through, and the account its S3 reads and writes go to.
+        CompletableFuture<List<String>> handedToDuck = new CompletableFuture<>();
         FlociDuckClient duckClient = mock(FlociDuckClient.class);
         doAnswer(invocation -> {
-            setupDdl.complete(invocation.getArgument(1));
+            handedToDuck.complete(List.of(invocation.getArgument(1), invocation.getArgument(3)));
             return null;
-        }).when(duckClient).execute(anyString(), any(), any());
+        }).when(duckClient).execute(anyString(), any(), any(), any());
         AthenaService athena = new AthenaService(storageFactory, duckClient, glueService, mock(S3Service.class),
                 realQueries(), vertx, ddlBuilder, regionResolver);
         try {
@@ -79,7 +81,7 @@ class AthenaQueryScopeTest {
             String id = RequestScopes.callAs(account, REGION,
                     () -> athena.startQueryExecution("SELECT 1", "primary", context, null));
 
-            assertEquals(expected, setupDdl.get(10, TimeUnit.SECONDS));
+            assertEquals(List.of(expected, account), handedToDuck.get(10, TimeUnit.SECONDS));
             await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).untilAsserted(() ->
                     assertEquals(QueryExecutionState.SUCCEEDED, RequestScopes.callAs(account, REGION,
                             () -> athena.getQueryExecution(id).getStatus().getState())));

@@ -204,9 +204,9 @@ public class AthenaService {
                     if (outputLocation != null) {
                         ensureOutputBucket(outputLocation);
                     }
-                    duckClient.execute(query, setupDdl, outputLocation);
+                    duckClient.execute(query, setupDdl, outputLocation, accountId);
                     if (outputLocation != null) {
-                        resultColumnTypeStore.put(id, describeColumnTypes(query, setupDdl));
+                        resultColumnTypeStore.put(id, describeColumnTypes(query, setupDdl, accountId));
                     }
                     return null;
                 })
@@ -1131,12 +1131,12 @@ public class AthenaService {
 
     /**
      * The DuckDB type of each result column, in order. The result CSV carries only the column names,
-     * so the types come from DuckDB describing the same query. The query has already succeeded, so a
+     * so the types come from DuckDB describing the same query, as the account that ran it. The query has already succeeded, so a
      * failure here only costs the types: its columns are reported as varchar.
      */
-    private List<String> describeColumnTypes(String query, String setupDdl) {
+    private List<String> describeColumnTypes(String query, String setupDdl, String accountId) {
         try {
-            return duckClient.query("DESCRIBE " + query, setupDdl).stream()
+            return duckClient.query("DESCRIBE " + query, setupDdl, accountId).stream()
                     .map(column -> String.valueOf(column.get("column_type")))
                     .toList();
         } catch (RuntimeException e) {
