@@ -4184,6 +4184,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             Instance inst = new Instance();
                             inst.setInstanceId(instanceId);
                             inst.setOwnerId(callerAccountId());
+                            inst.setReservationId(reservationId);
                             inst.setImageId(imageId);
                             inst.setState(InstanceState.pending());
                             inst.setInstanceType(effectiveInstanceType);
@@ -4933,15 +4934,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(i -> matchesFilters(i, filters, region))
                 .collect(Collectors.toList());
 
-        // Group into reservations (one instance per reservation for simplicity)
+        // An instance without a stored reservation (one Floci did not launch) keeps a stable id of its own
         Map<String, Reservation> reservationMap = new LinkedHashMap<>();
         String ownerAccountId = callerAccountId();
         for (Instance inst : matched) {
-            Reservation res = new Reservation();
-            res.setReservationId("r-" + randomHex(17));
-            res.setOwnerId(ownerAccountId);
+            String reservationId = inst.getReservationId() != null
+                    ? inst.getReservationId() : "r-" + inst.getInstanceId().substring("i-".length());
+            Reservation res = reservationMap.computeIfAbsent(reservationId, id -> {
+                Reservation created = new Reservation();
+                created.setReservationId(id);
+                created.setOwnerId(ownerAccountId);
+                return created;
+            });
             res.getInstances().add(inst);
-            reservationMap.put(inst.getInstanceId(), res);
         }
         return new ArrayList<>(reservationMap.values());
     }
@@ -6063,6 +6068,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         copy.setLaunchTime(source.getLaunchTime());
         copy.setAmiLaunchIndex(source.getAmiLaunchIndex());
         copy.setClientToken(source.getClientToken());
+        copy.setReservationId(source.getReservationId());
         copy.setMonitoring(source.getMonitoring());
         copy.setSourceDestCheck(source.isSourceDestCheck());
         copy.setEbsOptimized(source.isEbsOptimized());
