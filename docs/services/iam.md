@@ -2806,7 +2806,9 @@ account key carries no identity policies of its own.
 - **Conditions**: support for `Condition` blocks with multiple operators.
 - **Policy variables**: `${...}` placeholders in a `Resource` pattern or a `Condition` value,
   resolved from the request context.
-- **Effects**: `Allow` and `Deny`.
+- **Effects**: `Allow` and `Deny`. A statement whose `Effect` names neither, because it is absent,
+  is not a string, or is some other word, states nothing: it grants nothing, denies nothing, and
+  leaves the request to the rest of the document.
 
 #### Policy variables
 
