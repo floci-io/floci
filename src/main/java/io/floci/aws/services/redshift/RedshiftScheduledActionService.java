@@ -268,10 +268,8 @@ public class RedshiftScheduledActionService implements Resettable {
     }
 
     private void invoke(ScheduledAction action, String accountId) {
-        String clusterArn = regionResolver.buildArn("redshift", regionOf(accountId, action), accountId,
-                "cluster:" + action.getClusterIdentifier());
-        Optional<String> refusal = authorizer.refusal(
-                action.getIamRole(), accountId, action.getTargetActionType(), clusterArn);
+        Optional<String> refusal = authorizer.refusal(action.getIamRole(), accountId, regionOf(accountId, action),
+                action.getTargetActionType(), action.getClusterIdentifier());
         if (refusal.isPresent()) {
             throw new AwsException("UnauthorizedOperation", refusal.get(), 400);
         }

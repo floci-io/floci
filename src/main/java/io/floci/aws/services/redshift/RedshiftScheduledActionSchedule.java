@@ -1,12 +1,10 @@
 package io.floci.aws.services.redshift;
 
-import com.cronutils.model.Cron;
 import com.cronutils.model.time.ExecutionTime;
-import io.floci.aws.core.common.AwsCronDefinitions;
+import io.floci.aws.core.common.AwsCronSchedule;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.redshift.model.ScheduledAction;
 
-import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -17,10 +15,6 @@ import java.util.Optional;
 
 /** UTC schedule rules of a provisioned scheduled action: one-off {@code at(...)} or six-field AWS {@code cron(...)}. */
 final class RedshiftScheduledActionSchedule {
-
-    private static final Duration MINIMUM_INTERVAL = Duration.ofHours(1);
-    private static final Duration SPACING_HORIZON = Duration.ofDays(400);
-    private static final int MAX_SPACING_CHECKS = 1000;
 
     private RedshiftScheduledActionSchedule() { }
 
@@ -33,7 +27,7 @@ final class RedshiftScheduledActionSchedule {
         if (body.startsWith("at(")) {
             parseAt(body);
         } else if (body.startsWith("cron(")) {
-            requireHourlySpacing(parseCron(body));
+            AwsCronSchedule.requireHourlySpacing(parseCron(body), RedshiftScheduledActionSchedule::invalid);
         } else {
             throw invalid("The schedule must be an at(...) or a cron(...) expression.");
         }
@@ -50,9 +44,8 @@ final class RedshiftScheduledActionSchedule {
             Instant at = parseAt(schedule);
             candidate = at.isAfter(after) ? at : null;
         } else {
-            Instant from = action.getStartTime() != null && action.getStartTime().isAfter(after)
-                    ? action.getStartTime().minusNanos(1) : after;
-            candidate = nextCron(parseCron(schedule), from).orElse(null);
+            candidate = AwsCronSchedule.next(parseCron(schedule),
+                    AwsCronSchedule.searchFrom(after, action.getStartTime())).orElse(null);
         }
         return Optional.ofNullable(candidate).filter(time -> inWindow(action, time));
     }
@@ -77,47 +70,19 @@ final class RedshiftScheduledActionSchedule {
         if (!action.isEnabled()) {
             return Optional.empty();
         }
-        Instant upper = action.getEndTime() != null && action.getEndTime().isBefore(now) ? action.getEndTime() : now;
+        Instant upper = AwsCronSchedule.searchUpTo(now, action.getEndTime());
         Optional<Instant> latest;
         String schedule = action.getSchedule().trim();
         if (schedule.startsWith("at(")) {
             latest = Optional.of(parseAt(schedule)).filter(time -> !time.isAfter(upper));
         } else {
-            latest = parseCron(schedule).lastExecution(upper.atZone(ZoneOffset.UTC).plusNanos(1))
-                    .map(value -> value.toInstant());
+            latest = AwsCronSchedule.latest(parseCron(schedule), upper);
         }
         return latest.filter(time -> time.isAfter(anchor) && inWindow(action, time));
     }
 
-    /** AWS requires the invocations of a cron schedule to be at least one hour apart. */
-    private static void requireHourlySpacing(ExecutionTime cron) {
-        Optional<Instant> first = nextCron(cron, Instant.EPOCH);
-        if (first.isEmpty()) {
-            return;
-        }
-        Instant cursor = first.get().minusSeconds(1);
-        Instant limit = cursor.plus(SPACING_HORIZON);
-        Instant previous = null;
-        for (int i = 0; i < MAX_SPACING_CHECKS; i++) {
-            Optional<Instant> next = nextCron(cron, cursor);
-            if (next.isEmpty() || next.get().isAfter(limit)) {
-                return;
-            }
-            if (previous != null && Duration.between(previous, next.get()).compareTo(MINIMUM_INTERVAL) < 0) {
-                throw invalid("The cron schedule must be at least one hour apart.");
-            }
-            previous = next.get();
-            cursor = next.get();
-        }
-    }
-
     private static boolean inWindow(ScheduledAction action, Instant time) {
-        return (action.getStartTime() == null || !time.isBefore(action.getStartTime()))
-                && (action.getEndTime() == null || !time.isAfter(action.getEndTime()));
-    }
-
-    private static Optional<Instant> nextCron(ExecutionTime cron, Instant after) {
-        return cron.nextExecution(after.atZone(ZoneOffset.UTC)).map(value -> value.toInstant());
+        return AwsCronSchedule.inWindow(time, action.getStartTime(), action.getEndTime());
     }
 
     private static Instant parseAt(String expression) {
@@ -138,19 +103,7 @@ final class RedshiftScheduledActionSchedule {
         }
         String body = expression.substring("cron(".length(), expression.length() - 1).trim();
         String[] fields = body.split("\\s+");
-        if (fields.length != 6) {
-            throw invalid("The cron schedule needs six fields.");
-        }
-        if ("?".equals(fields[2]) == "?".equals(fields[4])) {
-            throw invalid("Use ? in exactly one of day-of-month and day-of-week.");
-        }
-        try {
-            Cron cron = AwsCronDefinitions.newParser().parse("0 " + String.join(" ", fields));
-            cron.validate();
-            return ExecutionTime.forCron(cron);
-        } catch (IllegalArgumentException e) {
-            throw invalid("The cron schedule is invalid: " + e.getMessage());
-        }
+        return AwsCronSchedule.parse(fields, RedshiftScheduledActionSchedule::invalid);
     }
 
     private static AwsException invalid(String message) {

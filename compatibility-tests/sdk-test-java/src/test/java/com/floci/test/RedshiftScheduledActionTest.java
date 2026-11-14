@@ -4,8 +4,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
 import software.amazon.awssdk.services.redshift.model.CreateScheduledActionResponse;
 import software.amazon.awssdk.services.redshift.model.RedshiftException;
@@ -14,7 +12,6 @@ import software.amazon.awssdk.services.redshift.model.ScheduledActionAlreadyExis
 import software.amazon.awssdk.services.redshift.model.ScheduledActionNotFoundException;
 import software.amazon.awssdk.services.redshift.model.ScheduledActionState;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
@@ -38,15 +35,8 @@ class RedshiftScheduledActionTest {
 
     @BeforeAll
     static void setUp() {
-        String endpoint = System.getenv("FLOCI_ENDPOINT");
-        if (endpoint == null || endpoint.isBlank()) {
-            endpoint = "http://localhost:4566";
-        }
-        if (!endpoint.startsWith("http")) {
-            endpoint = "http://" + endpoint;
-        }
-        owner = client(endpoint, OWNER);
-        other = client(endpoint, OTHER);
+        owner = TestFixtures.redshiftClient(OWNER);
+        other = TestFixtures.redshiftClient(OTHER);
         owner.createCluster(r -> r.clusterIdentifier(CLUSTER).nodeType("dc2.large")
                 .masterUsername("admin").masterUserPassword("Secret123"));
     }
@@ -65,12 +55,6 @@ class RedshiftScheduledActionTest {
         }
         owner.close();
         other.close();
-    }
-
-    private static RedshiftClient client(String endpoint, String account) {
-        return RedshiftClient.builder().endpointOverride(URI.create(endpoint)).region(TestFixtures.region())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
-                .build();
     }
 
     @Test

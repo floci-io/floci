@@ -56,7 +56,7 @@ class RedshiftScheduledActionServiceTest {
         redshift = mock(RedshiftService.class);
         when(redshift.clusterExists(anyString(), anyString())).thenReturn(true);
         authorizer = mock(RedshiftScheduledActionAuthorizer.class);
-        when(authorizer.refusal(anyString(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+        when(authorizer.refusal(anyString(), anyString(), anyString(), anyString(), anyString())).thenReturn(Optional.empty());
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
         when(regionResolver.getDefaultRegion()).thenReturn(REGION);
@@ -218,7 +218,7 @@ class RedshiftScheduledActionServiceTest {
         verify(redshift, never()).pauseCluster(anyString());
 
         service.modifyScheduledAction(changes, true);
-        when(authorizer.refusal(eq(ROLE_ARN), eq(ACCOUNT_ID), eq("PauseCluster"), anyString()))
+        when(authorizer.refusal(eq(ROLE_ARN), eq(ACCOUNT_ID), anyString(), eq("PauseCluster"), anyString()))
                 .thenReturn(Optional.of("the role does not trust the scheduler"));
         service.runScheduledActions(BASE_TIME.plusSeconds(4 * 3600));
 
@@ -255,8 +255,7 @@ class RedshiftScheduledActionServiceTest {
 
         service.runScheduledActions(BASE_TIME.plusSeconds(3 * 3600));
 
-        verify(authorizer).refusal(ROLE_ARN, ACCOUNT_ID, ScheduledAction.PAUSE_CLUSTER,
-                "arn:aws:redshift:eu-west-1:" + ACCOUNT_ID + ":cluster:analytics");
+        verify(authorizer).refusal(ROLE_ARN, ACCOUNT_ID, "eu-west-1", ScheduledAction.PAUSE_CLUSTER, "analytics");
         verify(redshift).pauseCluster("analytics");
     }
 
