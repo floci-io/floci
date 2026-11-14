@@ -102,6 +102,21 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
     }
 
     @Test
+    void aSecretOfAnotherRegionNamedByItsArnIsAuthorizedAgainstThatArnAlone() {
+        String name = "app-" + UUID.randomUUID().toString().substring(0, 8);
+        String arn = createSecretIn("us-west-2", name);
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"%s"}]}"""
+                .formatted(arn));
+
+        // Signed for us-east-1, the request reads the us-west-2 secret its ARN names, and is checked on that one.
+        secretsCall(session, "GetSecretValue", "{\"SecretId\": \"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("SecretString", equalTo("x"));
+    }
+
+    @Test
     void createSecretIgnoresASecretIdTheHandlerDoesNotRead() {
         String existing = "app-" + UUID.randomUUID().toString().substring(0, 8);
         createSecret(existing);
@@ -129,6 +144,17 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
                 "{\"SecretId\": \"" + name + "\", \"ForceDeleteWithoutRecovery\": true}").then().statusCode(200));
     }
 
+    /** A secret the account creates in {@code region}, deleted after the test by its ARN; its ARN. */
+    private String createSecretIn(String region, String name) {
+        Response response = accountCall(region, "CreateSecret",
+                "{\"Name\": \"" + name + "\", \"SecretString\": \"x\"}");
+        response.then().statusCode(200);
+        String arn = response.path("ARN");
+        cleanup.register(() -> accountCall(region, "DeleteSecret",
+                "{\"SecretId\": \"" + arn + "\", \"ForceDeleteWithoutRecovery\": true}").then().statusCode(200));
+        return arn;
+    }
+
     /** A session of a new role that its own account may assume, with {@code policy} inline. */
     private Session assumeRoleWith(String policy) {
         int port = baseUri.getPort();
@@ -139,7 +165,11 @@ class SecretsManagerSecretArnEnforcementIntegrationTest {
 
     /** A call as the account itself, which the cleanup also makes after RestAssured's port is reset. */
     private Response accountCall(String action, String body) {
-        return given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "secretsmanager"))
+        return accountCall("us-east-1", action, body);
+    }
+
+    private Response accountCall(String region, String action, String body) {
+        return given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, region, "secretsmanager"))
                 .header("X-Amz-Target", "secretsmanager." + action)
                 .contentType("application/x-amz-json-1.1")
                 .body(body)
