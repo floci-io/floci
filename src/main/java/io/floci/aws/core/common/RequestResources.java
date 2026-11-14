@@ -17,6 +17,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -306,9 +308,31 @@ public final class RequestResources {
     public static List<String> created(String operation, String tagging, ContainerRequestContext ctx, String partition,
                                        String region, String accountId, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
+        return created(table, operation, tagging, resources -> served(resources, ctx),
+                () -> located(table, operation, IamConditionContextResolver.formParameters(ctx), ctx, labels),
+                () -> IamConditionContextResolver.formParameters(ctx).isEmpty()
+                        ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null,
+                partition, region, accountId);
+    }
+
+    /**
+     * As {@link #created(String, String, ContainerRequestContext, String, String, String, Map)}, for a JSON request
+     * body that is not an HTTP request of its own (a state machine's task to its integrated service): its members
+     * the table locates in a path given in the body, and every resource applying, whatever endpoint it would reach.
+     */
+    public static List<String> created(String operation, String tagging, JsonNode body, String partition,
+                                       String region, String accountId) {
+        return created(RequestResourceMembers.table(), operation, tagging, resources -> resources, Map::of,
+                () -> body, partition, region, accountId);
+    }
+
+    private static List<String> created(RequestResourceMembers.Table table, String operation, String tagging,
+                                        UnaryOperator<List<RequestResourceMembers.Resource>> serving,
+                                        Supplier<Map<String, String>> sentForm, Supplier<JsonNode> sentBody,
+                                        String partition, String region, String accountId) {
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
         List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
-                : served(table.operations().getOrDefault(operation, List.of()), ctx).stream()
+                : serving.apply(table.operations().getOrDefault(operation, List.of())).stream()
                         .filter(RequestResourceMembers.Resource::made).toList();
         if (creates == null && made.isEmpty() && operation != null) {
             made = table.makes().getOrDefault(operation, List.of()).stream()
@@ -319,9 +343,8 @@ public final class RequestResources {
         if (creates == null && made.isEmpty()) {
             return List.of();
         }
-        Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
-        Map<String, String> form = located(table, operation, sent, ctx, labels);
+        JsonNode body = sentBody.get();
+        Map<String, String> form = sentForm.get();
         Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
         if (creates == null) {
             return named(operation, made, formats, form, body, partition, region, accountId, null);
