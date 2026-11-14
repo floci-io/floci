@@ -1,8 +1,11 @@
 package io.floci.aws.services.apigatewayv2.proxy;
 
+import io.floci.aws.config.ContainerCaBundle;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.SsrfProtection;
 import io.floci.aws.services.apigatewayv2.model.Integration;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.SSLContext;
@@ -76,14 +79,7 @@ public class HttpProxyInvoker {
         public static final ProxyOptions DEFAULTS = new ProxyOptions(Duration.ofSeconds(30), false);
     }
 
-    // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
-    // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
-    // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration).
-    private final HttpClient client = HttpClient.newBuilder()
-            .version(HttpClient.Version.HTTP_1_1)
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NEVER)
-            .build();
+    private final HttpClient client;
 
     /** Built on first use: an integration opting out of TLS verification is the exception. */
     private volatile HttpClient insecureClient;
@@ -278,12 +274,38 @@ public class HttpProxyInvoker {
 
     private final HostResolver resolver;
 
+    @Inject
+    public HttpProxyInvoker(EmulatorConfig config) {
+        this(InetAddress::getAllByName, ContainerCaBundle.sslContext(config).orElse(null));
+    }
+
     public HttpProxyInvoker() {
         this(InetAddress::getAllByName);
     }
 
     HttpProxyInvoker(HostResolver resolver) {
+        this(resolver, null);
+    }
+
+    private HttpProxyInvoker(HostResolver resolver, SSLContext sslContext) {
         this.resolver = resolver;
+        this.client = proxyClient(sslContext);
+    }
+
+    // Pin to HTTP/1.1: the default HTTP_2 setting attempts cleartext-HTTP/2 negotiation
+    // against http:// backends, which hangs against plain HTTP/1.1 servers (notably the
+    // in-JVM Vertx HttpServer used by ELBv2 listeners for HttpAlbIntegration). sslContext,
+    // when given, adds the extra CAs in floci.tls.extra-ca-path, and Floci's CA when TLS is
+    // on, to the JVM's roots.
+    private static HttpClient proxyClient(SSLContext sslContext) {
+        HttpClient.Builder builder = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(10))
+                .followRedirects(HttpClient.Redirect.NEVER);
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
+        return builder.build();
     }
 
     public ProxyResult invoke(Integration integration, RequestContext ctx) {
