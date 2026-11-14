@@ -32,6 +32,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -266,25 +267,50 @@ class ElbClassicServiceTest {
         https.setSslCertificateId("arn:aws:iam::000000000000:server-certificate/scanned");
 
         ExecutorService pool = Executors.newFixedThreadPool(2);
-        // The writes start only once the scan is running, so they overlap it however the threads
-        // are scheduled: started together, the writer could finish before the scanner first ran.
-        CountDownLatch scanning = new CountDownLatch(1);
+        // Started together, the writer could finish before the scanner first ran. So the scanner
+        // scans once before the writes start and then until they end, and the writer keeps writing
+        // until it starts a create and delete pair after two scans have finished since its first
+        // write. The second of those scans started after that write and finished before the last
+        // pair, so one whole scan runs while the listeners are written, however the threads are
+        // scheduled.
+        CountDownLatch scannedOnce = new CountDownLatch(1);
+        AtomicInteger scans = new AtomicInteger();
         AtomicBoolean writing = new AtomicBoolean(true);
         try {
             Future<?> scanner = pool.submit(() -> {
-                do {
+                try {
                     service.serverCertificateReferences();
-                    scanning.countDown();
-                } while (writing.get());
+                    scans.incrementAndGet();
+                } finally {
+                    // Released even when the first scan fails, so the failure comes out of this
+                    // future rather than as a writer left waiting.
+                    scannedOnce.countDown();
+                }
+                while (writing.get()) {
+                    service.serverCertificateReferences();
+                    scans.incrementAndGet();
+                }
                 return null;
             });
             Future<?> writer = pool.submit(() -> {
                 try {
-                    assertTrue(scanning.await(30, TimeUnit.SECONDS), "the scan never started");
-                    for (int i = 0; i < 400; i++) {
+                    assertTrue(scannedOnce.await(30, TimeUnit.SECONDS), "the scan never started");
+                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                    int scansAtFirstWrite = -1;
+                    int scansBeforePair;
+                    int pairs = 0;
+                    // A scanner that stopped on a failure scans no more, so the writes end after
+                    // the usual 400 and the failure comes out of the scanner's future.
+                    do {
+                        assertTrue(System.nanoTime() < deadline, "the scanner made no progress for 20 s");
+                        scansBeforePair = scans.get();
                         service.createLoadBalancerListeners(REGION, "scanned-elb", List.of(https));
+                        if (pairs == 0) {
+                            scansAtFirstWrite = scans.get();
+                        }
                         service.deleteLoadBalancerListeners(REGION, "scanned-elb", List.of(443));
-                    }
+                        pairs++;
+                    } while (pairs < 400 || (scansBeforePair < scansAtFirstWrite + 2 && !scanner.isDone()));
                 } finally {
                     writing.set(false);
                 }
