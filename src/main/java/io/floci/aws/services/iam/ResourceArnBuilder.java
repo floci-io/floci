@@ -1082,8 +1082,8 @@ public class ResourceArnBuilder {
     /**
      * The resource of a Lambda event source mapping, code signing config or layer route, as the Service
      * Reference gives it. A mapping is looked up by its UUID, a config by the id that ends its ARN and a
-     * layer version by its layer's name as given, an ARN included, and its number, each in the request's
-     * account and Region, so that is the resource checked. A layer route's path is split as the router
+     * layer version by its name and number in the request's account and Region. GetLayerVersion also
+     * accepts a layer ARN, retaining its account and Region. A layer route's path is split as the router
      * splits it, before decoding, so an encoded {@code /} stays inside the layer's name, and its version
      * number is read as Lambda parses it, so {@code 01} is version 1. {@code PublishLayerVersion} is checked
      * against the layer and {@code GetLayerVersionByArn} against the version its {@code Arn} names, its
@@ -1118,10 +1118,15 @@ public class ResourceArnBuilder {
         if (segments.length < 2 || !"versions".equals(segments[1])) {
             return "*";
         }
-        String layer = "layer:" + pathSegment(segments[0]);
+        String layerName = pathSegment(segments[0]);
+        String layer = "layer:" + layerName;
         if (segments.length == 2) {
             return "POST".equalsIgnoreCase(ctx.getMethod())
                     ? AwsArnUtils.Arn.of("lambda", region, accountId, layer).toString() : "*";
+        }
+        if (segments.length == 3 && "GET".equalsIgnoreCase(ctx.getMethod())
+                && AwsArnUtils.looksLikeArn(layerName)) {
+            return layerVersionArn(layerName + ":" + pathSegment(segments[2]));
         }
         return AwsArnUtils.Arn.of("lambda", region, accountId,
                 layer + ":" + layerVersion(pathSegment(segments[2]))).toString();

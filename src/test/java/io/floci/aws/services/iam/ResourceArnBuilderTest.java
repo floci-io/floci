@@ -2179,11 +2179,10 @@ class ResourceArnBuilderTest {
             request(path);
             assertEquals(version, builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
         }
-        // Lambda looks a layer named by an ARN up by that name as given, not as the layer the ARN names, so
-        // the layer of that name is the one checked.
+        // GetLayerVersion accepts an unversioned ARN and checks the version that it names.
         String named = "arn:aws:lambda:us-east-1:000000000000:layer:my-layer";
         request("/2018-10-31/layers/" + named + "/versions/3");
-        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:" + named + ":3",
+        assertEquals(version,
                 builder.build("lambda", ctx, "us-east-1", ACCOUNT));
         // GetLayerVersionByArn reads the version its Arn names.
         request("/2018-10-31/layers");
@@ -2212,6 +2211,31 @@ class ResourceArnBuilderTest {
         request("/2017-10-31/functions/my-function/concurrency");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
                 builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"aws,us-west-2,us-east-1", "aws-cn,cn-northwest-1,cn-north-1",
+            "aws-us-gov,us-gov-east-1,us-gov-west-1"})
+    void lambdaLayerArnLookupKeepsItsCoordinatesAndNormalizesTheVersion(
+            String partition, String layerRegion, String requestRegion) {
+        String layer = "arn:" + partition + ":lambda:" + layerRegion + ":111122223333:layer:shared";
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2018-10-31/layers/" + layer.replace(":", "%3A") + "/versions/01");
+
+        assertEquals(layer + ":1", builder.build("lambda", ctx, requestRegion, ACCOUNT));
+    }
+
+    @Test
+    void otherLayerRoutesKeepTheirLiteralNameResource() {
+        String layer = "arn:aws:lambda:us-west-2:111122223333:layer:shared";
+        String expected = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":layer:" + layer + ":1";
+        when(ctx.getMethod()).thenReturn("DELETE");
+        request("/2018-10-31/layers/" + layer + "/versions/01");
+        assertEquals(expected, builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2018-10-31/layers/" + layer + "/versions/01/policy");
+        assertEquals(expected, builder.build("lambda", ctx, "us-east-1", ACCOUNT));
     }
 
     @Test
