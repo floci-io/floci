@@ -97,7 +97,8 @@ public class LambdaLayerController {
                                     @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
         LambdaLayerVersion lv = layerService.getLayerVersion(region, layerName, versionNumber);
-        return Response.ok(buildLayerVersionResponse(lv, region, uriInfo)).build();
+        String layerRegion = AwsArnUtils.parse(lv.getLayerVersionArn()).region();
+        return Response.ok(buildLayerVersionResponse(lv, layerRegion, uriInfo)).build();
     }
 
     @DELETE

@@ -178,7 +178,7 @@ class LambdaGetLayerVersionByArnIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void arnNamingAnotherAccountDoesNotResolveTheCallersOwnLayer() throws Exception {
         String arn = publishLayer();
         // Same region, name and version — only the account differs. The lookup is keyed within
@@ -207,7 +207,7 @@ class LambdaGetLayerVersionByArnIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(9)
     void arnInAnotherPartitionIsRejected() throws Exception {
         String arn = publishLayer();
         // Same account, region, name and version - only the partition differs. Measured against
@@ -236,7 +236,7 @@ class LambdaGetLayerVersionByArnIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(10)
     void listLayersStillWorksWithoutFind() throws Exception {
         publishLayer();
 
@@ -250,7 +250,7 @@ class LambdaGetLayerVersionByArnIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void unknownFindValueFallsThroughToListLayers() throws Exception {
         publishLayer();
 
@@ -266,7 +266,7 @@ class LambdaGetLayerVersionByArnIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(12)
     void findMatchIsCaseSensitive() {
         // Also measured: only the exact string dispatches; other casings are ListLayers calls,
         // which is why an Arn alongside them is simply ignored rather than resolved.
@@ -282,10 +282,38 @@ class LambdaGetLayerVersionByArnIntegrationTest {
         }
     }
 
+    @Test
+    @Order(13)
+    void getLayerVersionAcceptsTheUnversionedLayerArn() throws Exception {
+        String versionArn = publishLayer();
+        String layerArn = versionArn.substring(0, versionArn.lastIndexOf(':'));
+        String version = versionArn.substring(versionArn.lastIndexOf(':') + 1);
+        String expectedHash = given()
+            .queryParam("find", "LayerVersion").queryParam("Arn", versionArn)
+            .get("/2018-10-31/layers")
+            .then().statusCode(200).extract().path("Content.CodeSha256");
+
+        given().pathParam("layer", layerArn).pathParam("version", version)
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(200)
+            .body("LayerVersionArn", equalTo(versionArn))
+            .body("Content.CodeSha256", equalTo(expectedHash));
+        given().pathParam("layer", layerArn.replace(":000000000000:", ":017000801446:"))
+            .pathParam("version", version)
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(404);
+        given().pathParam("layer", layerArn).pathParam("version", "999999")
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(404);
+        given().pathParam("layer", versionArn).pathParam("version", version)
+            .get("/2018-10-31/layers/{layer}/versions/{version}")
+            .then().statusCode(400);
+    }
+
     // ── cleanup ───────────────────────────────────────────────────────────────
 
     @Test
-    @Order(11)
+    @Order(14)
     void cleanup_deletePublishedVersions() {
         List<Integer> versions = given()
         .when()
