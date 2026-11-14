@@ -17,9 +17,9 @@ import io.floci.aws.services.redshift.model.EventSubscription;
 import io.floci.aws.services.redshift.model.Integration;
 import io.floci.aws.services.redshift.model.Parameter;
 import io.floci.aws.services.redshift.model.RedshiftEvent;
+import io.floci.aws.services.redshift.model.ScheduledAction;
 import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
-import io.floci.aws.services.redshift.model.ScheduledAction;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -864,7 +864,7 @@ public class RedshiftQueryHandler {
         }
         case "ModifyScheduledAction" -> {
             ScheduledAction changes = scheduledActionRequest(params);
-            Boolean enable = params.getFirst("Enable") == null ? null : Boolean.valueOf(params.getFirst("Enable"));
+            Boolean enable = booleanParam(params, "Enable");
             return scheduledActionResponse(action, scheduledActions.modifyScheduledAction(changes, enable));
         }
         case "DeleteScheduledAction" -> {
@@ -1435,8 +1435,9 @@ public class RedshiftQueryHandler {
         request.setDescription(params.getFirst("ScheduledActionDescription"));
         request.setStartTime(timestampParam(params, "StartTime"));
         request.setEndTime(timestampParam(params, "EndTime"));
-        if (params.getFirst("Enable") != null) {
-            request.setEnabled(Boolean.parseBoolean(params.getFirst("Enable")));
+        Boolean enable = booleanParam(params, "Enable");
+        if (enable != null) {
+            request.setEnabled(enable);
         }
         List<String> targets = params.keySet().stream()
                 .filter(key -> key.startsWith("TargetAction."))
@@ -1479,7 +1480,7 @@ public class RedshiftQueryHandler {
         PaginatedResult<ScheduledAction> page = scheduledActions.describeScheduledActions(
                 params.getFirst("ScheduledActionName"), params.getFirst("TargetActionType"),
                 timestampParam(params, "StartTime"), timestampParam(params, "EndTime"),
-                params.getFirst("Active") == null ? null : Boolean.valueOf(params.getFirst("Active")),
+                booleanParam(params, "Active"),
                 clusterIdentifiers, iamRoles,
                 intParam(params, "MaxRecords"), params.getFirst("Marker"));
         XmlBuilder xml = new XmlBuilder()

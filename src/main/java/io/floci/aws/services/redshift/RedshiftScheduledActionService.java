@@ -11,8 +11,10 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.redshift.model.ScheduledAction;
+import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -78,6 +80,12 @@ public class RedshiftScheduledActionService implements Resettable {
     @PostConstruct
     void registerClusterRemoval() {
         redshift.onClusterRemoved(this::removeActionsOfCluster);
+    }
+
+    // Observing startup builds this lazy bean at boot, so its removal listener is registered before any
+    // cluster can be deleted, also when the sweep is disabled or has not ticked yet.
+    void onStart(@Observes StartupEvent ignored) {
+        LOG.debug("Redshift scheduled actions registered for cluster removal");
     }
 
     /** Creates {@code request}. The target cluster must exist and the name must be unused. */
@@ -175,6 +183,12 @@ public class RedshiftScheduledActionService implements Resettable {
             }
             validate(updated);
             actions.put(updated.getScheduledActionName(), updated);
+            // Same race as in createScheduledAction: a deletion between validate and put leaves an orphan.
+            if (!clusterExists(updated)) {
+                actions.delete(updated.getScheduledActionName());
+                throw new AwsException("ClusterNotFound",
+                        "Cluster " + updated.getClusterIdentifier() + " not found", 404);
+            }
             return new ScheduledAction(updated);
         });
     }
@@ -204,7 +218,7 @@ public class RedshiftScheduledActionService implements Resettable {
             ReentrantLock lock = lockOf(entry.accountId(), entry.key());
             lock.lock();
             try {
-                RequestScopes.runAs(entry.accountId(), regionResolver.getDefaultRegion(),
+                RequestScopes.runAs(entry.accountId(), regionOf(entry.accountId(), entry.value()),
                         () -> runScheduledAction(entry.accountId(), entry.key(), now));
             } catch (RuntimeException e) {
                 LOG.warnv(e, "Scheduled action {0} in account {1} could not be processed",
@@ -254,7 +268,7 @@ public class RedshiftScheduledActionService implements Resettable {
     }
 
     private void invoke(ScheduledAction action, String accountId) {
-        String clusterArn = regionResolver.buildArn("redshift", regionResolver.getRegion(), accountId,
+        String clusterArn = regionResolver.buildArn("redshift", regionOf(accountId, action), accountId,
                 "cluster:" + action.getClusterIdentifier());
         Optional<String> refusal = authorizer.refusal(
                 action.getIamRole(), accountId, action.getTargetActionType(), clusterArn);
@@ -270,18 +284,22 @@ public class RedshiftScheduledActionService implements Resettable {
 
     /** Stores the checkpoint and outcome only when the action is still the one that was run. */
     private void recordOutcome(String accountId, String key, ScheduledAction outcome) {
-        try {
-            ScheduledAction current = actions.getForAccount(accountId, key).orElse(null);
-            if (current != null && Objects.equals(current.getActivatedAt(), outcome.getActivatedAt())) {
-                ScheduledAction recorded = new ScheduledAction(current);
-                recorded.setLastClaimedInvocation(outcome.getLastClaimedInvocation());
-                recorded.setLastCompletedInvocation(outcome.getLastCompletedInvocation());
-                recorded.setLastFailure(outcome.getLastFailure());
-                actions.putAllAtomicallyForAccount(accountId, Map.of(key, recorded));
-            }
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "The outcome of scheduled action {0} in account {1} could not be stored", key, accountId);
+        // A failed write propagates to runScheduledActions, which logs it; swallowing it here would leave the
+        // checkpoint behind and re-run the same invocation on every sweep.
+        ScheduledAction current = actions.getForAccount(accountId, key).orElse(null);
+        if (current != null && Objects.equals(current.getActivatedAt(), outcome.getActivatedAt())) {
+            ScheduledAction recorded = new ScheduledAction(current);
+            recorded.setLastClaimedInvocation(outcome.getLastClaimedInvocation());
+            recorded.setLastCompletedInvocation(outcome.getLastCompletedInvocation());
+            recorded.setLastFailure(outcome.getLastFailure());
+            actions.putAllAtomicallyForAccount(accountId, Map.of(key, recorded));
         }
+    }
+
+    /** The region of the target cluster, which its ARN and the role check are scoped to. */
+    private String regionOf(String accountId, ScheduledAction action) {
+        return redshift.clusterRegion(accountId, action.getClusterIdentifier())
+                .orElseGet(regionResolver::getDefaultRegion);
     }
 
     private void removeActionsOfCluster(String accountId, String clusterIdentifier) {

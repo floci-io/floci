@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,7 +49,7 @@ class RedshiftScheduledActionServiceTest {
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
     void setUp() {
-        store = new AccountAwareStorageBackend<>(new InMemoryStorage<String, ScheduledAction>(), null, ACCOUNT_ID);
+        store = spy(new AccountAwareStorageBackend<>(new InMemoryStorage<String, ScheduledAction>(), null, ACCOUNT_ID));
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(eq("redshift"), eq("redshift-scheduled-actions.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) store);
@@ -245,6 +246,43 @@ class RedshiftScheduledActionServiceTest {
         service.modifyScheduledAction(changes, true);
         service.runScheduledActions(tick.plusSeconds(120));
         verify(redshift, times(1)).pauseCluster("analytics");
+    }
+
+    @Test
+    void sweepAuthorizesAgainstTheArnOfTheRegionTheClusterLivesIn() {
+        when(redshift.clusterRegion(ACCOUNT_ID, "analytics")).thenReturn(Optional.of("eu-west-1"));
+        service.createScheduledAction(request("pause", ScheduledAction.PAUSE_CLUSTER, "cron(0 * * * ? *)"));
+
+        service.runScheduledActions(BASE_TIME.plusSeconds(3 * 3600));
+
+        verify(authorizer).refusal(ROLE_ARN, ACCOUNT_ID, ScheduledAction.PAUSE_CLUSTER,
+                "arn:aws:redshift:eu-west-1:" + ACCOUNT_ID + ":cluster:analytics");
+        verify(redshift).pauseCluster("analytics");
+    }
+
+    @Test
+    void aFailedOutcomeWriteIsNotSwallowedAndDoesNotAdvanceTheCheckpoint() {
+        service.createScheduledAction(request("pause", ScheduledAction.PAUSE_CLUSTER, "cron(0 * * * ? *)"));
+        doThrow(new IllegalStateException("disk full")).when(store).putAllAtomicallyForAccount(anyString(), any());
+        Instant tick = BASE_TIME.plusSeconds(3 * 3600);
+
+        service.runScheduledActions(tick);
+
+        assertNull(store.get("pause").orElseThrow().getLastClaimedInvocation());
+    }
+
+    @Test
+    void modifyDropsTheActionWhenTheClusterIsDeletedBetweenValidationAndWrite() {
+        service.createScheduledAction(request("pause", ScheduledAction.PAUSE_CLUSTER, "cron(0 * * * ? *)"));
+        when(redshift.clusterExists(ACCOUNT_ID, "analytics")).thenReturn(true, false);
+        ScheduledAction changes = new ScheduledAction();
+        changes.setScheduledActionName("pause");
+        changes.setDescription("changed");
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.modifyScheduledAction(changes, null));
+
+        assertEquals("ClusterNotFound", failure.getErrorCode());
+        assertTrue(store.get("pause").isEmpty());
     }
 
     @Test

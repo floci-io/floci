@@ -125,6 +125,29 @@ class RedshiftScheduledActionQueryTest {
     }
 
     @Test
+    void aNonBooleanEnableOrActiveIsRefusedAndNeverChangesState() {
+        MultivaluedMap<String, String> create = createParams("typo");
+        create.add("Enable", "maybe");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> handler.handle("CreateScheduledAction", create)).getErrorCode());
+
+        handler.handle("CreateScheduledAction", createParams("nightly"));
+        MultivaluedMap<String, String> modify = new MultivaluedHashMap<>();
+        modify.add("ScheduledActionName", "nightly");
+        modify.add("Enable", "maybe");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> handler.handle("ModifyScheduledAction", modify)).getErrorCode());
+
+        MultivaluedMap<String, String> describe = new MultivaluedHashMap<>();
+        describe.add("Active", "maybe");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> handler.handle("DescribeScheduledActions", describe)).getErrorCode());
+
+        describe.remove("Active");
+        assertTrue(body(handler.handle("DescribeScheduledActions", describe)).contains("<State>ACTIVE</State>"));
+    }
+
+    @Test
     void deleteRemovesTheActionAndAMissingOneIsNotFound() {
         handler.handle("CreateScheduledAction", createParams("nightly"));
         MultivaluedMap<String, String> delete = new MultivaluedHashMap<>();
