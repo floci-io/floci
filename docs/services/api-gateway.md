@@ -168,6 +168,12 @@ is absent, matching current AWS behavior, or explicitly set to `true`. The depre
 identifier. A caller-supplied `value` remains available only from create responses and reads that
 explicitly request values.
 
+#### Paging
+
+`GetApiKeys` pages with `limit` and `position`, 25 keys a page by default, emitting `position` only
+when another page exists; the token is the id of the last key returned, as for `GetUsage`. An id no
+key has, or a `limit` below one, is a `BadRequestException`; a `limit` above 500 still caps the page.
+
 #### Revocation
 
 `DeleteApiKey` detaches the key from every usage plan before removing it, matching AWS. A usage plan key

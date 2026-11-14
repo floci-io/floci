@@ -809,18 +809,20 @@ public class ApiGatewayController {
     @GET
     @Path("/apikeys")
     public Response getApiKeys(@Context HttpHeaders headers,
-                               @QueryParam("includeValues") boolean includeValues) {
+                               @QueryParam("includeValues") boolean includeValues,
+                               @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<ApiKey> keys = service.getApiKeys(region);
+        PaginatedResult<ApiKey> page = service.getApiKeys(region, limit, position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        keys.forEach(k -> {
+        page.items().forEach(k -> {
             ObjectNode node = toApiKeyNode(k);
             if (!includeValues) {
                 node.remove("value");
             }
             items.add(node);
         });
+        if (page.nextToken() != null) root.put("position", page.nextToken());
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
