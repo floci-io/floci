@@ -203,6 +203,14 @@ final class RequestResourceMembers {
     }
 
     /**
+     * A condition key of a resource type that a member of the type's botocore shape names ({@code ec2:Vpc}, a
+     * network interface's {@code VpcId}): its value is that member of the resource its service holds, as the ARN of
+     * the namespace's type {@code arn} where the Service Reference types the key as an ARN, as given otherwise.
+     */
+    record ResourceKey(String member, String arn) {
+    }
+
+    /**
      * A request an operation's service makes to another service as the caller: {@code action}, on that service's
      * resource of {@code type} which the record of the operation's resource of type {@code of} holds in
      * {@code member} (a Redshift Serverless snapshot's {@code kmsKeyId}), sent from the operation's endpoint prefix
@@ -227,6 +235,7 @@ final class RequestResourceMembers {
                  Map<String, Map<Member, String>> ec2Query,
                  Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
                  Map<String, Map<String, List<String>>> resourceTagKeys,
+                 Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces,
                  Map<String, List<Forwarded>> forwarded) {
     }
@@ -307,6 +316,7 @@ final class RequestResourceMembers {
             });
             resourceTagKeys.put(namespace.getKey(), Map.copyOf(types));
         });
+        Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys = resourceKeys(document, formats);
         Map<String, List<Resource>> entries = new LinkedHashMap<>();
         Map<String, List<String>> actsOn = new LinkedHashMap<>();
         Map<String, List<Created>> creates = new LinkedHashMap<>();
@@ -412,10 +422,42 @@ final class RequestResourceMembers {
         });
         return new Table(Map.copyOf(entries), Map.copyOf(actsOn), Map.copyOf(creates), Map.copyOf(makes),
                 Map.copyOf(targets), Map.copyOf(ec2Query), Map.copyOf(located), Map.copyOf(formats),
-                Map.copyOf(resourceTagKeys), namespaces,
+                Map.copyOf(resourceTagKeys), resourceKeys, namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")), Map.copyOf(forwarded));
+    }
+
+    /** Each resource type's member-named condition keys, by namespace, refusing a type or ARN type with no format. */
+    private static Map<String, Map<String, Map<String, ResourceKey>>> resourceKeys(
+            JsonNode document, Map<String, Map<String, ArnFormat>> formats) {
+        JsonNode section = document.path("resourceKeys");
+        if (!section.isMissingNode() && !section.isObject()) {
+            throw new IllegalStateException(RESOURCE_NAME + " has malformed resource keys");
+        }
+        Map<String, Map<String, Map<String, ResourceKey>>> result = new LinkedHashMap<>();
+        section.properties().forEach(namespace -> {
+            Map<String, ArnFormat> known = formats.getOrDefault(namespace.getKey(), Map.of());
+            Map<String, Map<String, ResourceKey>> types = new LinkedHashMap<>();
+            namespace.getValue().properties().forEach(type -> {
+                if (!known.containsKey(type.getKey()) || !type.getValue().isObject()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " has malformed resource keys");
+                }
+                Map<String, ResourceKey> keys = new LinkedHashMap<>();
+                type.getValue().properties().forEach(key -> {
+                    String member = key.getValue().path("member").asText("");
+                    JsonNode arn = key.getValue().path("arn");
+                    if (!key.getKey().startsWith(namespace.getKey() + ":") || member.isEmpty()
+                            || !arn.isMissingNode() && !known.containsKey(arn.asText(""))) {
+                        throw new IllegalStateException(RESOURCE_NAME + " has malformed resource keys");
+                    }
+                    keys.put(key.getKey(), new ResourceKey(member, arn.isMissingNode() ? null : arn.asText()));
+                });
+                types.put(type.getKey(), Map.copyOf(keys));
+            });
+            result.put(namespace.getKey(), Map.copyOf(types));
+        });
+        return Map.copyOf(result);
     }
 
     /**

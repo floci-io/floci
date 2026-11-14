@@ -103,7 +103,10 @@ example, i-0123456789abcdef0)") or its examples (`"GroupId": "sg-903004f8"`), di
 `targets` entry preserves the request's order and duplicates, including a wildcard for each unsupported id; only
 resolved ARNs use the corresponding target's condition context. Every other request of those namespaces is read by
 the ordinary rules, its EC2 Query wire names (`ec2Query`) from botocore. `resourceTagKeys` gives every type of those
-namespaces its Service Reference resource-tag condition keys, as their service keeps tags by resource id.
+namespaces its Service Reference resource-tag condition keys, as their service keeps tags by resource id, and
+`resourceKeys` the type's other condition keys that name a member of its botocore shape (`ec2:Vpc` a network
+interface's `VpcId`), which its service answers from the resource it holds, as an ARN where the reference types the
+key as one.
 Beyond the members' names, botocore's shapes and documentation say what a member names, and the rule reads them:
 - a member whose documentation names the type, word for word ("The name of the pipeline to start"), fills its
   variable when it is the kind the variable is (a name, an id), and is found by the type's service otherwise
@@ -520,6 +523,60 @@ def resource_tag_keys(documents: list[dict]) -> dict[str, dict[str, list[str]]]:
         if types:
             result[namespace] = dict(sorted(types.items()))
     return dict(sorted(result.items()))
+
+
+SCALAR_SHAPES = ("string", "boolean", "integer", "long")
+
+
+def resource_keys(documents: list[dict], data: Path, namespaces: dict[str, list[str]]) -> dict[str, dict[str, dict]]:
+    """The condition keys the Service Reference gives each resource type of the id-target namespaces that name a
+    member of the type's botocore shape (`network-interface` is `NetworkInterface`): a key named as a member, or as
+    the member without its `Id` (`ec2:Vpc` its `VpcId`, `ec2:NetworkInterfaceID` its `NetworkInterfaceId`), holding a
+    scalar. Each is `{"member": <member>}`, with `"arn": <type>` where the reference types the key as an ARN and the
+    namespace has a type named as the key (`ec2:Vpc` takes a `vpc` ARN); an ARN key with no such type is left out, as
+    are keys with a variable and keys no member names. The type's service holds the member's value for the resource
+    a request names, which is the key's value."""
+    result = {}
+    for document in documents:
+        namespace = document["Name"]
+        if namespace not in ID_TARGETS or namespace not in namespaces:
+            continue
+        key_types = {key["Name"]: key.get("Types", []) for key in document.get("ConditionKeys", [])}
+        shapes = {}
+        for model in load_models(data, set(namespaces[namespace])).values():
+            shapes.update(model["shapes"])
+        types = {resource["Name"] for resource in document.get("Resources", []) if resource.get("ARNFormats")}
+        by_shape_name = {_shape_name(kind).lower(): kind for kind in types}
+        found = {}
+        for resource in document.get("Resources", []):
+            shape = shapes.get(_shape_name(resource["Name"]))
+            if not shape or shape.get("type") != "structure":
+                continue
+            members = {name.lower(): (name, spec["shape"]) for name, spec in shape.get("members", {}).items()}
+            keys = {}
+            for key in resource.get("ConditionKeys", []):
+                if not key.startswith(namespace + ":") or "${" in key:
+                    continue
+                named = key.split(":", 1)[1].lower()
+                member = members.get(named) or members.get(named + "id")
+                if member is None or shapes.get(member[1], {}).get("type") not in SCALAR_SHAPES:
+                    continue
+                spec = {"member": member[0]}
+                if "ARN" in key_types.get(key, []):
+                    if named not in by_shape_name:
+                        continue
+                    spec["arn"] = by_shape_name[named]
+                keys[key] = spec
+            if keys:
+                found[resource["Name"]] = dict(sorted(keys.items()))
+        if found:
+            result[namespace] = dict(sorted(found.items()))
+    return dict(sorted(result.items()))
+
+
+def _shape_name(kind: str) -> str:
+    """The botocore shape a resource type of the reference names: `network-interface` is `NetworkInterface`."""
+    return "".join(part[:1].upper() + part[1:] for part in kind.split("-"))
 
 
 def arn_formats(documents: list[dict], namespaces: set[str]) -> dict[str, dict[str, str]]:
@@ -2428,6 +2485,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                                   and namespace not in NOT_COVERED),
         "arnFormats": formats,
         "resourceTagKeys": resource_tag_keys(documents),
+        "resourceKeys": resource_keys(documents, data, namespaces),
         "unqualified": unqualified,
         "mintedIds": minted,
         "forwardedActions": forwarded,
@@ -2534,7 +2592,7 @@ def render(document: dict) -> str:
     """The document with one operation to a line."""
     lines = ["{"]
     for key in ("_source", "namespaces", "handBuilt", "notCovered", "otherNamespaces", "arnFormats", "resourceTagKeys",
-                "unqualified", "mintedIds", "forwardedActions"):
+                "resourceKeys", "unqualified", "mintedIds", "forwardedActions"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
     lines.append('  "operations": {')
     operations = list(document["operations"].items())
@@ -2585,6 +2643,18 @@ def validate(document: dict) -> list[str]:
                 or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:ResourceTag/", key) for key in keys)
                 for kind, keys in kinds.items()) for namespace, kinds in tag_keys.items()):
         problems.append("resourceTagKeys is not stored-tag prefixes for supported resource types")
+    resource_keys_document = document.get("resourceKeys", {})
+    if not isinstance(resource_keys_document, dict) or any(
+            not isinstance(kinds, dict) or any(
+                kind not in formats.get(namespace, {}) or not isinstance(keys, dict) or not keys
+                or list(keys) != sorted(keys) or any(
+                    not re.fullmatch(rf"{re.escape(namespace)}:[A-Za-z0-9]+", key) or not isinstance(spec, dict)
+                    or set(spec) - {"member", "arn"} or not isinstance(spec.get("member"), str)
+                    or ("arn" in spec and spec["arn"] not in formats.get(namespace, {}))
+                    for key, spec in keys.items())
+                for kind, keys in kinds.items())
+            for namespace, kinds in resource_keys_document.items()):
+        problems.append("resourceKeys is not member-named condition keys of supported resource types")
     unqualified = document.get("unqualified")
     if not isinstance(unqualified, dict) or not all(
             isinstance(kinds, list) and kinds and all(isinstance(kind, str) and kind in formats.get(namespace, {})
@@ -2904,6 +2974,9 @@ def main(argv: list[str] | None = None) -> int:
         untrue, added = verify_against(document, upstream, formats)
         if document.get("resourceTagKeys", {}) != resource_tag_keys(documents):
             untrue.append("resourceTagKeys differ from AWS Service Reference")
+        if document.get("resourceKeys", {}) != resource_keys(documents, resolve_botocore_data(args.botocore_data)[0],
+                                                             document["namespaces"]):
+            untrue.append("resourceKeys differ from AWS Service Reference and botocore")
         untrue += verify_forwarded(document, documents)
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)

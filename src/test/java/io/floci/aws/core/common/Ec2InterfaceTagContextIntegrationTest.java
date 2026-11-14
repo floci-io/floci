@@ -8,6 +8,7 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -102,6 +103,52 @@ class Ec2InterfaceTagContextIntegrationTest {
                 admin.deleteSubnet(r -> r.subnetId(foreignSubnet));
                 admin.deleteVpc(r -> r.vpcId(vpc));
                 admin.deleteVpc(r -> r.vpcId(foreignVpc));
+            }
+        }
+    }
+
+    /**
+     * The interface's keys come from the request-resources table for every action on it, not only tagging: a delete
+     * is refused outside the granted VPC. A NAT gateway's interface, which Floci builds rather than stores, carries
+     * its VPC too.
+     */
+    @Test
+    void everyInterfaceActionAndManagedInterfaceCarryTheirVpc() {
+        String region = "us-east-1";
+        String user = "eni-actions-" + UUID.randomUUID();
+        UserCredentials credentials = EnforcementFixtures.createUser(cleanup, endpoint.getPort(),
+                auth("000000000000", region, "iam"), user);
+        String arn = "arn:aws:ec2:" + region + ":000000000000:";
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "000000000000", Region.of(region), endpoint);
+             Ec2Client client = AwsTestClients.create(Ec2Client.builder(), credentials.accessKeyId(),
+                     credentials.secretAccessKey(), Region.of(region), endpoint)) {
+            String vpc = admin.createVpc(r -> r.cidrBlock("10.207.0.0/16")).vpc().vpcId();
+            String foreignVpc = admin.createVpc(r -> r.cidrBlock("10.208.0.0/16")).vpc().vpcId();
+            String subnet = admin.createSubnet(r -> r.vpcId(vpc).cidrBlock("10.207.1.0/24")).subnet().subnetId();
+            String foreignSubnet = admin.createSubnet(r -> r.vpcId(foreignVpc).cidrBlock("10.208.1.0/24"))
+                    .subnet().subnetId();
+            String eni = admin.createNetworkInterface(r -> r.subnetId(subnet)).networkInterface().networkInterfaceId();
+            String foreign = admin.createNetworkInterface(r -> r.subnetId(foreignSubnet))
+                    .networkInterface().networkInterfaceId();
+            String natGateway = admin.createNatGateway(r -> r.subnetId(subnet).connectivityType("private"))
+                    .natGateway().natGatewayId();
+            EnforcementFixtures.putUserPolicy(endpoint.getPort(), auth("000000000000", region, "iam"), user, "vpc", """
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                    "Action":["ec2:DeleteNetworkInterface","ec2:CreateTags"],"Resource":"%snetwork-interface/*",
+                    "Condition":{"ArnEquals":{"ec2:Vpc":"%svpc/%s"}}}]}
+                    """.formatted(arn, arn, vpc));
+            try {
+                String managed = admin.describeNatGateways(r -> r.natGatewayIds(natGateway)).natGateways().getFirst()
+                        .natGatewayAddresses().getFirst().networkInterfaceId();
+                client.createTags(r -> r.resources(managed).tags(t -> t.key("Runtime").value("nat")));
+                assertEquals("nat", runtimeTag(admin, managed));
+                assertEquals("UnauthorizedOperation", assertThrows(Ec2Exception.class,
+                        () -> client.deleteNetworkInterface(r -> r.networkInterfaceId(foreign)))
+                        .awsErrorDetails().errorCode());
+                client.deleteNetworkInterface(r -> r.networkInterfaceId(eni));
+            } finally {
+                admin.deleteNatGateway(r -> r.natGatewayId(natGateway));
+                admin.deleteNetworkInterface(r -> r.networkInterfaceId(foreign));
             }
         }
     }

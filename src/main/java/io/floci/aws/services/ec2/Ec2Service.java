@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
-import io.floci.aws.core.common.AwsArnUtils.Arn;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsPartition;
 import io.floci.aws.core.common.AwsPartitions;
@@ -11100,47 +11099,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         tags.delete(key(region, resourceId));
     }
 
-    /** Stored interface identity for IAM conditions; does not create default resources. */
-    public Map<String, String> networkInterfaceConditionContext(String region, String interfaceId) {
-        String account = callerAccountId();
-        NetworkInterface stored = (networkInterfaces instanceof AccountAwareStorageBackend<NetworkInterface> aware
-                ? aware.getForAccount(account, key(region, interfaceId)) : networkInterfaces.get(key(region, interfaceId)))
-                .orElse(null);
-        String vpc = stored == null ? null : stored.getVpcId();
-        String subnet = stored == null ? null : stored.getSubnetId();
-        String zone = stored == null ? null : stored.getAvailabilityZone();
-        if (stored == null) {
-            List<Instance> scoped = instances instanceof AccountAwareStorageBackend<Instance> aware
-                    ? aware.scanForAccount(account, k -> k.startsWith(region + "::"))
-                    : instances.scan(k -> k.startsWith(region + "::"));
-            for (Instance instance : scoped) {
-                if (instance.getState() != null && "terminated".equals(instance.getState().getName())) {
-                    continue;
-                }
-                for (InstanceNetworkInterface attached : instance.getNetworkInterfaces()) {
-                    if (interfaceId.equals(attached.getNetworkInterfaceId())) {
-                        vpc = attached.getVpcId();
-                        subnet = attached.getSubnetId();
-                        zone = instance.getPlacement() == null ? null : instance.getPlacement().getAvailabilityZone();
-                    }
-                }
-            }
-        }
-        if (vpc == null) {
-            return Map.of();
-        }
-        Map<String, String> context = new LinkedHashMap<>();
-        context.put("ec2:NetworkInterfaceID", interfaceId);
-        context.put("ec2:Vpc", Arn.of("ec2", region, account, "vpc/" + vpc).toString());
-        if (subnet != null) {
-            context.put("ec2:Subnet", Arn.of("ec2", region, account, "subnet/" + subnet).toString());
-        }
-        if (zone != null) {
-            context.put("ec2:AvailabilityZone", zone);
-        }
-        return Map.copyOf(context);
-    }
-
     /** The tags currently on one resource in {@code region}, as CreateTags and DeleteTags maintain them. */
     public List<Tag> resourceTags(String region, String resourceId) {
         return List.copyOf(tagsOf(region, resourceId).orElse(List.of()));
@@ -15662,6 +15620,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                          List<String> networkInterfaceIds,
                                                          List<Map.Entry<String, List<String>>> filters,
                                                          int maxResults, String nextToken) {
+        return describeNetworkInterfaces(accountId, region, networkInterfaceIds, filters, maxResults, nextToken, true);
+    }
+
+    /**
+     * The resource of {@code type} EC2 holds under {@code id} for the caller, as its Describe operation answers it,
+     * which the IAM condition keys the request-resources table reads from a resource's members are valued from: a
+     * network interface of any kind, stored, held by an instance or owned by an endpoint or a NAT gateway. Empty for a
+     * type it does not answer for and an id it holds nothing under, which the request then fails on. Reads only: it
+     * creates no default resources.
+     */
+    public Optional<Object> heldResource(String region, String type, String id) {
+        if (!"network-interface".equals(type)) {
+            return Optional.empty();
+        }
+        try {
+            return describeNetworkInterfaces(callerAccountId(), region, List.of(id), List.of(), 0, null, false)
+                    .networkInterfaces().stream().findFirst().map(Object.class::cast);
+        } catch (AwsException expected) {
+            // A malformed id or one naming no interface: the request is refused on it, so it carries no keys.
+            return Optional.empty();
+        }
+    }
+
+    private NetworkInterfaceListResult describeNetworkInterfaces(String accountId, String region,
+                                                                 List<String> networkInterfaceIds,
+                                                                 List<Map.Entry<String, List<String>>> filters,
+                                                                 int maxResults, String nextToken,
+                                                                 boolean createDefaults) {
         // Validate pagination parameters
         if (maxResults > 0 && !networkInterfaceIds.isEmpty()) {
             throw new AwsException("InvalidParameterCombination",
@@ -15682,7 +15668,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
-        ensureDefaultResources(region);
+        if (createDefaults) {
+            ensureDefaultResources(region);
+        }
         String safeAccount = accountId != null ? accountId : callerAccountId();
         List<NetworkInterface> result = new ArrayList<>();
         Set<String> foundIds = new HashSet<>();

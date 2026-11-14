@@ -1363,6 +1363,30 @@ def test_resource_tag_prefixes_cover_every_type_of_an_id_target_namespace_from_t
     assert r.resource_tag_keys([]) == {}
 
 
+def test_resource_keys_are_the_reference_keys_a_member_of_the_types_shape_names(monkeypatch):
+    model = {"shapes": {
+        "NetworkInterface": {"type": "structure", "members": {
+            "VpcId": {"shape": "String"}, "SubnetId": {"shape": "String"},
+            "NetworkInterfaceId": {"shape": "String"}, "Groups": {"shape": "GroupList"}}},
+        "String": {"type": "string"}, "GroupList": {"type": "list", "member": {"shape": "String"}}}}
+    monkeypatch.setattr(r, "load_models", lambda data, clients: {"ec2": model})
+    document = {"Name": "ec2", "ConditionKeys": [
+        {"Name": "ec2:Vpc", "Types": ["ARN"]}, {"Name": "ec2:Subnet", "Types": ["ARN"]},
+        {"Name": "ec2:NetworkInterfaceID", "Types": ["String"]}, {"Name": "ec2:Region", "Types": ["String"]},
+        {"Name": "ec2:Groups", "Types": ["String"]}],
+        "Resources": [
+            {"Name": "network-interface", "ARNFormats": ["arn:${Partition}:ec2:${Region}:${Account}:network-interface/x"],
+             "ConditionKeys": ["aws:ResourceTag/${TagKey}", "ec2:Vpc", "ec2:Subnet", "ec2:NetworkInterfaceID",
+                               "ec2:Region", "ec2:Groups", "ec2:Attribute/${AttributeName}"]},
+            {"Name": "vpc", "ARNFormats": ["arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"],
+             "ConditionKeys": []}]}
+    # A key named as the member or as it without its Id; a list member, a key no member names, an ARN key with no
+    # type named as it and a key with a variable are left out.
+    assert r.resource_keys([document], Path("."), {"ec2": ["ec2"]}) == {"ec2": {"network-interface": {
+        "ec2:NetworkInterfaceID": {"member": "NetworkInterfaceId"}, "ec2:Vpc": {"member": "VpcId", "arn": "vpc"}}}}
+    assert r.resource_keys([document], Path("."), {}) == {}
+
+
 def test_id_prefixes_read_botocores_examples_by_the_shape_of_each_member():
     ec2 = model({"DescribeGroups": {"GroupIds": "GroupIdList", "Label": "String"}}, "ec2")
     ec2["shapes"]["SecurityGroupId"] = {"type": "string"}

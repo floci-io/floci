@@ -225,11 +225,7 @@ public final class RequestResources {
             String arn = "*";
             for (Map.Entry<String, String> prefix : targets.prefixes().entrySet()) {
                 if (id.startsWith(prefix.getValue())) {
-                    String format = formats.get(prefix.getKey()).format();
-                    Map<String, String> filling = new HashMap<>();
-                    VARIABLE.matcher(format).results().map(match -> match.group(1))
-                            .forEach(variable -> filling.put(variable, id));
-                    arn = render(format, filling, partition, region, accountId);
+                    arn = idArn(formats.get(prefix.getKey()).format(), id, partition, region, accountId);
                     break;
                 }
             }
@@ -813,6 +809,21 @@ public final class RequestResources {
     }
 
     /** The format with each variable replaced once: the partition, Region and account, a value, or else {@code *}. */
+    /**
+     * The ARN of the namespace's resource of {@code type} named by {@code id}, the one variable of its format past
+     * partition, Region and account, as a request naming the resource by its id gives it.
+     */
+    static String idArn(String namespace, String type, String id, String partition, String region, String accountId) {
+        return idArn(RequestResourceMembers.table().formats().get(namespace).get(type).format(), id, partition, region,
+                accountId);
+    }
+
+    private static String idArn(String format, String id, String partition, String region, String accountId) {
+        Map<String, String> filling = new HashMap<>();
+        VARIABLE.matcher(format).results().map(match -> match.group(1)).forEach(variable -> filling.put(variable, id));
+        return render(format, filling, partition, region, accountId);
+    }
+
     private static String render(String format, Map<String, String> filling, String partition, String region,
                                  String accountId) {
         Matcher variable = VARIABLE.matcher(format);

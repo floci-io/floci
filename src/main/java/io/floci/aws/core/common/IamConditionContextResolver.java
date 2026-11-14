@@ -1,6 +1,7 @@
 package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
@@ -49,6 +50,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -70,6 +72,8 @@ import java.util.function.Function;
 public class IamConditionContextResolver {
 
     private static final Logger LOG = Logger.getLogger(IamConditionContextResolver.class);
+    /** Reads a resource EC2 holds as its fields, java.time ones included. */
+    private static final ObjectMapper RESOURCE_MAPPER = new ObjectMapper().findAndRegisterModules();
 
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
     static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
@@ -105,6 +109,7 @@ public class IamConditionContextResolver {
     private final Instance<LambdaWebService> lambdaWebService;
     private final Instance<RequestConditionSpelling> requestConditionSpellings;
     private final RequestContext requestContext;
+    private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
     private final Clock clock;
@@ -124,11 +129,12 @@ public class IamConditionContextResolver {
                                        Instance<LambdaWebService> lambdaWebService,
                                        Instance<RequestConditionSpelling> requestConditionSpellings,
                                        RequestContext requestContext,
+                                       RegionResolver regionResolver,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
         this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
-                lambdaWebService, requestConditionSpellings, requestContext,
+                lambdaWebService, requestConditionSpellings, requestContext, regionResolver,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -141,6 +147,7 @@ public class IamConditionContextResolver {
                                 Instance<LambdaWebService> lambdaWebService,
                                 Instance<RequestConditionSpelling> requestConditionSpellings,
                                 RequestContext requestContext,
+                                RegionResolver regionResolver,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
                                 ResolvedServiceCatalog serviceCatalog, Clock clock) {
@@ -153,6 +160,7 @@ public class IamConditionContextResolver {
         this.lambdaWebService = lambdaWebService;
         this.requestConditionSpellings = requestConditionSpellings;
         this.requestContext = requestContext;
+        this.regionResolver = regionResolver;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
         this.clock = clock;
@@ -810,7 +818,7 @@ public class IamConditionContextResolver {
         }
         if (targets != null) {
             addResourceTags(conditions, form.get(targets.query() + ".1"), targets);
-            addInterfaceTagContext(action, conditions, form.get(targets.query() + ".1"), targets);
+            addResourceKeys(conditions, form.get(targets.query() + ".1"), targets);
         }
         return conditions.isEmpty() ? null : conditions;
     }
@@ -871,7 +879,7 @@ public class IamConditionContextResolver {
                 addRequestTags(conditions, form, "Tag.");
             }
             addResourceTags(conditions, form.get(idParameter + i), generatedTargets);
-            addInterfaceTagContext(action, conditions, form.get(idParameter + i), generatedTargets);
+            addResourceKeys(conditions, form.get(idParameter + i), generatedTargets);
             targets.add(conditions);
         }
         return targets;
@@ -891,10 +899,13 @@ public class IamConditionContextResolver {
         }
     }
 
-    /** Stored tags for one generated EC2 ARN, never borrowed from another target in the same request. */
-    public Map<String, List<String>> withEc2ResourceTags(String scope, String action, String resource,
-                                                        String region, String accountId,
-                                                        Map<String, List<String>> context) {
+    /**
+     * The stored tags and the generated resource keys of one generated EC2 ARN (see {@link #putResourceKeys}), never
+     * borrowed from another target in the same request.
+     */
+    public Map<String, List<String>> withEc2ResourceContext(String scope, String action, String resource,
+                                                           String region, String accountId,
+                                                           Map<String, List<String>> context) {
         if (!"ec2".equals(scope) || RequestResources.hasIndividualTargets(action)
                 || !AwsArnUtils.isArn(resource) || !ec2Service.isResolvable()) {
             return context;
@@ -909,12 +920,15 @@ public class IamConditionContextResolver {
         }
         List<String> prefixes = RequestResourceMembers.table().resourceTagKeys()
                 .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], List.of());
-        if (prefixes.isEmpty()) {
+        Map<String, RequestResourceMembers.ResourceKey> keys = RequestResourceMembers.table().resourceKeys()
+                .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], Map.of());
+        if (prefixes.isEmpty() && keys.isEmpty()) {
             return context;
         }
         Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
-        result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith));
+        result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith) || keys.containsKey(key));
         putStoredTags(result, region, parts[1], prefixes);
+        putResourceKeys(result, region, parts[0], parts[1]);
         return result;
     }
 
@@ -935,16 +949,58 @@ public class IamConditionContextResolver {
         putStoredTags(conditions, region, resourceId, prefixes);
     }
 
-    private void addInterfaceTagContext(String action, Map<String, List<String>> conditions, String resourceId,
-                                        RequestResourceMembers.Targets targets) {
-        String prefix = targets.prefixes().get("network-interface");
-        if (!("ec2:CreateTags".equals(action) || "ec2:DeleteTags".equals(action)) || prefix == null
-                || resourceId == null || !resourceId.startsWith(prefix) || !ec2Service.isResolvable()) {
+    /** The generated resource keys of the type whose id prefix {@code resourceId} carries (see {@link #putResourceKeys}). */
+    private void addResourceKeys(Map<String, List<String>> conditions, String resourceId,
+                                 RequestResourceMembers.Targets targets) {
+        if (resourceId == null || resourceId.isBlank()) {
             return;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
-        ec2Service.get().networkInterfaceConditionContext(region, resourceId)
-                .forEach((key, value) -> conditions.put(key, List.of(value)));
+        for (Map.Entry<String, String> type : targets.prefixes().entrySet()) {
+            if (resourceId.startsWith(type.getValue())) {
+                putResourceKeys(conditions, region, type.getKey(), resourceId);
+                return;
+            }
+        }
+    }
+
+    /**
+     * Each condition key the request-resources table gives EC2's resource {@code type} as a member of its botocore
+     * shape, valued from that member of the resource EC2 holds under {@code id}, as the ARN of the key's type where the
+     * Service Reference types the key as one. A member with no value, or a resource EC2 holds nothing under, leaves the
+     * key absent.
+     */
+    private void putResourceKeys(Map<String, List<String>> conditions, String region, String type, String id) {
+        Map<String, RequestResourceMembers.ResourceKey> keys = RequestResourceMembers.table().resourceKeys()
+                .getOrDefault("ec2", Map.of()).getOrDefault(type, Map.of());
+        if (keys.isEmpty() || !ec2Service.isResolvable()) {
+            return;
+        }
+        Optional<Object> held = ec2Service.get().heldResource(region, type, id);
+        if (held.isEmpty()) {
+            return;
+        }
+        JsonNode resource = RESOURCE_MAPPER.valueToTree(held.get());
+        String account = requestContext.getAccountId();
+        String partition = regionResolver.partitionForRegion(region);
+        keys.forEach((key, spec) -> {
+            String value = memberValue(resource, spec.member());
+            if (value != null && !value.isBlank()) {
+                conditions.put(key, List.of(spec.arn() == null ? value
+                        : RequestResources.idArn("ec2", spec.arn(), value, partition, region, account)));
+            }
+        });
+    }
+
+    /** The scalar the resource holds in the botocore member {@code member}, its field of that name, case aside. */
+    private static String memberValue(JsonNode resource, String member) {
+        for (Map.Entry<String, JsonNode> field : resource.properties()) {
+            if (field.getKey().equalsIgnoreCase(member) && field.getValue().isValueNode()
+                    && !field.getValue().isNull()) {
+                return field.getValue().asText();
+            }
+        }
+        return null;
     }
 
     private void putStoredTags(Map<String, List<String>> conditions, String region, String resourceId,

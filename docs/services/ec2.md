@@ -2,11 +2,14 @@
 
 **Protocol:** EC2 Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
-`CreateTags` and `DeleteTags` on network interfaces evaluate the target's stored
-VPC, subnet, availability zone, and interface ID alongside its own ownership tags.
-This includes primary interfaces held by an instance. Every member of a batch
-must satisfy its conditions before any tags change; another interface's VPC or
-tags cannot authorize it. Authorization reads do not create default resources.
+A request acting on a network interface carries its `ec2:Vpc` and `ec2:Subnet` (as ARNs),
+`ec2:AvailabilityZone` and `ec2:NetworkInterfaceID`, read from the interface Floci holds:
+stored, held by an instance as its primary interface, or owned by a VPC endpoint, NAT
+gateway or Instance Connect endpoint. Which keys a resource type takes, and the member of
+its botocore shape each comes from, are generated from the Service Reference and botocore
+(`resourceKeys` in `iam-request-resources.json`). In a `CreateTags` or `DeleteTags` batch
+every interface is checked against its own keys and tags before any tag changes; another
+interface's VPC or tags cannot authorize it. Authorization reads do not create default resources.
 
 ## Instance IAM authorization
 
