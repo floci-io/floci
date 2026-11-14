@@ -3336,3 +3336,14 @@ aws iam create-access-key --user-name alice --endpoint-url $AWS_ENDPOINT_URL
 # List roles
 aws iam list-roles --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+### Route 53 record change conditions
+
+`ChangeResourceRecordSets` evaluates the actions, record types, and normalized record
+names from every change in the batch under `route53:ChangeResourceRecordSetsActions`,
+`route53:ChangeResourceRecordSetsRecordTypes`, and
+`route53:ChangeResourceRecordSetsNormalizedRecordNames`. Use set operators such as
+`ForAllValues:StringEquals` with `Null: false` to require all changes to match.
+DNS names are lowercased, omit the final dot, and use octal escapes for special
+characters, following the [Route 53 condition format](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html).
+Authorization and mutation share the same change-batch parser.
