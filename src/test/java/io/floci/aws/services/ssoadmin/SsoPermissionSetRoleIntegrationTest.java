@@ -108,10 +108,7 @@ class SsoPermissionSetRoleIntegrationTest {
         customerPolicy("AttachCustomerManagedPolicyReferenceToPermissionSet", permissionSet,
                 customerName.toLowerCase(Locale.ROOT), "/team/");
         inlinePolicy(permissionSet, ALLOW_GET);
-        ObjectNode boundaryRequest = request(permissionSet);
-        boundaryRequest.putObject("PermissionsBoundary").putObject("CustomerManagedPolicyReference")
-                .put("Name", boundaryName).put("Path", "/team/");
-        successful("PutPermissionsBoundaryToPermissionSet", boundaryRequest);
+        customerBoundary(permissionSet, boundaryName, "/team/");
 
         provision(permissionSet, TARGET);
         Role first = provisionedRole(target, name);
@@ -190,10 +187,7 @@ class SsoPermissionSetRoleIntegrationTest {
         policy(iam("test"), boundaryName, "/boundaries/");
         IamClient target = iam(TARGET);
         trackRoles(target, name);
-        ObjectNode boundaryRequest = request(permissionSet);
-        boundaryRequest.putObject("PermissionsBoundary").putObject("CustomerManagedPolicyReference")
-                .put("Name", boundaryName).put("Path", "/boundaries/");
-        successful("PutPermissionsBoundaryToPermissionSet", boundaryRequest);
+        customerBoundary(permissionSet, boundaryName, "/boundaries/");
 
         failedProvision(permissionSet, TARGET);
 
@@ -370,10 +364,7 @@ class SsoPermissionSetRoleIntegrationTest {
         cleanup.register(() -> target.deletePolicy(r -> r.policyArn(boundary)));
         trackRoles(target, name);
         inlinePolicy(permissionSet, ALLOW_ALL);
-        ObjectNode boundaryRequest = request(permissionSet);
-        boundaryRequest.putObject("PermissionsBoundary").putObject("CustomerManagedPolicyReference")
-                .put("Name", boundaryName).put("Path", "/");
-        successful("PutPermissionsBoundaryToPermissionSet", boundaryRequest);
+        customerBoundary(permissionSet, boundaryName, "/");
         String userId = portalUser();
         ObjectNode assignment = assignment(permissionSet, userId);
         sso("CreateAccountAssignment", assignment).then().statusCode(200)
@@ -464,6 +455,13 @@ class SsoPermissionSetRoleIntegrationTest {
         ObjectNode body = request(permissionSet);
         body.putObject("CustomerManagedPolicyReference").put("Name", name).put("Path", path);
         successful(action, body);
+    }
+
+    private void customerBoundary(String permissionSet, String name, String path) {
+        ObjectNode body = request(permissionSet);
+        body.putObject("PermissionsBoundary").putObject("CustomerManagedPolicyReference")
+                .put("Name", name).put("Path", path);
+        successful("PutPermissionsBoundaryToPermissionSet", body);
     }
 
     private void inlinePolicy(String permissionSet, String document) {
