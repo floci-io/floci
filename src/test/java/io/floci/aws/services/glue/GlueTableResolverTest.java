@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class GlueTableResolverTest {
@@ -127,6 +128,82 @@ class GlueTableResolverTest {
         table.setStorageDescriptor(sd);
 
         assertThat(GlueTableResolver.buildProjection(table), equalTo("\"tenantId\" AS \"tenantId\""));
+    }
+
+    private static Table templatedTable(String template, Column... partitionKeys) {
+        Table table = table("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", "s3://bucket/events/",
+                List.of(column("id", "string")));
+        table.setPartitionKeys(List.of(partitionKeys));
+        table.setParameters(Map.of("projection.enabled", "true", "storage.location.template", template));
+        return table;
+    }
+
+    /** A string key is the matched text itself; any other type is cast, so a non-value yields NULL, not an error. */
+    @Test
+    void templatedKeysAreCastToTheirDeclaredTypes() {
+        Table table = templatedTable("s3://bucket/events/${region}/${year}/${dt}/",
+                column("region", "string"), column("year", "int"), column("dt", "date"));
+
+        String regex = "'^s3://bucket/events/([^/]+)/([^/]+)/([^/]+)/'";
+        assertThat(GlueTableResolver.buildProjection(table), equalTo("\"id\" AS \"id\", "
+                + "regexp_extract(\"$path\", " + regex + ", 1) AS \"region\", "
+                + "TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS INTEGER) AS \"year\", "
+                + "TRY_CAST(regexp_extract(\"$path\", " + regex + ", 3) AS DATE) AS \"dt\""));
+        assertThat(GlueTableResolver.pathFilter(table), equalTo("regexp_matches(\"$path\", " + regex + ")"
+                + " AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS INTEGER) IS NOT NULL"
+                + " AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 3) AS DATE) IS NOT NULL"));
+    }
+
+    /**
+     * DuckDB's scalar {@code regexp_extract} stops at group 9, so a key at group 10 is read through
+     * the struct form, and the keys before it keep the scalar form.
+     */
+    @Test
+    void aKeyPastTheNinthGroupIsExtractedThroughTheStructForm() {
+        Table table = templatedTable("s3://bucket/events/${account}/${team}/${service}/${env}/${cluster}/"
+                        + "${zone}/${rack}/${host}/${region}/${dt}/",
+                column("account", "string"), column("team", "string"), column("service", "string"),
+                column("env", "string"), column("cluster", "string"), column("zone", "string"),
+                column("rack", "string"), column("host", "string"), column("region", "string"),
+                column("dt", "date"));
+
+        String regex = "'^s3://bucket/events/" + "([^/]+)/".repeat(10) + "'";
+        String projection = GlueTableResolver.buildProjection(table);
+        assertThat(projection, containsString("regexp_extract(\"$path\", " + regex + ", 9) AS \"region\""));
+        assertThat(projection, containsString("TRY_CAST(regexp_extract(\"$path\", " + regex + ", "
+                + "['g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9', 'g10']).g10 AS DATE) AS \"dt\""));
+    }
+
+    @Test
+    void templatedReadAddsTheObjectPathAndTurnsOffHivePartitioning() {
+        Table table = templatedTable("s3://bucket/events/${region}/", column("region", "string"));
+
+        assertThat(GlueTableResolver.readExpression(table, "read_json_auto", "s3://bucket/events/*"),
+                equalTo("read_json_auto('s3://bucket/events/*/**', hive_partitioning = false, filename = '$path')"));
+    }
+
+    @Test
+    void singleQuotesInTheTemplateAreEscapedInTheRegexLiteral() {
+        Table table = templatedTable("s3://bucket/o'brien/${region}/", column("region", "string"));
+
+        assertThat(GlueTableResolver.pathFilter(table), equalTo("regexp_matches(\"$path\", '^s3://bucket/o''brien/([^/]+)/')"));
+    }
+
+    /** Tables without a template read and project exactly as they did, and an Iceberg table ignores one. */
+    @Test
+    void tablesWithoutATemplateAreReadAsBefore() {
+        Table plain = table("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", "s3://bucket/events/",
+                List.of(column("id", "string")));
+        Table iceberg = templatedTable("s3://bucket/events/${region}/", column("region", "string"));
+        iceberg.setParameters(Map.of("projection.enabled", "true", "table_type", "ICEBERG",
+                "storage.location.template", "s3://bucket/events/${region}/"));
+
+        for (Table table : List.of(plain, iceberg)) {
+            assertThat(GlueTableResolver.readExpression(table, "read_parquet", "s3://bucket/events"),
+                    equalTo("read_parquet('s3://bucket/events/**', union_by_name = true)"));
+            assertThat(GlueTableResolver.pathFilter(table), is(nullValue()));
+        }
+        assertThat(GlueTableResolver.buildProjection(iceberg), equalTo("\"id\" AS \"id\", \"region\" AS \"region\""));
     }
 
     @Test

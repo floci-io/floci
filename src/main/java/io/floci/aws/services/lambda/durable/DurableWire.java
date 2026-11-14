@@ -60,7 +60,7 @@ public final class DurableWire {
         event.put("CheckpointToken", checkpointToken);
         ObjectNode state = event.putObject("InitialExecutionState");
         ArrayNode operations = state.putArray("Operations");
-        for (DurableOperation operation : execution.getOperations().values()) {
+        for (DurableOperation operation : execution.replayedOperations()) {
             operations.add(operation(operation, true));
         }
         state.put("NextMarker", "");

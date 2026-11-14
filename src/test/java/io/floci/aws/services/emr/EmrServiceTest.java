@@ -1,9 +1,11 @@
 package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
@@ -44,6 +46,28 @@ class EmrServiceTest {
     private static final String AUTO_SCALING = "{\"Constraints\":{\"MinCapacity\":1,\"MaxCapacity\":4},"
             + "\"Rules\":[{\"Name\":\"scale-out\",\"Action\":{},\"Trigger\":{}}]}";
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * A tag call's {@code ResourceId} is the cluster the tag handlers find by it: one in the request's Region, or one
+     * stored with no Region, which they find in any.
+     */
+    @Test
+    void aTagCallsResourceIdIsTheClusterTheTagHandlersFind() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster cluster = service.runJobFlow(cluster("tagged", true), REGION);
+
+        assertEquals(List.of(cluster.getClusterArn()), service.through("ResourceId", cluster.getId(), REGION));
+        assertEquals(List.of(), service.through("ResourceId", cluster.getId(), "eu-west-1"));
+        assertEquals(List.of(), service.through("ResourceId", "j-UNKNOWN", REGION));
+
+        AccountAwareStorageBackend<EmrCluster> clusters = fixture.storage.create("emr", "emr-clusters.json",
+                new TypeReference<Map<String, EmrCluster>>() {});
+        EmrCluster regionless = clusters.get(cluster.getId()).orElseThrow();
+        regionless.setRegion(null);
+        clusters.put(cluster.getId(), regionless);
+        assertEquals(List.of(cluster.getClusterArn()), service.through("ResourceId", cluster.getId(), "eu-west-1"));
+    }
 
     @Test
     void aClusterIsStartingThenBootstrappingUntilItIsReady() {

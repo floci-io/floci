@@ -87,6 +87,17 @@ def test_a_create_makes_its_own_type_whatever_a_member_holding_the_resources_it_
         {"types": ["pool"], "arn": "resourceArns[]"}]
 
 
+def test_a_creates_bare_name_fills_what_it_makes_only_when_the_type_says_its_a_name_or_an_id():
+    # CreateResourceShare's share is `resource-share/${ResourcePath}`, a path RAM mints, which no name fills.
+    formats = {"share": "arn:${Partition}:svc:${Region}:${Account}:share/${ResourcePath}", "thing": FORMATS["thing"]}
+    assert r.resources_for("svc:CreateShare", ["share", "thing"], formats, members("name", "resourceArns[]")) == [
+        {"types": ["share", "thing"], "arn": "resourceArns[]"}, {"type": "share", "fill": {}}]
+    # A type whose variable is a name or an id takes the create's bare one.
+    named = {"share": "arn:${Partition}:svc:${Region}:${Account}:share/${ShareName}", "thing": FORMATS["thing"]}
+    assert r.resources_for("svc:CreateShare", ["share", "thing"], named, members("name", "resourceArns[]")) == [
+        {"types": ["share", "thing"], "arn": "resourceArns[]"}, {"type": "share", "fill": {"ShareName": "name"}}]
+
+
 def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent():
     named = [{"types": ["catalog", "thing"], "arn": "CatalogArn"}]
     assert r.with_absent_arn(named, FORMATS, {"CatalogArn"}) == named + [
@@ -127,7 +138,7 @@ def test_a_create_whose_action_acts_on_no_type_makes_the_one_named_as_it_is():
     assert r.makes_for("svc:CreatePool", [], VIEWS, {}) == []
 
 
-def test_a_built_document_with_what_a_create_makes_a_default_and_a_maps_ids_validates(corrections, tmp_path):
+def test_a_built_document_with_what_a_create_makes_a_default_and_a_maps_ids_validates(isolated, tmp_path):
     service = model({"CreateThing": {"ThingName": "String"}, "ListThings": {"ThingArn": "String"}, "ApplySteps": {}})
     service["shapes"]["Step"] = {"type": "structure", "members": {"poolId": {"shape": "String"},
                                                                   "note": {"shape": "String"}}}
@@ -355,12 +366,12 @@ def model(operations: dict[str, dict[str, str]], protocol: str = "json") -> dict
 
 
 @pytest.fixture
-def corrections(monkeypatch):
+def isolated(monkeypatch):
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
     monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
-    monkeypatch.setattr(r, "CORRECTIONS", {})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
+    monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "UNQUALIFIED", {})
     monkeypatch.setattr(r, "MINTED_IDS", {})
     monkeypatch.setattr(r, "FOUND_BY", {})
@@ -381,7 +392,7 @@ DOCUMENTS = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing
              reference("later", {"Op": ["y"]}, {"y": "arn:${Partition}:later:::y"})]
 
 
-def test_a_built_document_validates_matches_botocore_and_names_the_namespaces_it_does_not_read(corrections, tmp_path):
+def test_a_built_document_validates_matches_botocore_and_names_the_namespaces_it_does_not_read(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     assert r.validate(document) == []
@@ -393,7 +404,7 @@ def test_a_built_document_validates_matches_botocore_and_names_the_namespaces_it
     assert json.loads(r.render(document)) == document
 
 
-def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_variables(corrections, tmp_path):
+def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_variables(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String", "registryId": "AccountId"},
                                           "ListThings": {"registryId": "AccountId"}})})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
@@ -515,7 +526,7 @@ def test_a_format_whose_account_is_an_account_id_variable_takes_the_account_ever
         "thing": FORMATS["thing"]}}
 
 
-def test_a_file_that_is_not_json_is_reported_and_not_read(corrections, tmp_path, capsys):
+def test_a_file_that_is_not_json_is_reported_and_not_read(isolated, tmp_path, capsys):
     output = tmp_path / "iam-request-resources.json"
     output.write_text("{not json", encoding="utf-8")
 
@@ -524,7 +535,7 @@ def test_a_file_that_is_not_json_is_reported_and_not_read(corrections, tmp_path,
         assert "could not be read" in capsys.readouterr().err
 
 
-def test_a_file_that_cannot_be_read_is_reported(corrections, tmp_path, capsys):
+def test_a_file_that_cannot_be_read_is_reported(isolated, tmp_path, capsys):
     output = tmp_path / "iam-request-resources.json"
     output.write_text("{}", encoding="utf-8")
 
@@ -532,12 +543,12 @@ def test_a_file_that_cannot_be_read_is_reported(corrections, tmp_path, capsys):
         raise PermissionError(13, "Permission denied")
 
     # The read is refused rather than the file made unreadable, which a run as root could read anyway.
-    corrections.setattr(Path, "read_text", refuse)
+    isolated.setattr(Path, "read_text", refuse)
     assert r.main(["--check", "--output", str(output)]) == 1
     assert "could not be read" in capsys.readouterr().err
 
 
-def test_a_hand_edited_entry_does_not_match_botocore(corrections, tmp_path):
+def test_a_hand_edited_entry_does_not_match_botocore(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     document["operations"]["svc:GetThing"]["resources"] = []
@@ -545,35 +556,35 @@ def test_a_hand_edited_entry_does_not_match_botocore(corrections, tmp_path):
     assert len(r.derive(document, tmp_path)) == 1
 
 
-def test_a_type_checked_without_a_qualifier_is_recorded_and_must_be_one_the_file_reads(corrections, tmp_path):
+def test_a_type_checked_without_a_qualifier_is_recorded_and_must_be_one_the_file_reads(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
-    corrections.setattr(r, "UNQUALIFIED", {"svc:thing": "its service checks a qualified ARN without the qualifier"})
+    isolated.setattr(r, "UNQUALIFIED", {"svc:thing": "its service checks a qualified ARN without the qualifier"})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     assert document["unqualified"] == {"svc": ["thing"]}
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
     # A hand edit no longer matches, and a type the file has no format for fails the build.
     document["unqualified"] = {}
     assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    corrections.setattr(r, "UNQUALIFIED", {"svc:gone": "no longer there"})
+    isolated.setattr(r, "UNQUALIFIED", {"svc:gone": "no longer there"})
     with pytest.raises(ValueError, match="svc:gone"):
         r.build(DOCUMENTS, "test", tmp_path, "botocore test")
 
 
-def test_a_type_whose_service_mints_an_id_after_its_name_is_recorded_and_must_be_one_the_file_reads(corrections, tmp_path):
+def test_a_type_whose_service_mints_an_id_after_its_name_is_recorded_and_must_be_one_the_file_reads(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
-    corrections.setattr(r, "MINTED_IDS", {"svc:thing": "its service follows the name with an id it mints"})
+    isolated.setattr(r, "MINTED_IDS", {"svc:thing": "its service follows the name with an id it mints"})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     assert document["mintedIds"] == {"svc": ["thing"]}
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
     # A hand edit no longer matches, and a type the file has no format for fails the build.
     document["mintedIds"] = {}
     assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    corrections.setattr(r, "MINTED_IDS", {"svc:gone": "no longer there"})
+    isolated.setattr(r, "MINTED_IDS", {"svc:gone": "no longer there"})
     with pytest.raises(ValueError, match="svc:gone"):
         r.build(DOCUMENTS, "test", tmp_path, "botocore test")
 
 
-def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members_naming_it(corrections, tmp_path):
+def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members_naming_it(isolated, tmp_path):
     documents = [reference("svc", {"PutTarget": ["target"], "TagTarget": ["target"], "GetByResource": ["target"],
                                    "RunOn": ["target", "group"]},
                            {"target": "arn:${Partition}:svc:${Region}:${Account}:target/${ResourceId}",
@@ -583,7 +594,7 @@ def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members
                                           "TagTarget": {"ResourceArn": "String"},
                                           "GetByResource": {"ResourceId": "String"},
                                           "RunOn": {"GroupName": "String"}})})
-    corrections.setattr(r, "FOUND_BY", {"svc:target": (["Namespace", "ResourceId", "Dimension"], "its service mints the id"),
+    isolated.setattr(r, "FOUND_BY", {"svc:target": (["Namespace", "ResourceId", "Dimension"], "its service mints the id"),
                                         "svc:group": (["GroupName"], "its service mints the id")})
     document = r.build(documents, "test", tmp_path, "botocore test")
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
@@ -599,19 +610,19 @@ def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members
     # A hand edit no longer matches, and a type the file has no format for fails the build.
     operations["svc:PutTarget"]["resources"] = [{"type": "target", "fill": {"ResourceId": "ResourceId"}}]
     assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    corrections.setattr(r, "FOUND_BY", {"svc:gone": (["Namespace"], "no longer there")})
+    isolated.setattr(r, "FOUND_BY", {"svc:gone": (["Namespace"], "no longer there")})
     with pytest.raises(ValueError, match="svc:gone"):
         r.build(documents, "test", tmp_path, "botocore test")
 
 
-def test_a_member_naming_a_resource_of_no_type_names_the_one_it_runs_on_through_it(corrections, tmp_path):
+def test_a_member_naming_a_resource_of_no_type_names_the_one_it_runs_on_through_it(isolated, tmp_path):
     documents = [reference("svc", {"Run": ["cluster", "group"], "RunOnGroup": ["group"], "RunOnCluster": ["cluster"],
                                    "ListSessions": []},
                            {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster:${ClusterName}",
                             "group": "arn:${Partition}:svc:${Region}:${Account}:group/${GroupId}"})]
     write_models(tmp_path, {"svc": model({"Run": {"SessionId": "String"}, "RunOnGroup": {"SessionId": "String"},
                                           "RunOnCluster": {"Sql": "String"}, "ListSessions": {"SessionId": "String"}})})
-    corrections.setattr(r, "THROUGH", {"svc:SessionId": (["cluster", "group"], "a session runs on one")})
+    isolated.setattr(r, "THROUGH", {"svc:SessionId": (["cluster", "group"], "a session runs on one")})
     document = r.build(documents, "test", tmp_path, "botocore test")
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
     operations = document["operations"]
@@ -624,13 +635,13 @@ def test_a_member_naming_a_resource_of_no_type_names_the_one_it_runs_on_through_
     # A hand edit no longer matches, and a type the file has no format for fails the build.
     operations["svc:Run"]["resources"] = []
     assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    corrections.setattr(r, "THROUGH", {"svc:SessionId": (["gone"], "no longer there")})
+    isolated.setattr(r, "THROUGH", {"svc:SessionId": (["gone"], "no longer there")})
     with pytest.raises(ValueError, match="svc:gone"):
         r.build(documents, "test", tmp_path, "botocore test")
 
 
-def test_a_client_not_read_gives_no_members_and_aws_listing_it_is_no_untrue_claim(corrections, tmp_path):
-    corrections.setattr(r, "CLIENTS_NOT_READ", {"svcv2": "a second API Floci does not serve"})
+def test_a_client_not_read_gives_no_members_and_aws_listing_it_is_no_untrue_claim(isolated, tmp_path):
+    isolated.setattr(r, "CLIENTS_NOT_READ", {"svcv2": "a second API Floci does not serve"})
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
                             "svcv2": model({"GetThing": {"ThingArn": "String"}})})
     documents = [dict(DOCUMENTS[0], Operations=[dict(op, SDK=op["SDK"] + [{"Name": "svcv2", "Package": "Boto3"}])
@@ -672,15 +683,9 @@ def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_re
     # Only a list's structures give one value for each, so a lone structure's field is not read.
     assert r.name_or_arn_members(models, "PutEvents") == {"Entries[].BusName": "bus"}
     formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}"}
-    buses = [{"type": "bus", "fill": {"BusName": "Entries[].BusName"}, "absent": {"Entries[].BusName": "default"}}]
+    buses = [{"type": "bus", "fill": {"BusName": "Entries[].BusName"}}]
     assert r.with_arn_of(buses, formats, r.name_or_arn_members(models, "PutEvents")) == [
         dict(buses[0], arnOf={"Entries[].BusName": "bus"})]
-
-
-def test_a_correction_for_an_operation_the_file_does_not_read_fails(corrections, tmp_path):
-    corrections.setattr(r, "CORRECTIONS", {"svc:Gone": ([], "no longer there")})
-    with pytest.raises(ValueError, match="svc:Gone"):
-        r.build(DOCUMENTS, "test", tmp_path, "botocore test")
 
 
 def good_document() -> dict:
@@ -700,22 +705,18 @@ def test_a_well_formed_document_validates():
     document["operations"]["svc:B"]["resources"][0]["when"] = {"Type": ["application", None]}
     document["operations"]["svc:B"]["resources"][0]["account"] = "registryId"
     document["operations"]["svc:B"]["resources"][0]["unless"] = {"Bus": ["default"]}
-    document["operations"]["svc:B"]["resources"][0]["absent"] = {"Bus": "default"}
     document["operations"]["svc:B"]["resources"][0]["arnOf"] = {"Bus": "thing"}
-    document["operations"]["svc:A"]["resources"][0]["before"] = "#"
-    # A member filling a variable read up to a character, as a CodeBuild build id names its project before ':'.
-    document["operations"]["svc:B"]["resources"][0]["before"] = ":"
     assert r.validate(document) == []
     assert r.validate(with_a_create()) == []
-    # A field of each of a list's structures fills a variable, read as given when absent, or as an ARN.
+    # A field of each of a list's structures fills a variable, read as given, or as an ARN.
     document = good_document()
     document["operations"]["svc:B"]["resources"][0].update(
-        fill={"GroupName": "Groups[].Name"}, absent={"Groups[].Name": "default"}, arnOf={"Groups[].Name": "thing"})
+        fill={"GroupName": "Groups[].Name"}, arnOf={"Groups[].Name": "thing"})
     assert r.validate(document) == []
     # A field of a structure fills a variable, read as one value, and a variable no member fills may be fixed.
     document = good_document()
     document["operations"]["svc:B"]["resources"][0].update(
-        fill={"GroupName": "Group.Name"}, absent={"Group.Name": "default"}, fixed={"GroupId": "g-1"}, made=True)
+        fill={"GroupName": "Group.Name"}, fixed={"GroupId": "g-1"}, made=True)
     document["operations"]["svc:A"]["resources"][0]["made"] = True
     assert r.validate(document) == []
     # A type whose ARN is all an id its service mints, found by the members naming it.
@@ -766,7 +767,6 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(made="true"), "not true"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Names[]"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Groups[].Id"), "more than one list"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Groups[].Name": "default"}), "absent members"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(arnOf={"Groups[].Name": "thing"}), "types of one variable"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(Other="Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Ids[]"), "more than one list"),
@@ -779,17 +779,15 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(when={"Type": []}), "no member's values"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(when={"Types[]": ["a"]}), "no member's values"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(when={"Type": [1]}), "no member's values"),
-    (lambda d: d["operations"]["svc:A"]["resources"][0].update(before="##"), "no one character"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(before="##"), "no one character"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(before=":", fill={"GroupName": "Names[]"}) or
-     d["operations"]["svc:B"]["resources"][0].update(before=1), "no one character"),
+    # A value read as given for a member left out, or up to a character, is no key of a resource any more.
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(before="#"), "neither an ARN member"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(before=":"), "neither an ARN member"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Bus": "default"}), "neither an ARN member"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="Ids[]"), "no account of its ARN"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="a.b"), "no account of its ARN"),
     (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:::group/${GroupName}")
      or d["operations"]["svc:B"]["resources"][0].update(account="registryId"), "no account of its ARN"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(unless={"Type": []}), "no member's values"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Bus": ""}), "absent members"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Bus[]": "default"}), "absent members"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(arnOf={"Bus": "pool"}), "types of one variable"),
     (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:${Region}:${Account}:group/${GroupName}/${Id}")
      or d["operations"]["svc:B"]["resources"][0].update(arnOf={"Bus": "group"}), "types of one variable"),
@@ -807,7 +805,7 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=[]), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]"]), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find="Namespace"), "beside a fill"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], absent={"Namespace": "ecs"}),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], fixed={"GroupId": "g"}),
      "beside a fill"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(find=["Namespace"]), "neither an ARN member"),
 ])
@@ -843,25 +841,6 @@ def test_verify_fails_on_an_action_type_or_format_aws_does_not_give_and_reports_
     assert added == ["svc:D"]
 
 
-def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads():
-    operations = json.loads(r.OUTPUT.read_text(encoding="utf-8"))["operations"]
-    assert r.CORRECTIONS
-    for operation, (resources, reason) in r.CORRECTIONS.items():
-        assert operation in operations and reason, operation
-        # Derived metadata may extend a correction; metadata explicitly supplied by the correction must survive.
-        actual = operations[operation]["resources"]
-        assert len(actual) == len(resources), operation
-        for resource, correction in zip(actual, resources, strict=True):
-            assert {key: value for key, value in resource.items()
-                    if key not in ("account", "arnOf", "made") or key in correction} == correction, operation
-
-
-def test_a_correction_gives_the_operation_its_resources(corrections):
-    corrections.setattr(r, "CORRECTIONS", {"svc:GetThing": ([{"type": "thing", "fill": {}}], "a reason")})
-    entry = r.entry_for("svc:GetThing", {"action": "svc:GetThing", "types": ["thing"]}, FORMATS, {})
-    assert entry["resources"] == [{"type": "thing", "fill": {}}]
-
-
 def test_the_vendored_file_is_well_formed():
     document = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
     assert r.validate(document) == []
@@ -875,31 +854,31 @@ def test_the_vendored_file_is_well_formed():
     assert operations["ecr:BatchGetRepositoryScanningConfiguration"]["resources"] == [
         {"type": "repository", "fill": {"RepositoryName": "repositoryNames[]"}}]
     assert operations["cognito-idp:DescribeUserPool"]["resources"] == [{"type": "userpool", "fill": {"UserPoolId": "UserPoolId"}}]
-    # StartExecution's name is the execution's, so only its state machine ARN is read, up to a test case's #.
-    assert operations["states:StartExecution"]["resources"] == [
-        {"types": ["statemachine"], "arn": "stateMachineArn", "before": "#"}]
+    # StartExecution's name is the execution's, so only its state machine ARN is read; Step Functions drops a test
+    # case's `#` from it at runtime (StoredResourceArns.canonical).
+    assert operations["states:StartExecution"]["resources"] == [{"types": ["statemachine"], "arn": "stateMachineArn"}]
     # An ARN inside a structure or each of a list's structures.
     assert operations["elasticloadbalancing:SetRulePriorities"]["resources"] == [
         {"types": ["listener-rule/app", "listener-rule/net"], "arn": "RulePriorities[].RuleArn"}]
     assert operations["states:CreateStateMachineAlias"]["resources"] == [
         {"types": ["statemachine"], "arn": "routingConfiguration[].stateMachineVersionArn"}]
-    # An EventBridge rule is on the bus EventBusName names, by name or ARN, or the default one when it names none.
+    # An EventBridge rule is on the bus EventBusName names, by name or ARN; a rule on the default bus, the one a
+    # request naming none acts on, which EventBridge gives at runtime, has no bus in its ARN, and a default bus's ARN
+    # puts it in that ARN's account.
     assert operations["events:DescribeRule"]["resources"] == [
-        {"type": "rule-on-default-event-bus", "fill": {"RuleName": "Name"}, "when": {"EventBusName": ["default"]},
-         "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}},
         {"type": "rule-on-custom-event-bus", "fill": {"EventBusName": "EventBusName", "RuleName": "Name"},
-         "unless": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}]
+         "arnOf": {"EventBusName": "event-bus"}, "unlessDefault": {"EventBusName": "event-bus"}},
+        {"type": "rule-on-default-event-bus", "fill": {"RuleName": "Name"}, "whenDefault": {"EventBusName": "event-bus"},
+         "arnOf": {"EventBusName": "event-bus"}}]
     assert operations["events:DescribeEventBus"]["resources"] == [
         {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
-        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}, "endpoint": "events",
-         "arnOf": {"Name": "event-bus"}}]
-    # Each PutEvents entry is on the bus it names, by name or ARN, or the default one when it names none; an
-    # EventBridge V2 request is on the one bus its EventBusArn names.
+        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "arnOf": {"Name": "event-bus"}, "endpoint": "events"}]
+    # Each PutEvents entry is on the bus it names, by name or ARN (the default one, which EventBridge gives, when it
+    # names none); an EventBridge V2 request is on the one bus its EventBusArn names.
     assert operations["events:PutEvents"]["resources"] == [
         {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
         {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
-         "absent": {"Entries[].EventBusName": "default"}, "endpoint": "events",
-         "arnOf": {"Entries[].EventBusName": "event-bus"}}]
+         "arnOf": {"Entries[].EventBusName": "event-bus"}, "endpoint": "events"}]
     # EventBridge V2 is read beside EventBridge, and where both name an operation's resources, which one applies is
     # the endpoint serving the request, never a member a caller could add.
     assert document["namespaces"]["events"] == ["eventbridgev2", "events"]
@@ -908,11 +887,11 @@ def test_the_vendored_file_is_well_formed():
     assert operations["events:DeleteEventBus"]["resources"] == [
         {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
         {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events"}]
-    assert operations["events:CreateEventBus"]["resources"][1:] == [
-        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events", "made": True},
-        {"type": "event-busv2", "fill": {"EventBusName": "Name"}, "endpoint": "eventsv2"}]
+    created = operations["events:CreateEventBus"]["resources"]
+    assert {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events", "made": True} in created
+    assert {"type": "event-busv2", "fill": {"EventBusName": "Name"}, "endpoint": "eventsv2"} in created
     # A create's tags are checked on what it makes: not a dead-letter target or the bus a subscriber is made on.
-    assert "made" not in operations["events:CreateEventBus"]["resources"][0]
+    assert [resource for resource in created if "arn" in resource and resource.get("made")] == []
     assert [resource for resource in operations["events:CreateSubscriber"]["resources"] if resource.get("made")] == [
         {"type": "subscriber", "fill": {"SubscriberName": "Name"}, "made": True}]
     assert not any("when" in resource or "unless" in resource
@@ -947,47 +926,8 @@ def test_the_vendored_file_is_well_formed():
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}
 
 
-@pytest.mark.parametrize("operation", ["SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat"])
-def test_callback_resources_are_resolved_from_the_token(operation):
-    resources, reason = r.CORRECTIONS[f"states:{operation}"]
-    assert resources == [{"type": kind, "fill": {}, "find": ["taskToken"]}
-                         for kind in ("activity", "statemachine")]
-    assert "2026-11-02" in reason
-    assert "no resource types" in reason
-
-
-def test_list_tables_correction_names_the_literal_collection_without_selectors():
-    resources, reason = r.CORRECTIONS["dynamodb:ListTables"]
-    assert resources == [{"type": "table", "fill": {}}]
-    assert "table/?" in reason
-    formats = {"table": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}"}
-    assert not r._resource_problems("dynamodb:ListTables", resources[0], [], formats)
-    assert r._resource_problems("dynamodb:OtherOperation", resources[0], [], formats)
-    assert r.reads("dynamodb:ListTables")
-    assert not r.reads("dynamodb:BatchWriteItem")
-    assert not r.reads("dynamodb:ExecuteStatement")
-
-
-def test_hand_built_correction_is_generated_without_claiming_other_operations(corrections, tmp_path):
-    corrections.setattr(r, "CORRECTIONS", {"hand:ListThings": ([{"type": "thing", "fill": {}}], "measured collection")})
-    documents = DOCUMENTS + [reference("hand", {"ListThings": [], "PutThing": ["thing"]},
-                                       {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"})]
-    hand = model({"ListThings": {}, "PutThing": {"ThingName": "String"}})
-    hand["metadata"]["endpointPrefix"] = "hand"
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
-    document = r.build(documents, "test", tmp_path, "botocore test")
-    assert document["operations"]["hand:ListThings"] == {
-        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
-    assert "hand:PutThing" not in document["operations"]
-    assert document["namespaces"]["hand"] == ["hand"]
-    assert document["handBuilt"] == ["hand"]
-    assert r.validate(document) == []
-    assert r.derive(document, tmp_path) == []
-    assert r.verify_against(document, r.checked_actions(documents), document["arnFormats"]) == ([], [])
-
-
-def test_hand_built_operations_listed_to_read_follow_the_rule(corrections, tmp_path):
-    corrections.setattr(r, "READ_IN_HAND_BUILT", {"hand:GetThing": "a family the rule reads"})
+def test_hand_built_operations_listed_to_read_follow_the_rule(isolated, tmp_path):
+    isolated.setattr(r, "READ_IN_HAND_BUILT", {"hand:GetThing": "a family the rule reads"})
     documents = DOCUMENTS + [reference("hand", {"GetThing": ["thing"], "PutThing": ["thing"]},
                                        {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"})]
     hand = model({"GetThing": {"ThingName": "String"}, "PutThing": {"ThingName": "String"}})
@@ -1001,21 +941,86 @@ def test_hand_built_operations_listed_to_read_follow_the_rule(corrections, tmp_p
     assert r.validate(document) == []
 
 
-def test_operations_listed_to_read_must_exist_and_be_hand_built(corrections, tmp_path):
+def test_operations_listed_to_read_must_exist_and_be_hand_built(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
-    corrections.setattr(r, "READ_IN_HAND_BUILT", {"hand:Gone": "no longer there"})
+    isolated.setattr(r, "READ_IN_HAND_BUILT", {"hand:Gone": "no longer there"})
     with pytest.raises(ValueError, match="READ_IN_HAND_BUILT names hand:Gone, which the reference does not give"):
         r.build(DOCUMENTS, "test", tmp_path, "botocore test")
 
 
-def test_measured_callback_correction_retains_action_metadata_and_rejects_unlisted_resources():
-    formats = {"activity": "arn:${Partition}:states:${Region}:${Account}:activity:${ActivityName}",
-               "statemachine": "arn:${Partition}:states:${Region}:${Account}:stateMachine:${StateMachineName}"}
-    resource = {"type": "activity", "fill": {}, "find": ["taskToken"]}
-    assert not r._resource_problems("states:SendTaskSuccess", resource, [], formats)
-    assert r._resource_problems("states:SendTaskSuccess", {**resource, "find": ["otherToken"]}, [], formats)
-    assert r._resource_problems("states:OtherOperation", resource, [], formats)
-    assert r._resource_problems("states:SendTaskSuccess", resource, [], {})
+MEASURED_FORMATS = {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"}
+PROBED = "real AWS probes in https://example.com/probes accept an allow and enforce a deny on thing/*"
+
+
+def measured_documents(tmp_path, listed: list[str]) -> list[dict]:
+    hand = model({"ListThings": {"StartName": "String"}})
+    hand["metadata"]["endpointPrefix"] = "hand"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
+    return DOCUMENTS + [reference("hand", {"ListThings": listed}, MEASURED_FORMATS)]
+
+
+def test_a_measured_operation_takes_the_resources_aws_was_measured_to_check_where_the_reference_lists_none(
+        isolated, tmp_path):
+    isolated.setattr(r, "MEASURED", {"hand:ListThings": ([{"type": "thing", "fill": {}}], PROBED)})
+    document = r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
+    # Read in a namespace otherwise built by hand, keeping the reference's empty types.
+    assert document["operations"]["hand:ListThings"] == {
+        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
+    assert r.reads("hand:ListThings")
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+
+
+@pytest.mark.parametrize("measured, listed, problem", [
+    # No link to the measurement it rests on.
+    (([{"type": "thing", "fill": {}}], "probed against AWS, results not published"), [], "no link to the measurement"),
+    # A type the reference lists for the action: the rules read it, so a measurement of it belongs in a rule.
+    (([{"type": "thing", "fill": {}}], PROBED), ["thing"], "which the Service Reference lists for its action"),
+    # A type with no ARN format.
+    (([{"type": "gadget", "fill": {}}], PROBED), [], "no ARN format"),
+    # What the rules already give: an entry a later rule or reference update makes redundant is taken out.
+    (([], PROBED), [], "what the rules already give"),
+])
+def test_a_measured_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say(
+        isolated, tmp_path, measured, listed, problem):
+    isolated.setattr(r, "MEASURED", {"hand:ListThings": measured})
+    with pytest.raises(ValueError, match=problem):
+        r.build(measured_documents(tmp_path, listed), "test", tmp_path, "botocore test")
+
+
+def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
+    isolated.setattr(r, "MEASURED", {"hand:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
+    with pytest.raises(ValueError, match="MEASURED gives hand:Gone, which the file does not read"):
+        r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
+
+
+def test_a_variable_no_member_fills_takes_the_one_value_of_its_enum_the_operations_name_gives():
+    formats = {"actiontype": "arn:${Partition}:svc:${Region}:${Account}:actiontype:${Owner}/${Category}"}
+    owners = model({"CreateCustomActionType": {"category": "String"}})
+    owners["shapes"]["ActionOwner"] = {"type": "string", "enum": ["AWS", "ThirdParty", "Custom"]}
+    named = [{"type": "actiontype", "fill": {"Category": "category"}}]
+    assert r.with_enum_named("svc:CreateCustomActionType", named, formats, {"svc": owners}) == [
+        dict(named[0], fixed={"Owner": "Custom"})]
+    # A name giving none of its values, or a word inside another, fixes nothing.
+    assert r.with_enum_named("svc:CreateActionType", named, formats, {"svc": owners}) == named
+    assert r.with_enum_named("svc:CreateCustomizedActionType", named, formats, {"svc": owners}) == named
+
+
+def test_a_type_named_by_a_member_documented_as_holding_the_operations_subject_is_reached_through_it_when_left_out():
+    groups = model({"ModifyInstanceGroups": {"ClusterId": "String"}})
+    groups["shapes"]["ModifyInstanceGroupsIn"]["members"]["ClusterId"]["documentation"] = \
+        "<p>The ID of the cluster to which the instance group belongs.</p>"
+    named = [{"type": "cluster", "fill": {"ClusterId": "ClusterId"}}]
+    fields = {"InstanceGroups[].InstanceGroupId": "InstanceGroupId"}
+    assert r.with_subject_through("svc:ModifyInstanceGroups", named, {"ClusterId": "ClusterId"}, fields,
+                                  {"ClusterId"}, {"svc": groups}) == named + [
+        {"types": ["cluster"], "through": "InstanceGroups[].InstanceGroupId", "when": {"ClusterId": [None]}}]
+    # A member that must be given, or one not documented as holding the subject, is all that names the type.
+    assert r.with_subject_through("svc:ModifyInstanceGroups", named, {"ClusterId": "ClusterId"}, fields,
+                                  set(), {"svc": groups}) == named
+    groups["shapes"]["ModifyInstanceGroupsIn"]["members"]["ClusterId"]["documentation"] = "<p>The cluster.</p>"
+    assert r.with_subject_through("svc:ModifyInstanceGroups", named, {"ClusterId": "ClusterId"}, fields,
+                                  {"ClusterId"}, {"svc": groups}) == named
 
 
 # --------------------------------------------------------------------------- #
@@ -1032,7 +1037,7 @@ def rest_model(operations: dict[str, dict[str, str]], located: dict[str, dict[st
     return built
 
 
-def test_a_rest_request_reads_its_path_and_query_members_and_records_where_the_ones_it_reads_are(corrections, tmp_path):
+def test_a_rest_request_reads_its_path_and_query_members_and_records_where_the_ones_it_reads_are(isolated, tmp_path):
     svc = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}, "ListThings": {"Marker": "String"}},
                      {"GetThing": {"ThingName": "uri:Name", "Marker": "querystring:marker"},
                       "ListThings": {"Marker": "querystring:marker"}})
@@ -1053,7 +1058,7 @@ def test_a_member_two_clients_locate_apart_is_an_error():
         r.located_members({"one": one, "two": two}, "GetThing")
 
 
-def test_a_located_member_must_be_a_path_label_or_a_query_parameter(corrections, tmp_path):
+def test_a_located_member_must_be_a_path_label_or_a_query_parameter(isolated, tmp_path):
     write_models(tmp_path, {"svc": rest_model({"GetThing": {"ThingName": "String"}, "ListThings": {}},
                                               {"GetThing": {"ThingName": "uri:ThingName"}})})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
@@ -1068,8 +1073,8 @@ SPLIT = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": F
 SPLIT[0]["Actions"].append({"Name": "DescribeThing", "Resources": [{"Name": "thing"}]})
 
 
-def test_a_rest_models_operations_the_reference_lists_for_no_client_take_their_own_actions(corrections):
-    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+def test_a_rest_models_operations_the_reference_lists_for_no_client_take_their_own_actions(isolated):
+    isolated.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
     found = r.with_rest_operations(r.checked_actions(SPLIT), SPLIT, {"svc-v2": {"GetThing", "DescribeThing", "Gone"}})
     assert found["svc:GetThing"]["clients"] == ["svc", "svc-v2"]
     assert found["svc:DescribeThing"] == {"action": "svc:DescribeThing", "types": ["thing"], "clients": ["svc-v2"]}
@@ -1077,8 +1082,8 @@ def test_a_rest_models_operations_the_reference_lists_for_no_client_take_their_o
     assert "svc:Gone" not in found
 
 
-def test_a_namespace_reads_the_operations_of_the_rest_models_floci_routes_under_it(corrections, tmp_path):
-    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+def test_a_namespace_reads_the_operations_of_the_rest_models_floci_routes_under_it(isolated, tmp_path):
+    isolated.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
                             "svc-v2": rest_model({"DescribeThing": {"ThingName": "String"}},
                                                  {"DescribeThing": {"ThingName": "uri:ThingName"}})})
@@ -1097,8 +1102,8 @@ def test_a_namespace_reads_the_operations_of_the_rest_models_floci_routes_under_
     assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 0
 
 
-def test_verify_reports_a_rest_models_operation_whose_action_aws_no_longer_has(corrections, tmp_path):
-    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+def test_verify_reports_a_rest_models_operation_whose_action_aws_no_longer_has(isolated, tmp_path):
+    isolated.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
                             "svc-v2": rest_model({"DescribeThing": {"ThingName": "String"}},
                                                  {"DescribeThing": {"ThingName": "uri:ThingName"}})})
@@ -1209,7 +1214,6 @@ def test_controltower_entries_are_derived_without_operation_corrections(operatio
     from regen_partitions import resolve_botocore_data
 
     key = "controltower:" + operation
-    assert key not in r.CORRECTIONS
     document = json.loads(r.OUTPUT.read_text())
     data, _ = resolve_botocore_data(None)
     model = r.load_models(data, {"controltower"})
@@ -1262,8 +1266,6 @@ def test_no_inferred_identifier_metadata_or_withdrawn_redshift_rows():
     document = json.loads(r.OUTPUT.read_text())
     resource = document["operations"]["redshift:DescribeClusters"]["resources"][0]
     assert "arnOf" not in resource
-    assert "redshift:CreateCluster" not in r.CORRECTIONS
-    assert "redshift:AssociateDataShareConsumer" not in r.CORRECTIONS
 
 
 def test_sso_access_scope_does_not_authorize_target_applications():
@@ -1295,14 +1297,14 @@ def test_a_member_whose_enum_lists_two_of_the_actions_types_picks_the_type():
                "hostedzone": "arn:${Partition}:route53:::hostedzone/${Id}"}
     members = {"ResourceType": "ResourceType", "ResourceId": "ResourceId"}
     enums = {"ResourceType": {"healthcheck", "hostedzone"}}
-    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, enums) == [
+    assert r.picked_by_enum("route53:TagResource", ["healthcheck", "hostedzone"], formats, members, enums) == [
         {"type": "healthcheck", "fill": {"Id": "ResourceId"}, "when": {"ResourceType": ["healthcheck"]}},
         {"type": "hostedzone", "fill": {"Id": "ResourceId"}, "when": {"ResourceType": ["hostedzone"]}}]
     # An enum listing one of the action's types, or none of them, picks nothing.
-    assert r.picked_by_enum(["hostedzone"], formats, members, enums) is None
-    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, {"ResourceType": {"other"}}) is None
+    assert r.picked_by_enum("route53:TagResource", ["hostedzone"], formats, members, enums) is None
+    assert r.picked_by_enum("route53:TagResource", ["healthcheck", "hostedzone"], formats, members, {"ResourceType": {"other"}}) is None
     # Without a member naming the resource, the request names none of them.
-    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, {"ResourceType": "ResourceType"}, enums) is None
+    assert r.picked_by_enum("route53:TagResource", ["healthcheck", "hostedzone"], formats, {"ResourceType": "ResourceType"}, enums) is None
 
 
 def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_id_fills_it():
@@ -1311,7 +1313,8 @@ def test_an_enum_value_picks_a_type_ignoring_case_and_hyphens_and_the_resource_i
                "parameter": "arn:${Partition}:ssm:${Region}:${Account}:parameter/${ParameterNameWithoutLeadingSlash}"}
     members = {"ResourceType": "ResourceType", "ResourceId": "ResourceId"}
     enums = {"ResourceType": {"Document", "ManagedInstance", "Parameter", "Automation"}}
-    assert r.picked_by_enum(["document", "managed-instance", "parameter"], formats, members, enums) == [
+    assert r.picked_by_enum("ssm:AddTagsToResource", ["document", "managed-instance", "parameter"], formats, members,
+                            enums) == [
         {"type": "document", "fill": {"DocumentName": "ResourceId"}, "when": {"ResourceType": ["Document"]}},
         {"type": "managed-instance", "fill": {"InstanceId": "ResourceId"},
          "when": {"ResourceType": ["ManagedInstance"]}},
@@ -1328,3 +1331,239 @@ def test_a_member_whose_shape_is_named_after_the_type_names_it():
     assert r.resources_for("svc:GetPoolsByPath", ["pool"], FORMATS, members("Path"), shapes={"Path": "PoolName"}) == []
     assert r.resources_for("svc:GetThingsByPath", ["thing"], FORMATS, members("Paths[]"),
                            shapes={"Paths": "ThingName"}) == []
+
+
+# --------------------------------------------------------------------------- #
+# What botocore's documentation and shapes say a member names
+# --------------------------------------------------------------------------- #
+def documented(operation: str, fields: dict[str, tuple[str, str]], output: dict[str, str] | None = None,
+               protocol: str = "json") -> dict:
+    """A model whose operation takes the members given, each a shape name and its documentation."""
+    shapes = {"String": {"type": "string"}, "Strings": {"type": "list", "member": {"shape": "String"}},
+              "AccountId": {"type": "string", "pattern": "\\d{12}"},
+              "RoleArn": {"type": "string", "pattern": "arn:aws(-[\\w]+)*:iam::[0-9]{12}:role/.*"}}
+    shapes["In"] = {"type": "structure", "members": {name: {"shape": shape, "documentation": f"<p>{doc}</p>"}
+                                                     for name, (shape, doc) in fields.items()}}
+    spec = {"input": {"shape": "In"}}
+    if output:
+        shapes["Out"] = {"type": "structure", "members": {name: {"shape": shape} for name, shape in output.items()}}
+        spec["output"] = {"shape": "Out"}
+    return {"metadata": {"protocol": protocol, "endpointPrefix": "svc"}, "operations": {operation: spec}, "shapes": shapes}
+
+
+DOCUMENTED = {"pipeline": "arn:${Partition}:svc:${Region}:${Account}:pipeline/${PipelineName}",
+              "processor": "arn:${Partition}:svc:${Region}:${Account}:processor/${ProcessorId}",
+              "trail": "arn:${Partition}:svc:${Region}:${Account}:trail/${TrailName}",
+              "dashboard": "arn:${Partition}:svc:${Region}:${Account}:dashboard/${DashboardName}"}
+
+
+def test_a_member_whose_documentation_names_the_type_fills_it_or_is_found_by_its_service():
+    starts = {"svc": documented("StartPipelineExecution", {"name": ("String", "The name of the pipeline to start.")})}
+    assert r.with_documented("svc:StartPipelineExecution", ["pipeline"], DOCUMENTED, starts, []) == [
+        {"type": "pipeline", "fill": {"PipelineName": "name"}}]
+    # A name for an id variable: the type's service finds the resource by it, its id open when it finds none.
+    stops = {"svc": documented("StopProcessor", {"Name": ("String", "The name of the processor to stop.")})}
+    assert r.with_documented("svc:StopProcessor", ["processor"], DOCUMENTED, stops, []) == [
+        {"type": "processor", "fill": {}, "find": ["Name"]}]
+    # A type named only past the word the documentation stops at names nothing: a pipeline execution is no pipeline.
+    runs = {"svc": documented("GetRun", {"id": ("String", "The ID of the pipeline execution.")})}
+    assert r.with_documented("svc:GetRun", ["pipeline"], DOCUMENTED, runs, []) == []
+    # A type an ARN member of the request already holds takes no other member: an update's Name is the new name.
+    held = [{"types": ["pipeline"], "arn": "PipelineArn"}]
+    updates = {"svc": documented("UpdatePipeline", {"Name": ("String", "The name of the pipeline."),
+                                                    "PipelineArn": ("String", "The ARN of the pipeline.")})}
+    assert r.with_documented("svc:UpdatePipeline", ["pipeline"], DOCUMENTED, updates, held) == held
+
+
+def test_a_member_whose_documentation_says_it_is_an_arn_holds_one():
+    tags = {"svc": documented("AddTags", {"ResourceId": ("String", "Specifies the ARN of the trail or dashboard to "
+                                                                  "which one or more tags will be added.")})}
+    assert r.with_documented("svc:AddTags", ["dashboard", "trail"], DOCUMENTED, tags, []) == [
+        {"types": ["dashboard", "trail"], "arn": "ResourceId"}]
+    # A name or an ARN is a name, and an ARN of something else is no ARN of the action's types.
+    named = {"svc": documented("GetTrail", {"Name": ("String", "Specifies the name or the ARN of the trail.")})}
+    assert r.with_documented("svc:GetTrail", ["trail"], DOCUMENTED, named, []) == [
+        {"type": "trail", "fill": {"TrailName": "Name"}}]
+    keys = {"svc": documented("UntagResource", {"ResourceTagKeys": ("Strings", "The tag keys associated with the "
+                                                                              "resource ARN.")})}
+    assert r.with_documented("svc:UntagResource", ["trail"], DOCUMENTED, keys, []) == []
+    assert r.doc_head("the amazon resource name (arn) for which you want to describe the tags") == (
+        "the amazon resource name (arn)", None)
+
+
+def test_an_arn_member_whose_pattern_takes_another_services_arns_names_none_of_the_actions_resources():
+    models = {"svc": documented("CreatePipeline", {"roleArn": ("RoleArn", "The role it assumes.")})}
+    assert r.with_documented("svc:CreatePipeline", ["pipeline"], DOCUMENTED, models,
+                             [{"types": ["pipeline"], "arn": "roleArn"}]) == []
+    # A pattern whose ARN is optional, in a group of its own: CUR's billing view ARN.
+    views = documented("PutPipeline", {"viewArn": ("ViewArn", "The billing view.")})
+    views["shapes"]["ViewArn"] = {"type": "string",
+                                  "pattern": "(arn:aws(-cn)?:billing::[0-9]{12}:billingview/)?[a-zA-Z0-9_\\+=\\.\\-@].{1,30}"}
+    assert r.with_documented("svc:PutPipeline", ["pipeline"], DOCUMENTED, {"svc": views},
+                             [{"types": ["pipeline"], "arn": "viewArn"}]) == []
+
+
+def test_an_arn_member_documented_as_another_types_names_none_of_the_actions_resources():
+    # CreateExport's `Export.ExportArn`, "the ARN for this export", is the export's, of no type the action acts on.
+    model_ = documented("CreateTrailExport", {})
+    model_["shapes"]["Export"] = {"type": "structure", "members": {
+        "ExportArn": {"shape": "String", "documentation": "<p>The Amazon Resource Name (ARN) for this dashboard.</p>"}}}
+    model_["shapes"]["In"]["members"]["Export"] = {"shape": "Export"}
+    assert r.with_documented("svc:CreateTrailExport", ["trail"], DOCUMENTED, {"svc": model_},
+                             [{"types": ["trail"], "arn": "Export.ExportArn"}]) == []
+    # One documented as an acted-on type's is kept, and so is one named after it, whatever its documentation says.
+    model_["shapes"]["Export"]["members"]["ExportArn"]["documentation"] = "<p>The ARN of the trail.</p>"
+    assert r.with_documented("svc:CreateTrailExport", ["trail"], DOCUMENTED, {"svc": model_},
+                             [{"types": ["trail"], "arn": "Export.ExportArn"}]) == [{"types": ["trail"], "arn": "Export.ExportArn"}]
+    named = documented("PutTrailSetting", {"trailArn": ("String", "The Amazon Resource Name (ARN) of the dashboard.")})
+    assert r.with_documented("svc:PutTrailSetting", ["trail"], DOCUMENTED, {"svc": named},
+                             [{"types": ["trail"], "arn": "trailArn"}]) == [{"types": ["trail"], "arn": "trailArn"}]
+
+
+def test_a_structures_field_and_each_lists_element_name_the_type_they_are_named_after():
+    model_ = documented("CreateBudget", {})
+    model_["shapes"]["Budget"] = {"type": "structure", "members": {"BudgetName": {"shape": "String"},
+                                                                   "BillingViewArn": {"shape": "String"}}}
+    model_["shapes"]["In"]["members"]["Budget"] = {"shape": "Budget"}
+    formats = {"budget": "arn:${Partition}:svc::${Account}:budget/${BudgetName}"}
+    assert r.with_documented("svc:CreateBudget", ["budget"], formats, {"svc": model_},
+                             [{"type": "budget", "fill": {}}]) == [{"type": "budget", "fill": {"BudgetName": "Budget.BudgetName"}}]
+    # A field of each element of a list of structures, as of each value of a map.
+    entries = documented("PutEvents", {})
+    entries["shapes"]["Entry"] = {"type": "structure", "members": {"BusName": {"shape": "String"}}}
+    entries["shapes"]["Entries"] = {"type": "list", "member": {"shape": "Entry"}}
+    entries["shapes"]["In"]["members"]["Entries"] = {"shape": "Entries"}
+    assert r.map_fields({"svc": entries}, "PutEvents") == {"Entries[].BusName": "BusName"}
+
+
+def test_the_id_a_create_answers_beside_another_types_arn_is_that_types():
+    model_ = documented("TerminateJobFlows", {"JobFlowIds": ("Strings", "A list of job flows to be shut down.")})
+    model_["operations"]["RunJobFlow"] = {"input": {"shape": "In"}, "output": {"shape": "RunOut"}}
+    model_["shapes"]["RunOut"] = {"type": "structure", "members": {"JobFlowId": {"shape": "String"},
+                                                                   "ClusterArn": {"shape": "String"}}}
+    assert r.created_aliases({"svc": model_}) == {"jobflow": "cluster"}
+    formats = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterId}"}
+    assert r.with_documented("svc:TerminateJobFlows", ["cluster"], formats, {"svc": model_}, []) == [
+        {"type": "cluster", "fill": {"ClusterId": "JobFlowIds[]"}}]
+
+
+def test_an_account_id_member_fills_an_account_id_variable():
+    models = {"svc": documented("CreateAssignment", {"TargetId": ("AccountId", "TargetID is an account identifier.")})}
+    formats = {"Account": "arn:${Partition}:svc:::account/${AccountId}"}
+    assert r.with_documented("svc:CreateAssignment", ["Account"], formats, models, []) == [
+        {"type": "Account", "fill": {"AccountId": "TargetId"}}]
+
+
+def test_a_non_create_about_a_type_its_action_does_not_act_on_reaches_the_acted_types_through_its_service():
+    formats = {"build": "arn:${Partition}:svc:${Region}:${Account}:build/${BuildId}",
+               "project": "arn:${Partition}:svc:${Region}:${Account}:project/${ProjectName}"}
+    gets = {"svc": documented("BatchGetBuilds", {"ids": ("Strings", "The IDs of the builds.")})}
+    assert r.with_documented("svc:BatchGetBuilds", ["project"], formats, gets, []) == [
+        {"types": ["project"], "through": "ids[]"}]
+    # A create's bare name is the new resource's.
+    creates = {"svc": documented("CreateBuild", {"name": ("String", "The name of the build.")})}
+    assert r.with_documented("svc:CreateBuild", ["project"], formats, creates, []) == []
+
+
+def test_an_enum_value_the_word_setting_two_formats_apart_abbreviates_picks_the_type():
+    formats = {"loadbalancer": "arn:${Partition}:svc:${Region}:${Account}:loadbalancer/${LoadBalancerName}",
+               "loadbalancer/app/": "arn:${Partition}:svc:${Region}:${Account}:loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}",
+               "loadbalancer/gwy/": "arn:${Partition}:svc:${Region}:${Account}:loadbalancer/gwy/${LoadBalancerName}/${LoadBalancerId}"}
+    models = {"svc": documented("CreateLoadBalancer", {"Name": ("String", "The name of the load balancer."),
+                                                       "Type": ("String", "The type of load balancer. The default is application.")})}
+    picked = r.picked_by_enum("svc:CreateLoadBalancer", ["loadbalancer/app/", "loadbalancer/gwy/"], formats,
+                              {"Name": "Name", "Type": "Type"}, {"Type": {"application", "gateway", "network"}}, models)
+    assert picked == [
+        {"type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}},
+        {"type": "loadbalancer/gwy/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["gateway"]}}]
+
+
+def test_two_types_differing_by_one_variable_are_marked_for_the_default_its_service_gives():
+    formats = {"rule-on-default-bus": "arn:${Partition}:svc:${Region}:${Account}:rule/${RuleName}",
+               "rule-on-custom-bus": "arn:${Partition}:svc:${Region}:${Account}:rule/${BusName}/${RuleName}",
+               "bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}"}
+    resources = [{"type": "rule-on-custom-bus", "fill": {"BusName": "BusName", "RuleName": "Name"}},
+                 {"type": "rule-on-default-bus", "fill": {"RuleName": "Name"}}]
+    assert r.with_default_pairs(resources, formats, {"BusName"}) == [
+        dict(resources[0], unlessDefault={"BusName": "bus"}), dict(resources[1], whenDefault={"BusName": "bus"})]
+    # A required member always names its bus.
+    assert r.with_default_pairs(resources, formats, set()) == resources
+
+
+def test_a_resource_one_optional_member_qualifies_is_named_only_when_the_request_gives_it():
+    resources = [{"type": "dbname", "fill": {"ClusterName": "ClusterIdentifier", "DbName": "DbName"}},
+                 {"type": "dbuser", "fill": {"ClusterName": "ClusterIdentifier", "DbUser": "DbUser"}}]
+    assert r.with_optional_qualifier(resources, {"ClusterIdentifier", "DbName"}) == [
+        dict(resources[0], unless={"DbName": [None]}), resources[1]]
+    assert r.with_optional_qualifier(resources, {"ClusterIdentifier"}) == resources
+
+
+def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():
+    assert r.pattern_words("arn:aws:svc:[a-z0-9-]+:([0-9]{12}):(bus-v2|subscriber|source-v2\\/(a|b))\\/[A-Za-z]+") == {
+        "bus-v2", "subscriber", "source-v2"}
+    assert r.pattern_words("(arn:aws[\\w-]*:svc:[a-z]+:[0-9]{12}:bus\\/)?[A-Za-z]+") == {"bus"}
+    formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}",
+               "busv2": "arn:${Partition}:svc:${Region}:${Account}:busv2/${BusName}/${OpaqueId}"}
+    model_ = documented("CreateBus", {"Name": ("String", "The name of the bus.")})
+    # A client whose patterns name only the versioned type reads the other as it.
+    assert r.narrowed([{"type": "bus", "fill": {"BusName": "Name"}}], {"busv2"}, model_, "CreateBus", formats) == [
+        {"type": "busv2", "fill": {"BusName": "Name"}}]
+    assert r.narrowed([{"type": "bus", "fill": {"BusName": "Name"}}], {"bus", "busv2"}, model_, "CreateBus", formats) == [
+        {"type": "bus", "fill": {"BusName": "Name"}}]
+
+
+def test_a_lone_resource_id_in_a_rest_request_is_found_by_its_path_labels_and_the_member_named_after_it():
+    model_ = documented("DescribeUser", {"AwsAccountId": ("String", "The account."), "Namespace": ("String", "The namespace."),
+                                         "UserName": ("String", "The name of the user that you want to describe.")},
+                        protocol="rest-json")
+    model_["operations"]["DescribeUser"]["http"] = {
+        "method": "GET", "requestUri": "/accounts/{AwsAccountId}/namespaces/{Namespace}/users/{UserName}"}
+    for name in ("AwsAccountId", "Namespace", "UserName"):
+        model_["shapes"]["In"]["members"][name].update(location="uri", locationName=name)
+    formats = {"user": "arn:${Partition}:svc:${Region}:${Account}:user/${ResourceId}"}
+    assert r.with_documented("svc:DescribeUser", ["user"], formats, {"svc": model_}, []) == [
+        {"type": "user", "fill": {}, "find": ["AwsAccountId", "Namespace", "UserName"]}]
+    # A member holding the user's ARN names it by that ARN, and its service has nothing to find.
+    embeds = documented("GenerateEmbedUrlForRegisteredUser", {"AwsAccountId": ("String", "The account."),
+                                                              "UserArn": ("String", "The ARN of the user.")},
+                        protocol="rest-json")
+    embeds["operations"]["GenerateEmbedUrlForRegisteredUser"]["http"] = {
+        "method": "POST", "requestUri": "/accounts/{AwsAccountId}/embed-url/registered-user"}
+    embeds["shapes"]["In"]["members"]["AwsAccountId"].update(location="uri", locationName="AwsAccountId")
+    held = [{"types": ["user"], "arn": "UserArn"}]
+    assert r.with_documented("svc:GenerateEmbedUrlForRegisteredUser", ["user"], formats, {"svc": embeds}, held) == held
+    # A label after the member's own names something inside it: a membership's member is not its group's.
+    members_ = documented("DescribeGroupMembership", {name: ("String", "A label.") for name in
+                                                      ("AwsAccountId", "Namespace", "GroupName", "MemberName")},
+                          protocol="rest-json")
+    members_["operations"]["DescribeGroupMembership"]["http"] = {
+        "method": "GET",
+        "requestUri": "/accounts/{AwsAccountId}/namespaces/{Namespace}/groups/{GroupName}/members/{MemberName}"}
+    for name in ("AwsAccountId", "Namespace", "GroupName", "MemberName"):
+        members_["shapes"]["In"]["members"][name].update(location="uri", locationName=name)
+    groups = {"group": "arn:${Partition}:svc:${Region}:${Account}:group/${ResourceId}"}
+    found = [{"type": "group", "fill": {}, "find": ["GroupName"]}]
+    assert r.with_documented("svc:DescribeGroupMembership", ["group"], groups, {"svc": members_}, found) == [
+        {"type": "group", "fill": {}, "find": ["AwsAccountId", "Namespace", "GroupName"]}]
+
+
+def test_a_resource_id_naming_whatever_the_action_acts_on_reaches_it_through_its_service():
+    formats = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterId}",
+               "studio": "arn:${Partition}:svc:${Region}:${Account}:studio/${StudioId}"}
+    models = {"svc": documented("AddTags", {"ResourceId": ("String", "The resource identifier to tag."),
+                                            "ClusterId": ("String", "The cluster that scopes the call.")})}
+    # Another member then scopes the call rather than names a resource.
+    assert r.with_documented("svc:AddTags", ["cluster", "studio"], formats, models,
+                             [{"type": "cluster", "fill": {"ClusterId": "ClusterId"}}]) == [
+        {"types": ["cluster", "studio"], "through": "ResourceId"}]
+
+
+def test_a_resource_id_variable_takes_a_member_named_so_and_a_bare_id_the_member_named_after_the_type():
+    # CreateOpsMetadata names `opsmetadata/${ResourceId}` by its `ResourceId`.
+    assert r._filling("ResourceId", "opsmetadata", 1, {"ResourceId": "ResourceId", "Tags": "Tags[]"}, set()) == \
+        "ResourceId"
+    # A QuickSight ingestion's `ResourceId` is its `IngestionId` when no member is named so.
+    assert r._filling("ResourceId", "ingestion", 1, {"IngestionId": "IngestionId"}, set()) == "IngestionId"
+    # A bare `Id` is whatever the operation is about: the tenant's is its `DistributionTenantId`.
+    assert r._filling("Id", "distributiontenant", 1, {"Id": "Id", "DistributionTenantId": "DistributionTenantId"},
+                      {"Id"}) == "DistributionTenantId"

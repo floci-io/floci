@@ -305,7 +305,7 @@ public class DurableExecutionService implements Resettable {
         List<DurableOperation> operations;
         synchronized (lockFor(arn)) {
             DurableExecution execution = loadWithCurrentToken(arn, checkpointToken);
-            operations = new ArrayList<>(execution.getOperations().values());
+            operations = execution.replayedOperations();
         }
         List<Cursored<DurableOperation>> indexed = new ArrayList<>(operations.size());
         for (int i = 0; i < operations.size(); i++) {

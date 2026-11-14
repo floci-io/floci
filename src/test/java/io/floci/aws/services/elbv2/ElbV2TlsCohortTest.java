@@ -203,7 +203,7 @@ class ElbV2TlsCohortTest {
         listener.setLoadBalancerArn("arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/" + name + "/1");
         listener.setPort(8443);
         listener.setProtocol("HTTPS");
-        listener.setCertificates(List.of(certificateArn));
+        listener.setDefaultCertificate(certificateArn);
         return listener;
     }
 
