@@ -6,7 +6,6 @@ import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.RedshiftAuditSql;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChange;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChanges;
-import io.floci.aws.services.redshift.RedshiftDbIdentityProvisioner;
 import io.floci.aws.services.redshift.proxy.S3CopySimulator.S3TransferException;
 import io.floci.aws.services.redshift.spectrum.PostgresExtendedBackendSession;
 import io.floci.aws.services.redshift.spectrum.SpectrumColumn;
@@ -102,15 +101,6 @@ public class RedshiftInterceptingBridge {
     private boolean extendedSpectrumError;
     private boolean rolledBackInCycle;
     private boolean auditCycleFailed;
-    private boolean restrictSessionAuthorization;
-
-    void restrictSessionAuthorization(boolean restrict) {
-        this.restrictSessionAuthorization = restrict;
-    }
-
-    static boolean isRestrictedSessionAuthorization(String sql) {
-        return RedshiftDbIdentityProvisioner.isRestrictedSessionCommand(sql);
-    }
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService) {
         this(client, backend, s3Service, iamService, null);
@@ -294,12 +284,6 @@ public class RedshiftInterceptingBridge {
             finishCopyCycle(sync, backendOut, true);
         }
         String sql = message.getSql();
-        if (restrictSessionAuthorization && isRestrictedSessionAuthorization(sql)) {
-            coordinator.register(BackendResponseCoordinator.Operation.SIMPLE_QUERY, null);
-            write(client.getOutputStream(), errorResponse("42501", "permission denied to set session authorization"));
-            reportLocalReady();
-            return;
-        }
         publishActivity(sql);
         if (spectrumInterceptor != null) {
             SpectrumInterceptor.Decision[] decision = new SpectrumInterceptor.Decision[1];
@@ -372,10 +356,6 @@ public class RedshiftInterceptingBridge {
     private void handleParse(PostgresWireDecoder decoder, PostgresWireDecoder.FrontendMessage message,
             OutputStream backendOut) throws IOException {
         PostgresWireDecoder.ParseMessage parse = decoder.decodeParse(message);
-        if (restrictSessionAuthorization && isRestrictedSessionAuthorization(parse.sql())) {
-            writeParseSpectrumError(new SpectrumReadException("42501", "permission denied to set session authorization"));
-            return;
-        }
         // A Parse with an already-used statement name (the unnamed statement, "", above all) redefines
         // it, per protocol; without this, a later non-Spectrum statement reusing that name would still
         // resolve to the stale Spectrum plan in handleBind/handleDescribe/handleExecute.

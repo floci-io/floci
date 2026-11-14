@@ -314,9 +314,6 @@ public class RedshiftAuthProxy {
                 RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
                         clusterAccountId, roles.iamRoleArns(), bridgeSpectrum, clusterKey, login.database,
                         roles.defaultIamRoleArn(), bridgeAudit, login.username, parquetWriter);
-                if (session.iamRole() != null) {
-                    bridge.restrictSessionAuthorization(true);
-                }
                 try (CopyLoadErrorLog loadErrors = new CopyLoadErrorLog(() -> openAdminConnection(login.database))) {
                     bridge.loadErrorSink(loadErrors);
                     bridge.run();
@@ -369,7 +366,8 @@ public class RedshiftAuthProxy {
                         admin, clusterKey, cred.databaseRole(), cred.autoCreate(), cred.dbGroups(),
                         () -> openAdminConnection(database));
                 leaseCloser.set(prepared.releaseLease());
-                return new PostgresProtocolHandler.HandoverOutcome(prepared.databaseRole(), prepared.releaseLease());
+                return new PostgresProtocolHandler.HandoverOutcome(
+                        prepared.databaseRole(), prepared.backendPassword(), prepared.releaseLease());
             }
         };
     }

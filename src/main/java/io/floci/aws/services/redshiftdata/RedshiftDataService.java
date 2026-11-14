@@ -17,7 +17,6 @@ import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.RedshiftAuditSql;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChange;
 import io.floci.aws.services.redshift.RedshiftAuditSql.UserChanges;
-import io.floci.aws.services.redshift.RedshiftDbIdentityProvisioner;
 import io.floci.aws.services.redshift.proxy.CopyJobSql;
 import io.floci.aws.services.redshift.proxy.RedshiftSqlInterceptor;
 import io.floci.aws.services.redshift.spectrum.BackendSql;
@@ -424,9 +423,6 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
         RedshiftDataResourceResolver.DatabaseTarget target = resolved.target();
-        if (target.dbIdentity() != null && RedshiftDbIdentityProvisioner.isRestrictedSessionCommand(sql)) {
-            throw new AwsException("ValidationException", "permission denied to set session authorization", 400);
-        }
 
         RedshiftDataStatementStore.StoredStatement stored = newStatement(request);
         stored.sql = sql;
@@ -917,13 +913,6 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
         ResolvedTarget resolved = resolveTarget(request, region, owner);
         RedshiftDataResourceResolver.DatabaseTarget target = resolved.target();
-        if (target.dbIdentity() != null) {
-            for (String item : sqls) {
-                if (RedshiftDbIdentityProvisioner.isRestrictedSessionCommand(item)) {
-                    throw new AwsException("ValidationException", "permission denied to set session authorization", 400);
-                }
-            }
-        }
 
         RedshiftDataStatementStore.StoredStatement parent = newStatement(request);
         parent.batch = true;

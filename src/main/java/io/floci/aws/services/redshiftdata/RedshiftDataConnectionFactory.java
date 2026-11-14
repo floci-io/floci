@@ -28,28 +28,31 @@ class RedshiftDataConnectionFactory {
     }
 
     Connection open(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
-        Connection connection = openRaw(target);
         RedshiftDataResourceResolver.DbIdentity dbIdentity = target.dbIdentity();
         if (identityProvisioner == null || dbIdentity == null) {
-            return connection;
+            return openRaw(target, target.user(), target.password());
+        }
+        String backendKey = target.backendKey() != null ? target.backendKey() : target.arn();
+        RedshiftDbIdentityProvisioner.PreparedIdentity prepared;
+        try (Connection admin = openRaw(target, target.user(), target.password())) {
+            prepared = identityProvisioner.prepare(
+                    admin, backendKey, dbIdentity.role(), dbIdentity.autoCreate(),
+                    dbIdentity.dbGroups(), () -> openRaw(target, target.user(), target.password()));
         }
         try {
-            String backendKey = target.backendKey() != null ? target.backendKey() : target.arn();
-            Runnable releaseLease = identityProvisioner.applyToJdbc(
-                    connection, backendKey, dbIdentity.role(), dbIdentity.autoCreate(),
-                    dbIdentity.dbGroups(), () -> openRaw(target));
-            return wrapWithRelease(connection, releaseLease);
+            // The session authenticates as the role itself, so PostgreSQL refuses any switch to
+            // another user and loads the role's own ALTER USER ... SET defaults.
+            String password = prepared.backendPassword() != null ? prepared.backendPassword() : target.password();
+            Connection connection = openRaw(target, prepared.databaseRole(), password);
+            return wrapWithRelease(connection, prepared.releaseLease());
         } catch (SQLException | RuntimeException failure) {
-            try {
-                connection.close();
-            } catch (SQLException suppressed) {
-                failure.addSuppressed(suppressed);
-            }
+            prepared.releaseLease().run();
             throw failure;
         }
     }
 
-    private Connection openRaw(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
+    private Connection openRaw(RedshiftDataResourceResolver.DatabaseTarget target,
+                               String user, String password) throws SQLException {
         // stringtype=unspecified: Redshift Data API parameter values are always strings on the
         // wire, so every bind goes through PreparedStatement.setString. With the default
         // (varchar) the driver stamps an explicit type OID and the server refuses
@@ -59,8 +62,8 @@ class RedshiftDataConnectionFactory {
         String url = "jdbc:postgresql://" + target.host() + ":" + target.port() + "/" + target.database()
                 + "?sslmode=disable&stringtype=unspecified&ApplicationName=" + applicationName;
         Properties props = new Properties();
-        props.setProperty("user", target.user());
-        props.setProperty("password", target.password());
+        props.setProperty("user", user);
+        props.setProperty("password", password);
         props.setProperty("ApplicationName", applicationName);
         props.setProperty("connectTimeout", "5");
         return driver.connect(url, props);

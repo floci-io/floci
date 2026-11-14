@@ -12,35 +12,26 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 
 /**
  * Provisions or verifies the PostgreSQL role and temporary {@code DbGroups} memberships
- * corresponding to an IAM-derived Redshift credential, and switches the session authorization
- * to that non-superuser role.
+ * corresponding to an IAM-derived Redshift credential, and gives the session a password to log
+ * in as that role. Logging in as the role, rather than switching to it from the master, leaves
+ * the blocking of a switch to another user to PostgreSQL, which authorizes
+ * {@code SET SESSION AUTHORIZATION} against the authenticated user, and loads the role's own
+ * {@code ALTER USER ... SET} defaults as a direct login does.
  */
 @ApplicationScoped
 public class RedshiftDbIdentityProvisioner {
 
     private static final Logger LOG = Logger.getLogger(RedshiftDbIdentityProvisioner.class);
 
-    private enum TokenKind {
-        WORD,
-        STRING,
-        PUNCT
-    }
-
-    private record SqlToken(TokenKind kind, String value) { }
-
-    public static boolean isRestrictedSessionCommand(String sql) {
-        if (sql == null || sql.isBlank()) {
-            return false;
-        }
-        return containsRestrictedStatement(tokenizeSql(sql));
-    }
-
-    public record PreparedIdentity(String databaseRole, Runnable releaseLease) { }
+    /**
+     * {@code backendPassword} is the password to log in as {@code databaseRole}, or {@code null}
+     * when the role is the connection's own master user, which logs in with the master password.
+     */
+    public record PreparedIdentity(String databaseRole, String backendPassword, Runnable releaseLease) { }
 
     @FunctionalInterface
     public interface ConnectionSupplier {
@@ -48,16 +39,20 @@ public class RedshiftDbIdentityProvisioner {
     }
 
     private final TempGroupGrantTracker grantTracker;
+    private final TempRolePasswordTracker passwordTracker;
 
     @Inject
-    public RedshiftDbIdentityProvisioner(TempGroupGrantTracker grantTracker) {
+    public RedshiftDbIdentityProvisioner(TempGroupGrantTracker grantTracker,
+                                         TempRolePasswordTracker passwordTracker) {
         this.grantTracker = grantTracker;
+        this.passwordTracker = passwordTracker;
     }
 
     /**
      * Ensures {@code roleName} exists (creating it when {@code autoCreate} is true), validates
-     * every group in {@code dbGroups}, and grants temporary membership for groups the role does
-     * not already belong to. Must be called on a master/admin connection.
+     * every group in {@code dbGroups}, grants temporary membership for groups the role does
+     * not already belong to, and installs the temporary login password. Must be called on a
+     * master/admin connection.
      */
     public PreparedIdentity prepare(Connection adminConnection, String backendKey,
                                     String roleName, boolean autoCreate, List<String> dbGroups,
@@ -65,10 +60,11 @@ public class RedshiftDbIdentityProvisioner {
         if (roleName == null || roleName.isBlank()) {
             throw new SQLException("Database role name must not be blank", "28000");
         }
-        ensureLoginRole(adminConnection, roleName, autoCreate);
+        grantPublicSchemaAccess(adminConnection);
+        RoleInfo role = ensureLoginRole(adminConnection, roleName, autoCreate);
 
         List<String> groupsToGrant = resolveTemporaryGroups(adminConnection, dbGroups);
-        TempGroupGrantTracker.Lease lease = grantTracker.acquire(
+        TempGroupGrantTracker.Lease groupLease = grantTracker.acquire(
                 backendKey,
                 roleName,
                 groupsToGrant,
@@ -78,31 +74,40 @@ public class RedshiftDbIdentityProvisioner {
                         "REVOKE " + quoteIdentifier(group) + " FROM " + quoteIdentifier(roleName)),
                 group -> isDirectMember(adminConnection, roleName, group));
 
-        Runnable releaseHandle = () -> releaseLease(lease, roleName, adminConnectionFactory);
-        return new PreparedIdentity(roleName, releaseHandle);
+        TempRolePasswordTracker.Lease passwordLease = null;
+        if (!role.currentUser()) {
+            try {
+                passwordLease = passwordTracker.acquire(
+                        backendKey,
+                        roleName,
+                        () -> readPasswordHash(adminConnection, roleName),
+                        password -> setPassword(adminConnection, roleName, password));
+            } catch (SQLException | RuntimeException failure) {
+                releaseGroups(groupLease, roleName, adminConnectionFactory);
+                throw failure;
+            }
+        }
+
+        TempRolePasswordTracker.Lease heldPassword = passwordLease;
+        Runnable releaseHandle = () -> {
+            releaseGroups(groupLease, roleName, adminConnectionFactory);
+            releasePassword(heldPassword, roleName, adminConnectionFactory);
+        };
+        return new PreparedIdentity(roleName, heldPassword == null ? null : heldPassword.password(), releaseHandle);
     }
+
+    private record RoleInfo(boolean canLogin, boolean currentUser) { }
 
     /**
-     * Provisions the target role/groups on {@code connection} (currently authenticated as master)
-     * and switches the connection's session authorization to {@code roleName}.
+     * Redshift gives every user CREATE and USAGE on the public schema, whereas PostgreSQL 15+
+     * revokes CREATE on it from PUBLIC. The grant is per database, and to PUBLIC so that users
+     * created with CREATE USER are covered as well as auto-created IAM users.
      */
-    public Runnable applyToJdbc(Connection connection, String backendKey,
-                                String roleName, boolean autoCreate, List<String> dbGroups,
-                                ConnectionSupplier adminConnectionFactory) throws SQLException {
-        PreparedIdentity prepared = prepare(
-                connection, backendKey, roleName, autoCreate, dbGroups, adminConnectionFactory);
-        try {
-            executeSql(connection, "SET SESSION AUTHORIZATION " + quoteIdentifier(prepared.databaseRole()));
-            return prepared.releaseLease();
-        } catch (SQLException | RuntimeException failure) {
-            prepared.releaseLease().run();
-            throw failure;
-        }
+    private static void grantPublicSchemaAccess(Connection connection) throws SQLException {
+        executeSql(connection, "GRANT USAGE, CREATE ON SCHEMA public TO PUBLIC");
     }
 
-    private record RoleInfo(boolean canLogin, boolean privileged, boolean currentUser) { }
-
-    private void ensureLoginRole(Connection connection, String roleName, boolean autoCreate) throws SQLException {
+    private RoleInfo ensureLoginRole(Connection connection, String roleName, boolean autoCreate) throws SQLException {
         if (roleName.startsWith("pg_")) {
             throw new SQLException("role \"" + roleName + "\" is not permitted for IAM session handover", "28000");
         }
@@ -117,23 +122,17 @@ public class RedshiftDbIdentityProvisioner {
                 throw new SQLException("role \"" + roleName + "\" could not be created", "28000");
             }
         }
-        if (info.privileged() || info.currentUser()) {
-            throw new SQLException("role \"" + roleName + "\" is not permitted for IAM session handover", "28000");
-        }
         if (!info.canLogin()) {
             throw new SQLException("role \"" + roleName + "\" is not permitted to log in", "28000");
         }
+        return info;
     }
 
     private void createLoginRole(Connection connection, String roleName) throws SQLException {
-        String quotedRole = quoteIdentifier(roleName);
-        String sql = "CREATE ROLE " + quotedRole
+        String sql = "CREATE ROLE " + quoteIdentifier(roleName)
                 + " WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE";
         try {
             executeSql(connection, sql);
-            // PostgreSQL 15+ revokes CREATE on schema public from PUBLIC, whereas Redshift
-            // allows newly auto-created users to create tables in the default public schema.
-            executeSql(connection, "GRANT USAGE, CREATE ON SCHEMA public TO " + quotedRole);
         } catch (SQLException failure) {
             // Two concurrent logins with AutoCreate=true may race on CREATE ROLE.
             String state = failure.getSQLState();
@@ -167,18 +166,14 @@ public class RedshiftDbIdentityProvisioner {
     }
 
     private static RoleInfo queryRoleInfo(Connection connection, String roleName) throws SQLException {
-        String sql = "SELECT rolcanlogin, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, "
-                + "rolname = current_user FROM pg_catalog.pg_roles WHERE rolname = ?";
+        String sql = "SELECT rolcanlogin, rolname = current_user FROM pg_catalog.pg_roles WHERE rolname = ?";
         try (PreparedStatement ps = connection.prepareStatement(sql)) {
             ps.setString(1, roleName);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
                     return null;
                 }
-                boolean canLogin = rs.getBoolean(1);
-                boolean privileged = rs.getBoolean(2) || rs.getBoolean(3) || rs.getBoolean(4) || rs.getBoolean(5);
-                boolean currentUser = rs.getBoolean(6);
-                return new RoleInfo(canLogin, privileged, currentUser);
+                return new RoleInfo(rs.getBoolean(1), rs.getBoolean(2));
             }
         }
     }
@@ -208,8 +203,23 @@ public class RedshiftDbIdentityProvisioner {
         }
     }
 
-    private static void releaseLease(TempGroupGrantTracker.Lease lease, String roleName,
-                                     ConnectionSupplier adminConnectionFactory) {
+    private static String readPasswordHash(Connection connection, String roleName) throws SQLException {
+        String sql = "SELECT rolpassword FROM pg_catalog.pg_authid WHERE rolname = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+            ps.setString(1, roleName);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getString(1) : null;
+            }
+        }
+    }
+
+    private static void setPassword(Connection connection, String roleName, String password) throws SQLException {
+        String literal = password == null ? "NULL" : "'" + password.replace("'", "''") + "'";
+        executeSql(connection, "ALTER ROLE " + quoteIdentifier(roleName) + " PASSWORD " + literal);
+    }
+
+    private static void releaseGroups(TempGroupGrantTracker.Lease lease, String roleName,
+                                      ConnectionSupplier adminConnectionFactory) {
         try {
             lease.release(group -> {
                 try (Connection admin = adminConnectionFactory.open()) {
@@ -221,6 +231,18 @@ public class RedshiftDbIdentityProvisioner {
         }
     }
 
+    private static void releasePassword(TempRolePasswordTracker.Lease lease, String roleName,
+                                        ConnectionSupplier adminConnectionFactory) {
+        if (lease == null) {
+            return;
+        }
+        lease.release(storedHash -> {
+            try (Connection admin = adminConnectionFactory.open()) {
+                setPassword(admin, roleName, storedHash);
+            }
+        });
+    }
+
     private static void executeSql(Connection connection, String sql) throws SQLException {
         try (Statement stmt = connection.createStatement()) {
             stmt.execute(sql);
@@ -229,275 +251,5 @@ public class RedshiftDbIdentityProvisioner {
 
     public static String quoteIdentifier(String identifier) {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
-    }
-
-    private static boolean containsRestrictedStatement(List<SqlToken> tokens) {
-        int i = 0;
-        int n = tokens.size();
-        while (i < n) {
-            while (i < n && isSemicolon(tokens.get(i))) {
-                i++;
-            }
-            if (i >= n) {
-                break;
-            }
-            int stmtStart = i;
-            while (i < n && !isSemicolon(tokens.get(i))) {
-                i++;
-            }
-            int stmtEnd = i;
-            if (isStatementRestricted(tokens, stmtStart, stmtEnd)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean isStatementRestricted(List<SqlToken> tokens, int start, int end) {
-        if (isWord(tokens, start, end, "do")) {
-            return true;
-        }
-        for (int k = start; k < end; k++) {
-            SqlToken current = tokens.get(k);
-            if (current.kind() != TokenKind.WORD) {
-                continue;
-            }
-            String word = current.value();
-            if ("reset".equals(word)) {
-                if (isWord(tokens, k + 1, end, "all")) {
-                    return true;
-                }
-                if (isWord(tokens, k + 1, end, "session") && isWord(tokens, k + 2, end, "authorization")) {
-                    return true;
-                }
-            } else if ("discard".equals(word)) {
-                if (isWord(tokens, k + 1, end, "all")) {
-                    return true;
-                }
-            } else if ("set".equals(word)) {
-                int idx = k + 1;
-                if (isWord(tokens, idx, end, "session") || isWord(tokens, idx, end, "local")) {
-                    if (isWord(tokens, idx, end, "session") && isWord(tokens, idx + 1, end, "authorization")) {
-                        return true;
-                    }
-                    idx++;
-                }
-                if (isWord(tokens, idx, end, "session_authorization")) {
-                    return true;
-                }
-                if (isWord(tokens, idx, end, "session") && isWord(tokens, idx + 1, end, "authorization")) {
-                    return true;
-                }
-            } else if ("set_config".equals(word) && isPunct(tokens, k + 1, end, "(")) {
-                if (isRestrictedSetConfigCall(tokens, k + 2, end)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private static boolean isRestrictedSetConfigCall(List<SqlToken> tokens, int argStart, int end) {
-        List<SqlToken> firstArg = new ArrayList<>();
-        int depth = 1;
-        for (int k = argStart; k < end && depth > 0; k++) {
-            SqlToken token = tokens.get(k);
-            if (token.kind() == TokenKind.PUNCT) {
-                if ("(".equals(token.value())) {
-                    depth++;
-                } else if (")".equals(token.value())) {
-                    depth--;
-                    if (depth == 0) {
-                        break;
-                    }
-                } else if (",".equals(token.value()) && depth == 1) {
-                    break;
-                }
-            }
-            firstArg.add(token);
-        }
-        if (firstArg.size() != 1 || firstArg.get(0).kind() != TokenKind.STRING) {
-            return true;
-        }
-        String gucName = firstArg.get(0).value().trim().toLowerCase(Locale.ROOT);
-        return "session_authorization".equals(gucName);
-    }
-
-    private static boolean isSemicolon(SqlToken token) {
-        return token.kind() == TokenKind.PUNCT && ";".equals(token.value());
-    }
-
-    private static boolean isWord(List<SqlToken> tokens, int index, int end, String expected) {
-        return index < end
-                && tokens.get(index).kind() == TokenKind.WORD
-                && expected.equals(tokens.get(index).value());
-    }
-
-    private static boolean isPunct(List<SqlToken> tokens, int index, int end, String expected) {
-        return index < end
-                && tokens.get(index).kind() == TokenKind.PUNCT
-                && expected.equals(tokens.get(index).value());
-    }
-
-    private static List<SqlToken> tokenizeSql(String sql) {
-        List<SqlToken> tokens = new ArrayList<>();
-        int len = sql.length();
-        int i = 0;
-        while (i < len) {
-            char c = sql.charAt(i);
-            if (Character.isWhitespace(c)) {
-                i++;
-                continue;
-            }
-            if (c == '-' && i + 1 < len && sql.charAt(i + 1) == '-') {
-                int nl = sql.indexOf('\n', i + 2);
-                i = nl < 0 ? len : nl + 1;
-                continue;
-            }
-            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                i = skipBlockComment(sql, i + 2);
-                continue;
-            }
-            if (c == '$') {
-                String tag = matchDollarTag(sql, i);
-                if (tag != null) {
-                    int bodyStart = i + tag.length();
-                    int closeIdx = sql.indexOf(tag, bodyStart);
-                    if (closeIdx < 0) {
-                        tokens.add(new SqlToken(TokenKind.STRING, sql.substring(bodyStart)));
-                        i = len;
-                    } else {
-                        tokens.add(new SqlToken(TokenKind.STRING, sql.substring(bodyStart, closeIdx)));
-                        i = closeIdx + tag.length();
-                    }
-                    continue;
-                }
-            }
-            if (c == '\'') {
-                i = readSingleQuotedString(sql, i + 1, false, tokens);
-                continue;
-            }
-            if (isStringPrefix(c) && i + 1 < len && sql.charAt(i + 1) == '\'') {
-                boolean escapeMode = c == 'e' || c == 'E';
-                i = readSingleQuotedString(sql, i + 2, escapeMode, tokens);
-                continue;
-            }
-            if (c == '"') {
-                StringBuilder ident = new StringBuilder();
-                i++;
-                while (i < len) {
-                    char ch = sql.charAt(i);
-                    if (ch == '"') {
-                        if (i + 1 < len && sql.charAt(i + 1) == '"') {
-                            ident.append('"');
-                            i += 2;
-                            continue;
-                        }
-                        i++;
-                        break;
-                    }
-                    ident.append(ch);
-                    i++;
-                }
-                tokens.add(new SqlToken(TokenKind.WORD, ident.toString().toLowerCase(Locale.ROOT)));
-                continue;
-            }
-            if (Character.isLetter(c) || c == '_') {
-                int start = i;
-                i++;
-                while (i < len) {
-                    char ch = sql.charAt(i);
-                    if (Character.isLetterOrDigit(ch) || ch == '_' || ch == '$') {
-                        i++;
-                    } else {
-                        break;
-                    }
-                }
-                tokens.add(new SqlToken(TokenKind.WORD, sql.substring(start, i).toLowerCase(Locale.ROOT)));
-                continue;
-            }
-            if (c == ';' || c == '(' || c == ')' || c == ',' || c == '.' || c == '=') {
-                tokens.add(new SqlToken(TokenKind.PUNCT, String.valueOf(c)));
-            }
-            i++;
-        }
-        return tokens;
-    }
-
-    private static int skipBlockComment(String sql, int start) {
-        int len = sql.length();
-        int depth = 1;
-        int i = start;
-        while (i < len && depth > 0) {
-            char c = sql.charAt(i);
-            if (c == '/' && i + 1 < len && sql.charAt(i + 1) == '*') {
-                depth++;
-                i += 2;
-            } else if (c == '*' && i + 1 < len && sql.charAt(i + 1) == '/') {
-                depth--;
-                i += 2;
-            } else {
-                i++;
-            }
-        }
-        return i;
-    }
-
-    private static String matchDollarTag(String sql, int start) {
-        int len = sql.length();
-        int i = start + 1;
-        if (i < len && sql.charAt(i) == '$') {
-            return "$$";
-        }
-        if (i >= len || !(Character.isLetter(sql.charAt(i)) || sql.charAt(i) == '_')) {
-            return null;
-        }
-        i++;
-        while (i < len) {
-            char ch = sql.charAt(i);
-            if (ch == '$') {
-                return sql.substring(start, i + 1);
-            }
-            if (!Character.isLetterOrDigit(ch) && ch != '_') {
-                return null;
-            }
-            i++;
-        }
-        return null;
-    }
-
-    private static boolean isStringPrefix(char c) {
-        return c == 'e' || c == 'E' || c == 'b' || c == 'B' || c == 'x' || c == 'X' || c == 'n' || c == 'N';
-    }
-
-    private static int readSingleQuotedString(String sql, int start, boolean escapeMode, List<SqlToken> tokens) {
-        int len = sql.length();
-        StringBuilder sb = new StringBuilder();
-        int i = start;
-        while (i < len) {
-            char ch = sql.charAt(i);
-            if (escapeMode && ch == '\\') {
-                if (i + 1 < len) {
-                    sb.append(sql.charAt(i + 1));
-                    i += 2;
-                    continue;
-                }
-                i++;
-                break;
-            }
-            if (ch == '\'') {
-                if (i + 1 < len && sql.charAt(i + 1) == '\'') {
-                    sb.append('\'');
-                    i += 2;
-                    continue;
-                }
-                i++;
-                break;
-            }
-            sb.append(ch);
-            i++;
-        }
-        tokens.add(new SqlToken(TokenKind.STRING, sb.toString()));
-        return i;
     }
 }
