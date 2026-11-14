@@ -122,6 +122,10 @@ public class CodeArtifactService implements Resettable {
      * restrictions map this service returns iterates them. */
     private static final List<String> PACKAGE_GROUP_RESTRICTION_TYPES =
             List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM");
+    /** The pattern of the root package group every domain holds from its creation, which matches every package. */
+    static final String ROOT_PACKAGE_GROUP = "/*";
+    /** The description CodeArtifact gives the root package group, the same in every domain. */
+    private static final String ROOT_PACKAGE_GROUP_DESCRIPTION = "Default root package group";
     /** The real {@code PackageGroupOriginRestrictionMode} wire enum. */
     private static final Set<String> PACKAGE_GROUP_MODES =
             Set.of("ALLOW", "ALLOW_SPECIFIC_REPOSITORIES", "BLOCK", "INHERIT");
@@ -494,7 +498,48 @@ public class CodeArtifactService implements Resettable {
         d.setCreatedTime(Instant.now().getEpochSecond());
         d.setTags(validateTags(tags, Map.of(), domain, "domain"));
         domains.putForAccount(owner, key, d);
+        try {
+            packageGroups.putForAccount(owner, packageGroupKey(region, domain, ROOT_PACKAGE_GROUP),
+                    rootPackageGroup(owner, d));
+        } catch (RuntimeException e) {
+            // A domain left without its root would refuse the retry as a duplicate.
+            domains.deleteForAccount(owner, key);
+            throw e;
+        }
         return new DomainView(d, 0, 0L);
+    }
+
+    /**
+     * The root package group a domain is created with. "Every domain in CodeArtifact automatically contains a root
+     * package group", which "allows package versions to enter repositories in the domain from all origin types by
+     * default": each of its restrictions is {@code ALLOW} rather than {@code INHERIT}, as it has no parent to inherit
+     * from, and a group under it inherits from it. Its description is the one CodeArtifact gives it.
+     */
+    private PackageGroup rootPackageGroup(String owner, CodeArtifactDomain d) {
+        String arn = regionResolver.buildArn("codeartifact", d.getRegion(), owner,
+                "package-group/" + d.getName() + ROOT_PACKAGE_GROUP);
+        PackageGroup root = new PackageGroup(ROOT_PACKAGE_GROUP, arn, d.getName(), owner, d.getRegion(), null,
+                ROOT_PACKAGE_GROUP_DESCRIPTION, d.getCreatedTime());
+        Map<String, PackageGroupRestriction> restrictions = new LinkedHashMap<>();
+        PACKAGE_GROUP_RESTRICTION_TYPES.forEach(type ->
+                restrictions.put(type, new PackageGroupRestriction("ALLOW", new ArrayList<>())));
+        root.setRestrictions(restrictions);
+        return root;
+    }
+
+    /**
+     * Gives every stored domain without one its root package group, for a domain stored by a release that did not
+     * create the group with it. Run once storage is loaded.
+     */
+    public synchronized void seedRootPackageGroups() {
+        for (AccountAwareStorageBackend.AccountEntry<CodeArtifactDomain> entry
+                : domains.scanAllAccountEntries(k -> true)) {
+            CodeArtifactDomain d = entry.value();
+            String key = packageGroupKey(d.getRegion(), d.getName(), ROOT_PACKAGE_GROUP);
+            if (packageGroups.getForAccount(entry.accountId(), key).isEmpty()) {
+                packageGroups.putForAccount(entry.accountId(), key, rootPackageGroup(entry.accountId(), d));
+            }
+        }
     }
 
     /**
@@ -5334,7 +5379,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         String key = packageGroupKey(region, domain, pattern);
         requireDomain(owner, domainKey(region, domain), domain);
-        if (packageGroups.getForAccount(owner, key).isPresent()) {
+        if (ROOT_PACKAGE_GROUP.equals(pattern) || packageGroups.getForAccount(owner, key).isPresent()) {
             throw conflict("A package group with pattern '" + pattern + "' already exists.", pattern,
                     "package-group");
         }
@@ -5357,6 +5402,10 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         String key = packageGroupKey(region, domain, pattern);
         PackageGroup group = requirePackageGroup(owner, key, pattern);
+        if (ROOT_PACKAGE_GROUP.equals(group.getPattern())) {
+            // The service's own sentence, as recorded against AWS.
+            throw validation("The root package group, '/*', cannot be deleted.");
+        }
         List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
         // Computed before the delete removes it from storage: DeletePackageGroup's own documented
         // behavior ("the direct child package groups will become children of the package group's
@@ -5611,11 +5660,9 @@ public class CodeArtifactService implements Resettable {
     /**
      * The single group a package is associated with: the most specific group in {@code all}
      * whose pattern matches {@code path} at all (strong or weak), per the User Guide's own
-     * "a package is associated with exactly one package group" rule. {@link Optional#empty}
-     * models a domain where no created group's pattern reaches this package at all — real
-     * CodeArtifact has no implicit catch-all root group (confirmed by {@code
-     * GetAssociatedPackageGroup}'s own documented {@code ResourceNotFoundException}), so callers
-     * must treat that as "this package has no group," not fall back to a synthesized default.
+     * "a package is associated with exactly one package group" rule. Every domain holds the root
+     * group {@code /*}, which matches every package, so a package of a domain always has one;
+     * {@link Optional#empty} is left for a list of groups that has no root.
      */
     private Optional<AssociatedGroupMatch> findAssociatedGroup(List<PackageGroup> all,
             PackageGroupPatterns.PackagePath path) {

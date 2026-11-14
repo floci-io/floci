@@ -18,7 +18,7 @@ behind them yet.
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags. |
+| `CreateDomain` | Creates a domain (max 10 per account per Region), optionally with a KMS encryption key and initial tags, and its root package group `/*`, whose restrictions are all `ALLOW`. |
 | `DeleteDomain` | Deletes a domain; fails with `ConflictException` while it still contains repositories, and with `ResourceNotFoundException` for a missing domain (as AWS does, although the API reference does not list it). |
 | `DescribeDomain` | Returns a domain's full description, including its repository count and the total size of its assets (generic, Maven, npm, pypi, and NuGet; see Known limitations). |
 | `ListDomains` | Lists domain summaries for the account and Region, paginated. |
@@ -52,8 +52,8 @@ behind them yet.
 | `UpdatePackageVersionsStatus` | Moves one or more versions of a package to `Published`, `Unlisted`, or `Archived`; all-or-nothing per call, with `versionRevisions`/`expectedStatus` as optional preconditions. |
 | `DisposePackageVersions` | Permanently deletes a package version's assets and sets its status to `Disposed`; irreversible, and shares `UpdatePackageVersionsStatus`'s all-or-nothing batch semantics. |
 | `DeletePackageVersions` | Permanently removes one or more versions of a package, real assets included; unlike `DisposePackageVersions`, leaves no trace, the freed coordinates can be freely republished, and it is the one action allowed on an already-`Disposed` version. |
-| `CreatePackageGroup` | Creates a package group from a pattern (its own identifier); every restriction type starts at `INHERIT`. |
-| `DeletePackageGroup` | Deletes a package group; its direct children reparent onto its own parent, recomputed from the remaining groups. |
+| `CreatePackageGroup` | Creates a package group from a pattern (its own identifier); every restriction type starts at `INHERIT`. The root group `/*` exists from the domain's creation, so it cannot be created again. |
+| `DeletePackageGroup` | Deletes a package group; its direct children reparent onto its own parent, recomputed from the remaining groups. The root group `/*` cannot be deleted (`ValidationException`). |
 | `DescribePackageGroup` | Returns a package group's pattern, origin configuration (stored and resolved effective mode per restriction type), and parent. |
 | `UpdatePackageGroup` | Updates a package group's `contactInfo`/`description`; the pattern and restrictions are unchanged. |
 | `UpdatePackageGroupOriginConfiguration` | Sets a package group's per-restriction-type mode and/or edits its `ALLOW_SPECIFIC_REPOSITORIES` allow-list. |
@@ -61,7 +61,7 @@ behind them yet.
 | `ListSubPackageGroups` | Lists a package group's direct children only (not grandchildren), per the hierarchy computed from the domain's current groups. |
 | `ListAllowedRepositoriesForGroup` | Lists the repositories a package group's `ALLOW_SPECIFIC_REPOSITORIES` allow-list names for one restriction type. |
 | `ListAssociatedPackages` | Lists the packages (across every repository in the domain) for which this group is the most specific match; `preview` answers the same question for a pattern that doesn't exist yet. |
-| `GetAssociatedPackageGroup` | Returns the most specific package group matching a package's coordinate, and whether the match is `STRONG` or `WEAK`; `ResourceNotFoundException` if no group's pattern reaches it at all. |
+| `GetAssociatedPackageGroup` | Returns the most specific package group matching a package's coordinate, and whether the match is `STRONG` or `WEAK`; the root group `/*` when no other group's pattern reaches it. |
 | `TagResource` | Adds or updates tags on a domain, repository, or package group ARN. |
 | `UntagResource` | Removes tags by key from a domain, repository, or package group ARN. |
 | `ListTagsForResource` | Lists the tags on a domain, repository, or package group ARN. |
