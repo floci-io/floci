@@ -754,7 +754,7 @@ final class PaymentCryptographyKeyExchange {
         }
     }
 
-    /** The clear material of a key, which an export needs. */
+    /** The clear material of a key. */
     private static byte[] clearMaterial(PaymentCryptographyKey key) {
         return PaymentCryptographyKeyRules.material(key);
     }
@@ -1314,7 +1314,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation(tooWeak);
         }
         String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(clear, variant.variantByte(),
-                algorithm, PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()), kekAlgorithm);
+                algorithm, clearMaterial(kek), kekAlgorithm);
         return new Exported(cryptogram, "KEY_CRYPTOGRAM", kek.getArn());
     }
 
@@ -1463,11 +1463,14 @@ final class PaymentCryptographyKeyExchange {
         }
         PaymentCryptographyKeyAlgorithm kekAlgorithm =
                 PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
+        // The material of the wrapping key is read before the cryptogram is opened, so a
+        // key whose material is not held is refused with that reason and not with a
+        // cryptogram that did not open.
+        byte[] kekMaterial = clearMaterial(kek);
         byte[] clear;
         try {
             clear = PaymentCryptographyAs2805Cryptogram.unwrap(cryptogram, variant.variantByte(),
-                    algorithm, PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()),
-                    kekAlgorithm);
+                    algorithm, kekMaterial, kekAlgorithm);
         } catch (RuntimeException e) {
             throw validation("the AS2805 cryptogram did not open: " + e.getMessage());
         }

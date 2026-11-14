@@ -131,9 +131,10 @@
   carries one may not come in under a request that names none.
 - **The AS2805 key cryptogram:** a key leaves under a key encryption key, bound to its
   purpose by the AS2805 variant, and comes back the same way. The variant is exclusive-ored
-  into the key before it is encrypted, so a cryptogram wrapped under one variant does not
-  open under another, and the check value inside it catches a wrong wrapping key. The
-  variants served are `TERMINAL_MAJOR_KEY_VARIANT_00`, `DATA_ENCRYPTION_KEY_VARIANT_22`,
+  into the key before it is encrypted, and the cryptogram carries a tag over the whole of
+  it, so a cryptogram that was changed does not open at all: the tag catches a wrong
+  wrapping key and a wrong variant as well as a changed ciphertext. The variants served
+  are `TERMINAL_MAJOR_KEY_VARIANT_00`, `DATA_ENCRYPTION_KEY_VARIANT_22`,
   `MESSAGE_AUTHENTICATION_KEY_VARIANT_24` and `PIN_ENCRYPTION_KEY_VARIANT_28`. A variant
   says what the key is for, so a key may only leave under the variant that matches its own
   usage, and the wrapping key has to be at least as strong as the key it carries, on the
