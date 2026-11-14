@@ -172,7 +172,7 @@ final class SesServiceTestBuilder {
         contactService = new SesContactService(contactListStore, contactStore, clock);
         suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
                 new InMemoryStorage<>());
-        configSetService = new SesConfigurationSetService(configSetStore);
+        configSetService = new SesConfigurationSetService(configSetStore, mock(SesEventPublisher.class));
         identityService = new SesIdentityService(identityStore, route53Service, clock);
         sentEmailService = new SesSentEmailService(emailStore);
         cvetService = new SesCvetService(cvetStore);

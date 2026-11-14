@@ -1005,7 +1005,7 @@ public class SesQueryHandler {
         String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
+        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region, false);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "CreateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -1015,7 +1015,7 @@ public class SesQueryHandler {
         String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
+        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region, false);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }

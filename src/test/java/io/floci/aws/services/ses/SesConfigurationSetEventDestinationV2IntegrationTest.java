@@ -37,6 +37,10 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
     @Test
     @Order(1)
     void createConfigurationSet() {
+        for (String topic : new String[] {"ses-events", "ses-events-2", "dup", "x", "ed-a", "ed-b", "ed-c",
+                "ed-a-updated"}) {
+            SnsTopicFixture.create("us-east-1", topic);
+        }
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -122,7 +126,7 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
                   "EventDestinationName": "ed-x",
                   "EventDestination": {
                     "MatchingEventTypes": ["SEND"],
-                    "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:000000000000:ghost"}
+                    "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:000000000000:x"}
                   }
                 }
                 """)
@@ -737,5 +741,66 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .body("EventDestinations[0].MatchingEventTypes", equalTo(List.of("BOUNCE")))
             .body("EventDestinations[0].EventBridgeDestination.EventBusArn",
                     equalTo(SCOPED_DEFAULT_BUS_ARN));
+    }
+
+    @Test
+    @Order(100)
+    void snsDestination_missingTopicRejectedOnCreateAndUpdate() {
+        String body = """
+                {
+                  "EventDestinationName": "ed-sns",
+                  "EventDestination": {
+                    "MatchingEventTypes": ["SEND"],
+                    "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:000000000000:never-created"}
+                  }
+                }
+                """;
+        String message = "SNS topic <arn:aws:sns:us-east-1:000000000000:never-created> not found.";
+        String set = "v2-cs-sns-check";
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"" + set + "\"}")
+        .when()
+            .post("/v2/email/configuration-sets")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body.replace("never-created", "x"))
+        .when()
+            .post("/v2/email/configuration-sets/" + set + "/event-destinations")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/configuration-sets/" + set + "/event-destinations")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(message));
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .post("/v2/email/configuration-sets/v2-cs-ghost/event-destinations")
+        .then()
+            .statusCode(400)
+            .body("message", equalTo(message));
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body(body)
+        .when()
+            .put("/v2/email/configuration-sets/" + set + "/event-destinations/ed-sns")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(message));
     }
 }

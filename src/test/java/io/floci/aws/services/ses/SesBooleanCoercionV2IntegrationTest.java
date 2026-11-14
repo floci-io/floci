@@ -38,6 +38,7 @@ class SesBooleanCoercionV2IntegrationTest {
         send("POST", "/v2/email/identities", "{\"EmailIdentity\":\"" + DOMAIN + "\"}").statusCode(200);
         send("POST", "/v2/email/configuration-sets", "{\"ConfigurationSetName\":\"" + CS + "\"}")
                 .statusCode(200);
+        SnsTopicFixture.create(REGION, "coercion");
         send("POST", "/v2/email/configuration-sets/" + CS + "/event-destinations", """
                 {"EventDestinationName": "%s",
                  "EventDestination": {"Enabled": "yes", "MatchingEventTypes": ["SEND"],

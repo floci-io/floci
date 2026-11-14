@@ -152,30 +152,6 @@ class SesConfigurationSetEventDestinationTest {
     }
 
     @Test
-    void snsBlankTopicArn_throws() {
-        EventDestination ed = new EventDestination();
-        ed.setMatchingEventTypes(List.of("SEND"));
-        SnsDestination sns = new SnsDestination();
-        sns.setTopicArn("");
-        ed.setSnsDestination(sns);
-        AwsException ex = assertThrows(AwsException.class,
-                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
-        assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
-    }
-
-    @Test
-    void snsNullTopicArn_throws() {
-        EventDestination ed = new EventDestination();
-        ed.setMatchingEventTypes(List.of("SEND"));
-        ed.setSnsDestination(new SnsDestination()); // TopicArn left null
-        AwsException ex = assertThrows(AwsException.class,
-                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
-        assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
-    }
-
-    @Test
     void firehoseMissingDeliveryStream_throws() {
         EventDestination ed = new EventDestination();
         ed.setMatchingEventTypes(List.of("SEND"));
