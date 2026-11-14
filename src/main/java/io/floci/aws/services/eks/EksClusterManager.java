@@ -595,13 +595,15 @@ public class EksClusterManager
     /**
      * Allocates the k3s API server's host port. A cluster recreated on restore asks first for the
      * port its persisted endpoint names, since an EKS endpoint never changes and every kubeconfig
-     * written for the cluster names that port. Only when that port is taken, or outside the
-     * configured range, does the cluster get the first free one, which changes its endpoint.
+     * written for the cluster names that port. Only when that port is taken does the cluster get the
+     * first free one, which changes its endpoint, and a warning says so. A port outside the
+     * configured range is not asked for, and neither is the port of a network-mode endpoint: that
+     * endpoint names the container's own API server port, whatever host port the container gets.
      */
     private int allocateApiServerPort(Cluster cluster) {
         int basePort = config.services().eks().apiServerBasePort();
         int maxPort = config.services().eks().apiServerMaxPort();
-        int previousPort = endpointPort(cluster.getEndpoint());
+        int previousPort = networkEndpointMode() ? -1 : endpointPort(cluster.getEndpoint());
         if (previousPort >= basePort && previousPort <= maxPort) {
             try {
                 return portAllocator.allocate(previousPort, previousPort);
@@ -1689,11 +1691,16 @@ public class EksClusterManager
      * {@link EksStartupValidator} has already refused an invalid value at boot.
      */
     private String endpointHost() {
-        if (containerDetector.isRunningInContainer()
-                && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(config.services().eks().endpointMode())) {
+        if (networkEndpointMode()) {
             return "localhost";
         }
         return endpointHostFrom(config.services().eks().endpointHost());
+    }
+
+    /** Whether endpoints name the k3s container rather than a host port: network mode, with Floci in a container. */
+    private boolean networkEndpointMode() {
+        return containerDetector.isRunningInContainer()
+                && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(config.services().eks().endpointMode());
     }
 
     /**

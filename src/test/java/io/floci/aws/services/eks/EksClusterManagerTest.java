@@ -73,6 +73,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1305,12 +1306,41 @@ class EksClusterManagerTest {
             Cluster cluster = cluster();
             cluster.setEndpoint("https://localhost:6457");
 
-            manager.restoreCluster(cluster);
+            List<LogRecord> logs = LogCapture.capture(EksClusterManager.class, () -> manager.restoreCluster(cluster));
 
             assertEquals(6440, cluster.getHostPort());
             assertEquals("https://localhost:6440", cluster.getEndpoint());
             verify(builder).withPortBinding(6443, 6440);
             verify(portAllocator).allocate(6440, 6499);
+            String warning = "API server port 6457 of EKS cluster demo is no longer free (No free port available in "
+                    + "range 6457-6457); moving the cluster to another port changes its endpoint";
+            // Compared by severity, not identity: JBoss LogManager has its own Level constants.
+            List<String> warnings = logs.stream()
+                    .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
+                    .map(record -> MessageFormat.format(record.getMessage(), record.getParameters()))
+                    .toList();
+            assertTrue(warnings.contains(warning), String.valueOf(warnings));
+        }
+
+        /**
+         * A network-mode endpoint names the container's own API server port, 6443, which says nothing
+         * about the host port the container had, so it is not asked for even inside the range.
+         */
+        @Test
+        void recreatingAMissingContainerInNetworkModeDoesNotAskForTheEndpointsContainerPort() {
+            when(containerDetector.isRunningInContainer()).thenReturn(true);
+            when(config.services().eks().endpointMode()).thenReturn("network");
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://floci-eks-demo:6443");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(6440, cluster.getHostPort());
+            assertEquals("https://" + cluster.getDockerName() + ":6443", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6440);
+            verify(portAllocator, never()).allocate(6443, 6443);
         }
 
         @Test

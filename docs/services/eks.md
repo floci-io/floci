@@ -454,10 +454,13 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
 - A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
   started in place, keeping its published API server port and data volume: deployments come
   back as they were.
-- A missing container is recreated on the API server port the cluster's endpoint names, so
-  existing kubeconfigs stay valid. Only when another process has taken that port, or it is
-  outside the configured range, does the cluster move to the first free port, which changes its
-  endpoint. Its named k3s data volume (`floci-aws-eks-<name>`; for a
+- A missing container, or a survivor that cannot be adopted, is recreated on the API server port
+  the cluster's endpoint names, so existing kubeconfigs stay valid. Only when that port is in use
+  (by another process, another container or another cluster), or it is outside the configured
+  range, does the cluster move to the first free port, which changes its endpoint; Floci logs a
+  warning when a port in use moves it. A `network` mode endpoint names the container itself, so it
+  stays the same whatever host port the container gets.
+  Its named k3s data volume (`floci-aws-eks-<name>`; for a
   [non-default account](../configuration/multi-account.md), `floci-aws-eks-<account>.<name>`) is
   reused if it survived; volumes follow the global prune policy
   (`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`, default `false`), so they are retained when the
