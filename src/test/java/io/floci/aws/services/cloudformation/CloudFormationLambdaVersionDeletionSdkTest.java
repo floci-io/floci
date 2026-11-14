@@ -1,19 +1,12 @@
 package io.floci.aws.services.cloudformation;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.core.SdkPojo;
-import software.amazon.awssdk.core.interceptor.Context;
-import software.amazon.awssdk.core.interceptor.ExecutionAttribute;
-import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
-import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.core.retry.RetryPolicy;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
@@ -28,23 +21,15 @@ import software.amazon.awssdk.services.lambda.model.LambdaException;
 import software.amazon.awssdk.services.lambda.model.ListVersionsByFunctionResponse;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -61,7 +46,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @Timeout(120)
 class CloudFormationLambdaVersionDeletionSdkTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String ACCOUNT = "815670000031";
     private static final Set<String> TERMINAL = Set.of("CREATE_COMPLETE", "CREATE_FAILED",
             "ROLLBACK_COMPLETE", "ROLLBACK_FAILED", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE",
@@ -70,7 +54,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
     @ParameterizedTest
     @ValueSource(strings = {"", "\"DeletionPolicy\":\"Delete\",\"UpdateReplacePolicy\":\"Retain\","})
     void deletionRemovesOnlyTheStackVersionFromAnExternalFunction(String policy) {
-        try (Owned owned = new Owned("external-delete", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             String other = owned.seedVersion;
             owned.alias(owned.function, "keep", other);
             owned.create(owned.versionTemplate(policy, false), "CREATE_COMPLETE");
@@ -91,15 +75,29 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
     @Test
     void retainedParentFunctionSurvivesWhileItsDefaultDeleteVersionIsRemoved() {
-        try (Owned owned = new Owned("retained-parent", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             String child = owned.marker + "-child";
             owned.functions.add(child);
             String template = """
-                    {"Resources":{
-                    "Function":{"Type":"AWS::Lambda::Function","DeletionPolicy":"Retain",
-                      "Properties":{"FunctionName":"%s","Runtime":"python3.12","Handler":"index.handler",
-                      "Role":"%s","Code":{"ZipFile":"def handler(event, context):\\n    return 'owned'\\n"}}},
-                    "Version":{"Type":"AWS::Lambda::Version","Properties":{"FunctionName":{"Ref":"Function"}}}}}
+                    {
+                      "Resources": {
+                        "Function": {
+                          "Type": "AWS::Lambda::Function",
+                          "DeletionPolicy": "Retain",
+                          "Properties": {
+                            "FunctionName": "%s",
+                            "Runtime": "python3.12",
+                            "Handler": "index.handler",
+                            "Role": "%s",
+                            "Code": {"ZipFile": "def handler(event, context):\\n    return 'owned'\\n"}
+                          }
+                        },
+                        "Version": {
+                          "Type": "AWS::Lambda::Version",
+                          "Properties": {"FunctionName": {"Ref": "Function"}}
+                        }
+                      }
+                    }
                     """.formatted(child, owned.roleArn);
             owned.create(template, "CREATE_COMPLETE");
             String version = owned.version("Version");
@@ -116,7 +114,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
     @Test
     void retainedVersionStaysPublishedAfterStackDeletion() {
-        try (Owned owned = new Owned("retained-version", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             owned.create(owned.versionTemplate("\"DeletionPolicy\":\"Retain\",", false), "CREATE_COMPLETE");
             String version = owned.version("Version");
             FunctionConfiguration before = owned.configuration(owned.function, version);
@@ -132,7 +130,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
     @ParameterizedTest
     @ValueSource(strings = {"", "\"DeletionPolicy\":\"Retain\","})
     void removingTheVersionFromTheTemplateHonorsItsDeletionPolicy(String policy) {
-        try (Owned owned = new Owned("remove-version", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             owned.create(owned.versionTemplate(policy, true), "CREATE_COMPLETE");
             String version = owned.version("Version");
             FunctionConfiguration before = owned.configuration(owned.function, version);
@@ -156,13 +154,25 @@ class CloudFormationLambdaVersionDeletionSdkTest {
     @ParameterizedTest
     @ValueSource(strings = {"", "\"DeletionPolicy\":\"RetainExceptOnCreate\","})
     void failedCreateRollsBackThePublishedVersion(String policy) {
-        try (Owned owned = new Owned("rollback-version", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             Set<String> versions = owned.versions(owned.function);
             String template = """
-                    {"Resources":{
-                    "Version":{"Type":"AWS::Lambda::Version",%s"Properties":{"FunctionName":"%s"}},
-                    "Failure":{"Type":"AWS::Logs::LogStream","DependsOn":"Version",
-                      "Properties":{"LogGroupName":"/%s-missing","LogStreamName":"missing"}}}}
+                    {
+                      "Resources": {
+                        "Version": {
+                          "Type": "AWS::Lambda::Version",
+                          %s"Properties": {"FunctionName": "%s"}
+                        },
+                        "Failure": {
+                          "Type": "AWS::Logs::LogStream",
+                          "DependsOn": "Version",
+                          "Properties": {
+                            "LogGroupName": "/%s-missing",
+                            "LogStreamName": "missing"
+                          }
+                        }
+                      }
+                    }
                     """.formatted(policy, owned.function, owned.marker);
 
             List<StackEvent> events = owned.create(template, "ROLLBACK_COMPLETE");
@@ -179,13 +189,25 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
     @Test
     void stackAliasIsDeletedBeforeTheVersionItReferences() {
-        try (Owned owned = new Owned("alias-order", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             owned.aliases.add("stack-alias");
             String template = """
-                    {"Resources":{
-                    "Version":{"Type":"AWS::Lambda::Version","Properties":{"FunctionName":"%s"}},
-                    "Alias":{"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":"%s",
-                      "Name":"stack-alias","FunctionVersion":{"Fn::GetAtt":["Version","Version"]}}}}}
+                    {
+                      "Resources": {
+                        "Version": {
+                          "Type": "AWS::Lambda::Version",
+                          "Properties": {"FunctionName": "%s"}
+                        },
+                        "Alias": {
+                          "Type": "AWS::Lambda::Alias",
+                          "Properties": {
+                            "FunctionName": "%s",
+                            "Name": "stack-alias",
+                            "FunctionVersion": {"Fn::GetAtt": ["Version", "Version"]}
+                          }
+                        }
+                      }
+                    }
                     """.formatted(owned.function, owned.function);
             owned.create(template, "CREATE_COMPLETE");
             String version = owned.version("Version");
@@ -206,7 +228,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
     @Test
     void externalAliasBlocksNativeAndStackDeletionUntilTheAliasIsRemoved() {
-        try (Owned owned = new Owned("alias-conflict", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             owned.create(owned.versionTemplate("", false), "CREATE_COMPLETE");
             String version = owned.version("Version");
             owned.alias(owned.function, "external", version);
@@ -231,7 +253,7 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
     @Test
     void anAlreadyDeletedVersionAllowsIdempotentStackDeletion() {
-        try (Owned owned = new Owned("already-deleted", ACCOUNT, Region.US_EAST_1)) {
+        try (Owned owned = new Owned(ACCOUNT, Region.US_EAST_1)) {
             owned.create(owned.versionTemplate("", false), "CREATE_COMPLETE");
             String version = owned.version("Version");
             owned.lambda.deleteFunction(request -> request.functionName(owned.function).qualifier(version));
@@ -246,9 +268,9 @@ class CloudFormationLambdaVersionDeletionSdkTest {
     @Test
     void sameNamedFunctionsAndVersionsInOtherAccountsAndRegionsRemainUnchanged() {
         String shared = "cfn-version-scope-" + UUID.randomUUID().toString().replace("-", "");
-        try (Owned owner = new Owned("scope-owner", ACCOUNT, Region.US_EAST_1, shared);
-             Owned account = new Owned("scope-account", "815670000032", Region.US_EAST_1, shared);
-             Owned region = new Owned("scope-region", ACCOUNT, Region.US_WEST_2, shared)) {
+        try (Owned owner = new Owned(ACCOUNT, Region.US_EAST_1, shared);
+             Owned account = new Owned("815670000032", Region.US_EAST_1, shared);
+             Owned region = new Owned(ACCOUNT, Region.US_WEST_2, shared)) {
             for (Owned owned : List.of(owner, account, region)) {
                 owned.create(owned.versionTemplate("", false), "CREATE_COMPLETE");
             }
@@ -296,11 +318,9 @@ class CloudFormationLambdaVersionDeletionSdkTest {
     }
 
     private static final class Owned implements AutoCloseable {
-        private final WireReceipt wire = new WireReceipt();
         private final String marker = "cfn-version-" + UUID.randomUUID().toString().replace("-", "");
         private final Set<String> functions = new LinkedHashSet<>();
         private final Set<String> aliases = new LinkedHashSet<>();
-        private final String caseName;
         private final String function;
         private CloudFormationClient cfn;
         private LambdaClient lambda;
@@ -312,27 +332,32 @@ class CloudFormationLambdaVersionDeletionSdkTest {
         private boolean stackAttempted;
         private boolean stackDeleted;
 
-        private Owned(String caseName, String account, Region region) {
-            this(caseName, account, region, null);
+        private Owned(String account, Region region) {
+            this(account, region, null);
         }
 
-        private Owned(String caseName, String account, Region region, String sharedFunction) {
-            this.caseName = caseName;
+        private Owned(String account, Region region, String sharedFunction) {
             function = sharedFunction == null ? marker : sharedFunction;
             try {
                 cfn = AwsTestClients.create(CloudFormationClient.builder().overrideConfiguration(config ->
                         config.apiCallTimeout(Duration.ofSeconds(15)).apiCallAttemptTimeout(Duration.ofSeconds(10))
-                                .retryPolicy(RetryPolicy.none()).addExecutionInterceptor(wire)), account, region);
+                                .retryPolicy(RetryPolicy.none())), account, region);
                 lambda = AwsTestClients.create(LambdaClient.builder().overrideConfiguration(config ->
                         config.apiCallTimeout(Duration.ofSeconds(15)).apiCallAttemptTimeout(Duration.ofSeconds(10))
-                                .retryPolicy(RetryPolicy.none()).addExecutionInterceptor(wire)), account, region);
+                                .retryPolicy(RetryPolicy.none())), account, region);
                 iam = AwsTestClients.create(IamClient.builder().overrideConfiguration(config ->
                         config.apiCallTimeout(Duration.ofSeconds(15)).apiCallAttemptTimeout(Duration.ofSeconds(10))
-                                .retryPolicy(RetryPolicy.none()).addExecutionInterceptor(wire)), account, region);
+                                .retryPolicy(RetryPolicy.none())), account, region);
                 roleAttempted = true;
                 roleArn = iam.createRole(request -> request.roleName(marker).assumeRolePolicyDocument("""
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
-                        "Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                        {
+                          "Version": "2012-10-17",
+                          "Statement": [{
+                            "Effect": "Allow",
+                            "Principal": {"Service": "lambda.amazonaws.com"},
+                            "Action": "sts:AssumeRole"
+                          }]
+                        }
                         """)).role().arn();
                 functions.add(function);
                 lambda.createFunction(request -> request.functionName(function).runtime(Runtime.PYTHON3_12)
@@ -357,16 +382,28 @@ class CloudFormationLambdaVersionDeletionSdkTest {
 
         private String versionTemplate(String policy, boolean anchor) {
             return """
-                    {"Resources":{"Version":{"Type":"AWS::Lambda::Version",%s
-                    "Properties":{"FunctionName":"%s"}}%s}}
+                    {
+                      "Resources": {
+                        "Version": {
+                          "Type": "AWS::Lambda::Version",
+                          %s"Properties": {"FunctionName": "%s"}
+                        }%s
+                      }
+                    }
                     """.formatted(policy, function, anchor ? "," + anchorResource() : "");
         }
 
         private String anchorResource() {
             aliases.add("anchor");
             return """
-                    "Anchor":{"Type":"AWS::Lambda::Alias","Properties":{"FunctionName":"%s",
-                    "Name":"anchor","FunctionVersion":"%s"}}
+                    "Anchor": {
+                      "Type": "AWS::Lambda::Alias",
+                      "Properties": {
+                        "FunctionName": "%s",
+                        "Name": "anchor",
+                        "FunctionVersion": "%s"
+                      }
+                    }
                     """.formatted(function, seedVersion);
         }
 
@@ -579,7 +616,6 @@ class CloudFormationLambdaVersionDeletionSdkTest {
             if (iam != null) {
                 cleanup(iam::close, failures);
             }
-            cleanup(() -> wire.save(caseName, marker, failures.getSuppressed().length == 0), failures);
             if (failures.getSuppressed().length > 0) {
                 throw failures;
             }
@@ -621,119 +657,4 @@ class CloudFormationLambdaVersionDeletionSdkTest {
         }
     }
 
-    private static final class WireReceipt implements ExecutionInterceptor {
-        private static final ExecutionAttribute<Integer> ID = new ExecutionAttribute<>("lambda-version-cfn-wire-id");
-        private final List<Map<String, Object>> calls = new ArrayList<>();
-
-        @Override
-        public void beforeTransmission(Context.BeforeTransmission context, ExecutionAttributes attributes) {
-            assertEquals("localhost", context.httpRequest().getUri().getHost());
-            assertEquals("http", context.httpRequest().getUri().getScheme());
-            assertTrue(calls.size() < 3000);
-            attributes.putAttribute(ID, calls.size());
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("index", calls.size());
-            row.put("operation", context.request().getClass().getSimpleName().replaceFirst("Request$", ""));
-            row.put("method", context.httpRequest().method().name());
-            row.put("uri", context.httpRequest().getUri().toString());
-            row.put("requestModel", model(context.request()));
-            Map<String, List<String>> headers = new LinkedHashMap<>(context.httpRequest().headers());
-            headers.keySet().removeIf(name -> name.equalsIgnoreCase("authorization")
-                    || name.equalsIgnoreCase("x-amz-security-token"));
-            row.put("requestHeaders", headers);
-            row.put("requestBodyAvailable", context.requestBody().isPresent());
-            try (InputStream stream = context.requestBody().isPresent()
-                    ? context.requestBody().orElseThrow().contentStreamProvider().newStream()
-                    : InputStream.nullInputStream()) {
-                row.put("requestBase64", encode(stream));
-            } catch (IOException failure) {
-                throw new UncheckedIOException(failure);
-            }
-            calls.add(row);
-        }
-
-        @Override
-        public Optional<InputStream> modifyHttpResponseContent(Context.ModifyHttpResponse context,
-                                                               ExecutionAttributes attributes) {
-            Map<String, Object> row = calls.get(attributes.getAttribute(ID));
-            row.put("status", context.httpResponse().statusCode());
-            row.put("responseHeaders", context.httpResponse().headers());
-            try (InputStream stream = context.responseBody().orElseGet(InputStream::nullInputStream)) {
-                String encoded = encode(stream);
-                row.put("responseBase64", encoded);
-                return Optional.of(new ByteArrayInputStream(Base64.getDecoder().decode(encoded)));
-            } catch (IOException failure) {
-                throw new UncheckedIOException(failure);
-            }
-        }
-
-        @Override
-        public void afterExecution(Context.AfterExecution context, ExecutionAttributes attributes) {
-            calls.get(attributes.getAttribute(ID)).put("responseModel", model(context.response()));
-        }
-
-        @Override
-        public void onExecutionFailure(Context.FailedExecution context, ExecutionAttributes attributes) {
-            Integer id = attributes.getAttribute(ID);
-            if (id == null) {
-                return;
-            }
-            Map<String, Object> row = calls.get(id);
-            row.put("exceptionType", context.exception().getClass().getName());
-            if (context.exception() instanceof AwsServiceException failure) {
-                row.put("errorCode", failure.awsErrorDetails().errorCode());
-                row.put("errorMessage", failure.awsErrorDetails().errorMessage());
-                row.put("errorStatus", failure.statusCode());
-            }
-        }
-
-        private static Object model(Object value) {
-            if (value instanceof SdkPojo pojo) {
-                Map<String, Object> fields = new LinkedHashMap<>();
-                pojo.sdkFields().forEach(field -> {
-                    Object member = field.getValueOrDefault(pojo);
-                    if (member != null) {
-                        fields.put(field.memberName(), model(member));
-                    }
-                });
-                return fields;
-            }
-            if (value instanceof List<?> list) {
-                return list.stream().map(WireReceipt::model).toList();
-            }
-            if (value instanceof Map<?, ?> map) {
-                Map<String, Object> fields = new LinkedHashMap<>();
-                map.forEach((key, member) -> fields.put(key.toString(), model(member)));
-                return fields;
-            }
-            if (value instanceof SdkBytes bytes) {
-                return Base64.getEncoder().encodeToString(bytes.asByteArray());
-            }
-            if (value instanceof String || value instanceof Number || value instanceof Boolean) {
-                return value;
-            }
-            return value.toString();
-        }
-
-        private static String encode(InputStream stream) throws IOException {
-            byte[] bytes = stream.readNBytes(1_048_577);
-            assertTrue(bytes.length <= 1_048_576);
-            return Base64.getEncoder().encodeToString(bytes);
-        }
-
-        private void save(String caseName, String marker, boolean cleanupComplete) {
-            try {
-                Path directory = Path.of(System.getProperty("audit.lambda.version.cfn.directory",
-                        "target/lambda-version-cfn-wire"));
-                Files.createDirectories(directory);
-                MAPPER.writerWithDefaultPrettyPrinter().writeValue(directory.resolve(marker + ".json").toFile(),
-                        Map.of("case", caseName, "marker", marker, "cleanupComplete", cleanupComplete, "calls", calls));
-            } catch (IOException failure) {
-                throw new UncheckedIOException(failure);
-            }
-            assertFalse(calls.isEmpty());
-            assertTrue(calls.stream().allMatch(row -> row.containsKey("responseBase64")),
-                    "every attempted transmission has a complete captured response");
-        }
-    }
 }

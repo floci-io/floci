@@ -223,6 +223,17 @@ class LambdaVersionAliasCfnProvisionerTest {
     }
 
     @Test
+    void deleteVersionRejectsAnEmptyQualifierBeforeNativeDeletion() {
+        AwsException failure = assertThrows(AwsException.class, () ->
+                provisioner.delete("AWS::Lambda::Version",
+                        "arn:aws:lambda:us-east-1:000000000000:function:my-fn:", "us-east-1"));
+
+        assertEquals("InvalidParameterValueException", failure.getErrorCode());
+        assertEquals("Qualifier segment is empty", failure.getMessage());
+        verifyNoInteractions(lambda);
+    }
+
+    @Test
     void deleteVersionRejectsAnArnFromAnotherRegionBeforeNativeDeletion() {
         AwsException failure = assertThrows(AwsException.class, () ->
                 provisioner.delete("AWS::Lambda::Version",

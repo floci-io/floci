@@ -57,21 +57,7 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         if ("AWS::Lambda::Version".equals(resourceType)) {
-            LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithRegion(region, physicalId, null);
-            String version = ref.qualifier();
-            if (version == null || !version.chars().allMatch(value -> value >= '0' && value <= '9')) {
-                // Older stacks can carry a generic placeholder. Never turn that into a whole-function delete.
-                LOG.debugv("Not a published version ARN, nothing to delete: {0}", physicalId);
-                return;
-            }
-            try {
-                lambdaService.deleteFunction(region, physicalId, version);
-            } catch (AwsException failure) {
-                if (failure.getHttpStatus() != 404 || !"ResourceNotFoundException".equals(failure.getErrorCode())) {
-                    throw failure;
-                }
-                LOG.debugv("Version {0} already absent: {1}", physicalId, failure.getMessage());
-            }
+            deleteVersion(physicalId, region);
             return;
         }
         if (!"AWS::Lambda::Alias".equals(resourceType)) {
@@ -91,6 +77,18 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
             // must stay idempotent.
             LOG.debugv("Alias {0} already absent: {1}", physicalId, e.getMessage());
         }
+    }
+
+    private void deleteVersion(String physicalId, String region) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithRegion(region, physicalId, null);
+        String version = ref.qualifier();
+        if (version == null || !version.chars().allMatch(value -> value >= '0' && value <= '9')) {
+            // Older stacks can carry a generic placeholder. Never turn that into a whole-function delete.
+            LOG.debugv("Not a published version ARN, nothing to delete: {0}", physicalId);
+            return;
+        }
+        CfnDeletes.safeDelete("Lambda version", physicalId,
+                () -> lambdaService.deleteFunction(region, physicalId, version), "ResourceNotFoundException");
     }
 
     private void provisionVersion(StackResource r, JsonNode props, ProvisionContext ctx) {
