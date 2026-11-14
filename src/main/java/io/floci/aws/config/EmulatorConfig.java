@@ -1776,6 +1776,14 @@ public interface EmulatorConfig {
         boolean seedDeployerPrincipal();
 
         /**
+         * Access key ID of the seeded deployer's key. The default {@code floci} is shorter than
+         * the 16 characters IAM requires of an AccessKeyId, so DeleteAccessKey and UpdateAccessKey
+         * refuse it; an ID of 16 to 128 word characters lets the key be retired like any other.
+         */
+        @WithDefault("floci")
+        String seedDeployerAccessKeyId();
+
+        /**
          * Alias to seed for the default account at startup, so callers that read the account
          * alias find one without creating it first. Unset means the account has no alias, which
          * is the AWS default.

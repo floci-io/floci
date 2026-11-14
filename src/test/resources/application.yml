@@ -192,6 +192,7 @@ floci:
       enabled: true
       enforcement-enabled: false
       seed-deployer-principal: false
+      seed-deployer-access-key-id: floci
     msk:
       enabled: true
       mock: true
