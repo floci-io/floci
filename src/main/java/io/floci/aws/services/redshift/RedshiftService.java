@@ -71,7 +71,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -127,6 +129,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ResourceKey> managedRotationReservations = new ConcurrentHashMap<>();
+    private final List<BiConsumer<String, String>> clusterRemovalListeners = new CopyOnWriteArrayList<>();
 
     private record ResourceKey(String accountId, String kind, String identifier) { }
 
@@ -1126,6 +1129,18 @@ public class RedshiftService implements ManagedSecretRotator {
         }
     }
 
+    /**
+     * Registers a callback run with the account id and identifier of every cluster that is deleted. It runs
+     * while the cluster's resource lock is held, so it must not wait for locks of its own.
+     */
+    public void onClusterRemoved(BiConsumer<String, String> listener) {
+        clusterRemovalListeners.add(listener);
+    }
+
+    public boolean clusterExists(String accountId, String identifier) {
+        return clusters.getForAccount(accountId, identifier).isPresent();
+    }
+
     public List<Cluster> describeClusters(String identifier) {
         if (identifier != null) {
             Optional<Cluster> cluster = clusters.get(identifier);
@@ -1273,6 +1288,9 @@ public class RedshiftService implements ManagedSecretRotator {
         // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
         // identifier does not accept them as master-equivalent.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
+        for (BiConsumer<String, String> listener : clusterRemovalListeners) {
+            listener.accept(clusters.accountId(), identifier);
+        }
 
         if (cluster.getMasterPasswordSecretArn() != null && secretsManagerService != null) {
             try {
