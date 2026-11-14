@@ -33,6 +33,7 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class KinesisJsonHandler {
 
+    private static final int LIST_SHARDS_MAX_PAGE_SIZE = 1000;
     private static final String EXPLICIT_HASH_KEY_FIELD = "ExplicitHashKey";
     private static final String EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE =
             "ExplicitHashKey must be a string.";
@@ -781,7 +782,9 @@ public class KinesisJsonHandler {
             }
         }
 
-        int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
+        int maxResults = request.has("MaxResults")
+                ? Math.min(request.path("MaxResults").asInt(LIST_SHARDS_MAX_PAGE_SIZE), LIST_SHARDS_MAX_PAGE_SIZE)
+                : LIST_SHARDS_MAX_PAGE_SIZE;
 
         List<KinesisShard> snapshot = List.copyOf(shards);
         int start = token == null ? 0 : resumeShardIndex(token, snapshot);
