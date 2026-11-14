@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.ProtocolClaim;
@@ -10,6 +11,9 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
+import io.floci.aws.services.cloudwatch.logs.model.Delivery;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.IamGroup;
@@ -947,11 +951,29 @@ class ResourceArnBuilderTest {
     @Test
     void deliveryActionsAreAuthorizedOnTheSourceDestinationOrDeliveryTheyName() {
         String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
-        for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource", "logs:DeleteDeliverySource")) {
+        // A delivery is the one CloudWatch Logs holds under its id; a deleted delivery source is checked on the
+        // delivery destinations its deliveries send to, the type the Service Reference gives DeleteDeliverySource.
+        CloudWatchLogsDeliveryService deliveries = mock(CloudWatchLogsDeliveryService.class);
+        Delivery delivery = new Delivery();
+        delivery.setArn(prefix + "delivery:AbCdEfGh12345678");
+        when(deliveries.getDelivery("AbCdEfGh12345678", "us-east-1")).thenReturn(delivery);
+        when(deliveries.getDelivery("gone", "us-east-1"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Delivery not found", 400));
+        when(deliveries.destinationArnsFrom("bus-source", "us-east-1"))
+                .thenReturn(List.of(prefix + "delivery-destination:bus-logs"));
+        ResourceArnBuilder builder = reading(new CloudWatchLogsStoredResourceArns(deliveries));
+        for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource")) {
             setJsonBody("{\"name\":\"bus-source\"}");
             assertEquals(List.of(prefix + "delivery-source:bus-source"),
                     builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
+        setJsonBody("{\"name\":\"bus-source\"}");
+        assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
+                builder.buildLogResources("logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT, "aws"));
+        // A source with no deliveries reaches no destination, so the request names none of its resource type.
+        setJsonBody("{\"name\":\"idle-source\"}");
+        assertEquals(List.of("*"), builder.buildLogResources("logs:DeleteDeliverySource", ctx, "us-east-1", ACCOUNT,
+                "aws"));
         for (String action : List.of("logs:PutDeliveryDestination", "logs:GetDeliveryDestination",
                 "logs:DeleteDeliveryDestination")) {
             setJsonBody("{\"name\":\"bus-logs\"}");
@@ -961,6 +983,10 @@ class ResourceArnBuilderTest {
         for (String action : List.of("logs:GetDelivery", "logs:DeleteDelivery", "logs:UpdateDeliveryConfiguration")) {
             setJsonBody("{\"id\":\"AbCdEfGh12345678\"}");
             assertEquals(List.of(prefix + "delivery:AbCdEfGh12345678"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+            // One it holds none of has its id open.
+            setJsonBody("{\"id\":\"gone\"}");
+            assertEquals(List.of(prefix + "delivery:*"),
                     builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
         }
         setJsonBody("{\"deliverySourceName\":\"bus-source\",\"deliveryDestinationArn\":\""
@@ -1046,6 +1072,7 @@ class ResourceArnBuilderTest {
 
     @Test
     void listTablesUsesTheCollectionInTheRequestPartitionRegionAndAccount() {
+        // The collection AWS was measured to check ListTables on, the Service Reference giving its action no type.
         for (String body : List.of("{}", "{\"ExclusiveStartTableName\":\"page-start\"}",
                 "{\"TableName\":\"decoy\",\"ResourceArn\":\"decoy\"}")) {
             setJsonBody(body);
@@ -1380,11 +1407,11 @@ class ResourceArnBuilderTest {
         return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, instance);
     }
 
-    /** A builder reading the stored ARNs of a namespace, for a request of that namespace. */
+    /** A builder reading the stored ARNs of a namespace, for every request of that namespace. */
     private static ResourceArnBuilder reading(StoredResourceArns stored) {
         @SuppressWarnings("unchecked")
         Instance<StoredResourceArns> instance = mock(Instance.class);
-        when(instance.iterator()).thenReturn(List.of(stored).iterator());
+        when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
         return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, null, instance);
     }
 

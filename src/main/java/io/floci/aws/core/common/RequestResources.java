@@ -59,7 +59,7 @@ public final class RequestResources {
     private RequestResources() {
     }
 
-    /** Whether the generated table owns this operation, including corrections to hand-built namespaces. */
+    /** Whether the generated table owns this operation, including those of hand-built namespaces it reads. */
     public static boolean reads(String operation) {
         return operation != null && RequestResourceMembers.table().operations().containsKey(operation);
     }
@@ -107,13 +107,14 @@ public final class RequestResources {
         }
         List<RequestResourceMembers.Resource> resources = operation == null ? null
                 : served(table.operations().get(operation), ctx);
-        if (resources == null || resources.isEmpty()) {
+        if (resources == null) {
             return List.of();
         }
         Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
         JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         Map<String, String> form = located(table, operation, sent, ctx, labels);
-        return named(resources, formats(table, operation), form, body, partition, region, accountId, stored);
+        return resources.isEmpty() ? List.of()
+                : named(operation, resources, formats(table, operation), form, body, partition, region, accountId, stored);
     }
 
     /**
@@ -132,7 +133,7 @@ public final class RequestResources {
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
-        return named(resources, formats(table, operation), Map.of(), body, partition, region, accountId, stored);
+        return named(operation, resources, formats(table, operation), Map.of(), body, partition, region, accountId, stored);
     }
 
     /** Whether the table holds the operation as one with no resource of its own, which is checked on {@code *}. */
@@ -177,18 +178,20 @@ public final class RequestResources {
     }
 
     /** The ARNs of the resources the request names, as {@link #of} reads them. */
-    private static List<String> named(List<RequestResourceMembers.Resource> resources,
+    private static List<String> named(String operation, List<RequestResourceMembers.Resource> resources,
                                       Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
                                       JsonNode body, String partition, String region, String accountId,
                                       StoredResourceArns stored) {
         Set<String> arns = new LinkedHashSet<>();
         for (RequestResourceMembers.Resource resource : resources) {
-            if (!applies(resource, form, body, formats)) {
+            if (!applies(resource, form, body, formats) || !onDefault(resource, form, body, formats, region, stored)) {
                 continue;
             }
             if (resource.arn() != null) {
-                for (String value : values(form, body, resource.arn())) {
-                    String named = before(value, resource.before());
+                for (String named : values(form, body, resource.arn())) {
+                    if (longerFormat(named, resource.types(), formats)) {
+                        continue;
+                    }
                     // An ARN fitting a customer's format and one AWS owns is AWS's: the account `aws` tells them apart.
                     resource.types().stream().map(formats::get).filter(format -> format.pattern().matcher(named).matches())
                             .min(Comparator.comparing(format -> !format.awsOwned()))
@@ -262,16 +265,12 @@ public final class RequestResources {
         Map<String, String> form = located(table, operation, sent, ctx, labels);
         Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
         if (creates == null) {
-            return named(made, formats, form, body, partition, region, accountId, null);
+            return named(operation, made, formats, form, body, partition, region, accountId, null);
         }
         Set<String> arns = new LinkedHashSet<>();
         for (RequestResourceMembers.Created created : creates) {
-            String separator = table.operations().getOrDefault(operation, List.of()).stream()
-                    .filter(resource -> created.arn().equals(resource.arn()) && resource.before() != null)
-                    .map(RequestResourceMembers.Resource::before).findFirst().orElse(null);
             RequestResourceMembers.ArnFormat parentFormat = formats.get(created.parent());
-            for (String value : values(form, body, created.arn())) {
-                String named = before(value, separator);
+            for (String named : values(form, body, created.arn())) {
                 if (!parentFormat.pattern().matcher(named).matches()) {
                     continue;
                 }
@@ -376,10 +375,48 @@ public final class RequestResources {
                 || resource.endpoint().equals(endpoint)).toList();
     }
 
-    /** The value up to {@code separator}, which its handler drops the rest after; the whole value without one. */
-    private static String before(String value, String separator) {
-        int at = separator == null ? -1 : value.indexOf(separator);
-        return at < 0 ? value : value.substring(0, at);
+    /**
+     * Whether an ARN fits the format of a type of the namespace the resource does not read, longer than every one of
+     * its own that it fits: an endpoint group's ARN under its accelerator's, {@code accelerator/<id>/listener/...},
+     * is the endpoint group's, not the accelerator's.
+     */
+    private static boolean longerFormat(String arn, List<String> types,
+                                        Map<String, RequestResourceMembers.ArnFormat> formats) {
+        List<RequestResourceMembers.ArnFormat> fits = types.stream().map(formats::get)
+                .filter(format -> format != null && format.pattern().matcher(arn).matches()).toList();
+        // A type checked without its qualifier takes the longer ARNs of its versions and aliases on purpose.
+        if (fits.stream().anyMatch(RequestResourceMembers.ArnFormat::unqualified)) {
+            return false;
+        }
+        int own = fits.stream().mapToInt(format -> format.format().length()).max().orElse(Integer.MAX_VALUE);
+        return formats.entrySet().stream().anyMatch(other -> !types.contains(other.getKey())
+                && other.getValue().format().length() > own && other.getValue().pattern().matcher(arn).matches());
+    }
+
+    /**
+     * Whether a resource marked {@code whenDefault} or {@code unlessDefault} applies: the one without the variable when
+     * its member is absent or names the default resource of its type, which the service gives ({@code findDefault}),
+     * the other otherwise; true for a resource marked neither. With no service, only an absent member is the default.
+     */
+    private static boolean onDefault(RequestResourceMembers.Resource resource, Map<String, String> form, JsonNode body,
+                                     Map<String, RequestResourceMembers.ArnFormat> formats, String region,
+                                     StoredResourceArns stored) {
+        Map<String, String> pair = resource.whenDefault().isEmpty() ? resource.unlessDefault() : resource.whenDefault();
+        if (pair.isEmpty()) {
+            return true;
+        }
+        Map.Entry<String, String> member = pair.entrySet().iterator().next();
+        RequestResourceMembers.ArnFormat format = formats.get(member.getValue());
+        List<String> given = isNull(body, new RequestResourceMembers.Member(member.getKey(), false)) ? List.of()
+                : values(form, body, new RequestResourceMembers.Member(member.getKey(), false));
+        String value = given.isEmpty() ? "" : given.getFirst();
+        if (format != null && format.pattern().matcher(value).matches()) {
+            value = format.variable(value);
+        }
+        Optional<String> fallback = stored == null ? Optional.empty() : stored.findDefault(member.getValue(), region);
+        boolean isDefault = value.isEmpty() || fallback.map(arn -> format != null && format.pattern().matcher(arn).matches()
+                ? format.variable(arn) : arn).filter(value::equals).isPresent();
+        return resource.whenDefault().isEmpty() != isDefault;
     }
 
     /**
@@ -405,7 +442,7 @@ public final class RequestResources {
     private static String first(RequestResourceMembers.Resource resource, Map<String, String> form, JsonNode body,
                                 String member, Map<String, RequestResourceMembers.ArnFormat> formats) {
         RequestResourceMembers.Member read = new RequestResourceMembers.Member(member, false);
-        if (!resource.absent().containsKey(member) && isNull(body, read)) {
+        if (isNull(body, read)) {
             return "";
         }
         List<String> given = given(resource, form, body, read, formats);
@@ -413,32 +450,25 @@ public final class RequestResources {
     }
 
     /**
-     * The values a request gives a member as the resource reads them, as {@link #read} gives them, and, for a member
-     * that may give an ARN of a type instead of its name, that type's one variable of such an ARN.
+     * The values a request gives a member, and, for a member that may give an ARN of a type instead of its name, that
+     * type's one variable of such an ARN.
      */
     private static List<String> given(RequestResourceMembers.Resource resource, Map<String, String> form,
                                       JsonNode body, RequestResourceMembers.Member member,
                                       Map<String, RequestResourceMembers.ArnFormat> formats) {
         RequestResourceMembers.ArnFormat named = arnOf(resource, member.path(), formats);
-        List<String> values = read(resource, form, body, member);
+        List<String> values = values(form, body, member);
         return named == null ? values : values.stream()
                 .map(value -> named.pattern().matcher(value).matches() ? named.variable(value) : value).toList();
     }
 
-    /**
-     * The values a request gives a member: the one the resource reads for the member absent or given a JSON null,
-     * as a handler reading it with {@code asText(null)} does (EventBridge's {@code EventBusName}), and, for a field
-     * of each of a list's structures, one for each structure, that one for a structure lacking it (a
-     * {@code PutEvents} entry naming no event bus is published to the default one), none for no structures.
-     */
-    private static List<String> read(RequestResourceMembers.Resource resource, Map<String, String> form,
-                                     JsonNode body, RequestResourceMembers.Member member) {
-        String absent = resource.absent().get(member.path());
-        if (absent != null && member.eachElement()) {
-            return eachElement(form, body, member, absent);
+    /** The values of a member, a JSON null, or one in an element of a list, giving none. */
+    private static List<String> namingNoneWhenNull(Map<String, String> form, JsonNode body,
+                                                   RequestResourceMembers.Member member) {
+        if (member.eachElement()) {
+            return eachElement(form, body, member, "").stream().filter(value -> !value.isEmpty()).toList();
         }
-        List<String> values = absent != null && isNull(body, member) ? List.of() : values(form, body, member);
-        return values.isEmpty() && absent != null ? List.of(absent) : values;
+        return isNull(body, member) ? List.of() : values(form, body, member);
     }
 
     /** The format of the type whose ARN a member of the resource may give instead of its name; null for none. */
@@ -489,11 +519,11 @@ public final class RequestResources {
      * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is; for
      * a member naming one resource for each of a list's structures, each in the account and Region of the ARN its
      * structure gives, the request's for a name (a {@code PutEvents} entry, on the bus it names). Each value is read
-     * up to the resource's {@code before} character, when it has one (a CodeBuild build id's project), and without the
-     * type's own path when it begins with one, as Route 53 returns its ids ({@code /hostedzone/Z1} names hosted zone
-     * {@code Z1}). A value filling a {@code ...WithoutLeadingSlash} variable is a Parameter Store name instead, read
-     * as {@link #asVariable} reads it. A value rendered past a type's format, when its service checks the
-     * type without a qualifier, is cut where the format ends, as an ARN given is. A type
+     * without the type's own path when it begins with one, as Route 53 returns its ids ({@code /hostedzone/Z1} names
+     * hosted zone {@code Z1}). A value filling a {@code ...WithoutLeadingSlash} variable is a Parameter Store name
+     * instead, read as {@link #asVariable} reads it. A value rendered past a type's format, when its service checks
+     * the type without a qualifier, is cut where the format ends, as an ARN given is. A variable no member fills
+     * takes the value the resource gives it {@code fixed}. A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
      * else has that id open.
      */
@@ -508,14 +538,23 @@ public final class RequestResources {
         }
         AwsArnUtils.Arn fromRequest = arnGiven(resource, form, body, formats);
         List<Filling> fillings = new ArrayList<>(List.of(new Filling(resource.fixed(), fromRequest)));
+        // A member that is a JSON null names none, as a request leaving it out and as a handler reading it with
+        // asText(null) does: an EventBridge rule with a null EventBusName is on the default bus, and an EMR request
+        // with a null ClusterId names no cluster of its own.
         boolean given = false;
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
-            List<String> values = read(resource, form, body, variable.getValue()).stream()
-                    .map(value -> before(value, resource.before()))
+            List<String> values = namingNoneWhenNull(form, body, variable.getValue()).stream()
                     .map(value -> variable.getKey().endsWith(WITHOUT_LEADING_SLASH)
                             ? asVariable(variable.getKey(), value)
                             : withoutTypePath(value, resource.types().getFirst()))
                     .toList();
+            // An element of a list naming no resource names its service's default (a PutEvents entry with no bus).
+            if (variable.getValue().eachElement() && stored != null && resource.fill().size() == 1) {
+                List<String> elements = eachElement(form, body, variable.getValue(), "");
+                if (elements.contains("")) {
+                    stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
+                }
+            }
             if (values.isEmpty()) {
                 continue;
             }
@@ -543,6 +582,12 @@ public final class RequestResources {
             fillings = next;
         }
         if (!resource.fill().isEmpty() && !given) {
+            // A request leaving out every member naming the resource acts on the one its service uses then; a list's
+            // elements each name their own (above), so a list of none names nothing (a PutEvents of no entries).
+            boolean perElement = resource.fill().values().stream().anyMatch(RequestResourceMembers.Member::eachElement);
+            if (stored != null && account.equals(accountId) && !perElement) {
+                stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
+            }
             return;
         }
         for (Filling filling : fillings) {

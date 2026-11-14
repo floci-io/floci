@@ -822,10 +822,11 @@ public class ElbV2DataPlane {
         Set<String> hosts = new LinkedHashSet<>();
         List<CertificateMaterial> certificates = new ArrayList<>();
         if (secure) {
-            if (listener.getCertificates() == null || listener.getCertificates().isEmpty()) {
+            List<String> served = listener.servedCertificates();
+            if (served.isEmpty()) {
                 throw new IllegalStateException("HTTPS listener has no default certificate");
             }
-            for (String certificateArn : listener.getCertificates()) {
+            for (String certificateArn : served) {
                 CertificateMaterial certificate = certificateResolver.publishedMaterial(
                         listener.getListenerArn(), region, certificateArn);
                 try {

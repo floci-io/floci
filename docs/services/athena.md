@@ -78,7 +78,11 @@ omitted, since the API reference does not document a default. The built-in
 `AwsDataCatalog` stays first, followed by registered catalogs in name order.
 `GetDataCatalog` requires `Name`; `ListDatabases`, `ListTableMetadata` and
 `GetTableMetadata` require `CatalogName`. Name `AwsDataCatalog` explicitly to
-read the built-in catalog.
+read the built-in catalog. Floci reads databases and tables from the account's
+Glue Data Catalog alone, so these three refuse a catalog whose metadata lives
+elsewhere, a `LAMBDA`, `HIVE` or `FEDERATED` one or a `GLUE` one registered for
+another account's `catalog-id`, with `MetadataException`, and a catalog that is
+not registered with `InvalidRequestException`.
 Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
 to the action, caller account, and request region and remain resumable after a
 cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024
@@ -108,9 +112,9 @@ results storage.
 ## How it works
 
 1. **Lazy sidecar start**: On the first `StartQueryExecution` call, Floci checks for a local `floci/floci-duck:latest` image and starts the container. Subsequent queries reuse the running container.
-2. **Glue DDL injection**: Floci registers every Glue database as a DuckDB schema (`CREATE SCHEMA IF NOT EXISTS "<schema>"`) and creates qualified views (`CREATE OR REPLACE VIEW "<db>"."<table>"`) mapping each table to its S3 location via DuckDB's `read_parquet`, `read_json_auto`, or `read_csv_auto` functions, chosen based on the table's `InputFormat` or SerDe serialization library. In addition, tables in the query context database receive unqualified view aliases (`CREATE OR REPLACE VIEW "<table>"` in DuckDB's default `main` schema), so queries can reference tables as both `FROM db.table` and `FROM table`.
+2. **Glue DDL injection**: Floci registers every Glue database as a DuckDB schema (`CREATE SCHEMA IF NOT EXISTS "<schema>"`) and creates qualified views (`CREATE OR REPLACE VIEW "<db>"."<table>"`) mapping each table to its S3 location via DuckDB's `read_parquet`, `read_json_auto`, or `read_csv_auto` functions, chosen based on the table's `InputFormat` or SerDe serialization library (a table with partition projection reads only its partition folders; see [Partition projection](#partition-projection)). In addition, tables in the query context database receive unqualified view aliases (`CREATE OR REPLACE VIEW "<table>"` in DuckDB's default `main` schema), so queries can reference tables as both `FROM db.table` and `FROM table`.
 3. **Query execution**: The user's SQL is wrapped in `COPY (...) TO 's3://...' (FORMAT CSV, HEADER)` and executed. Results are written directly to the output S3 path.
-4. **Results retrieval**: `GetQueryResults` reads the CSV back from S3 and returns it in the standard Athena `ResultSet` shape. Each column's `Type` comes from DuckDB describing the query, mapped to the Athena name (`bigint`, `integer`, `double`, `boolean`, `date`, `time`, `timestamp`, `decimal` and so on), with `Precision` and `Scale` for a decimal; a column whose type has no Athena name, such as an interval, and every column of a query DuckDB cannot describe are reported as `varchar`.
+4. **Results retrieval**: `GetQueryResults` reads the CSV back from S3 and returns it in the standard Athena `ResultSet` shape. Each column's `Type` comes from DuckDB describing the query, mapped to the Athena name (`bigint`, `integer`, `double`, `boolean`, `date`, `time`, `timestamp`, `decimal` and so on), with `Precision` and `Scale` for a decimal; a column whose type has no Athena name, such as an interval, and every column of a query DuckDB cannot describe are reported as `varchar`. DuckDB widens `sum` and `count_if` over integers to `HUGEINT`, which is reported as `bigint`, Trino's type for them; a sum past `bigint`'s range, which Athena fails with `NUMERIC_VALUE_OUT_OF_RANGE`, is returned instead.
 
 ## Format inference
 
@@ -124,6 +128,20 @@ For every other table, the DuckDB read function is chosen from the Glue table's 
 | `InputFormat` or `SerializationLibrary` contains `json` | `read_json_auto` |
 | `InputFormat` contains `hive` | `read_json_auto` |
 | Anything else | `read_csv_auto` |
+
+## Partition projection
+
+A Glue table with `projection.enabled` set to `true` is read the way Athena reads it, from its partition layout rather than from its whole location:
+
+- **Read path**: only the partition folders are read, `<location>/<key>=*/...` in the default `column=value` layout, or the `storage.location.template` with each `${key}` placeholder as a wildcard (one per folder, for a `date` format that holds slashes). Anything else stored under the location, such as query results, is not read as table data.
+- **Partition values**: in the default layout, DuckDB's Hive partitioning supplies each key's value. With a template, the view takes each value from the object's S3 path by matching it against the template, and casts it to the key's declared type. A `date` projection whose `format` holds slashes (`yyyy/MM/dd/HH`, the Firehose layout) spans that many folders behind one placeholder. A repeated placeholder must hold the same value at each occurrence, and an object whose path value does not parse as its key's type is not read.
+- **Validation**: as on Athena, a query fails when it leaves an `injected` key without a static equality condition in its `WHERE` clause (`CONSTRAINT_VIOLATION`), or when it reads a table whose template has no placeholder for one of its keys (`INVALID_TABLE_PROPERTY`). Such a table gets no view, so the other tables stay queryable.
+
+Not yet supported:
+
+- Values outside the projection (a date before the range or after `NOW`, an unlisted `enum` value) are read; Athena returns zero rows for them.
+- A `date` or `timestamp` key with a `format` other than ISO is not parsed, so its objects are not read.
+- The object path backs the template's values but is not exposed: Athena's `"$path"` pseudo-column cannot be selected.
 
 ## Configuration
 

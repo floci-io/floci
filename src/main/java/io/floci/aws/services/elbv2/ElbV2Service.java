@@ -48,6 +48,12 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     private static final Logger LOG = Logger.getLogger(ElbV2Service.class);
     private static final String DEFAULT_SSL_POLICY = "ELBSecurityPolicy-2016-08";
+    /**
+     * "Certificates per Application Load Balancer (excluding default certificates)", the one
+     * certificate quota the reference publishes a number for, and the number
+     * {@code DescribeAccountLimits} reports.
+     */
+    public static final int CERTIFICATES_PER_LOAD_BALANCER = 25;
     /** {@code LoadBalancerTypeEnum}, in the model's order. */
     private static final List<String> LOAD_BALANCER_TYPES = List.of("application", "network", "gateway");
 
@@ -670,6 +676,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                                     List<Action> defaultActions, List<String> alpnPolicy,
                                     Map<String, String> initialTags) {
         validatePort(port, "port");
+        requireOneDefaultCertificate(certificates);
         requireGatewayListenerSettings(requireLoadBalancer(region, lbArn), protocol, port);
 
         Map<String, Listener> regionListeners = listeners.computeIfAbsent(region, k -> new ConcurrentHashMap<>());
@@ -701,7 +708,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         listener.setProtocol(protocol != null ? protocol : ("gateway".equals(lbType) ? "GENEVE" : "HTTP"));
         listener.setSslPolicy(sslPolicy == null && servesCertificates(listener.getProtocol())
                 ? DEFAULT_SSL_POLICY : sslPolicy);
-        listener.setCertificates(certificates != null ? new ArrayList<>(certificates) : new ArrayList<>());
+        listener.setDefaultCertificate(defaultCertificateOf(certificates));
         listener.setDefaultActions(defaultActions != null ? new ArrayList<>(defaultActions) : new ArrayList<>());
         listener.setAlpnPolicy(alpnPolicy != null ? new ArrayList<>(alpnPolicy) : new ArrayList<>());
 
@@ -838,6 +845,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                                     String sslPolicy, List<String> certificates,
                                     List<Action> defaultActions, List<String> alpnPolicy) {
         validatePort(port, "port");
+        requireOneDefaultCertificate(certificates);
         while (true) {
             Listener initial = requireListener(region, listenerArn);
             LoadBalancer initialLb = requireLoadBalancer(region, initial.getLoadBalancerArn());
@@ -857,13 +865,14 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             Listener listener = requireListener(region, listenerArn);
             LoadBalancer lb = requireLoadBalancer(region, listener.getLoadBalancerArn());
             ListenerState expected = listenerState(listener, lb);
-            Listener prospective = prospectiveListener(expected, protocol, port, certificates);
+            Listener prospective = prospectiveListener(expected, protocol, port,
+                    defaultCertificateOf(certificates), null);
             boolean clearSecuritySettings = clearsSecuritySettings(expected.protocol(), protocol);
             requireAvailableListenerPort(listeners.getOrDefault(region, Map.of()), listener.getLoadBalancerArn(),
                     listenerArn, prospective.getPort());
             if (!validateExistingListener(region, expected, lb, () -> {
                 requireListenerProtocolTransition(expected.protocol(), protocol, sslPolicy, certificates);
-                requireListenerCertificates(region, prospective.getProtocol(), prospective.getCertificates());
+                requireListenerCertificates(region, prospective.getProtocol(), prospective.servedCertificates());
                 requireCompatibleListenerProtocol(listenerArn, prospective.getPort(), prospective.getProtocol());
             })) {
                 continue;
@@ -888,7 +897,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                         listener.setSslPolicy(sslPolicy);
                     }
                     if (certificates != null || clearSecuritySettings) {
-                        listener.setCertificates(new ArrayList<>(prospective.getCertificates()));
+                        // A default the certificate list holds as well is not counted while it is
+                        // the default, so replacing it starts counting it and the ceiling has to be
+                        // asked about, which is why this operation models TooManyCertificates too.
+                        requireCertificateQuota(region, expected, prospective.getDefaultCertificate(),
+                                prospective.getCertificateList());
+                        listener.setDefaultCertificate(prospective.getDefaultCertificate());
+                        listener.setCertificateList(new ArrayList<>(prospective.getCertificateList()));
                     }
                     if (alpnPolicy != null) {
                         listener.setAlpnPolicy(new ArrayList<>(alpnPolicy));
@@ -913,15 +928,15 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             boolean applied = restart
                     ? publishExistingListener(prospective, region, expected, lb,
                             () -> requireCertificates(region, prospective.getProtocol(),
-                                    certificates != null ? certificates : prospective.getCertificates()), publication)
-                    : supplyCertificatesHeld(prospective.getCertificates(), () -> {
+                                    certificates != null ? certificates : prospective.servedCertificates()), publication)
+                    : supplyCertificatesHeld(prospective.servedCertificates(), () -> {
                         synchronized (lb) {
                             if (!isCurrentListener(region, expected)) {
                                 return false;
                             }
                         }
-                        requireCertificates(region, prospective.getProtocol(), prospective.getCertificates());
-                        requirePublishedCertificates(region, prospective.getProtocol(), prospective.getCertificates());
+                        requireCertificates(region, prospective.getProtocol(), prospective.servedCertificates());
+                        requirePublishedCertificates(region, prospective.getProtocol(), prospective.servedCertificates());
                         return dataPlane.updateListener(expected.port(), publication);
                     });
             if (applied) {
@@ -1157,7 +1172,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
             th.setHealthCheckPort(String.valueOf(port));
-            if (hasFilterTargets && !isRegisteredTarget(tg, t, port)) {
+            if (hasFilterTargets && !isRegisteredTarget(tg, t)) {
                 th.setState("unused");
                 th.setReason("Target.NotRegistered");
                 th.setDescription("Target is not registered to the target group");
@@ -1171,10 +1186,9 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         }).collect(Collectors.toList());
     }
 
-    private static boolean isRegisteredTarget(TargetGroup targetGroup, TargetDescription candidate, int candidatePort) {
+    private static boolean isRegisteredTarget(TargetGroup targetGroup, TargetDescription candidate) {
         return targetGroup.getTargets().stream()
-                .anyMatch(registered -> Objects.equals(registered.getId(), candidate.getId())
-                        && ElbV2HealthChecker.effectivePort(registered, targetGroup) == candidatePort);
+                .anyMatch(registered -> ElbV2HealthChecker.sameTarget(registered, candidate, targetGroup));
     }
 
     // ── Tags ──────────────────────────────────────────────────────────────────
@@ -1211,7 +1225,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         List<Reference> references = new ArrayList<>();
         for (Map<String, Listener> regionListeners : listeners.values()) {
             for (Listener listener : regionListeners.values()) {
-                for (String certificate : listener.getCertificates()) {
+                for (String certificate : listener.servedCertificates()) {
                     references.add(new Reference(certificate, "listener " + listener.getListenerArn()));
                 }
             }
@@ -1219,25 +1233,34 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         return references;
     }
 
-    public void addListenerCertificates(String region, String listenerArn, List<String> certArns) {
+    /**
+     * The certificate list as the add leaves it, which is what the operation answers with: "the
+     * certificates in the certificate list", rather than the certificates the call named.
+     *
+     * <p>The reference's member says one certificate per call, and the Application Load Balancers
+     * guide adds three in one call of its own, so a list is taken.
+     */
+    public List<String> addListenerCertificates(String region, String listenerArn, List<String> certArns) {
         Listener initial = requireListener(region, listenerArn);
         requireCertificates(region, initial.getProtocol(), certArns);
-        changeListenerCertificates(region, listenerArn, certArns, false);
+        return changeListenerCertificates(region, listenerArn, certArns, false);
     }
 
     public void removeListenerCertificates(String region, String listenerArn, List<String> certArns) {
         changeListenerCertificates(region, listenerArn, certArns, true);
     }
 
-    private void changeListenerCertificates(String region, String listenerArn, List<String> requested, boolean remove) {
+    private List<String> changeListenerCertificates(String region, String listenerArn,
+                                                    List<String> requested, boolean remove) {
         while (true) {
             Listener listener = requireListener(region, listenerArn);
             LoadBalancer lb = requireLoadBalancer(region, listener.getLoadBalancerArn());
             ListenerState expected = listenerState(listener, lb);
-            List<String> certificates = new ArrayList<>(expected.certificates());
+            List<String> certificates = new ArrayList<>(expected.certificateList());
+            boolean namesTheDefault = remove && expected.defaultCertificate() != null
+                    && requested.contains(expected.defaultCertificate());
             if (remove) {
-                if (servesCertificates(expected.protocol()) && !certificates.isEmpty()
-                        && requested.contains(certificates.getFirst())) {
+                if (servesCertificates(expected.protocol()) && namesTheDefault) {
                     throw new AwsException("OperationNotPermitted",
                             "The default listener certificate cannot be removed.", 400);
                 }
@@ -1252,11 +1275,16 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                         certificates.add(arn);
                     }
                 }
+                requireCertificateQuota(region, expected, certificates);
             }
-            Listener prospective = prospectiveListener(expected, null, null, certificates);
+            Listener prospective = prospectiveListener(expected, null, null, null, certificates);
+            if (namesTheDefault) {
+                prospective.setDefaultCertificate(null);
+            }
             if (publishExistingListener(prospective, region, expected, lb, () -> {
                 if (!remove) {
                     requireCertificates(region, expected.protocol(), requested);
+                    requireCertificateQuota(region, expected, certificates);
                 }
             }, () -> {
                 synchronized (lb) {
@@ -1264,28 +1292,109 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     if (!isCurrentListener(region, expected)) {
                         return false;
                     }
-                    listener.setCertificates(certificates);
+                    if (!remove) {
+                        // The ceiling belongs to the load balancer rather than to the listener, so
+                        // it is counted here as well, under the lock every certificate write takes:
+                        // two adds on sibling listeners would otherwise each count the other's list
+                        // as it was before the other wrote and pass the ceiling together.
+                        requireCertificateQuota(region, expected, certificates);
+                    }
+                    listener.setCertificateList(certificates);
+                    if (namesTheDefault) {
+                        // Only a listener of a protocol the member does not describe reaches here,
+                        // the throw above refusing the removal otherwise, and it keeps the
+                        // behaviour this service had before the default was held apart.
+                        listener.setDefaultCertificate(null);
+                    }
                     persistRegion(listeners, region);
                     return true;
                 }
             })) {
-                return;
+                return certificates;
             }
         }
     }
 
-    public List<String> describeListenerCertificates(String region, String listenerArn) {
+    /**
+     * The quota the reference publishes is per load balancer and excludes the default certificates,
+     * so a listener's own default is not counted where its certificate list holds it as well, and
+     * the listeners of one load balancer share the ceiling. The default the count is taken against
+     * is the one the write leaves behind rather than the one the listener holds now, since
+     * replacing a default the certificate list also holds starts counting it. The number in hand is
+     * the Application Load Balancer one; a TLS listener on a Network Load Balancer is held to the
+     * same ceiling, which is Floci's reading rather than a sentence of its own.
+     */
+    private void requireCertificateQuota(String region, ListenerState expected, List<String> certificateList) {
+        requireCertificateQuota(region, expected, expected.defaultCertificate(), certificateList);
+    }
+
+    private void requireCertificateQuota(String region, ListenerState expected, String defaultCertificate,
+                                         List<String> certificateList) {
+        String loadBalancerArn = expected.listener().getLoadBalancerArn();
+        String listenerArn = expected.listener().getListenerArn();
+        int held = countedCertificates(defaultCertificate, certificateList);
+        for (Listener other : listeners.getOrDefault(region, Map.of()).values()) {
+            if (loadBalancerArn.equals(other.getLoadBalancerArn())
+                    && !listenerArn.equals(other.getListenerArn())) {
+                held += countedCertificates(other.getDefaultCertificate(), other.getCertificateList());
+            }
+        }
+        if (held > CERTIFICATES_PER_LOAD_BALANCER) {
+            throw new AwsException("TooManyCertificates",
+                    "You've reached the limit on the number of certificates per load balancer.", 400);
+        }
+    }
+
+    private static int countedCertificates(String defaultCertificate, List<String> certificateList) {
+        return (int) certificateList.stream().filter(arn -> !arn.equals(defaultCertificate)).count();
+    }
+
+    /**
+     * The default certificate and then the certificate list, a default the list holds as well
+     * named twice, "once with IsDefault set to true and once with IsDefault set to false".
+     */
+    public List<ListenerCertificate> describeListenerCertificates(String region, String listenerArn) {
         Listener listener = requireListener(region, listenerArn);
-        return new ArrayList<>(listener.getCertificates());
+        List<ListenerCertificate> certificates = new ArrayList<>();
+        if (listener.getDefaultCertificate() != null) {
+            certificates.add(new ListenerCertificate(listener.getDefaultCertificate(), true));
+        }
+        for (String certificate : listener.getCertificateList()) {
+            certificates.add(new ListenerCertificate(certificate, false));
+        }
+        return certificates;
+    }
+
+    /** A certificate {@code DescribeListenerCertificates} names, and the part it plays. */
+    public record ListenerCertificate(String certificateArn, boolean isDefault) {}
+
+    /**
+     * The member both create and modify read as the listener's default certificate, where the
+     * reference says "You must provide exactly one certificate." No source gives the code a longer
+     * list is answered with, so it is the {@code ValidationError} this service answers a request
+     * shape with, which is Floci's reading.
+     */
+    private static void requireOneDefaultCertificate(List<String> certificates) {
+        if (certificates != null && certificates.size() > 1) {
+            throw new AwsException("ValidationError",
+                    "You must provide exactly one certificate.", 400);
+        }
+    }
+
+    private static String defaultCertificateOf(List<String> certificates) {
+        return certificates == null || certificates.isEmpty() ? null : certificates.getFirst();
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private record ListenerState(Listener listener, Integer port, String protocol, List<String> certificates) {}
+    private record ListenerState(Listener listener, Integer port, String protocol,
+                                 String defaultCertificate, List<String> certificateList,
+                                 List<String> certificates) {}
 
     private static ListenerState listenerState(Listener listener) {
         return new ListenerState(listener, listener.getPort(), listener.getProtocol(),
-                new ArrayList<>(listener.getCertificates()));
+                listener.getDefaultCertificate(), new ArrayList<>(listener.getCertificateList()),
+                listener.servedCertificates());
     }
 
     private static ListenerState listenerState(Listener listener, LoadBalancer lb) {
@@ -1298,18 +1407,23 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         Listener current = listeners.getOrDefault(region, Map.of()).get(expected.listener().getListenerArn());
         return current == expected.listener() && Objects.equals(current.getPort(), expected.port())
                 && Objects.equals(current.getProtocol(), expected.protocol())
-                && current.getCertificates().equals(expected.certificates());
+                && Objects.equals(current.getDefaultCertificate(), expected.defaultCertificate())
+                && current.getCertificateList().equals(expected.certificateList());
     }
 
     private static Listener prospectiveListener(ListenerState expected, String protocol, Integer port,
-                                                List<String> certificates) {
+                                                String defaultCertificate, List<String> certificateList) {
         Listener prospective = new Listener();
         prospective.setListenerArn(expected.listener().getListenerArn());
         prospective.setLoadBalancerArn(expected.listener().getLoadBalancerArn());
         prospective.setPort(port != null ? port : expected.port());
         prospective.setProtocol(protocol != null ? protocol : expected.protocol());
-        prospective.setCertificates(clearsSecuritySettings(expected.protocol(), protocol) ? new ArrayList<>()
-                : new ArrayList<>(certificates != null ? certificates : expected.certificates()));
+        if (!clearsSecuritySettings(expected.protocol(), protocol)) {
+            prospective.setDefaultCertificate(defaultCertificate != null ? defaultCertificate
+                    : expected.defaultCertificate());
+            prospective.setCertificateList(new ArrayList<>(certificateList != null ? certificateList
+                    : expected.certificateList()));
+        }
         return prospective;
     }
 
@@ -1417,7 +1531,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                                             LoadBalancer lb, Runnable referenceValidation, BooleanSupplier publication) {
         try {
             return publishListener(prospective, region, expected.port(), publication,
-                    operation -> supplyCertificatesHeld(prospective.getCertificates(), () -> {
+                    operation -> supplyCertificatesHeld(prospective.servedCertificates(), () -> {
                         synchronized (lb) {
                             if (!isCurrentListener(region, expected)
                                     || loadBalancers.getOrDefault(region, Map.of()).get(lb.getLoadBalancerArn()) != lb) {
@@ -1425,7 +1539,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                             }
                         }
                         referenceValidation.run();
-                        requirePublishedCertificates(region, prospective.getProtocol(), prospective.getCertificates());
+                        requirePublishedCertificates(region, prospective.getProtocol(), prospective.servedCertificates());
                         return operation.get();
                     }));
         } catch (AwsException failure) {
@@ -1447,7 +1561,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 return;
             }
             ListenerState expected = listenerState(listener, lb);
-            if (publishExistingListener(prospectiveListener(expected, null, null, null), region, expected, lb,
+            if (publishExistingListener(prospectiveListener(expected, null, null, null, null), region, expected, lb,
                     () -> { }, () -> {
                 synchronized (lb) {
                     return loadBalancers.getOrDefault(region, Map.of()).get(lb.getLoadBalancerArn()) == lb
@@ -1528,7 +1642,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         List<CertificateReference> references = new ArrayList<>();
         for (Map<String, Listener> regionListeners : listeners.values()) {
             for (Listener listener : regionListeners.values()) {
-                for (String certificateArn : listener.getCertificates()) {
+                for (String certificateArn : listener.servedCertificates()) {
                     references.add(new CertificateReference(certificateArn, listener.getLoadBalancerArn()));
                 }
             }
@@ -1538,7 +1652,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void certificateReimported(String certificateArn, String region) {
         for (Listener listener : listeners.getOrDefault(region, Map.of()).values()) {
-            if (listener.getCertificates().contains(certificateArn)) {
+            if (listener.servedCertificates().contains(certificateArn)) {
                 try {
                     restoreListener(region, listener.getListenerArn());
                 } catch (RuntimeException failure) {

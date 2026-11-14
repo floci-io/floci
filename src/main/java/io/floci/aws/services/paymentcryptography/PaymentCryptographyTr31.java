@@ -108,7 +108,7 @@ final class PaymentCryptographyTr31 {
      * @param blockSize the cipher block size in characters
      * @return the blocks, with the padding block appended when one is needed
      */
-    private static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
+    static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
         int total = 0;
         for (String[] block : blocks) {
             total += block[0].length() + 2 + block[1].length();
@@ -196,7 +196,7 @@ final class PaymentCryptographyTr31 {
      * @param blocks the optional blocks, each its identifier and its value
      * @return the optional blocks, as the characters of the key block
      */
-    private static String optionalBlocks(List<String[]> blocks) {
+    static String optionalBlocks(List<String[]> blocks) {
         StringBuilder out = new StringBuilder();
         for (String[] block : blocks) {
             String id = block[0];
@@ -301,9 +301,9 @@ final class PaymentCryptographyTr31 {
      *
      * @param blockLength the length of the whole block, in characters
      */
-    private static String header16(String type, String usage, String mode, String exportability,
-                                  int blockLength, String algorithm, String version,
-                                  int optionalBlocks) {
+    static String header16(String type, String usage, String mode, String exportability,
+                           int blockLength, String algorithm, String version,
+                           int optionalBlocks) {
         String header = type
                 + pad4(blockLength)
                 + usage
@@ -553,7 +553,7 @@ final class PaymentCryptographyTr31 {
      * @param radix the radix the field is written in
      * @return the number, in two characters
      */
-    private static String two(int value, int radix) {
+    static String two(int value, int radix) {
         String text = Integer.toString(value, radix).toUpperCase(Locale.ROOT);
         if (text.length() > 2) {
             throw new IllegalArgumentException("the number does not fit in two characters: " + value);

@@ -1471,7 +1471,7 @@ public class Ec2QueryHandler {
 
     private Response handleTerminateInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Map<String, String>> changes = service.terminateInstances(region, ids);
+        List<Map<String, String>> changes = service.terminateInstances(region, ids, dryRun(p));
         return xmlResponse(buildInstanceStateChangeXml("TerminateInstancesResponse", changes));
     }
 
@@ -1531,13 +1531,13 @@ public class Ec2QueryHandler {
 
     private Response handleStartInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Map<String, String>> changes = service.startInstances(region, ids);
+        List<Map<String, String>> changes = service.startInstances(region, ids, dryRun(p));
         return xmlResponse(buildInstanceStateChangeXml("StartInstancesResponse", changes));
     }
 
     private Response handleStopInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Map<String, String>> changes = service.stopInstances(region, ids);
+        List<Map<String, String>> changes = service.stopInstances(region, ids, dryRun(p));
         return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
     }
 
@@ -1563,7 +1563,7 @@ public class Ec2QueryHandler {
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        service.rebootInstances(region, ids);
+        service.rebootInstances(region, ids, dryRun(p));
         return booleanResponse("RebootInstances");
     }
 
