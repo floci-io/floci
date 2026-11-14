@@ -258,6 +258,34 @@ class EksAddonServiceTest {
                 fixture.service.delete(fixture.cluster, "kube-proxy", false));
     }
 
+    /** The node asks whether the agent is stored when it starts, which can be while the cluster is not ACTIVE. */
+    @Test
+    void anAddonIsInstalledWhileItIsStoredWhateverTheClustersStatus() {
+        Fixture fixture = fixture();
+        fixture.cluster.setVersion("1.29");
+        fixture.service.create(fixture.cluster, new CreateAddonRequest(
+                "eks-pod-identity-agent", null, null, null, null, null, null, null));
+        Cluster sameName = new Cluster();
+        sameName.setName("test-cluster");
+        sameName.setArn(fixture.cluster.getArn());
+        sameName.setCreatedAt(Instant.parse("2026-09-21T12:00:00Z"));
+
+        assertTrue(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+        assertTrue(fixture.service.isInstalled(fixture.cluster, " EKS-Pod-Identity-Agent "));
+        assertFalse(fixture.service.isInstalled(fixture.cluster, "coredns"));
+        assertFalse(fixture.service.isInstalled(fixture.cluster, null));
+        assertFalse(fixture.service.isInstalled(null, "eks-pod-identity-agent"));
+        // A cluster recreated under the same name starts without the earlier one's add-ons.
+        assertFalse(fixture.service.isInstalled(sameName, "eks-pod-identity-agent"));
+
+        fixture.cluster.setStatus(ClusterStatus.UPDATING);
+        assertTrue(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+
+        fixture.cluster.setStatus(ClusterStatus.ACTIVE);
+        fixture.service.delete(fixture.cluster, "eks-pod-identity-agent", false);
+        assertFalse(fixture.service.isInstalled(fixture.cluster, "eks-pod-identity-agent"));
+    }
+
     @Test
     void listAddonsWithPagination() {
         Fixture fixture = fixture();

@@ -1,7 +1,9 @@
 package io.floci.aws.services.eks;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
@@ -17,6 +19,47 @@ import static org.hamcrest.Matchers.*;
 class EksAddonIntegrationTest {
 
     private static final String REGION = "us-east-1";
+
+    @InjectSpy
+    EksClusterManager clusterManager;
+
+    /**
+     * The Pod Identity address answers while the agent add-on is installed: CreateAddon starts it and
+     * DeleteAddon stops it, except with preserve, which leaves the agent running on EKS. Other add-ons
+     * leave it alone.
+     */
+    @Test
+    void thePodIdentityAgentsAddressFollowsItsAddon() {
+        String account = "123456789012";
+        String name = "addon-agent-" + UUID.randomUUID().toString().substring(0, 8);
+        String basePath = "/clusters/" + name + "/addons";
+        createCluster(account, name, "1.30");
+        try {
+            for (String addon : List.of("eks-pod-identity-agent", "coredns")) {
+                given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                        .body(Map.of("addonName", addon)).post(basePath).then().statusCode(200);
+            }
+            Mockito.verify(clusterManager, Mockito.times(1))
+                    .podIdentityAgentCreated(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+
+            given().header("Authorization", auth(account, "eks")).queryParam("preserve", true)
+                    .delete(basePath + "/eks-pod-identity-agent").then().statusCode(200);
+            given().header("Authorization", auth(account, "eks"))
+                    .delete(basePath + "/coredns").then().statusCode(200);
+            Mockito.verify(clusterManager, Mockito.never()).podIdentityAgentDeleted(Mockito.any());
+
+            given().header("Authorization", auth(account, "eks")).contentType("application/json")
+                    .body(Map.of("addonName", "eks-pod-identity-agent")).post(basePath).then().statusCode(200);
+            given().header("Authorization", auth(account, "eks"))
+                    .delete(basePath + "/eks-pod-identity-agent").then().statusCode(200);
+            Mockito.verify(clusterManager, Mockito.times(2))
+                    .podIdentityAgentCreated(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+            Mockito.verify(clusterManager, Mockito.times(1))
+                    .podIdentityAgentDeleted(Mockito.argThat(cluster -> name.equals(cluster.getName())));
+        } finally {
+            deleteCluster(account, name);
+        }
+    }
 
     @Test
     void addonLifecycleRoundTrip() {

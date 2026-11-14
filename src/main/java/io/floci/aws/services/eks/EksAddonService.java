@@ -182,6 +182,17 @@ public class EksAddonService {
         return stored.addon();
     }
 
+    /**
+     * Whether {@code cluster} has the add-on stored, whatever the cluster's status: what its node
+     * acts on when it starts or is adopted, which can happen while the cluster is not ACTIVE.
+     */
+    public boolean isInstalled(Cluster cluster, String addonName) {
+        if (cluster == null || addonName == null || addonName.isBlank()) {
+            return false;
+        }
+        return storage.get(prefix(cluster) + addonName.trim().toLowerCase(Locale.ROOT)).isPresent();
+    }
+
     public AddonNamesPage list(Cluster cluster, Integer maxResults, String nextToken) {
         requireActiveCluster(cluster);
         String p = prefix(cluster);

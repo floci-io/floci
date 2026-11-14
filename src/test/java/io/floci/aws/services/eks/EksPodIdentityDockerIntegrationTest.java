@@ -11,9 +11,11 @@ import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
 import io.floci.aws.services.eks.model.ClusterStatus;
+import io.floci.aws.services.eks.model.CreateAddonRequest;
 import io.floci.aws.services.eks.model.CreatePodIdentityAssociationRequest;
 import io.floci.aws.services.eks.model.OidcIdentity;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testing.DockerAvailability;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -82,6 +84,9 @@ class EksPodIdentityDockerIntegrationTest {
     EksClusterManager eksClusterManager;
 
     @Inject
+    EksAddonService addonService;
+
+    @Inject
     DockerHostResolver dockerHostResolver;
 
     private String containerId;
@@ -91,7 +96,7 @@ class EksPodIdentityDockerIntegrationTest {
 
     @BeforeEach
     void requireDocker() {
-        boolean dockerAvailable = isDockerAvailable();
+        boolean dockerAvailable = DockerAvailability.answers(dockerClient);
         if (!dockerAvailable) {
             LOG.warn("Docker daemon is not available; skipping EksPodIdentityDockerIntegrationTest");
         }
@@ -102,6 +107,9 @@ class EksPodIdentityDockerIntegrationTest {
 
     @AfterEach
     void tearDown() {
+        if (cluster != null) {
+            addonService.deleteClusterAddons(cluster);
+        }
         if (clusterName != null) {
             try {
                 eksService.deleteClusterForAccount("000000000000", clusterName);
@@ -160,7 +168,10 @@ class EksPodIdentityDockerIntegrationTest {
 
         execInContainer(containerId, "command -v curl >/dev/null 2>&1 && command -v iptables >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 || apk add --no-cache curl iptables iproute2");
 
-        eksClusterManager.configurePodIdentityRelay(cluster, containerId);
+        // The address answers while the agent add-on is stored, as on EKS.
+        addonService.create(cluster, new CreateAddonRequest(EksPodIdentityWebhook.POD_IDENTITY_ADDON,
+                "v1.4.0-eksbuild.3", null, null, null, null, null, null));
+        eksClusterManager.configurePodIdentityForward(cluster, containerId);
 
         String validToken = oidcService.mintServiceAccountToken(EksService.clusterKey("us-east-1", clusterName), issuer, "default", "workload-sa",
                 "pods.eks.amazonaws.com", 3600);
@@ -174,15 +185,6 @@ class EksPodIdentityDockerIntegrationTest {
                 "pods.eks.amazonaws.com", 3600);
         String missingCode = execInContainer(containerId, "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: " + unassociatedToken + "' http://169.254.170.23/v1/credentials");
         assertEquals("404", missingCode.trim());
-    }
-
-    private boolean isDockerAvailable() {
-        try {
-            dockerClient.pingCmd().exec();
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
     }
 
     private String execInContainer(String containerId, String cmd) {

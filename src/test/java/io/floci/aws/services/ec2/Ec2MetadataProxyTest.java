@@ -4,17 +4,16 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
+import io.floci.aws.testing.HelperShellFixture;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import java.io.File;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -406,113 +405,18 @@ class Ec2MetadataProxyTest {
     @Test
     void readinessProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
         List<String> proxied = new CopyOnWriteArrayList<>();
-        HttpServer proxy = failingProxy(proxied);
+        HttpServer proxy = HelperShellFixture.failingProxy(proxied);
         try (Ec2MetadataTestFixture fixture = new Ec2MetadataTestFixture()) {
             fixture.start();
             requireTokens(fixture.instance());
 
-            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, proxyEnvironment(proxy));
+            int result = HelperShellFixture.run(probe(fixture.endpoint()), directory, HelperShellFixture.proxyEnvironment(proxy));
 
             assertEquals(0, result, HelperShellFixture.output(directory));
             assertEquals(List.of(), proxied);
         } finally {
             proxy.stop(0);
         }
-    }
-
-    /**
-     * Floci answers 400 without a pod token, which still proves the path reaches it. A proxy that
-     * answered in its place would look the same to the status check, so the probe must not go
-     * through one.
-     */
-    @Test
-    void podIdentityProbeIgnoresTheImagesHttpProxy(@TempDir Path directory) throws Exception {
-        List<String> proxied = new CopyOnWriteArrayList<>();
-        AtomicInteger relayed = new AtomicInteger();
-        HttpServer proxy = null;
-        HttpServer relay = null;
-        try {
-            proxy = failingProxy(proxied);
-            relay = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            relay.createContext("/v1/credentials", exchange -> {
-                relayed.incrementAndGet();
-                exchange.sendResponseHeaders(400, -1);
-                exchange.close();
-            });
-            relay.start();
-            String[] probe = {"sh", "-c",
-                    Ec2MetadataProxy.podIdentityProbeCommand("http://127.0.0.1:" + relay.getAddress().getPort())};
-
-            int result = HelperShellFixture.run(probe, directory, proxyEnvironment(proxy));
-
-            assertEquals(0, result, HelperShellFixture.output(directory));
-            assertEquals(1, relayed.get(), HelperShellFixture.output(directory));
-            assertEquals(List.of(), proxied);
-        } finally {
-            if (relay != null) {
-                relay.stop(0);
-            }
-            if (proxy != null) {
-                proxy.stop(0);
-            }
-        }
-    }
-
-    /**
-     * A stock {@code rancher/k3s} node has BusyBox's {@code wget} and no {@code curl}: without curl
-     * the probe asks with wget, reads the status from the error it prints, and does not go through
-     * the image's proxy either.
-     */
-    @Test
-    void podIdentityProbeUsesWgetWithoutCurl(@TempDir Path directory) throws Exception {
-        Optional<Path> wget = onPath("wget");
-        assumeTrue(wget.isPresent(), "wget is not installed on this host");
-        Path bin = Files.createDirectory(directory.resolve("bin"));
-        for (String tool : List.of("env", "grep")) {
-            Files.createSymbolicLink(bin.resolve(tool), onPath(tool).orElseThrow());
-        }
-        Files.createSymbolicLink(bin.resolve("wget"), wget.get());
-        List<String> proxied = new CopyOnWriteArrayList<>();
-        AtomicInteger answered = new AtomicInteger();
-        HttpServer proxy = null;
-        HttpServer floci = null;
-        try {
-            proxy = failingProxy(proxied);
-            floci = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-            floci.createContext("/v1/credentials", exchange -> {
-                answered.incrementAndGet();
-                exchange.sendResponseHeaders(400, -1);
-                exchange.close();
-            });
-            floci.start();
-            String[] probe = {"sh", "-c",
-                    Ec2MetadataProxy.podIdentityProbeCommand("http://127.0.0.1:" + floci.getAddress().getPort())};
-            Map<String, String> environment = new HashMap<>(proxyEnvironment(proxy));
-            environment.put("PATH", bin.toString());
-
-            int result = HelperShellFixture.run(probe, directory, environment);
-
-            assertEquals(0, result, HelperShellFixture.output(directory));
-            assertEquals(1, answered.get(), HelperShellFixture.output(directory));
-            assertEquals(List.of(), proxied);
-        } finally {
-            if (floci != null) {
-                floci.stop(0);
-            }
-            if (proxy != null) {
-                proxy.stop(0);
-            }
-        }
-    }
-
-    private static Optional<Path> onPath(String tool) {
-        for (String dir : System.getenv().getOrDefault("PATH", "").split(File.pathSeparator)) {
-            Path candidate = Path.of(dir, tool);
-            if (!dir.isEmpty() && Files.isExecutable(candidate)) {
-                return Optional.of(candidate.toAbsolutePath());
-            }
-        }
-        return Optional.empty();
     }
 
     /**
@@ -659,24 +563,6 @@ class Ec2MetadataProxyTest {
     }
 
     /** An HTTP proxy that records every request it is sent and answers each with 502. */
-    private static HttpServer failingProxy(List<String> proxied) throws Exception {
-        HttpServer proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        proxy.createContext("/", exchange -> {
-            proxied.add(exchange.getRequestMethod() + " " + exchange.getRequestURI());
-            exchange.sendResponseHeaders(502, -1);
-            exchange.close();
-        });
-        proxy.start();
-        return proxy;
-    }
-
-    /** The proxy settings an image could carry, with nothing exempted. */
-    private static Map<String, String> proxyEnvironment(HttpServer proxy) {
-        String proxyUrl = "http://127.0.0.1:" + proxy.getAddress().getPort();
-        return Map.of("http_proxy", proxyUrl, "HTTP_PROXY", proxyUrl, "all_proxy", proxyUrl,
-                "ALL_PROXY", proxyUrl, "no_proxy", "", "NO_PROXY", "");
-    }
-
     private static String[] probe(String endpoint) {
         return new String[]{"sh", "-c", Ec2MetadataProxy.imdsProbeCommand(endpoint)};
     }

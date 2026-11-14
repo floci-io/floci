@@ -30,8 +30,9 @@ import java.util.function.Supplier;
  * SDK at Floci with {@code AWS_ENDPOINT_URL} and {@code AWS_ENDPOINT_URL_STS}, as it does for every
  * container it launches itself: otherwise the pod's calls, signed with Floci credentials, go to AWS.
  *
- * <p>Nothing answers {@link #CREDENTIALS_FULL_URI} yet: this class injects the plumbing only, so an
- * injected pod still cannot obtain credentials.
+ * <p>This class injects the plumbing only. {@link #CREDENTIALS_FULL_URI} answers while the addon is
+ * installed: {@link EksClusterManager} forwards its address in the node to
+ * {@link EksPodIdentityCredentialsController}, which hands the pod its association's credentials.
  *
  * <p>Every path here admits the pod. A cluster that is gone, an addon that is not installed, a
  * malformed review and an internal error all return {@code allowed: true} with no patch, which is

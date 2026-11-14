@@ -149,7 +149,15 @@ Real EKS sets neither endpoint variable. Floci adds them so the credentials it h
 
 ### Credential endpoint
 
-Floci serves pod identity credentials through a link-local relay bound to `169.254.170.23:80` inside the cluster container, forwarding requests to Floci's credentials endpoint (`GET /v1/credentials`). Workloads reach this endpoint using the injected `AWS_CONTAINER_CREDENTIALS_FULL_URI` environment variable, passing their projected token in the `Authorization` header (`Authorization: <token>` or `Authorization: Bearer <token>`).
+On EKS the Pod Identity Agent answers on `169.254.170.23:80` on every node while the `eks-pod-identity-agent` add-on is installed. Floci makes that address answer in the cluster container while the add-on is stored, with NAT rules that send requests for it straight to Floci's credentials endpoint (`GET /v1/credentials`), so nothing is installed or run in the node. A `PREROUTING` rule takes the pod network's requests (the cluster's pod CIDR) and an `OUTPUT` rule the node's own, which is where `hostNetwork` pods' come from. The node's masquerade rule (flannel's) carries the answers back. Workloads reach this endpoint using the injected `AWS_CONTAINER_CREDENTIALS_FULL_URI` environment variable, passing their projected token in the `Authorization` header (`Authorization: <token>` or `Authorization: Bearer <token>`).
+
+The rules follow the add-on:
+
+- `CreateAddon` for `eks-pod-identity-agent` adds them, replacing any an earlier Floci left for the address.
+- `DeleteAddon` removes them. With `preserve=true` they stay, since EKS leaves the agent running on the cluster then.
+- When the cluster container starts or a Floci restart adopts it, Floci adds them while the add-on is stored and otherwise removes any it finds. So after a `DeleteAddon` with `preserve=true`, the address answers only until the next restart.
+
+The rules need `iptables` in the node, which the stock `rancher/k3s` image has, and they are only set up with `floci.services.eks.pod-identity-webhook` and TLS on (see below), since pods get the credentials URL only from the webhook. Floci's host name is resolved inside the node, from its `/etc/hosts` (where `host.docker.internal` lives on Linux) or else through DNS.
 
 The credentials endpoint performs the following validations:
 1. Validates token format and extracts the issuer URL without verifying signatures yet.
@@ -181,11 +189,12 @@ Floci supports the EKS cluster addon management plane for AWS SDKs and Terraform
 - **Updating**: `UpdateAddon` updates the addon version, configuration values, service account role ARN, or resolve-conflicts strategy. It returns an `Update` tracking object and updates the addon metadata.
 - **Update tracking**: `DescribeUpdate` describes the status of an addon update (such as an in-place addon version update queried by Terraform).
 - **Deletion**: `DeleteAddon` marks the addon as `DELETING` and removes it from the cluster. Deleting a cluster automatically cleans up all associated addons.
+- **Pod Identity Agent**: while `eks-pod-identity-agent` is installed, `169.254.170.23:80` answers in the cluster container, as described under [Credential endpoint](#credential-endpoint).
 - **Supported versions**: `DescribeAddonVersions` queries the addon version catalog with optional filtering by `addonName` and `kubernetesVersion`, supporting pagination. As in AWS, a `kubernetesVersion` filter also limits each version's `compatibilities` to that Kubernetes version. The catalog in `src/main/resources/eks/addon-versions.json` holds the parts of AWS's `DescribeAddonVersions` answer that Floci serves, for every Kubernetes version Floci can run; `make eks-addons-sync` regenerates it from `DescribeAddonVersions` with any AWS account's credentials.
 
 ### Metadata recording only
 
-Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container.
+Addons in Floci are recorded metadata only. Creating or updating an addon does not install or reconcile Kubernetes DaemonSets, Deployments, or custom resources inside the cluster container. The one effect inside it is the Pod Identity address of `eks-pod-identity-agent`, which Floci forwards itself rather than by running the agent.
 
 ## Cluster security group
 

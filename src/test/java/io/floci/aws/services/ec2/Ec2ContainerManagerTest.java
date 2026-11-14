@@ -44,6 +44,7 @@ import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
+import io.floci.aws.testing.HelperShellFixture;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
