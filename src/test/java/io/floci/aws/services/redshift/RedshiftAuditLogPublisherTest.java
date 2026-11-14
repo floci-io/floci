@@ -54,6 +54,62 @@ import static org.mockito.Mockito.when;
 
 class RedshiftAuditLogPublisherTest {
 
+    private static RedshiftAuditTarget namespaceTarget(List<String> exports) {
+        return new RedshiftAuditTarget("serverless_us-east-1_wg", "analytics", "/aws/redshift/analytics",
+                "namespace/analytics", true, "cloudwatch", null, null, exports, false, 1L);
+    }
+
+    @Test
+    void aTargetNamesItsOwnLogGroupAndStream() {
+        CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+        RedshiftAuditLogPublisher publisher = new RedshiftAuditLogPublisher(logs,
+                Clock.fixed(Instant.ofEpochMilli(1234), ZoneOffset.UTC));
+
+        publisher.publishConnection(namespaceTarget(null), "111111111111", "us-east-1", "dev", "admin", "authenticated",
+                "10.0.0.1", null);
+
+        verify(logs).createLogGroupForAccount("111111111111", "/aws/redshift/analytics/connectionlog", null, Map.of(),
+                "us-east-1");
+        verify(logs).createLogStreamForAccount("111111111111", "/aws/redshift/analytics/connectionlog", "analytics",
+                "us-east-1");
+        verify(logs).putLogEventsForAccount(eq("111111111111"), eq("/aws/redshift/analytics/connectionlog"),
+                eq("analytics"), anyList(), eq("us-east-1"));
+    }
+
+    @Test
+    void aRegisteredTargetPublishesOnlyItsSelectedExportsUnderItsIdentifier() {
+        CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+        RedshiftAuditLogPublisher publisher = new RedshiftAuditLogPublisher(logs, Clock.systemUTC());
+        publisher.register("111111111111", "us-east-1", namespaceTarget(List.of("userlog")));
+
+        publisher.publishRegisteredConnection("111111111111", "serverless_us-east-1_wg", "dev", "admin", "authenticated",
+                "10.0.0.1", 5439);
+        publisher.publishRegisteredUserChange("111111111111", "serverless_us-east-1_wg", "dev", "bob", "create", null);
+        publisher.unregister("111111111111", "serverless_us-east-1_wg");
+        publisher.publishRegisteredUserChange("111111111111", "serverless_us-east-1_wg", "dev", "bob", "drop", null);
+
+        verify(logs, never()).createLogGroupForAccount(anyString(), eq("/aws/redshift/analytics/connectionlog"), any(),
+                anyMap(), anyString());
+        verify(logs, times(1)).putLogEventsForAccount(eq("111111111111"), eq("/aws/redshift/analytics/userlog"),
+                eq("analytics"), anyList(), eq("us-east-1"));
+    }
+
+    @Test
+    void aClusterBecomesATargetWithTheClusterLogGroupAndArn() {
+        Cluster cluster = enabledCluster(List.of("userlog"));
+        cluster.setLoggingGeneration(7L);
+
+        RedshiftAuditTarget target = RedshiftAuditTarget.of(cluster);
+
+        assertEquals("analytics", target.identifier());
+        assertEquals("analytics", target.name());
+        assertEquals("/aws/redshift/cluster/analytics", target.logGroupPrefix());
+        assertEquals("cluster:analytics", target.arnResource());
+        assertEquals(List.of("userlog"), target.exports());
+        assertEquals(7L, target.loggingGeneration());
+        assertEquals(null, RedshiftAuditTarget.of(null));
+    }
+
     @Test
     void createsAwsNamedResourcesAndWritesSelectedExport() {
         CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
