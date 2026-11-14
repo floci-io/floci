@@ -833,6 +833,32 @@ public class CloudWatchMetricsService {
         return "Alarm \"" + name + "\" created";
     }
 
+    /** Changes action execution for metric and composite alarms while preserving their state and other configuration. */
+    public synchronized void setAlarmActionsEnabled(List<String> alarmNames, boolean enabled, String region) {
+        String violation = alarmNames == null ? SmithyValidationErrors.notNull("alarmNames")
+                : SmithyValidationErrors.sizeOutOfRange("alarmNames", alarmNames.size(), 0, 100);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationError(violation);
+        }
+        for (int i = 0; i < alarmNames.size(); i++) {
+            String name = alarmNames.get(i);
+            String path = "alarmNames.member." + (i + 1);
+            violation = name == null ? SmithyValidationErrors.notNull(path)
+                    : SmithyValidationErrors.lengthOutOfRange(path, name, 1, 255);
+            if (violation != null) {
+                throw SmithyValidationErrors.validationError(violation);
+            }
+        }
+        for (String name : new LinkedHashSet<>(alarmNames)) {
+            Alarm alarm = alarmStore.get(region + "::" + name).orElse(null);
+            if (alarm != null && alarm.isActionsEnabled() != enabled) {
+                Alarm updated = MAPPER.convertValue(alarm, alarm.getClass());
+                updated.setActionsEnabled(enabled);
+                putAlarm(updated, region);
+            }
+        }
+    }
+
     /**
      * Deletes the named alarms, or none of them: CloudWatch refuses a request that names more than one
      * composite alarm, or an alarm that a composite alarm's rule names, even when the request deletes

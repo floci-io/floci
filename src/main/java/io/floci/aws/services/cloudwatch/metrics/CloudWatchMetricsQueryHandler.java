@@ -66,6 +66,8 @@ public class CloudWatchMetricsQueryHandler {
             case "PutCompositeAlarm" -> handlePutCompositeAlarm(params, region);
             case "DescribeAlarms" -> handleDescribeAlarms(params, region);
             case "DeleteAlarms" -> handleDeleteAlarms(params, region);
+            case "DisableAlarmActions" -> handleAlarmActions(params, region, false);
+            case "EnableAlarmActions" -> handleAlarmActions(params, region, true);
             case "SetAlarmState" -> handleSetAlarmState(params, region);
             case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(params, region);
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
@@ -333,6 +335,13 @@ public class CloudWatchMetricsQueryHandler {
         }
         metricsService.deleteAlarms(alarmNames, region);
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAlarms", null)).build();
+    }
+
+    private Response handleAlarmActions(MultivaluedMap<String, String> params, String region, boolean enabled) {
+        boolean supplied = params.containsKey("AlarmNames") || params.containsKey("AlarmNames.member.1");
+        metricsService.setAlarmActionsEnabled(supplied ? alarmMembers(params, "AlarmNames") : null, enabled, region);
+        String action = enabled ? "EnableAlarmActions" : "DisableAlarmActions";
+        return Response.ok(AwsQueryResponse.envelopeNoResult(action, null)).build();
     }
 
     private Response handleSetAlarmState(MultivaluedMap<String, String> params, String region) {
