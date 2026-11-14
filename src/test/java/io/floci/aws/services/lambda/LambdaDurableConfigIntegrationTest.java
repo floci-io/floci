@@ -253,6 +253,55 @@ class LambdaDurableConfigIntegrationTest {
             .body("$", not(hasKey("DurableConfig")));
     }
 
+    @Test
+    void deleteFunctionAnswers202ForADurableFunctionAndItsExistingVersion() {
+        createDurableFunction("durable-delete-fn", "{\"ExecutionTimeout\": 3600}").statusCode(201);
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post(BASE_PATH + "/functions/durable-delete-fn/versions")
+        .then()
+            .statusCode(201);
+
+        given()
+        .when()
+            .delete(BASE_PATH + "/functions/durable-delete-fn?Qualifier=5")
+        .then()
+            .statusCode(204)
+            .body(equalTo(""));
+
+        given()
+        .when()
+            .delete(BASE_PATH + "/functions/durable-delete-fn?Qualifier=1")
+        .then()
+            .statusCode(202)
+            .contentType("application/json")
+            .body(equalTo("{}"));
+
+        given()
+        .when()
+            .delete(BASE_PATH + "/functions/durable-delete-fn")
+        .then()
+            .statusCode(202)
+            .contentType("application/json")
+            .body(equalTo("{}"));
+
+        getConfiguration("durable-delete-fn").statusCode(404);
+    }
+
+    @Test
+    void deleteFunctionAnswers204ForAPlainFunction() {
+        createFunction("plain-delete-fn", "").statusCode(201);
+
+        given()
+        .when()
+            .delete(BASE_PATH + "/functions/plain-delete-fn")
+        .then()
+            .statusCode(204)
+            .body(equalTo(""));
+    }
+
     private static ValidatableResponse updateDurableConfig(String name, String durableConfig) {
         return updateConfiguration(name, "{\"DurableConfig\": " + durableConfig + "}");
     }

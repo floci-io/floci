@@ -1596,8 +1596,14 @@ class CodeArtifactNpmDataPlaneTest {
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
         when(serviceConfigAccess.isEnabled("codeartifact")).thenReturn(codeArtifactEnabled);
         Router router = Router.router(vertx);
-        new CodeArtifactNpmDataPlane(service, verdaccioClient, externalConnectionImporter, serviceConfigAccess,
-                vertx, new ObjectMapper())
+        // A fresh, unstubbed mock, the same convention the overload above already documents for
+        // externalConnectionImporter: every test here that never configures it relies on
+        // Mockito's own default (Optional.empty()/false) to mean "no upstreams configured,
+        // proceed with the ordinary proxy" exactly as if this importer did not exist.
+        CodeArtifactNpmUpstreamRepositoryImporter upstreamRepositoryImporter =
+                mock(CodeArtifactNpmUpstreamRepositoryImporter.class);
+        new CodeArtifactNpmDataPlane(service, verdaccioClient, externalConnectionImporter, upstreamRepositoryImporter,
+                serviceConfigAccess, vertx, new ObjectMapper())
                 .register(router);
         dataPlane = vertx.createHttpServer().requestHandler(router)
                 .listen(0, "127.0.0.1")

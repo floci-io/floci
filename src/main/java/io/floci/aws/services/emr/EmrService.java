@@ -21,6 +21,7 @@ import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
 import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrStep;
@@ -103,6 +104,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             "On the master instance (%s), bootstrap action %d could not be read from %s: %s";
     private static final String BOOTSTRAP_NOT_RUN = "Floci could not run the bootstrap actions: %s";
     static final String BOOTSTRAP_INTERRUPTED = "Floci stopped while the cluster's bootstrap actions were running.";
+    // The ErrorDetail codes of an action that failed on the primary node and of one whose script it could not download,
+    // each with a Management Guide page of its own name.
+    static final String BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE = "BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE";
+    static final String BOOTSTRAP_FAILURE_BA_DOWNLOAD_FAILED_PRIMARY = "BOOTSTRAP_FAILURE_BA_DOWNLOAD_FAILED_PRIMARY";
+    private static final String ERROR_CODE_PAGE = "https://docs.aws.amazon.com/emr/latest/ManagementGuide/%s.html";
     // The release whose EMR Serverless Hive image runs the HDFS of a cluster of the AWS runtime for Apache Spark,
     // which publishes none. Hadoop keeps its wire protocols compatible across a major version's minor releases, so
     // a newer client, such as the runtime's, reaches its NameNode.
@@ -1307,8 +1313,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 || bootstrapping.contains(clusterKey(regionResolver.getAccountId(), cluster.getId()))) {
             return false;
         }
-        lifecycle.bootstrapEnded(cluster, null, EmrClusterLifecycle.INTERNAL_ERROR, BOOTSTRAP_INTERRUPTED, now(),
-                regionOf(cluster));
+        lifecycle.bootstrapEnded(cluster, null, EmrClusterLifecycle.INTERNAL_ERROR, BOOTSTRAP_INTERRUPTED, List.of(),
+                now(), regionOf(cluster));
         return true;
     }
 
@@ -1939,6 +1945,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         String master = masterInstanceId(cluster);
         String code = EmrClusterLifecycle.BOOTSTRAP_FAILURE;
         String message;
+        List<EmrErrorDetail> errorDetails = List.of();
         if (outcome.image() != null) {
             code = null;
             message = null;
@@ -1946,16 +1953,44 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             cluster.setBootstrapImageRunsYarn(runsYarn(cluster));
         } else if (outcome.exitCode() != null) {
             message = BOOTSTRAP_ACTION_FAILED.formatted(master, outcome.failedAction());
+            errorDetails = List.of(bootstrapErrorDetail(BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE, master,
+                    outcome.failedAction(), outcome.exitCode(), bootstrap, message));
         } else if (outcome.failedAction() != null) {
             message = BOOTSTRAP_ACTION_NOT_READ.formatted(master, outcome.failedAction(),
                     bootstrap.actions().get(outcome.failedAction() - 1).path(), outcome.failure());
+            errorDetails = List.of(bootstrapErrorDetail(BOOTSTRAP_FAILURE_BA_DOWNLOAD_FAILED_PRIMARY, master,
+                    outcome.failedAction(), null, bootstrap, message));
         } else {
             code = EmrClusterLifecycle.INTERNAL_ERROR;
             message = BOOTSTRAP_NOT_RUN.formatted(outcome.failure());
         }
-        lifecycle.bootstrapEnded(cluster, outcome.image(), code, message, now(), regionOf(cluster));
+        lifecycle.bootstrapEnded(cluster, outcome.image(), code, message, errorDetails, now(), regionOf(cluster));
         store(cluster);
         LOG.infov("The bootstrap actions of EMR cluster {0} ended; it is {1}", cluster.getId(), cluster.getState());
+    }
+
+    /**
+     * The ErrorDetail of bootstrap action {@code action}, counted from 1, that failed on the primary node
+     * {@code master} for {@code code}, with the ErrorData its Management Guide page gives: the primary node, the
+     * action, its return code when it ran ({@code returnCode}, null when it did not), its script and the page itself.
+     * The model makes ErrorData a list of maps, and no source shows how the keys spread over them: Floci puts them all
+     * in one, which a client that reads the first map and one that merges them all read alike. ErrorMessage is
+     * "Description of the error with a link to more information in the Amazon EMR documentation", whose text AWS does
+     * not give: Floci's is the cluster's reason, {@code message}, and the page.
+     */
+    private static EmrErrorDetail bootstrapErrorDetail(String code, String master, int action, Integer returnCode,
+                                                       BootstrapRunner.Bootstrap bootstrap, String message) {
+        String page = ERROR_CODE_PAGE.formatted(code);
+        Map<String, String> data = new LinkedHashMap<>();
+        data.put("primary-instance-id", master);
+        data.put("bootstrap-action", String.valueOf(action));
+        if (returnCode != null) {
+            data.put("return-code", String.valueOf(returnCode));
+        }
+        data.put("amazon-s3-path", bootstrap.actions().get(action - 1).path());
+        data.put("public-doc", page);
+        String sentence = message.endsWith(".") ? message : message + ".";
+        return new EmrErrorDetail(code, List.of(data), sentence + " For more information, see " + page);
     }
 
     /** The EC2 instance id ListInstances gives a cluster's instance {@code index}, counted from 1. */

@@ -78,9 +78,7 @@ public class DsqlDatabases {
             spec.withNamedVolume(name, DATA_PATH);
         } else {
             String hostPath = ContainerStorageHelper.hostResourcePath(config, "dsql", cluster.getIdentifier()).toString();
-            if (!containerDetector.isRunningInContainer()) {
-                ContainerStorageHelper.ensureHostDir(hostPath);
-            }
+            ContainerStorageHelper.ensureHostDir(containerDetector, hostPath);
             spec.withBind(hostPath, DATA_PATH);
         }
         if (containerDetector.isRunningInContainer()) {

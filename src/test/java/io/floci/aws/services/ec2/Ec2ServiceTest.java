@@ -10106,6 +10106,41 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void providerInstancesSharingAReservationAreDescribedTogether() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        List<Instance> nodes = new ArrayList<>();
+        for (String id : List.of("i-node1111111111111", "i-node2222222222222")) {
+            Instance node = new Instance();
+            node.setInstanceId(id);
+            node.setRegion("us-east-1");
+            node.setPlacement(new Placement("us-east-1a"));
+            node.setState(InstanceState.running());
+            node.setInstanceType("m5.large");
+            node.setReservationId("r-sharedprovider01");
+            nodes.add(node);
+        }
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return nodes.stream().filter(node -> node.getInstanceId().equals(instanceId)).findFirst();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return nodes;
+            }
+        });
+
+        List<Reservation> reservations = service.describeInstances("us-east-1", List.of(), Map.of());
+
+        assertEquals(1, reservations.size());
+        assertEquals("r-sharedprovider01", reservations.getFirst().getReservationId());
+        assertEquals(2, reservations.getFirst().getInstances().size());
+    }
+
+    @Test
     void clusterNodeStaysRefusedAfterAnotherActionStoredACopyOfIt() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),

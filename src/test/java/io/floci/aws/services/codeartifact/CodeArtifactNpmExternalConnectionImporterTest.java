@@ -68,7 +68,8 @@ class CodeArtifactNpmExternalConnectionImporterTest {
         repository.setExternalConnections(List.of(new ExternalConnection("public:npmjs", "npm", "AVAILABLE")));
         when(service.describeRepository(REGION, DOMAIN, OWNER, REPOSITORY)).thenReturn(repository);
         when(service.isUpstreamRetentionBlocked(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString())).thenReturn(false);
+                any(), anyString(),
+                eq("EXTERNAL_UPSTREAM"))).thenReturn(false);
         when(service.currentContainerBackedPackageFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString())).thenReturn(42L);
         when(service.currentContainerBackedVersionFence(anyString(), anyString(), anyString(), anyString(),
@@ -76,7 +77,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
         // Unstubbed by default: the claim succeeds, matching the common case of a first or
         // same-connection retry. Tests for a conflicting claim override this per call.
         when(service.claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyString(), anyLong()))
+                any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong()))
                 .thenReturn(new CodeArtifactService.RetainedVersionOriginClaimOutcome(true, EPISODE_ID));
         // Unstubbed by default: Verdaccio does not have the version yet, matching the data plane's
         // own pre-check always calling tryImportAsset only on a miss.
@@ -189,12 +190,13 @@ class CodeArtifactNpmExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyString(), anyLong());
+                anyString(), any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong());
     }
 
     @Test
     void tryImportAssetReturnsFalseWhenUpstreamRetentionIsBlocked() {
-        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null, PACKAGE_NAME))
+        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null, PACKAGE_NAME,
+                "EXTERNAL_UPSTREAM"))
                 .thenReturn(true);
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
@@ -202,13 +204,13 @@ class CodeArtifactNpmExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyString(), anyLong());
+                anyString(), any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong());
     }
 
     @Test
     void tryImportAssetReturnsFalseWithoutFinishingWhenTheClaimIsRefused() {
         when(service.claimRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null, PACKAGE_NAME,
-                VERSION, "public:npmjs", 42L))
+                VERSION, "public:npmjs", RetentionOriginKind.EXTERNAL_CONNECTION, 42L))
                 .thenReturn(new CodeArtifactService.RetainedVersionOriginClaimOutcome(false, 0L));
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
@@ -331,7 +333,8 @@ class CodeArtifactNpmExternalConnectionImporterTest {
 
     @Test
     void mergedPackumentReturnsEmptyWhenUpstreamRetentionIsBlocked() {
-        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null, PACKAGE_NAME))
+        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null, PACKAGE_NAME,
+                "EXTERNAL_UPSTREAM"))
                 .thenReturn(true);
 
         Optional<ObjectNode> merged = importer.mergedPackument(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null,

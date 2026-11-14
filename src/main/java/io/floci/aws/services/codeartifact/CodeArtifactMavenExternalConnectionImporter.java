@@ -126,7 +126,7 @@ public class CodeArtifactMavenExternalConnectionImporter {
             return false;
         }
         if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "maven", namespace,
-                packageName)) {
+                packageName, "EXTERNAL_UPSTREAM")) {
             return false;
         }
 
@@ -152,7 +152,8 @@ public class CodeArtifactMavenExternalConnectionImporter {
         // check and both write real bytes before either recorded anything), and for why its own
         // episodeId, not just the connection name, is what finally identifies this exact claim.
         CodeArtifactService.MavenClaimOutcome claim = service.claimMavenRetainedVersionOrigin(region, domain, owner,
-                repository, namespace, packageName, version, externalConnectionName, fenceSnapshot);
+                repository, namespace, packageName, version, externalConnectionName,
+                RetentionOriginKind.EXTERNAL_CONNECTION, fenceSnapshot);
         if (!claim.claimed()) {
             return false;
         }
@@ -339,7 +340,7 @@ public class CodeArtifactMavenExternalConnectionImporter {
             return false;
         }
         if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "maven", namespace,
-                packageName)) {
+                packageName, "EXTERNAL_UPSTREAM")) {
             return false;
         }
         long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
@@ -367,7 +368,8 @@ public class CodeArtifactMavenExternalConnectionImporter {
             }
         };
         return service.mergeMavenMetadataUnderPackageFence(region, domain, owner, repository, namespace,
-                packageName, packageFenceSnapshot, reposilite, repoId, fetched.get().content(), versionAllowed);
+                packageName, packageFenceSnapshot, reposilite, repoId, fetched.get().content(), versionAllowed,
+                false);
     }
 
     private String mavenExternalConnectionName(String region, String domain, String owner, String repository) {
