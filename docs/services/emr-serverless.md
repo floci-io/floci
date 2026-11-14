@@ -58,6 +58,8 @@ another.
 `interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
 among them, and `GetApplication` returns each as it was written.
 
+`UpdateApplication` answers with the updated application, as `GetApplication` reports it.
+
 `UpdateApplication` changes any setting of a `CREATED` or `STOPPED` application, and of a `STARTED` one its
 `maximumCapacity` and its custom images, `imageConfiguration` and `workerTypeSpecifications`, as the user guide's
 "Updating Running Applications" describes. For every other setting the API reference's "An application has to be in
