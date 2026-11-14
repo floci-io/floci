@@ -1407,6 +1407,33 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
         return parameterName(nameOrArn, region, true);
     }
 
+    /** Whether a read names a stored parameter in the caller's scope, including a version or label selector. */
+    boolean hasStoredParameter(String nameOrArn, String region) {
+        if (nameOrArn.startsWith(SECRET_REFERENCE_PREFIX)) {
+            return false;
+        }
+        String name = parameterReadName(nameOrArn, region);
+        if (AwsArnUtils.looksLikeArn(name)) {
+            return false;
+        }
+        if (parameterStore.get(regionKey(region, name)).isPresent()) {
+            return true;
+        }
+        int separator = name.lastIndexOf(':');
+        if (separator <= 0 || separator == name.length() - 1
+                || name.substring(separator + 1).indexOf(' ') >= 0) {
+            return false;
+        }
+        return parameterStore.get(regionKey(region, name.substring(0, separator))).isPresent();
+    }
+
+    /** A legacy hierarchy is readable only while the caller's account and region contain a parameter below it. */
+    boolean hasStoredParametersUnderPath(String path, String region) {
+        String normalizedPath = path.endsWith("/") ? path : path + "/";
+        String prefix = regionKey(region, normalizedPath);
+        return parameterStore.keys().stream().anyMatch(key -> key.startsWith(prefix));
+    }
+
     /**
      * The stored name a tagging {@code ResourceId} addresses. A legacy {@code parameter<name>} ARN of the request's
      * partition, region and account is read as {@code parameter/<name>}; see {@link #withLegacyParameterSlash}.

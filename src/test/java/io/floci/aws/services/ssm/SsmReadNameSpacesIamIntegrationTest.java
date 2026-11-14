@@ -1,5 +1,6 @@
 package io.floci.aws.services.ssm;
 
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
@@ -7,6 +8,7 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -31,8 +33,85 @@ class SsmReadNameSpacesIamIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
 
+    @Inject
+    StorageFactory storage;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GetParameter", "GetParameters", "GetParameterHistory",
+            "LabelParameterVersion", "GetParametersByPath"})
+    void retainedNamesKeepExactPermissionsBeforeLookup(String operation) {
+        String prefix = "/retained-iam-" + UUID.randomUUID();
+        String allowedPath = prefix + "/allowed path";
+        String deniedPath = prefix + "/denied path";
+        String allowedName = allowedPath + "/value";
+        String deniedName = deniedPath + "/value";
+        try (SsmLegacyParameterFixture allowed = new SsmLegacyParameterFixture(
+                storage, ACCOUNT, "us-east-1", allowedName);
+             SsmLegacyParameterFixture denied = new SsmLegacyParameterFixture(
+                     storage, ACCOUNT, "us-east-1", deniedName);
+             SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            String resource = "GetParametersByPath".equals(operation)
+                    ? allowed.arn().substring(0, allowed.arn().lastIndexOf('/')) : allowed.arn();
+            EnforcementFixtures.UserCredentials credentials = user("""
+                    {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                          "Effect": "Allow",
+                          "Action": "ssm:%s",
+                          "Resource": "%s"
+                        }
+                      ]
+                    }
+                    """.formatted(operation, resource));
+            try (SsmClient caller = caller(credentials)) {
+                switch (operation) {
+                    case "GetParameter" -> {
+                        for (String reference : List.of(allowedName, allowed.arn())) {
+                            assertEquals("v2", caller.getParameter(request -> request
+                                    .name(" " + reference + " ")).parameter().value());
+                        }
+                    }
+                    case "GetParameters" -> assertEquals(List.of(allowedName),
+                            caller.getParameters(request -> request.names(" " + allowedName + " "))
+                                    .parameters().stream().map(Parameter::name).toList());
+                    case "GetParameterHistory" -> assertEquals(List.of("v1", "v2"),
+                            caller.getParameterHistory(request -> request.name(" " + allowedName + " "))
+                                    .parameters().stream().map(parameter -> parameter.value()).toList());
+                    case "LabelParameterVersion" -> assertEquals(2L,
+                            caller.labelParameterVersion(request -> request.name(" " + allowedName + " ")
+                                    .parameterVersion(2L).labels("stable")).parameterVersion());
+                    case "GetParametersByPath" -> assertEquals(List.of(allowedName),
+                            caller.getParametersByPath(request -> request.path(" " + allowedPath + " "))
+                                    .parameters().stream().map(Parameter::name).toList());
+                    default -> throw new AssertionError(operation);
+                }
+                for (String suffix : List.of("", "-missing")) {
+                    SsmException error = assertThrows(SsmException.class, () -> {
+                        switch (operation) {
+                            case "GetParameter" -> caller.getParameter(request -> request
+                                    .name(" " + deniedName + suffix + " "));
+                            case "GetParameters" -> caller.getParameters(request -> request
+                                    .names(allowedName, " " + deniedName + suffix + " "));
+                            case "GetParameterHistory" -> caller.getParameterHistory(request -> request
+                                    .name(" " + deniedName + suffix + " "));
+                            case "LabelParameterVersion" -> caller.labelParameterVersion(request -> request
+                                    .name(" " + deniedName + suffix + " ").parameterVersion(2L).labels("stable"));
+                            case "GetParametersByPath" -> caller.getParametersByPath(request -> request
+                                    .path(" " + deniedPath + suffix + " "));
+                            default -> throw new AssertionError(operation);
+                        }
+                    });
+                    assertEquals("AccessDeniedException", error.awsErrorDetails().errorCode());
+                }
+            }
+            assertEquals("v1", root.getParameter(request -> request.name(deniedName + ":stable")).parameter().value());
+            assertEquals("v2", root.getParameter(request -> request.name(deniedName)).parameter().value());
+        }
+    }
 
     @Test
     void paddedNamesAndArnsKeepExactParameterPermissions() {

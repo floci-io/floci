@@ -1,8 +1,10 @@
 package io.floci.aws.services.ssm;
 
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -37,6 +39,154 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SsmReadNameSpacesIntegrationTest {
 
     private static final String ACCOUNT = "741661401501";
+
+    @Inject
+    StorageFactory storage;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GetParameter", "GetParameters", "GetParameterHistory", "LabelParameterVersion"})
+    void retainedNamesRemainReadableAndLabelable(String operation) {
+        String name = "/retained-" + UUID.randomUUID() + "/legacy value";
+        try (SsmLegacyParameterFixture fixture = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", name);
+             SsmClient client = client("us-east-1")) {
+            String padded = " " + name + " ";
+            switch (operation) {
+                case "GetParameter" -> assertEquals("v2",
+                        client.getParameter(request -> request.name(padded)).parameter().value());
+                case "GetParameters" -> {
+                    String missing = name.replace("legacy value", "missing");
+                    GetParametersResponse response = client.getParameters(request -> request.names(padded, missing));
+                    assertEquals(List.of(name), response.parameters().stream().map(Parameter::name).toList());
+                    assertEquals(List.of(missing), response.invalidParameters());
+                }
+                case "GetParameterHistory" -> {
+                    GetParameterHistoryResponse first = client.getParameterHistory(request -> request
+                            .name(padded).maxResults(1));
+                    assertEquals("v1", first.parameters().getFirst().value());
+                    assertNotNull(first.nextToken());
+                    GetParameterHistoryResponse next = client.getParameterHistory(request -> request
+                            .name(name).maxResults(1).nextToken(first.nextToken()));
+                    assertEquals("v2", next.parameters().getFirst().value());
+                    assertNull(next.nextToken());
+                }
+                case "LabelParameterVersion" -> {
+                    assertEquals(2L, client.labelParameterVersion(request -> request
+                            .name(padded).parameterVersion(2L).labels("stable")).parameterVersion());
+                    assertEquals("v2", client.getParameter(request -> request
+                            .name(name + ":stable")).parameter().value());
+                }
+                default -> throw new AssertionError(operation);
+            }
+            assertEquals(fixture.arn(), client.getParameter(request -> request.name(name)).parameter().arn());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", ":1", ":stable"})
+    void retainedNamesAndArnsKeepVersionSelection(String selector) {
+        String name = "retained value-" + UUID.randomUUID();
+        try (SsmLegacyParameterFixture fixture = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", name);
+             SsmClient client = client("us-east-1")) {
+            for (String reference : List.of(name, fixture.arn())) {
+                Parameter parameter = client.getParameter(request -> request
+                        .name(" " + reference + selector + " ")).parameter();
+                assertEquals(name, parameter.name());
+                assertEquals(selector.isEmpty() ? "v2" : "v1", parameter.value());
+                assertEquals(selector.isEmpty() ? null : selector, parameter.selector());
+                assertEquals(List.of(parameter), client.getParameters(request -> request
+                        .names(" " + reference + selector + " ")).parameters());
+            }
+        }
+    }
+
+    @Test
+    void retainedNamesDoNotPermitNewWritesOrMalformedSelectors() {
+        String name = "/retained-" + UUID.randomUUID() + "/legacy value";
+        try (SsmLegacyParameterFixture fixture = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", name);
+             SsmClient client = client("us-east-1")) {
+            assertAwsError("ValidationException", 400, () -> client.putParameter(request -> request
+                    .name(name).type("String").value("replacement").overwrite(true)));
+            assertAwsError("ValidationException", 400, () -> client.getParameter(request -> request
+                    .name(name + ":bad label")));
+            assertAwsError("ValidationException", 400, () -> client.getParameters(request -> request
+                    .names(name, name + "-missing")));
+            for (String reference : List.of(name, fixture.arn())) {
+                assertAwsError("ParameterVersionNotFound", 400, () -> client.getParameter(request -> request
+                        .name(reference + ":missing")));
+            }
+            assertEquals("v2", client.getParameter(request -> request.name(name)).parameter().value());
+        }
+        try (SsmClient client = client("us-east-1")) {
+            assertAwsError("ValidationException", 400, () -> client.getParameter(request -> request.name(name)));
+        }
+    }
+
+    @Test
+    void retainedPathsKeepPaginationAndRequireStoredDescendants() {
+        String path = "/retained-path-" + UUID.randomUUID() + "/legacy path";
+        String firstName = path + "/a";
+        String nextName = path + "/b";
+        try (SsmLegacyParameterFixture first = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", firstName);
+             SsmLegacyParameterFixture next = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", nextName);
+             SsmClient client = client("us-east-1")) {
+            GetParametersByPathResponse page = client.getParametersByPath(request -> request
+                    .path(" " + path + " ").maxResults(1));
+            assertEquals(List.of(firstName), page.parameters().stream().map(Parameter::name).toList());
+            assertNotNull(page.nextToken());
+            GetParametersByPathResponse remaining = client.getParametersByPath(request -> request
+                    .path(path).maxResults(1).nextToken(page.nextToken()));
+            assertEquals(List.of(nextName), remaining.parameters().stream().map(Parameter::name).toList());
+            assertNull(remaining.nextToken());
+            assertAwsError("ValidationException", 400, () -> client.getParametersByPath(request -> request
+                    .path(path.substring(0, path.length() - 1))));
+        }
+        try (SsmClient client = client("us-east-1")) {
+            assertAwsError("ValidationException", 400, () -> client.getParametersByPath(request -> request.path(path)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"account", "region", "partition"})
+    void retainedNamesDoNotMakeForeignArnsReadable(String dimension) {
+        String name = "/retained-scope-" + UUID.randomUUID() + "/legacy value";
+        try (SsmLegacyParameterFixture fixture = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", name);
+             SsmClient client = client("us-east-1")) {
+            String foreign = switch (dimension) {
+                case "account" -> fixture.arn().replace(ACCOUNT, "741661401502");
+                case "region" -> fixture.arn().replace("us-east-1", "us-west-2");
+                case "partition" -> fixture.arn().replace("arn:aws:", "arn:aws-cn:");
+                default -> throw new AssertionError(dimension);
+            };
+            assertAwsError("ValidationException", 400, () -> client.getParameter(request -> request
+                    .name(" " + foreign + " ")));
+            assertAwsError("ValidationException", 400, () -> client.getParameters(request -> request.names(foreign)));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"GetParameter", "GetParameters", "GetParameterHistory",
+            "LabelParameterVersion", "GetParametersByPath"})
+    void retainedNameExceptionIsScopedToTheStoredAccountAndRegion(String operation) {
+        String path = "/retained-isolation-" + UUID.randomUUID() + "/legacy path";
+        String name = path + "/value";
+        try (SsmLegacyParameterFixture fixture = new SsmLegacyParameterFixture(storage, ACCOUNT, "us-east-1", name);
+             SsmClient otherAccount = client("741661401502", "us-east-1");
+             SsmClient otherRegion = client("us-west-2")) {
+            for (SsmClient client : List.of(otherAccount, otherRegion)) {
+                assertAwsError("ValidationException", 400, () -> {
+                    switch (operation) {
+                        case "GetParameter" -> client.getParameter(request -> request.name(name));
+                        case "GetParameters" -> client.getParameters(request -> request.names(name));
+                        case "GetParameterHistory" -> client.getParameterHistory(request -> request.name(name));
+                        case "LabelParameterVersion" -> client.labelParameterVersion(request -> request
+                                .name(name).parameterVersion(2L).labels("stable"));
+                        case "GetParametersByPath" -> client.getParametersByPath(request -> request.path(path));
+                        default -> throw new AssertionError(operation);
+                    }
+                });
+            }
+        }
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"us-east-1", "eu-west-2", "cn-north-1", "us-gov-west-1"})
@@ -277,10 +427,14 @@ class SsmReadNameSpacesIntegrationTest {
     }
 
     private SsmClient client(String region) {
+        return client(ACCOUNT, region);
+    }
+
+    private SsmClient client(String account, String region) {
         return AwsTestClients.create(SsmClient.builder()
                         .overrideConfiguration(config -> config.apiCallTimeout(Duration.ofSeconds(15))
                                 .apiCallAttemptTimeout(Duration.ofSeconds(12)).retryPolicy(RetryPolicy.none())),
-                ACCOUNT, "test", Region.of(region), UrlConnectionHttpClient.builder()
+                account, "test", Region.of(region), UrlConnectionHttpClient.builder()
                         .connectionTimeout(Duration.ofSeconds(5)).socketTimeout(Duration.ofSeconds(10)),
                 URI.create("http://localhost:" + RestAssured.port));
     }
