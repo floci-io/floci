@@ -120,13 +120,15 @@ child ranges or records.
 Stream creation and control-plane updates normally report `ACTIVE` immediately. Set
 `FLOCI_SERVICES_KINESIS_CREATING_DELAY_MILLIS` or
 `FLOCI_SERVICES_KINESIS_UPDATING_DELAY_MILLIS` to test clients that wait for a stream
-to become active or retry a conflicting update. During an `UPDATING` window, reads
-and record writes remain available, but another split, merge, scaling, mode, size,
-or encryption change returns `ResourceInUseException`. The window is evaluated on
-read from a stored deadline set after the changed state is first persisted. A slow
-final synchronous write can shorten a very small window before the call returns.
-With a nonzero updating delay, resharding also reports `UPDATING` while the change is
-in progress; the setting does not defer the shard change.
+to become active or retry a conflicting update. During a `CREATING` window,
+`PutRecord` and `PutRecords` reject writes until the stream becomes active. During an
+`UPDATING` window, reads and record writes remain available, but another split,
+merge, scaling, mode, size, encryption, retention, or stream-tag change returns
+`ResourceInUseException`. Tag and retention changes also reject a `CREATING` stream.
+The window is evaluated on
+read from a stored deadline set when the change begins, so a slow synchronous write
+can consume some or all of a very small window before the call returns. Resharding
+does not defer the shard change.
 
 `UpdateShardCount` enforces the documented default limits: at most double the current
 open shard count per call, at most ten calls per rolling 24-hour period per stream, a

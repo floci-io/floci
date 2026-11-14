@@ -129,7 +129,7 @@ class KinesisCfnProvisionerTest {
                 """, "s");
 
         verify(kinesis, never()).createStream(anyString(), anyInt(), any(), anyString());
-        verify(kinesis).updateStreamMode("s", "PROVISIONED", REGION);
+        verify(kinesis, never()).updateStreamMode("s", "PROVISIONED", REGION);
     }
 
     @Test

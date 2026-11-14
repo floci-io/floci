@@ -2,6 +2,7 @@ package io.floci.aws.services.kinesis.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -19,10 +20,9 @@ public class KinesisStream {
     private String streamName;
     private String streamArn;
     private String accountId;
+    @JsonProperty("streamStatus")
     private String streamStatus;
     private Instant statusTransitionDeadline;
-    @JsonIgnore
-    private transient boolean statusWindowInProgress;
     private volatile List<KinesisShard> shards = new CopyOnWriteArrayList<>();
     private int retentionPeriodHours = 24;
     private Instant streamCreationTimestamp;
@@ -57,11 +57,9 @@ public class KinesisStream {
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
 
+    @JsonIgnore
     public String getStreamStatus() { return getStreamStatus(Instant.now()); }
     public synchronized String getStreamStatus(Instant now) {
-        if (statusWindowInProgress) {
-            return streamStatus;
-        }
         return statusTransitionDeadline != null && !now.isBefore(statusTransitionDeadline)
                 ? "ACTIVE" : streamStatus;
     }
@@ -75,14 +73,6 @@ public class KinesisStream {
     public synchronized void setStatusWindow(String status, Instant deadline) {
         this.streamStatus = status;
         this.statusTransitionDeadline = deadline;
-        this.statusWindowInProgress = false;
-    }
-
-    public synchronized void beginStatusWindow(String status, Instant fallbackDeadline) {
-        // Persistent snapshots taken during a change still have a bounded recovery deadline.
-        this.streamStatus = status;
-        this.statusTransitionDeadline = fallbackDeadline;
-        this.statusWindowInProgress = true;
     }
 
     public List<KinesisShard> getShards() { return shards; }
