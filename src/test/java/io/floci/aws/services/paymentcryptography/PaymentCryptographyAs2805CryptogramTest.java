@@ -37,12 +37,27 @@ class PaymentCryptographyAs2805CryptogramTest {
     /** The length of the initialization vector, in bytes. */
     private static final int IV_BYTES = 16;
 
+    /** The length of the tag, in bytes. */
+    private static final int TAG_BYTES = 32;
+
+    /** The byte the key the cryptogram carries starts at. */
+    private static final int KEY_SEED = 0x00;
+
+    /** The byte the other key the cryptogram carries starts at. */
+    private static final int OTHER_KEY_SEED = 0x10;
+
+    /** The byte the wrapping key starts at. */
+    private static final int WRAPPING_KEY_SEED = 0xF0;
+
+    /** The byte the other wrapping key starts at. */
+    private static final int OTHER_WRAPPING_KEY_SEED = 0x20;
+
     @ParameterizedTest
     @EnumSource(value = PaymentCryptographyKeyAlgorithm.class,
             names = {"AES_128", "AES_192", "AES_256", "TDES_2KEY", "TDES_3KEY"})
     void aCryptogramComesBackUnderTheKeyItWasWrappedUnder(PaymentCryptographyKeyAlgorithm algorithm) {
-        String key = keyOf(algorithm.bytes());
-        String wrappingKey = wrappingKeyOf(algorithm.bytes(), 0xF0);
+        String key = keyOf(algorithm.bytes(), KEY_SEED);
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
 
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
 
@@ -55,8 +70,8 @@ class PaymentCryptographyAs2805CryptogramTest {
     @ValueSource(strings = {"marker", "ciphertext", "tag"})
     void aCryptogramThatWasChangedDoesNotOpen(String part) {
         PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.AES_256;
-        String key = keyOf(algorithm.bytes());
-        String wrappingKey = wrappingKeyOf(algorithm.bytes(), 0xF0);
+        String key = keyOf(algorithm.bytes(), KEY_SEED);
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
 
         String changed = changed(cryptogram, atOf(part, cryptogram));
@@ -66,12 +81,32 @@ class PaymentCryptographyAs2805CryptogramTest {
     }
 
     @Test
+    void aCryptogramThatCarriesAnotherKeysCiphertextDoesNotOpen() {
+        // The check value inside the cryptogram is the check value of the key the
+        // ciphertext carries, so a ciphertext of another key passes it. The tag is over the
+        // ciphertext, so the substitution is caught.
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.AES_256;
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
+        String cryptogram = wrap(keyOf(algorithm.bytes(), KEY_SEED), PIN_VARIANT, algorithm,
+                wrappingKey);
+        String other = wrap(keyOf(algorithm.bytes(), OTHER_KEY_SEED), PIN_VARIANT, algorithm,
+                wrappingKey);
+
+        String spliced = splice(cryptogram, other);
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> unwrap(spliced, PIN_VARIANT, algorithm, wrappingKey));
+
+        assertEquals("the cryptogram did not open under the wrapping key", refused.getMessage());
+    }
+
+    @Test
     void aCryptogramUnderOneVariantDoesNotOpenUnderAnother() {
         // The tag is over the variant, so a cryptogram bound to one purpose does not open
         // under another even though the key it carries is the same.
         PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.AES_256;
-        String key = keyOf(algorithm.bytes());
-        String wrappingKey = wrappingKeyOf(algorithm.bytes(), 0xF0);
+        String key = keyOf(algorithm.bytes(), KEY_SEED);
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
 
         IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
@@ -85,8 +120,8 @@ class PaymentCryptographyAs2805CryptogramTest {
         // The tag is over the algorithm as well, so a cryptogram that names another
         // algorithm does not open under it.
         PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.AES_256;
-        String key = keyOf(algorithm.bytes());
-        String wrappingKey = wrappingKeyOf(algorithm.bytes(), 0xF0);
+        String key = keyOf(algorithm.bytes(), KEY_SEED);
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
 
         IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
@@ -99,13 +134,13 @@ class PaymentCryptographyAs2805CryptogramTest {
     @Test
     void aCryptogramUnderOneWrappingKeyDoesNotOpenUnderAnother() {
         PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.AES_256;
-        String key = keyOf(algorithm.bytes());
-        String wrappingKey = wrappingKeyOf(algorithm.bytes(), 0xF0);
+        String key = keyOf(algorithm.bytes(), KEY_SEED);
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
 
         IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
                 () -> unwrap(cryptogram, PIN_VARIANT, algorithm,
-                        wrappingKeyOf(algorithm.bytes(), 0x20)));
+                        keyOf(algorithm.bytes(), OTHER_WRAPPING_KEY_SEED)));
 
         assertEquals("the cryptogram did not open under the wrapping key", refused.getMessage());
     }
@@ -115,8 +150,8 @@ class PaymentCryptographyAs2805CryptogramTest {
         // The vector is fresh for every cryptogram, so the same key under the same wrapping
         // key does not give the same bytes twice.
         PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.AES_256;
-        String key = keyOf(algorithm.bytes());
-        String wrappingKey = wrappingKeyOf(algorithm.bytes(), 0xF0);
+        String key = keyOf(algorithm.bytes(), KEY_SEED);
+        String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
 
         String first = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
         String second = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
@@ -128,7 +163,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     void aCryptogramThatIsNotHexadecimalIsRefused() {
         assertThrows(IllegalArgumentException.class,
                 () -> unwrap("not hexadecimal", PIN_VARIANT, PaymentCryptographyKeyAlgorithm.AES_256,
-                        wrappingKeyOf(PaymentCryptographyKeyAlgorithm.AES_256.bytes(), 0xF0)));
+                        keyOf(PaymentCryptographyKeyAlgorithm.AES_256.bytes(), WRAPPING_KEY_SEED)));
     }
 
     /**
@@ -168,32 +203,17 @@ class PaymentCryptographyAs2805CryptogramTest {
     /**
      * A key of the given length, in hexadecimal.
      *
+     * <p>The seed tells the key apart from the other keys of the same length, so a key and
+     * the wrapping key that carries it are never the same bytes.
+     *
      * @param length the length of the key, in bytes
+     * @param seed the byte the key starts at
      * @return the key
      */
-    private static String keyOf(int length) {
+    private static String keyOf(int length, int seed) {
         StringBuilder hex = new StringBuilder();
         for (int i = 0; i < length; i++) {
-            hex.append(String.format("%02X", i));
-        }
-        return hex.toString();
-    }
-
-    /**
-     * A wrapping key of the given length, in hexadecimal.
-     *
-     * <p>The bytes run the other way from the key's, so a key and the wrapping key that
-     * carries it are never the same bytes, and the seed tells one wrapping key from
-     * another.
-     *
-     * @param length the length of the wrapping key, in bytes
-     * @param seed the byte the wrapping key starts at
-     * @return the wrapping key
-     */
-    private static String wrappingKeyOf(int length, int seed) {
-        StringBuilder hex = new StringBuilder();
-        for (int i = 0; i < length; i++) {
-            hex.append(String.format("%02X", (seed - i) & 0xFF));
+            hex.append(String.format("%02X", (seed + i) & 0xFF));
         }
         return hex.toString();
     }
@@ -225,5 +245,29 @@ class PaymentCryptographyAs2805CryptogramTest {
         byte[] bytes = HEX.parseHex(cryptogram);
         bytes[at] = (byte) (bytes[at] ^ 0x01);
         return HEX.formatHex(bytes);
+    }
+
+    /**
+     * One cryptogram with the encrypted part of another one.
+     *
+     * <p>The marker and the tag are the first one's, and the vector and the ciphertext are
+     * the second one's, so the ciphertext is not the one the tag was made over. The
+     * ciphertext decrypts under the first cryptogram's own vector, because the second
+     * cryptogram carries its own.
+     *
+     * @param cryptogram the cryptogram the marker and the tag come from
+     * @param other the cryptogram the vector and the ciphertext come from
+     * @return the spliced cryptogram
+     */
+    private static String splice(String cryptogram, String other) {
+        byte[] first = HEX.parseHex(cryptogram);
+        byte[] second = HEX.parseHex(other);
+        byte[] spliced = new byte[first.length];
+        System.arraycopy(first, 0, spliced, 0, MARKER_BYTES);
+        System.arraycopy(second, MARKER_BYTES, spliced, MARKER_BYTES,
+                second.length - MARKER_BYTES - TAG_BYTES);
+        System.arraycopy(first, first.length - TAG_BYTES, spliced, spliced.length - TAG_BYTES,
+                TAG_BYTES);
+        return HEX.formatHex(spliced);
     }
 }
