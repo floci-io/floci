@@ -140,12 +140,21 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         // The physical id is the queue URL, so ctx.stablePhysicalName does not fit: the prior name
         // comes from the QueueName attribute recorded at create time, as SnsCfnProvisioner reads
         // the topic name beside its ARN. Keeping it means an unnamed queue survives an update
-        // instead of being orphaned with its messages. FifoQueue is createOnly like QueueName, so a
-        // prior name whose .fifo suffix no longer matches the flag is a replacing update and gets a
-        // fresh name.
+        // instead of being orphaned with its messages. The engine's change decides whether the
+        // update replaces the queue, as it does for the change set's Replacement: QueueName and
+        // FifoQueue are create-only in the registry. A replacing update of an unnamed queue gets a
+        // fresh generated name; a named one cannot be replaced under the same name.
         String priorName = r.getAttributes() != null ? r.getAttributes().get("QueueName") : null;
+        // SQS cannot change a queue's mode in place and a FIFO queue's name always ends in .fifo, so
+        // the prior name tells the live mode; the engine reads an added FifoQueue as no change, which
+        // would apply the update in place and leave the mode as it was.
+        boolean replaces = ctx.isUpdate() && priorName != null && !priorName.isBlank()
+                && (ctx.changes("AWS::SQS::Queue", props).requiresReplacement() || priorName.endsWith(".fifo") != fifo);
+        if (replaces && queueName != null && queueName.equals(priorName)) {
+            throw CfnExceptions.customNamedReplacement(queueName);
+        }
         if (queueName == null || queueName.isBlank()) {
-            if (priorName != null && !priorName.isBlank() && priorName.endsWith(".fifo") == fifo) {
+            if (priorName != null && !priorName.isBlank() && !replaces) {
                 queueName = priorName;
             } else {
                 // Like real CloudFormation, generated names of FIFO queues must end in .fifo
@@ -183,15 +192,6 @@ public class SqsCfnProvisioner implements CfnResourceProvisioner {
         // registry schema's update handler, rather than a second create. The prior physical id is
         // the queue URL SetQueueAttributes addresses. A replacing update derives a different name
         // and still creates.
-        // FifoQueue is createOnly and encoded in the name. An explicitly named queue keeps its name
-        // across updates, so a changed FifoQueue would need a replacement under the same name,
-        // which CloudFormation refuses for a custom-named resource: the SQS registry schema says a
-        // named queue cannot take an update that requires replacement. Fail it, as the other
-        // provisioners do, instead of reconciling everything but the mode.
-        if (ctx.isUpdate() && queueName.equals(priorName) && priorName.endsWith(".fifo") != fifo) {
-            throw new AwsException("ValidationError",
-                    "Updating FifoQueue requires resource replacement, which is not supported.", 400);
-        }
         String queueUrl;
         if (ctx.isUpdate() && queueName.equals(priorName)) {
             attrs.remove("FifoQueue");

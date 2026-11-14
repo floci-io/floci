@@ -103,6 +103,16 @@ class CfnReplacementIntegrationTest {
             CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\", \"CacheSubnetGroupName\": {\"Ref\": \"SubnetGroup\"}",
             "True", true, "repl-sng-b");
 
+    private static final String SQS_TYPE = "AWS::SQS::Queue";
+    private static final String QUEUE_NAME_IF =
+            "{\"Fn::If\": [\"Named\", \"repl-q-if\", {\"Ref\": \"AWS::NoValue\"}]}";
+
+    /** A queue named by {@code Fn::If} on {@code Named}, which is {@code Fn::Equals} of {@code equalsArgs}. */
+    private static String namedByCondition(String equalsArgs) {
+        return subjectStack("", "", SQS_TYPE, "\"QueueName\": " + QUEUE_NAME_IF).replace("\"Resources\"",
+                "\"Conditions\": {\"Named\": {\"Fn::Equals\": " + equalsArgs + "}}, \"Resources\"");
+    }
+
     static Stream<Row> rows() {
         String app = appConfigApplication("replacement-orders");
         return Stream.of(
@@ -124,6 +134,12 @@ class CfnReplacementIntegrationTest {
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.small\"",
                         "False", true, null),
                 SUBNET_GROUP_REPLACED,
+                createOnlyRow("SQS queue explicit QueueName removed", "", "", SQS_TYPE,
+                        "\"QueueName\": \"repl-q-removed\"", "\"VisibilityTimeout\": 30", "True", false, null),
+                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue",
+                        namedByCondition("[\"x\", \"x\"]"),
+                        namedByCondition("[\"x\", \"y\"]"),
+                        "Subject", "True", true, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
