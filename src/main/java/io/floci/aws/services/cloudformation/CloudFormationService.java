@@ -1681,8 +1681,15 @@ public class CloudFormationService implements ResourceProvider {
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
                                         Set<String> changedParams, Set<String> changedConditions) {
-        if (oldProps == null || newProps == null || oldProps.isMissingNode() || newProps.isMissingNode()) {
+        if (oldProps == null || oldProps.isMissingNode()) {
             return false;
+        }
+        if (newProps == null || newProps.isMissingNode()) {
+            // A dropped Properties block removes every property in it, as removing them one by one does.
+            if (!oldProps.isObject()) {
+                return false;
+            }
+            newProps = objectMapper.createObjectNode();
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
             // The registry table names the exact pointers; only a value at one of them replaces.
