@@ -1891,6 +1891,9 @@ public interface EmulatorConfig {
 
         @WithDefault("1000000")
         long spectrumMaxRows();
+
+        @WithDefault("false")
+        boolean spectrumLakeFormationEnforcement();
     }
 
     interface RdsServiceConfig {
