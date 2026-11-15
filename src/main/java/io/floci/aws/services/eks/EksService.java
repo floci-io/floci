@@ -2011,8 +2011,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
     /**
      * Deletes the Auto Scaling group {@code nodeGroup} reports, which takes the cluster's node out of its target
-     * groups, except those another node group's group has attached. A failure is logged, so the node group, and
-     * the other node groups of a cluster being deleted, are deleted all the same.
+     * groups and Classic Load Balancers, except those another node group's group has attached. A failure is logged,
+     * so the node group, and the other node groups of a cluster being deleted, are deleted all the same.
      */
     private void deleteNodeGroupAutoScalingGroup(String accountId, String region, Nodegroup nodeGroup) {
         String groupName = autoScalingGroupName(nodeGroup);

@@ -167,6 +167,26 @@ class IamRestRouteEnforcementIntegrationTest {
                 .body(containsString("Invalid resource ARN"));
     }
 
+    /** A resource-tag condition reads the tags Scheduler holds on the schedule group a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheScheduleGroup() {
+        String tagged = "route-tagged-" + suffix();
+        String untagged = "route-untagged-" + suffix();
+        for (String[] group : new String[][] {{tagged, "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}"},
+                {untagged, "{}"}}) {
+            given().header("Authorization", auth(ADMIN, "scheduler")).contentType("application/json").body(group[1])
+                    .post("/schedule-groups/" + group[0]).then().statusCode(200);
+            cleanup.register(() -> given().header("Authorization", auth(ADMIN, "scheduler"))
+                    .delete("/schedule-groups/" + group[0]).then().statusCode(200));
+        }
+        String user = user("route-scheduler-tag-condition");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":\"scheduler:GetScheduleGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        as(user, "scheduler").get("/schedule-groups/" + tagged).then().statusCode(200);
+        refused(as(user, "scheduler").get("/schedule-groups/" + untagged).then(), "scheduler:GetScheduleGroup");
+    }
+
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
         // POST /tags tags the ARN its body names: one named in the query does not move the check.
