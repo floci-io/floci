@@ -6,11 +6,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.glue.GlueCatalogService;
 import io.floci.aws.services.glue.GlueService;
-import io.floci.aws.services.glue.GlueTableResolver;
-import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3tables.S3TablesService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -19,24 +19,25 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * The Iceberg REST catalog AWS Glue serves at {@code /iceberg}, over Floci's Glue Data Catalog: a namespace is a Glue
- * database, a table a Glue table whose {@code table_type} is {@code ICEBERG} and whose {@code metadata_location}
- * names its current metadata file in S3. A commit writes the next metadata file beside the last one and moves
- * {@code metadata_location} to it, refused when the Glue table changed since the commit's base was read, so Spark's
- * {@code GlueCatalog}, Athena and any other reader of the Glue table see each commit.
+ * The Iceberg REST catalog AWS Glue serves at {@code /iceberg}. The catalog a request names decides where its
+ * namespaces and tables live ({@link IcebergCatalogStore}): the caller's default catalog ({@code :} or its account id)
+ * is Floci's Glue Data Catalog, whose tables are Glue tables with {@code table_type} {@code ICEBERG}; a table bucket
+ * federated from Amazon S3 Tables ({@code s3tablescatalog:<bucket>}, or {@code <account>:s3tablescatalog:<bucket>}, the
+ * colons standing for the slashes of its Glue catalog id) keeps them in S3 Tables. A commit checks its requirements,
+ * applies its updates, writes the next metadata file beside the last one, and has the store move the table's current
+ * metadata file to it, refused when the table changed since the commit's base was read; so Spark's {@code GlueCatalog},
+ * Athena and S3 Tables readers see each commit.
  *
- * <p>The operations are the twelve AWS lists for the endpoint. The catalog in the path is the caller's default
- * catalog, named {@code :} or by the caller's account id; Glue supports single-level namespaces only.
+ * <p>The operations are the twelve AWS lists for the endpoint; Glue supports single-level namespaces only.
  */
 @ApplicationScoped
 public class GlueIcebergCatalog {
@@ -44,11 +45,8 @@ public class GlueIcebergCatalog {
     private static final Logger LOG = Logger.getLogger(GlueIcebergCatalog.class);
 
     static final String DEFAULT_CATALOG = ":";
-    private static final String PARAM_TABLE_TYPE = IcebergGlueTables.PARAM_TABLE_TYPE;
-    private static final String PARAM_METADATA_LOCATION = IcebergGlueTables.PARAM_METADATA_LOCATION;
-    private static final String PARAM_PREVIOUS_METADATA_LOCATION = "previous_metadata_location";
-    private static final String ICEBERG = IcebergGlueTables.ICEBERG;
     private static final Pattern METADATA_VERSION = Pattern.compile("^(\\d+)-.*\\.metadata\\.json$");
+    private static final Pattern ACCOUNT_QUALIFIER = Pattern.compile("^(\\d{12}):(.+)$");
     /** The REST routes the endpoint answers, as {@code GetConfig}'s {@code endpoints} names them. */
     private static final List<String> ENDPOINTS = List.of(
             "GET /v1/{prefix}/namespaces",
@@ -63,20 +61,25 @@ public class GlueIcebergCatalog {
             "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}",
             "DELETE /v1/{prefix}/namespaces/{namespace}/tables/{table}");
 
-    private final GlueService glue;
+    private final GlueIcebergStore glueStore;
+    private final GlueCatalogService catalogs;
+    private final S3TablesService s3Tables;
     private final S3Service s3;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
     private final Clock clock;
 
     @Inject
-    public GlueIcebergCatalog(GlueService glue, S3Service s3, RegionResolver regionResolver, ObjectMapper mapper) {
-        this(glue, s3, regionResolver, mapper, Clock.systemUTC());
+    public GlueIcebergCatalog(GlueService glue, S3Service s3, RegionResolver regionResolver, ObjectMapper mapper,
+                              GlueCatalogService catalogs, S3TablesService s3Tables) {
+        this(glue, s3, regionResolver, mapper, catalogs, s3Tables, Clock.systemUTC());
     }
 
     GlueIcebergCatalog(GlueService glue, S3Service s3, RegionResolver regionResolver, ObjectMapper mapper,
-                       Clock clock) {
-        this.glue = glue;
+                       GlueCatalogService catalogs, S3TablesService s3Tables, Clock clock) {
+        this.glueStore = new GlueIcebergStore(glue);
+        this.catalogs = catalogs;
+        this.s3Tables = s3Tables;
         this.s3 = s3;
         this.regionResolver = regionResolver;
         this.mapper = mapper;
@@ -85,13 +88,23 @@ public class GlueIcebergCatalog {
 
     // ─── GetConfig ────────────────────────────────────────────────────────────────
 
-    /** The catalog's configuration: the path prefix of the catalog {@code warehouse} names, and the routes served. */
+    /**
+     * The catalog's configuration: the path prefix of the catalog {@code warehouse} names (the default catalog when it
+     * names none, or a federated S3 Tables catalog such as {@code <account>:s3tablescatalog/<bucket>}), and the routes
+     * served.
+     */
     ObjectNode config(String warehouse) {
         String catalog = warehouse == null || warehouse.isBlank() ? DEFAULT_CATALOG : warehouse;
-        requireDefaultCatalog(catalog);
+        String prefix;
+        if (isDefault(catalog)) {
+            prefix = catalog;
+        } else {
+            prefix = federatedBucket(catalog).map(bucket -> bucket.catalogId().replace('/', ':'))
+                    .orElseThrow(() -> unsupported(catalog));
+        }
         ObjectNode config = mapper.createObjectNode();
         config.putObject("defaults");
-        config.putObject("overrides").put("prefix", "catalogs/" + catalog);
+        config.putObject("overrides").put("prefix", "catalogs/" + prefix);
         ArrayNode endpoints = config.putArray("endpoints");
         ENDPOINTS.forEach(endpoints::add);
         return config;
@@ -100,158 +113,122 @@ public class GlueIcebergCatalog {
     // ─── Namespaces ───────────────────────────────────────────────────────────────
 
     ObjectNode listNamespaces(String catalog, String parent) {
-        requireDefaultCatalog(catalog);
+        IcebergCatalogStore store = store(catalog);
         ObjectNode result = mapper.createObjectNode();
         ArrayNode namespaces = result.putArray("namespaces");
         if (parent != null && !parent.isBlank()) {
             // Glue namespaces have one level, so nothing sits beneath one.
-            requireNamespace(namespace(parent));
+            store.namespaceProperties(namespace(parent));
             return result;
         }
-        for (Database database : glue.getDatabases()) {
-            namespaces.addArray().add(database.getName());
+        for (String namespace : store.namespaces()) {
+            namespaces.addArray().add(namespace);
         }
         return result;
     }
 
     ObjectNode createNamespace(String catalog, JsonNode request) {
-        requireDefaultCatalog(catalog);
+        IcebergCatalogStore store = store(catalog);
         JsonNode levels = request.path("namespace");
         if (!levels.isArray() || levels.size() != 1) {
             throw IcebergRestException.badRequest("AWS Glue supports single-level namespaces only");
         }
-        Database database = new Database(levels.get(0).asText());
-        Map<String, String> parameters = new LinkedHashMap<>();
-        Iterator<Map.Entry<String, JsonNode>> properties = request.path("properties").fields();
-        while (properties.hasNext()) {
-            Map.Entry<String, JsonNode> property = properties.next();
-            switch (property.getKey()) {
-                case "location" -> database.setLocationUri(property.getValue().asText());
-                case "comment" -> database.setDescription(property.getValue().asText());
-                default -> parameters.put(property.getKey(), property.getValue().asText());
-            }
-        }
-        database.setParameters(parameters);
-        try {
-            glue.createDatabase(database);
-        } catch (AwsException e) {
-            throw translated(e, database.getName(), null);
-        }
+        String namespace = levels.get(0).asText();
+        store.createNamespace(namespace, strings(request.path("properties")));
         ObjectNode result = mapper.createObjectNode();
-        result.putArray("namespace").add(database.getName());
-        result.set("properties", properties(requireNamespace(database.getName())));
+        result.putArray("namespace").add(namespace);
+        result.set("properties", mapper.valueToTree(store.namespaceProperties(namespace)));
         return result;
     }
 
     ObjectNode loadNamespace(String catalog, String namespace) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
+        IcebergCatalogStore store = store(catalog);
+        String name = namespace(namespace);
+        Map<String, String> properties = store.namespaceProperties(name);
         ObjectNode result = mapper.createObjectNode();
-        result.putArray("namespace").add(database.getName());
-        result.set("properties", properties(database));
+        result.putArray("namespace").add(name);
+        result.set("properties", mapper.valueToTree(properties));
         return result;
     }
 
     ObjectNode updateNamespaceProperties(String catalog, String namespace, JsonNode request) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
-        Database updated = new Database(database.getName());
-        updated.setDescription(database.getDescription());
-        updated.setLocationUri(database.getLocationUri());
-        Map<String, String> parameters = new LinkedHashMap<>(database.getParameters() == null ? Map.of()
-                : database.getParameters());
+        IcebergCatalogStore store = store(catalog);
+        List<String> removals = new ArrayList<>();
+        request.path("removals").forEach(key -> removals.add(key.asText()));
+        IcebergCatalogStore.PropertyChanges changes = store.updateNamespaceProperties(namespace(namespace), removals,
+                strings(request.path("updates")));
         ObjectNode result = mapper.createObjectNode();
-        ArrayNode removed = result.putArray("removed");
-        ArrayNode missing = result.putArray("missing");
-        for (JsonNode key : request.path("removals")) {
-            String name = key.asText();
-            boolean present = switch (name) {
-                case "location" -> updated.getLocationUri() != null;
-                case "comment" -> updated.getDescription() != null;
-                default -> parameters.containsKey(name);
-            };
-            if (!present) {
-                missing.add(name);
-                continue;
-            }
-            switch (name) {
-                case "location" -> updated.setLocationUri(null);
-                case "comment" -> updated.setDescription(null);
-                default -> parameters.remove(name);
-            }
-            removed.add(name);
-        }
-        ArrayNode updatedKeys = result.putArray("updated");
-        Iterator<Map.Entry<String, JsonNode>> updates = request.path("updates").fields();
-        while (updates.hasNext()) {
-            Map.Entry<String, JsonNode> update = updates.next();
-            switch (update.getKey()) {
-                case "location" -> updated.setLocationUri(update.getValue().asText());
-                case "comment" -> updated.setDescription(update.getValue().asText());
-                default -> parameters.put(update.getKey(), update.getValue().asText());
-            }
-            updatedKeys.add(update.getKey());
-        }
-        updated.setParameters(parameters);
-        glue.updateDatabase(database.getName(), updated);
+        result.set("removed", mapper.valueToTree(changes.removed()));
+        result.set("missing", mapper.valueToTree(changes.missing()));
+        result.set("updated", mapper.valueToTree(changes.updated()));
         return result;
     }
 
     void dropNamespace(String catalog, String namespace) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
-        if (!glue.getTables(database.getName()).isEmpty()) {
-            throw new IcebergRestException(409, "NamespaceNotEmptyException",
-                    "Namespace " + database.getName() + " is not empty");
-        }
-        glue.deleteDatabase(database.getName());
+        store(catalog).dropNamespace(namespace(namespace));
     }
 
     // ─── Tables ───────────────────────────────────────────────────────────────────
 
     ObjectNode listTables(String catalog, String namespace) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
+        IcebergCatalogStore store = store(catalog);
+        String name = namespace(namespace);
         ObjectNode result = mapper.createObjectNode();
         ArrayNode identifiers = result.putArray("identifiers");
-        for (Table table : glue.getTables(database.getName())) {
-            if (GlueTableResolver.isIcebergTable(table)) {
-                ObjectNode identifier = identifiers.addObject();
-                identifier.putArray("namespace").add(database.getName());
-                identifier.put("name", table.getName());
-            }
+        for (String table : store.tables(name)) {
+            ObjectNode identifier = identifiers.addObject();
+            identifier.putArray("namespace").add(name);
+            identifier.put("name", table);
         }
         return result;
     }
 
     /**
      * Creates a table from a {@code CreateTableRequest}, or, with {@code stage-create}, answers the metadata it would
-     * have without creating it: the commit that follows, required to find no table ({@code assert-create}), does.
+     * have without committing it: the commit that follows, required to find no table ({@code assert-create}), does. A
+     * store that decides where tables live (S3 Tables) holds the table, empty, from here on.
      */
     public ObjectNode createTable(String catalog, String namespace, JsonNode request) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
+        IcebergCatalogStore store = store(catalog);
+        String ns = namespace(namespace);
+        store.namespaceProperties(ns);
         String name = request.path("name").asText();
         if (name.isBlank()) {
             throw IcebergRestException.badRequest("Table name is required");
         }
-        if (findTable(database.getName(), name) != null) {
-            throw IcebergRestException.alreadyExists("Table already exists: " + database.getName() + "." + name);
+        String requested = request.hasNonNull("location") ? request.get("location").asText() : null;
+        Optional<IcebergCatalogStore.StoredTable> existing = store.table(ns, name);
+        boolean reserved = existing.isPresent() && store.managesLocations()
+                && existing.get().metadataLocation() == null;
+        if (existing.isPresent() && !reserved) {
+            throw IcebergRestException.alreadyExists("Table already exists: " + ns + "." + name);
         }
-        String location = request.hasNonNull("location") ? stripTrailingSlash(request.get("location").asText())
-                : defaultLocation(database, name);
-        ObjectNode metadata = IcebergTableMetadata.forCreate(request, location, clock.millis());
+        if (reserved && requested != null) {
+            throw IcebergRestException.badRequest("S3 Tables decides where a table lives: a create names no location");
+        }
+        // Checked before a store that decides locations creates the table, so a bad request leaves nothing behind.
+        ObjectNode metadata = IcebergTableMetadata.forCreate(request, requested == null ? "s3://placeholder" : requested,
+                clock.millis());
+        boolean reservedHere = !reserved && store.managesLocations();
+        String location = reserved ? existing.get().location() : store.locationForNewTable(ns, name, requested);
+        metadata.put("location", location);
         ObjectNode result = mapper.createObjectNode();
         if (request.path("stage-create").asBoolean(false)) {
             result.set("metadata", metadata);
             result.putObject("config");
             return result;
         }
-        String metadataLocation = writeMetadata(metadata, 0);
+        String metadataLocation = null;
         try {
-            createGlueTable(database.getName(), name, metadata, metadataLocation);
+            metadataLocation = writeMetadata(metadata, 0);
+            store.create(ns, name, metadata, metadataLocation, reserved ? existing.get() : null);
         } catch (RuntimeException e) {
-            deleteMetadata(metadataLocation);
+            if (metadataLocation != null) {
+                deleteMetadata(metadataLocation);
+            }
+            if (reservedHere) {
+                dropEmptyReservation(store, ns, name);
+            }
             throw e;
         }
         result.put("metadata-location", metadataLocation);
@@ -261,10 +238,9 @@ public class GlueIcebergCatalog {
     }
 
     public ObjectNode loadTable(String catalog, String namespace, String name, String snapshots) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
-        Table table = requireIcebergTable(database.getName(), name);
-        String metadataLocation = GlueTableResolver.icebergMetadataLocation(table);
+        IcebergCatalogStore store = store(catalog);
+        String ns = namespace(namespace);
+        String metadataLocation = requireIcebergTable(store, ns, name).metadataLocation();
         ObjectNode metadata = readMetadata(metadataLocation);
         if ("refs".equals(snapshots)) {
             metadata.set("snapshots", referencedSnapshots(metadata));
@@ -277,73 +253,75 @@ public class GlueIcebergCatalog {
     }
 
     void tableExists(String catalog, String namespace, String name) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
-        requireIcebergTable(database.getName(), name);
+        IcebergCatalogStore store = store(catalog);
+        requireIcebergTable(store, namespace(namespace), name);
     }
 
     /**
      * Applies a {@code CommitTableRequest}: checks its requirements against the table's current metadata, applies its
-     * updates, writes the next metadata file and moves the Glue table's {@code metadata_location} to it, refused
-     * ({@code CommitFailedException}) when the Glue table changed since. A commit requiring {@code assert-create}
-     * creates the table.
+     * updates, writes the next metadata file and has the store make it current, refused
+     * ({@code CommitFailedException}) when the table changed since. A commit requiring {@code assert-create} creates
+     * the table.
      */
     public ObjectNode commitTable(String catalog, String namespace, String name, JsonNode request) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
-        Table existing = findTable(database.getName(), name);
+        IcebergCatalogStore store = store(catalog);
+        String ns = namespace(namespace);
+        store.namespaceProperties(ns);
+        Optional<IcebergCatalogStore.StoredTable> existing = store.table(ns, name);
         boolean creating = false;
         for (JsonNode requirement : request.path("requirements")) {
             creating |= "assert-create".equals(requirement.path("type").asText());
         }
-        if (existing == null && !creating) {
-            throw IcebergRestException.noSuchTable(database.getName(), name);
+        if (existing.isPresent() && !existing.get().iceberg()) {
+            throw IcebergRestException.badRequest("Table " + ns + "." + name + " is not an Iceberg table");
         }
-        if (existing != null && !GlueTableResolver.isIcebergTable(existing)) {
-            throw IcebergRestException.badRequest("Table " + database.getName() + "." + name
-                    + " is not an Iceberg table");
+        IcebergCatalogStore.StoredTable current = existing.filter(table -> table.metadataLocation() != null)
+                .orElse(null);
+        if (current == null && !creating) {
+            throw IcebergRestException.noSuchTable(ns, name);
         }
-        String baseLocation = existing == null ? null : GlueTableResolver.icebergMetadataLocation(existing);
-        ObjectNode base = existing == null ? null : readMetadata(baseLocation);
+        ObjectNode base = current == null ? null : readMetadata(current.metadataLocation());
         IcebergTableMetadata.check(base, request.path("requirements"));
         long now = clock.millis();
         ObjectNode metadata = base == null ? IcebergTableMetadata.empty(now) : base.deepCopy();
         IcebergTableMetadata.apply(metadata, request.path("updates"), now);
-        if (!metadata.hasNonNull("location")) {
-            metadata.put("location", defaultLocation(database, name));
+        IcebergCatalogStore.StoredTable reserved = current == null ? existing.orElse(null) : null;
+        boolean reservedHere = base == null && reserved == null && store.managesLocations();
+        if (base == null) {
+            reserved = placeNewTable(store, ns, name, metadata, reserved);
+        } else if (store.managesLocations()) {
+            // S3 Tables decided where the table lives; no commit moves it.
+            requireManagedLocation(metadata, current.location(), ns, name);
         }
         if (base != null) {
             metadata.withArray("metadata-log").addObject()
                     .put("timestamp-ms", base.path("last-updated-ms").asLong())
-                    .put("metadata-file", baseLocation);
+                    .put("metadata-file", current.metadataLocation());
         }
-        String metadataLocation = writeMetadata(metadata, base == null ? 0 : metadataVersion(baseLocation) + 1);
+        String metadataLocation = null;
         try {
-            if (existing == null) {
-                glue.createTable(database.getName(), icebergTable(name, metadata, metadataLocation, null));
+            metadataLocation = writeMetadata(metadata,
+                    base == null ? 0 : metadataVersion(current.metadataLocation()) + 1);
+            if (base == null) {
+                store.create(ns, name, metadata, metadataLocation, reserved);
             } else {
-                Table updated = icebergTable(existing.getName(), metadata, metadataLocation, existing);
-                updated.getParameters().put(PARAM_PREVIOUS_METADATA_LOCATION, baseLocation);
-                glue.updateTable(database.getName(), updated, existing.getVersionId(), false);
+                store.commit(ns, name, current, metadata, metadataLocation);
             }
-        } catch (AwsException e) {
-            // The metadata file names a commit that did not happen.
-            deleteMetadata(metadataLocation);
-            if ("AlreadyExistsException".equals(e.getErrorCode())) {
-                throw new IcebergRestException(409, "CommitFailedException",
-                        "Table " + database.getName() + "." + name + " was created concurrently");
-            }
-            if ("ConcurrentModificationException".equals(e.getErrorCode())) {
-                throw new IcebergRestException(409, "CommitFailedException",
-                        "Table " + database.getName() + "." + name + " was changed concurrently");
-            }
-            // A create can only miss its namespace, dropped since it was looked up.
-            throw translated(e, database.getName(), existing == null ? null : name);
         } catch (RuntimeException e) {
-            deleteMetadata(metadataLocation);
+            // The metadata file names a commit that did not happen.
+            if (metadataLocation != null) {
+                deleteMetadata(metadataLocation);
+            }
+            if (reservedHere) {
+                dropEmptyReservation(store, ns, name);
+            }
+            if (e instanceof IcebergRestException rest && "AlreadyExistsException".equals(rest.type())) {
+                throw new IcebergRestException(409, "CommitFailedException",
+                        "Table " + ns + "." + name + " was created concurrently");
+            }
             throw e;
         }
-        LOG.debugv("Committed Iceberg table {0}.{1} at {2}", database.getName(), name, metadataLocation);
+        LOG.debugv("Committed Iceberg table {0}.{1} at {2}", ns, name, metadataLocation);
         ObjectNode result = mapper.createObjectNode();
         result.put("metadata-location", metadataLocation);
         result.set("metadata", metadata);
@@ -351,22 +329,114 @@ public class GlueIcebergCatalog {
     }
 
     /**
-     * Drops the Glue table. Its metadata and data files stay where they are, as Glue's DeleteTable leaves a table's
-     * storage alone, whether or not the client asked for a purge.
+     * Drops the table. A Glue table's metadata and data files stay where they are, as Glue's DeleteTable leaves a
+     * table's storage alone whether or not the client asked for a purge; an S3 Tables table's warehouse, its data and
+     * metadata, goes with it, as S3 Tables' DeleteTable deletes it.
      */
     void dropTable(String catalog, String namespace, String name) {
-        requireDefaultCatalog(catalog);
-        Database database = requireNamespace(namespace(namespace));
-        requireIcebergTable(database.getName(), name);
-        glue.deleteTable(database.getName(), name);
+        IcebergCatalogStore store = store(catalog);
+        String ns = namespace(namespace);
+        store.namespaceProperties(ns);
+        IcebergCatalogStore.StoredTable table = store.table(ns, name)
+                .orElseThrow(() -> IcebergRestException.noSuchTable(ns, name));
+        if (!table.iceberg()) {
+            throw IcebergRestException.noSuchTable(ns, name);
+        }
+        store.drop(ns, name);
     }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-    private void requireDefaultCatalog(String catalog) {
-        if (!DEFAULT_CATALOG.equals(catalog) && !regionResolver.getAccountId().equals(catalog)) {
-            throw IcebergRestException.badRequest("Catalog " + catalog
-                    + " is not supported: use the caller's default catalog (':' or its account id)");
+    /** The store of the catalog a request's path names. */
+    private IcebergCatalogStore store(String catalog) {
+        if (isDefault(catalog)) {
+            return glueStore;
+        }
+        return federatedBucket(catalog)
+                .<IcebergCatalogStore>map(bucket -> new S3TablesIcebergStore(s3Tables, bucket.bucketArn(),
+                        regionResolver.getRegion()))
+                .orElseThrow(() -> unsupported(catalog));
+    }
+
+    private boolean isDefault(String catalog) {
+        return DEFAULT_CATALOG.equals(catalog) || regionResolver.getAccountId().equals(catalog);
+    }
+
+    /**
+     * The table bucket a catalog names, as a request's path does ({@code [<account>:]s3tablescatalog:<bucket>}) or a
+     * warehouse does ({@code [<account>:]s3tablescatalog/<bucket>}); empty for any other catalog.
+     */
+    private Optional<GlueCatalogService.FederatedBucket> federatedBucket(String catalog) {
+        if (catalogs == null || catalog == null) {
+            return Optional.empty();
+        }
+        Matcher qualified = ACCOUNT_QUALIFIER.matcher(catalog);
+        String account = qualified.matches() ? qualified.group(1) + ":" : "";
+        String path = (qualified.matches() ? qualified.group(2) : catalog).replace(':', '/');
+        try {
+            return catalogs.federatedTableBucket(account + path, regionResolver.getRegion());
+        } catch (AwsException e) {
+            // Another account's catalog is not found here; any other failure is the caller's to see.
+            if ("EntityNotFoundException".equals(e.getErrorCode())) {
+                return Optional.empty();
+            }
+            throw e;
+        }
+    }
+
+    private static IcebergRestException unsupported(String catalog) {
+        return IcebergRestException.badRequest("Catalog " + catalog + " is not supported: use the caller's default "
+                + "catalog (':' or its account id) or a table bucket of its federated S3 Tables catalog "
+                + "(s3tablescatalog:<bucket>)");
+    }
+
+    /**
+     * Gives a table a commit creates its location: S3 Tables decides it, holding the table from here on if a staged
+     * create has not already, and refuses another; elsewhere the commit's own location stands, or the namespace's
+     * default. Answers the empty table S3 Tables holds, if any.
+     */
+    private IcebergCatalogStore.StoredTable placeNewTable(IcebergCatalogStore store, String ns, String name,
+                                                          ObjectNode metadata, IcebergCatalogStore.StoredTable reserved) {
+        if (!store.managesLocations()) {
+            if (!metadata.hasNonNull("location")) {
+                metadata.put("location", store.locationForNewTable(ns, name, null));
+            }
+            return reserved;
+        }
+        if (reserved != null) {
+            requireManagedLocation(metadata, reserved.location(), ns, name);
+            metadata.put("location", reserved.location());
+            return reserved;
+        }
+        if (metadata.hasNonNull("location")) {
+            // Checked before S3 Tables creates the table, so a refused commit leaves nothing behind.
+            throw IcebergRestException.badRequest("S3 Tables decides where a table lives: a commit that creates "
+                    + ns + "." + name + " names no location of its own; stage the create first");
+        }
+        metadata.put("location", store.locationForNewTable(ns, name, null));
+        return store.table(ns, name).orElse(null);
+    }
+
+    /** Refuses metadata whose location is not the one S3 Tables gave the table. */
+    private static void requireManagedLocation(ObjectNode metadata, String location, String ns, String name) {
+        if (metadata.hasNonNull("location")
+                && !IcebergGlueTables.stripTrailingSlash(metadata.get("location").asText()).equals(location)) {
+            throw IcebergRestException.badRequest("S3 Tables decides where a table lives: " + ns + "." + name
+                    + " lives at " + location);
+        }
+    }
+
+    /**
+     * Drops a table this request had S3 Tables create, once the request failed before anything was committed to it,
+     * so it does not stay behind empty; a failure to is logged, since the request's error matters more.
+     */
+    private void dropEmptyReservation(IcebergCatalogStore store, String ns, String name) {
+        try {
+            if (store.table(ns, name).filter(table -> table.metadataLocation() == null).isPresent()) {
+                store.drop(ns, name);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not drop the empty table {0}.{1} a failed create left: {2}", ns, name, e.getMessage());
         }
     }
 
@@ -378,88 +448,18 @@ public class GlueIcebergCatalog {
         return segment;
     }
 
-    private Database requireNamespace(String name) {
-        try {
-            return glue.getDatabase(name);
-        } catch (AwsException e) {
-            if ("EntityNotFoundException".equals(e.getErrorCode())) {
-                throw IcebergRestException.noSuchNamespace(name);
-            }
-            throw e;
-        }
+    private static IcebergCatalogStore.StoredTable requireIcebergTable(IcebergCatalogStore store, String namespace,
+                                                                       String name) {
+        store.namespaceProperties(namespace);
+        return store.table(namespace, name)
+                .filter(table -> table.iceberg() && table.metadataLocation() != null)
+                .orElseThrow(() -> IcebergRestException.noSuchTable(namespace, name));
     }
 
-    private Table findTable(String database, String name) {
-        try {
-            return glue.getTable(database, name);
-        } catch (AwsException e) {
-            if ("EntityNotFoundException".equals(e.getErrorCode())) {
-                return null;
-            }
-            throw e;
-        }
-    }
-
-    private Table requireIcebergTable(String database, String name) {
-        Table table = findTable(database, name);
-        if (table == null || !GlueTableResolver.isIcebergTable(table)) {
-            throw IcebergRestException.noSuchTable(database, name);
-        }
-        return table;
-    }
-
-    private ObjectNode properties(Database database) {
-        ObjectNode properties = mapper.createObjectNode();
-        if (database.getParameters() != null) {
-            database.getParameters().forEach(properties::put);
-        }
-        if (database.getLocationUri() != null) {
-            properties.put("location", database.getLocationUri());
-        }
-        if (database.getDescription() != null) {
-            properties.put("comment", database.getDescription());
-        }
-        return properties;
-    }
-
-    private static String defaultLocation(Database database, String table) {
-        if (database.getLocationUri() == null || database.getLocationUri().isBlank()) {
-            throw IcebergRestException.badRequest("Table " + database.getName() + "." + table
-                    + " needs a location: the request names none and namespace " + database.getName()
-                    + " has no location property");
-        }
-        return stripTrailingSlash(database.getLocationUri()) + "/" + table;
-    }
-
-    private static String stripTrailingSlash(String location) {
-        return location.endsWith("/") ? location.substring(0, location.length() - 1) : location;
-    }
-
-    private void createGlueTable(String database, String name, ObjectNode metadata, String metadataLocation) {
-        try {
-            glue.createTable(database, icebergTable(name, metadata, metadataLocation, null));
-        } catch (AwsException e) {
-            throw translated(e, database, name);
-        }
-    }
-
-    /**
-     * The Glue table holding an Iceberg table: {@code table_type} and {@code metadata_location} in its parameters,
-     * its location and its current schema's columns in its storage descriptor, as AWS Glue keeps one. What
-     * {@code existing} holds beyond those (a description, other parameters) carries over.
-     */
-    private Table icebergTable(String name, ObjectNode metadata, String metadataLocation, Table existing) {
-        Table table = IcebergGlueTables.glueTable(name, metadata, metadataLocation);
-        if (existing != null) {
-            table.setDescription(existing.getDescription());
-            table.setOwner(existing.getOwner());
-            if (existing.getParameters() != null) {
-                Map<String, String> parameters = new HashMap<>(existing.getParameters());
-                parameters.putAll(table.getParameters());
-                table.setParameters(parameters);
-            }
-        }
-        return table;
+    private static Map<String, String> strings(JsonNode object) {
+        Map<String, String> values = new LinkedHashMap<>();
+        object.fields().forEachRemaining(entry -> values.put(entry.getKey(), entry.getValue().asText()));
+        return values;
     }
 
     private ObjectNode readMetadata(String metadataLocation) {
@@ -529,14 +529,5 @@ public class GlueIcebergCatalog {
         } catch (IllegalArgumentException e) {
             throw IcebergRestException.badRequest(e.getMessage());
         }
-    }
-
-    private static IcebergRestException translated(AwsException e, String database, String table) {
-        return switch (e.getErrorCode()) {
-            case "AlreadyExistsException" -> IcebergRestException.alreadyExists(e.getMessage());
-            case "EntityNotFoundException" -> table == null ? IcebergRestException.noSuchNamespace(database)
-                    : IcebergRestException.noSuchTable(database, table);
-            default -> IcebergRestException.badRequest(e.getMessage());
-        };
     }
 }

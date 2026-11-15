@@ -7,7 +7,6 @@ import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,7 +17,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
@@ -84,18 +82,7 @@ class GlueIcebergRestIntegrationTest {
                 + "\"schema\":" + SCHEMA + ",\"properties\":{\"format-version\":\"2\"}}").then().statusCode(200)
                 .body("metadata.location", equalTo("s3://" + bucket + "/lake/events"))
                 .body("metadata-location", nullValue());
-        return send(glue, "POST", tablePath(), """
-                {"requirements":[{"type":"assert-create"}],"updates":[
-                 {"action":"assign-uuid","uuid":"11111111-2222-3333-4444-555555555555"},
-                 {"action":"upgrade-format-version","format-version":2},
-                 {"action":"add-schema","last-column-id":2,"schema":%s},
-                 {"action":"add-spec","spec":{"spec-id":0,"fields":[]}},{"action":"set-default-spec","spec-id":0},
-                 {"action":"add-sort-order","sort-order":{"order-id":0,"fields":[]}},
-                 {"action":"set-default-sort-order","sort-order-id":0},
-                 {"action":"set-location","location":"s3://%s/lake/events"},
-                 {"action":"set-properties","updates":{"format-version":"2"}},
-                 {"action":"set-current-schema","schema-id":0}]}
-                """.formatted(SCHEMA, bucket)).then().statusCode(200)
+        return send(glue, "POST", tablePath(), IcebergCommits.createCommit(SCHEMA, "s3://" + bucket + "/lake/events")).then().statusCode(200)
                 .body("metadata-location", endsWith(".metadata.json"))
                 .extract().path("metadata-location");
     }
@@ -205,17 +192,6 @@ class GlueIcebergRestIntegrationTest {
     }
 
     private Response send(AwsRequestSigner signer, String method, String path, String body) {
-        URI uri = endpoint.resolve(path);
-        byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-        try {
-            RequestSpecification request = given().urlEncodingEnabled(false)
-                    .headers(signer.headersFor(method, uri, Map.of(), bytes));
-            if (body != null) {
-                request = request.contentType("application/json").body(bytes);
-            }
-            return request.request(method, uri);
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
+        return IcebergCommits.send(endpoint, signer, method, path, body);
     }
 }

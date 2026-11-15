@@ -27,7 +27,8 @@ class GlueIcebergControllerTest {
         config = Mockito.mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
         requestContext = Mockito.mock(RequestContext.class);
         GlueIcebergCatalog catalog = new GlueIcebergCatalog(Mockito.mock(GlueService.class),
-                Mockito.mock(S3Service.class), new RegionResolver("us-east-1", "000000000000"), new ObjectMapper());
+                Mockito.mock(S3Service.class), new RegionResolver("us-east-1", "000000000000"), new ObjectMapper(),
+                null, null);
         controller = new GlueIcebergController(catalog, config, requestContext);
     }
 

@@ -71,6 +71,11 @@ public final class IcebergGlueTables {
         }
     }
 
+    /** {@code location} without a trailing slash. */
+    static String stripTrailingSlash(String location) {
+        return location != null && location.endsWith("/") ? location.substring(0, location.length() - 1) : location;
+    }
+
     /** The bucket and key an {@code s3://} (or {@code s3a://}, {@code s3n://}) object location names. */
     static S3Location s3Location(String location) {
         Matcher matcher = S3_LOCATION.matcher(location == null ? "" : location);

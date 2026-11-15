@@ -54,7 +54,7 @@ class GlueIcebergCatalogTest {
         glue = Mockito.mock(GlueService.class);
         s3 = Mockito.mock(S3Service.class);
         catalog = new GlueIcebergCatalog(glue, s3, new RegionResolver("us-east-1", "000000000000"), mapper,
-                Clock.fixed(Instant.ofEpochMilli(10_000L), ZoneOffset.UTC));
+                null, null, Clock.fixed(Instant.ofEpochMilli(10_000L), ZoneOffset.UTC));
         Database database = new Database("lake");
         database.setLocationUri("s3://lake-bucket/lake");
         when(glue.getDatabase("lake")).thenReturn(database);
