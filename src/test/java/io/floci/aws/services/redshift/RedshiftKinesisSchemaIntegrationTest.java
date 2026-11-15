@@ -2,6 +2,7 @@ package io.floci.aws.services.redshift;
 
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.spectrum.KinesisSchemaRegistry;
+import io.floci.aws.testing.DockerAvailability;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -37,19 +38,8 @@ class RedshiftKinesisSchemaIntegrationTest {
     private String clusterId;
 
     @BeforeAll
-    static void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for Redshift integration tests");
-    }
-
-    private static boolean isDockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true)
-                    .start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
+    static void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for Redshift integration tests");
     }
 
     @AfterEach

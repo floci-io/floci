@@ -9,7 +9,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  */
 @RegisterForReflection
 public record KinesisSchemaBinding(String accountId, String clusterKey, String databaseName,
-                                   String schemaName, String region, String iamRoleArn) {
+                                   String schemaName, String region, String iamRoleArn)
+        implements SchemaBinding {
     public KinesisSchemaBinding {
         require(accountId, "accountId");
         require(clusterKey, "clusterKey");

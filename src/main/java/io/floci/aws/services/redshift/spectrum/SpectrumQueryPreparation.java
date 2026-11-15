@@ -118,9 +118,10 @@ public class SpectrumQueryPreparation {
 
     public boolean referencesExternal(String sql, SpectrumSession session) {
         Set<String> schemas = bindings(session).keySet();
+        Set<String> kinesisSchemaNames = kinesisBindings(session).keySet();
         return !ExternalReferenceScanner.scan(sql, schemas).isEmpty()
-                || ExternalReferenceScanner.writeTarget(sql, schemas).isPresent()
-                || !ExternalReferenceScanner.scan(sql, kinesisBindings(session).keySet()).isEmpty();
+                || !ExternalReferenceScanner.scan(sql, kinesisSchemaNames).isEmpty()
+                || ExternalReferenceScanner.writeTarget(sql, externalSchemaNames(schemas, kinesisSchemaNames)).isPresent();
     }
 
     public boolean handlesDdl(String sql, SpectrumSession session) {
@@ -202,7 +203,8 @@ public class SpectrumQueryPreparation {
             throw new SpectrumSqlException("0A000", "\"" + stream.schema() + "." + stream.table()
                     + "\" is in a Kinesis external schema, whose streams are only read through a streaming materialized view");
         }
-        Optional<ExternalReferenceScanner.Reference> write = ExternalReferenceScanner.writeTarget(sql, bindings.keySet());
+        Optional<ExternalReferenceScanner.Reference> write = ExternalReferenceScanner.writeTarget(sql,
+                externalSchemaNames(bindings.keySet(), kinesis.keySet()));
         if (write.isPresent()) {
             throw new SpectrumSqlException("0A000", "Writes to external relation \""
                     + write.get().schema() + "." + write.get().table() + "\" are not supported");
@@ -224,6 +226,12 @@ public class SpectrumQueryPreparation {
             }
         }
         return false;
+    }
+
+    private static Set<String> externalSchemaNames(Set<String> glueSchemas, Set<String> kinesisSchemas) {
+        Set<String> names = new HashSet<>(glueSchemas);
+        names.addAll(kinesisSchemas);
+        return names;
     }
 
     private static void rejectTransaction(SpectrumSession session) {
@@ -359,15 +367,8 @@ public class SpectrumQueryPreparation {
         if (session.inTransaction()) {
             throw new SpectrumSqlException("0A000", "CREATE EXTERNAL SCHEMA inside a transaction is not supported");
         }
-        boolean existing = registry.find(session.accountId(), session.clusterKey(), session.databaseName(),
-                schema.schemaName()).isPresent()
-                || kinesisSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),
-                schema.schemaName()).isPresent();
-        if (existing) {
-            if (schema.ifNotExists()) {
-                return true;
-            }
-            throw new SpectrumSqlException("42P06", "schema \"" + schema.schemaName() + "\" already exists");
+        if (schemaExists(session, schema.schemaName())) {
+            return existingSchemaOutcome(schema.schemaName(), schema.ifNotExists());
         }
         try {
             glue.getDatabase(schema.glueDatabase());
@@ -385,18 +386,8 @@ public class SpectrumQueryPreparation {
         }
         ExternalSchemaBinding binding = new ExternalSchemaBinding(session.accountId(), session.clusterKey(),
                 session.databaseName(), schema.schemaName(), schema.glueDatabase(), schema.iamRoleArn());
-        backend.execute("CREATE SCHEMA " + ExternalTableMaterializer.quote(schema.schemaName()));
-        try {
-            metadata.refresh(backend, session.accountId(), binding);
-            bindWhenCommitted(backend, () -> registry.bind(binding));
-        } catch (RuntimeException exception) {
-            try {
-                backend.execute("DROP SCHEMA " + ExternalTableMaterializer.quote(schema.schemaName()) + " CASCADE");
-            } catch (RuntimeException cleanupFailure) {
-                LOG.warnv(cleanupFailure, "Could not clean up failed external schema {0}", schema.schemaName());
-            }
-            throw exception;
-        }
+        createBoundSchema(backend, schema.schemaName(), () -> metadata.refresh(backend, session.accountId(), binding),
+                () -> registry.bind(binding));
         return true;
     }
 
@@ -405,31 +396,44 @@ public class SpectrumQueryPreparation {
         if (session.inTransaction()) {
             throw new SpectrumSqlException("0A000", "CREATE EXTERNAL SCHEMA inside a transaction is not supported");
         }
-        boolean exists = registry.find(session.accountId(), session.clusterKey(), session.databaseName(),
-                schema.schemaName()).isPresent()
-                || kinesisSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),
-                schema.schemaName()).isPresent();
-        if (exists) {
-            if (schema.ifNotExists()) {
-                return true;
-            }
-            throw new SpectrumSqlException("42P06", "schema \"" + schema.schemaName() + "\" already exists");
+        if (schemaExists(session, schema.schemaName())) {
+            return existingSchemaOutcome(schema.schemaName(), schema.ifNotExists());
         }
         KinesisSchemaBinding binding = new KinesisSchemaBinding(session.accountId(), session.clusterKey(),
                 session.databaseName(), schema.schemaName(), schema.region(), schema.iamRoleArn());
-        backend.execute("CREATE SCHEMA " + ExternalTableMaterializer.quote(schema.schemaName()));
+        createBoundSchema(backend, schema.schemaName(), () -> metadata.refreshKinesis(backend, binding),
+                () -> kinesisSchemas.bind(binding));
+        return true;
+    }
+
+    /** A name is taken when either kind of external schema already holds it. */
+    private boolean schemaExists(SpectrumSession session, String schemaName) {
+        return registry.find(session.accountId(), session.clusterKey(), session.databaseName(), schemaName).isPresent()
+                || kinesisSchemas.find(session.accountId(), session.clusterKey(), session.databaseName(),
+                schemaName).isPresent();
+    }
+
+    private static boolean existingSchemaOutcome(String schemaName, boolean ifNotExists) {
+        if (ifNotExists) {
+            return true;
+        }
+        throw new SpectrumSqlException("42P06", "schema \"" + schemaName + "\" already exists");
+    }
+
+    /** Creates the local schema, publishes its metadata, and binds it once committed; removes it again on failure. */
+    private void createBoundSchema(BackendSql backend, String schemaName, Runnable refreshMetadata, Runnable bind) {
+        backend.execute("CREATE SCHEMA " + ExternalTableMaterializer.quote(schemaName));
         try {
-            metadata.refreshKinesis(backend, binding);
-            bindWhenCommitted(backend, () -> kinesisSchemas.bind(binding));
+            refreshMetadata.run();
+            bindWhenCommitted(backend, bind);
         } catch (RuntimeException exception) {
             try {
-                backend.execute("DROP SCHEMA " + ExternalTableMaterializer.quote(schema.schemaName()) + " CASCADE");
+                backend.execute("DROP SCHEMA " + ExternalTableMaterializer.quote(schemaName) + " CASCADE");
             } catch (RuntimeException cleanupFailure) {
-                LOG.warnv(cleanupFailure, "Could not clean up failed external schema {0}", schema.schemaName());
+                LOG.warnv(cleanupFailure, "Could not clean up failed external schema {0}", schemaName);
             }
             throw exception;
         }
-        return true;
     }
 
     private void dropKinesisSchema(ExternalStatement.DropSchema statement, KinesisSchemaBinding binding,

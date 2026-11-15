@@ -210,6 +210,20 @@ class SpectrumKinesisSchemaPreparationTest {
     }
 
     @Test
+    void refusesStatementsThatWouldPutARelationIntoTheSchemaOrDropItAmongOthers() {
+        preparation.prepare(CREATE, SESSION, backend);
+
+        for (String sql : List.of("CREATE TABLE kds.t (id int)", "ALTER TABLE t SET SCHEMA kds",
+                "DROP SCHEMA other, kds")) {
+            assertThat(sql, preparation.referencesExternal(sql, SESSION), equalTo(true));
+            SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                    () -> preparation.prepare(sql, SESSION, backend));
+            assertThat(sql, error.sqlState(), equalTo("0A000"));
+        }
+        assertThat(bound("kds").isPresent(), equalTo(true));
+    }
+
+    @Test
     void aGlueSchemaCannotTakeTheNameOfAKinesisSchemaAndLeavesGlueUntouched() {
         GlueService glue = mock(GlueService.class);
         SpectrumQueryPreparation withGlue = new SpectrumQueryPreparation(glueSchemas, kinesisSchemas, materializer,
