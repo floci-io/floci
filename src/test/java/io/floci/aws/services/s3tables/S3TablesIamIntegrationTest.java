@@ -166,6 +166,33 @@ class S3TablesIamIntegrationTest {
         }
     }
 
+    /** A resource-tag condition reads the tags S3 Tables holds on the bucket or the table a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheBucketAndTheTable() throws Exception {
+        String tagged = send(admin, "PUT", "/buckets", "{\"name\":\"iam-" + UUID.randomUUID().toString().substring(0, 8)
+                + "\",\"tags\":{\"team\":\"data\"}}").then().statusCode(200).extract().path("arn");
+        String untagged = createBucket();
+        String path = "/tables/" + encoded(tagged) + "/analytics/";
+        send(admin, "PUT", "/namespaces/" + encoded(tagged), "{\"namespace\":[\"analytics\"]}").then().statusCode(200);
+        send(admin, "PUT", path, "{\"name\":\"events\",\"format\":\"ICEBERG\",\"tags\":{\"team\":\"data\"}}")
+                .then().statusCode(200);
+        send(admin, "PUT", path, "{\"name\":\"orders\",\"format\":\"ICEBERG\"}").then().statusCode(200);
+        String onTeamData = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":"
+                + "[\"s3tables:GetTableBucket\",\"s3tables:GetTable\"],\"Resource\":\"*\",\"Condition\":"
+                + "{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}";
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-iam-", "tags", onTeamData)) {
+            send(user.signer("s3tables"), "GET", "/buckets/" + encoded(tagged), null).then().statusCode(200);
+            denied(send(user.signer("s3tables"), "GET", "/buckets/" + encoded(untagged), null),
+                    "s3tables:GetTableBucket");
+            String query = "/get-table?tableBucketARN=" + encoded(tagged) + "&namespace=analytics&name=";
+            send(user.signer("s3tables"), "GET", query + "events", null).then().statusCode(200);
+            denied(send(user.signer("s3tables"), "GET", query + "orders", null), "s3tables:GetTable");
+        } finally {
+            deleteBucket(tagged, "analytics");
+            send(admin, "DELETE", "/buckets/" + encoded(untagged), null).then().statusCode(204);
+        }
+    }
+
     private String createTable(String bucket, String namespace, String name) throws Exception {
         send(admin, "PUT", "/namespaces/" + encoded(bucket), "{\"namespace\":[\"" + namespace + "\"]}");
         return send(admin, "PUT", "/tables/" + encoded(bucket) + "/" + namespace + "/",
