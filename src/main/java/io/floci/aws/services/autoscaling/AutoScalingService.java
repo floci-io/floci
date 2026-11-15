@@ -1615,19 +1615,13 @@ public class AutoScalingService implements PassedRoleLookup {
 
     /**
      * Applies {@code change} to the target groups and traffic sources attached to the group {@code name}, and
-     * stores it. An EKS group's in-service members are then registered with the target groups the change attached
-     * and deregistered from those it detached, as AWS does, all under the Region's lock and then the group's, like
-     * every change to an EKS group's members or target groups. Other groups' members are left as they are: the
-     * reconciler registers them as they come into service.
+     * stores it. The group's members are deregistered from the target groups the change detached, and its in-service
+     * members registered with those it attached, as AWS does, all under the Region's lock and then the group's, in
+     * the order {@code attachInstances} and the changes to an EKS group's members take them. An instance an EKS group
+     * shares with another group stays in a target group that other group still has attached.
      */
     private void changeAttachments(String region, String name, Consumer<AutoScalingGroup> change) {
         String key = asgKey(region, name);
-        AutoScalingGroup asg = requireGroup(region, name);
-        if (!asg.isEksManaged()) {
-            change.accept(asg);
-            groups.put(key, asg);
-            return;
-        }
         synchronized (lockFor(region)) {
             synchronized (lockFor(key)) {
                 AutoScalingGroup current = requireGroup(region, name);
@@ -1639,7 +1633,7 @@ public class AutoScalingService implements PassedRoleLookup {
                 Set<String> detached = new LinkedHashSet<>(attachedBefore);
                 detached.removeAll(attached);
                 attached.removeAll(attachedBefore);
-                // The node leaves the target groups the change detached before the change is stored: when ELBv2
+                // The members leave the target groups the change detached before the change is stored: when ELBv2
                 // refuses, the group keeps them attached, so the detach can be sent again.
                 try {
                     deregisterFromUnsharedTargetGroups(current, memberIds(current), detached);
