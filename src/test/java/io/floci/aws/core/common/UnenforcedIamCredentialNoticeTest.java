@@ -116,16 +116,26 @@ class UnenforcedIamCredentialNoticeTest {
         verify(iamService, times(1)).isKnownAccessKey("AKIAIOSFODNN7EXAMPLE");
     }
 
+    /**
+     * It remembers the keys it saw most recently, up to its bound: one seen once the bound is reached is
+     * looked up once all the same, and takes the place of the key seen longest ago.
+     */
     @Test
-    void theKeysItRemembersAreBounded() {
-        for (int i = 0; i < UnenforcedIamCredentialNotice.MAX_CHECKED_KEYS; i++) {
+    void itRemembersTheKeysSeenMostRecentlyUpToItsBound() {
+        int bound = UnenforcedIamCredentialNotice.MAX_CHECKED_KEYS;
+        for (int i = 0; i < bound; i++) {
             notice.observe("AKIAUNKNOWN" + i, ACCOUNT);
         }
 
         notice.observe("AKIAONEMORE", ACCOUNT);
         notice.observe("AKIAONEMORE", ACCOUNT);
+        notice.observe("AKIAUNKNOWN" + (bound - 1), ACCOUNT);
+        notice.observe("AKIAUNKNOWN0", ACCOUNT);
 
-        verify(iamService, times(2)).isKnownAccessKey("AKIAONEMORE");
+        verify(iamService, times(1)).isKnownAccessKey("AKIAONEMORE");
+        verify(iamService, times(1)).isKnownAccessKey("AKIAUNKNOWN" + (bound - 1));
+        verify(iamService, times(2)).isKnownAccessKey("AKIAUNKNOWN0");
+        assertEquals(bound, notice.rememberedKeys());
     }
 
     private static List<String> warnings(Runnable action) {

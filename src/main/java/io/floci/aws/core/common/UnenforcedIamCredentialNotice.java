@@ -3,8 +3,9 @@ package io.floci.aws.core.common;
 import io.floci.aws.services.iam.IamService;
 import org.jboss.logging.Logger;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -23,8 +24,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>Once the warning is logged this costs one read per request. Before that, each other access
  * key id is looked up once: a key Floci did not issue never becomes one it issued, and a session
- * the root minted stays the root's, so it is remembered as checked, up to
- * {@link #MAX_CHECKED_KEYS} of them.
+ * the root minted stays the root's, so it is remembered as checked. The {@link #MAX_CHECKED_KEYS}
+ * keys seen most recently are remembered, each added in one step that drops the one seen longest
+ * ago, so concurrent requests cannot take it past that.
  */
 final class UnenforcedIamCredentialNotice {
 
@@ -33,7 +35,13 @@ final class UnenforcedIamCredentialNotice {
 
     private final IamService iamService;
     private final AtomicBoolean warned = new AtomicBoolean();
-    private final Set<String> checkedKeys = ConcurrentHashMap.newKeySet();
+    private final Map<String, Boolean> checkedKeys = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+                    return size() > MAX_CHECKED_KEYS;
+                }
+            });
 
     UnenforcedIamCredentialNotice(IamService iamService) {
         this.iamService = iamService;
@@ -46,15 +54,13 @@ final class UnenforcedIamCredentialNotice {
     boolean observe(String accessKeyId, String accountId) {
         if (warned.get() || accessKeyId == null || accessKeyId.isBlank()
                 || "test".equals(accessKeyId) || AccountResolver.isAccountId(accessKeyId)
-                || checkedKeys.contains(accessKeyId)) {
+                || checkedKeys.get(accessKeyId) != null) {
             return false;
         }
         if (!iamService.isKnownAccessKey(accessKeyId) || iamService.isRootIssuedSessionToken(accessKeyId)
                 || iamService.presignedScope(accessKeyId).isPresent()
                 || iamService.isSeededDeployerAccessKey(accessKeyId)) {
-            if (checkedKeys.size() < MAX_CHECKED_KEYS) {
-                checkedKeys.add(accessKeyId);
-            }
+            checkedKeys.put(accessKeyId, Boolean.TRUE);
             return false;
         }
         if (!warned.compareAndSet(false, true)) {
@@ -69,5 +75,10 @@ final class UnenforcedIamCredentialNotice {
                         + "This is logged once.",
                 accountId, credential, accessKeyId);
         return true;
+    }
+
+    /** How many access key ids it remembers as checked. */
+    int rememberedKeys() {
+        return checkedKeys.size();
     }
 }
