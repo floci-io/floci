@@ -189,6 +189,19 @@ public class GlueCatalogService {
         return path(catalogId).isDefault();
     }
 
+    /**
+     * The ARN of the table bucket a federated S3 Tables catalog id names ({@code [<account>:]s3tablescatalog/<bucket>}),
+     * and the catalog's id as catalogs answer it; empty for any other catalog id.
+     */
+    public Optional<FederatedBucket> federatedTableBucket(String catalogId, String region) {
+        return federated(catalogId, region).map(found -> new FederatedBucket(found.bucket().getArn(),
+                found.bucket().getName(), found.catalogId()));
+    }
+
+    /** A table bucket a federated catalog names, and the catalog's qualified id. */
+    public record FederatedBucket(String bucketArn, String bucketName, String catalogId) {
+    }
+
     public GlueService.Page<Database> getDatabases(String catalogId, Integer maxResults, String nextToken,
                                                    String region) {
         Optional<Federated> federated = federated(catalogId, region);
