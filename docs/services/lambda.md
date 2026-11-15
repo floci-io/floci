@@ -511,6 +511,11 @@ validate each `Layers` ARN in the caller's own account eagerly against that stor
 real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
 ... does not exist.`, not silently accepted.
 
+`DeleteLayerVersion` accepts either a layer name or an unversioned layer ARN, with
+`VersionNumber` supplied separately. ARN deletion resolves the stored version in the ARN's
+region and removes its archive. IAM checks use that same layer-version ARN; another
+account's ARN cannot select a same-named layer in the caller's account.
+
 An ARN naming another account or another partition is answered on the live service by the layer's
 resource policy: an AWS-managed public layer resolves, and everything else is
 `AccessDeniedException`. Measured on `CreateFunction` in ap-southeast-1, a foreign-account ARN and

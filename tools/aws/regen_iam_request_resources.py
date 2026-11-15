@@ -279,9 +279,9 @@ READ_IN_HAND_BUILT: dict[str, str] = {
 READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
-for operation in ("GetLayerVersion", "GetLayerVersionByArn"):
+for operation in ("GetLayerVersion", "GetLayerVersionByArn", "DeleteLayerVersion"):
     READ_IN_HAND_BUILT[f"lambda:{operation}"] = (
-        "Lambda layer lookups name the version through modeled path and query members; "
+        "Lambda layer reads and deletion name the version through modeled path and query members; "
         "other Lambda resources retain their existing builders")
 
 # ---------------------------------------------------------------------------------------------------------------------

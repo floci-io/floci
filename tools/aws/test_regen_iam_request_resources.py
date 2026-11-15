@@ -1006,7 +1006,7 @@ def test_the_vendored_file_is_well_formed():
     assert document["unqualified"] == {"lambda": ["function"], "ssm": ["parameter"], "states": ["statemachine"]}
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
     assert {operation for operation in operations if operation.startswith("lambda:")} == {
-        "lambda:GetLayerVersion", "lambda:GetLayerVersionByArn"}
+        "lambda:GetLayerVersion", "lambda:GetLayerVersionByArn", "lambda:DeleteLayerVersion"}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}

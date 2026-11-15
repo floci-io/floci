@@ -2233,16 +2233,14 @@ class ResourceArnBuilderTest {
         request("/2018-10-31/layers/" + layer.replace(":", "%3A") + "/versions/01");
 
         assertEquals(layer + ":1", layerResource("GetLayerVersion", requestRegion));
+        when(ctx.getMethod()).thenReturn("DELETE");
+        assertEquals(layer + ":1", layerResource("DeleteLayerVersion", requestRegion));
     }
 
     @Test
     void otherLayerRoutesKeepTheirLiteralNameResource() {
         String layer = "arn:aws:lambda:us-west-2:111122223333:layer:shared";
         String expected = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":layer:" + layer + ":1";
-        when(ctx.getMethod()).thenReturn("DELETE");
-        request("/2018-10-31/layers/" + layer + "/versions/01");
-        assertEquals(expected, layerResource("DeleteLayerVersion", "us-east-1"));
-
         when(ctx.getMethod()).thenReturn("GET");
         request("/2018-10-31/layers/" + layer + "/versions/01/policy");
         assertEquals(expected, layerResource("GetLayerVersionPolicy", "us-east-1"));
