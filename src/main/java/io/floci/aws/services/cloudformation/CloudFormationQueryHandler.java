@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsQueryResponse;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.cloudformation.model.ChangeSet;
 import io.floci.aws.services.cloudformation.model.Stack;
@@ -23,7 +24,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -45,24 +45,12 @@ public class CloudFormationQueryHandler {
         this.stackSetService = stackSetService;
     }
 
-    /** The id of the stack a stack name or id names, as a request naming it finds it. */
-    public Optional<String> stackId(String stackNameOrId, String region) {
-        return cfnService.stackId(stackNameOrId, region);
-    }
-
-    /** The id of the stack holding the change set {@code changeSetArn} names. */
-    public Optional<String> stackIdOfChangeSet(String changeSetArn, String region) {
-        return cfnService.stackIdOfChangeSet(changeSetArn, region);
-    }
-
-    /** The id of the stack that owns the resource {@code physicalResourceId} names. */
-    public Optional<String> stackIdOfResource(String physicalResourceId, String region) {
-        return cfnService.stackIdOfResource(physicalResourceId, region);
-    }
-
-    /** The id of the stack set of this name. */
-    public Optional<String> stackSetId(String stackSetName) {
-        return stackSetService.stackSetId(stackSetName);
+    /**
+     * What IAM asks CloudFormation of the resources a request names, the stack or the stack set a name names, reading
+     * only: for a state machine's task, which has no HTTP request of its own.
+     */
+    public StoredResourceArns storedResourceArns() {
+        return new CloudFormationStoredResourceArns(cfnService, stackSetService);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {

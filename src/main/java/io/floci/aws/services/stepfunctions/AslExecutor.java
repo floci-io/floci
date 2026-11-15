@@ -1266,7 +1266,8 @@ public class AslExecutor {
         }
         Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
                 redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns(), ecsService,
-                taskToken != null, new TaskPermissions.ControlServices(cloudFormationHandler,
+                taskToken != null, new TaskPermissions.ControlServices(
+                        cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
                         sfnService == null || !sfnService.isResolvable() ? null : sfnService.get()));
         if (required.isEmpty()) {
