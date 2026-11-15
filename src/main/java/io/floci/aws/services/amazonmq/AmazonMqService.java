@@ -223,12 +223,18 @@ public class AmazonMqService implements ResourceProvider {
 
     public void deleteBroker(String brokerId) {
         Broker broker = describeBroker(brokerId);
-        broker.setBrokerState(BrokerState.DELETION_IN_PROGRESS);
+        String key = brokerKey(regionResolver.getRegion(), brokerId);
+        // Marked under the broker's lock, which the readiness poller holds while it reads the broker again and writes
+        // it back, so a broker turning ready while it is deleted is not stored again as RUNNING.
+        synchronized (brokerLocks.lockFor(regionResolver.getAccountId() + ":" + key)) {
+            broker.setBrokerState(BrokerState.DELETION_IN_PROGRESS);
+            storage.put(key, broker);
+        }
         if (!config.services().amazonmq().mock()) {
             rabbitMqManager.stopContainer(broker);
             rabbitMqManager.removeBrokerStorage(broker);
         }
-        storage.delete(brokerKey(regionResolver.getRegion(), brokerId));
+        storage.delete(key);
         LOG.infov("Deleted Amazon MQ broker {0}", brokerId);
     }
 
@@ -273,13 +279,28 @@ public class AmazonMqService implements ResourceProvider {
                 Broker broker = entry.value();
                 if (broker.getBrokerState() == BrokerState.CREATION_IN_PROGRESS
                         && rabbitMqManager.isReady(broker)) {
-                    LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
-                    broker.setBrokerState(BrokerState.RUNNING);
-                    storage.putForAccount(entry.accountId(), entry.key(), broker);
+                    markRunning(entry.accountId(), entry.key());
                 }
             }
         } catch (Exception e) {
             LOG.error("Error in Amazon MQ readiness poller", e);
+        }
+    }
+
+    /**
+     * Stores a broker that turned ready as RUNNING, read again under its lock first. The readiness check is a
+     * blocking call to the broker's container, long enough for a DeleteBroker, which marks the broker under the same
+     * lock, to land in the meantime, and a broker deleted or being deleted is not written back.
+     */
+    private void markRunning(String accountId, String key) {
+        synchronized (brokerLocks.lockFor(accountId + ":" + key)) {
+            Broker broker = storage.getForAccount(accountId, key).orElse(null);
+            if (broker == null || broker.getBrokerState() != BrokerState.CREATION_IN_PROGRESS) {
+                return;
+            }
+            LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
+            broker.setBrokerState(BrokerState.RUNNING);
+            storage.putForAccount(accountId, key, broker);
         }
     }
 
