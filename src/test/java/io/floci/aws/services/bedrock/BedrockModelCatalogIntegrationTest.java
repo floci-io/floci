@@ -146,7 +146,7 @@ class BedrockModelCatalogIntegrationTest {
         try (BedrockClient client = client("eu-central-1")) {
             FoundationModelSummary novaMicro = client.listFoundationModels(request -> { }).modelSummaries().stream()
                     .filter(model -> model.modelId().equals(NOVA_MICRO)).findFirst().orElseThrow();
-            assertTrue(novaMicro.inferenceTypesSupported().isEmpty(),
+            assertEquals(List.of("INFERENCE_PROFILE"), novaMicro.inferenceTypesSupportedAsStrings(),
                     "Nova Micro is reachable from eu-central-1 only through eu." + NOVA_MICRO);
 
             List<String> onDemand = client.listFoundationModels(request -> request
