@@ -6,6 +6,8 @@ import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Map;
 
@@ -95,6 +97,21 @@ class GlobalCorsFilterIntegrationTest {
     }
 
     @Test
+    void cognitoTokenPreflightKeepsThePrivateNetworkGrant() {
+        given()
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Private-Network", "true")
+        .when()
+            .options("/cognito-idp/oauth2/token")
+        .then()
+            .statusCode(204)
+            .header("Access-Control-Allow-Private-Network", equalTo("true"))
+            .header("Access-Control-Allow-Origin", equalTo("http://localhost:3000"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"));
+    }
+
+    @Test
     void actualRequestFromExtraAllowedOriginGetsCorsHeaders() {
         given()
             .header("Origin", "https://ui.example.test")
@@ -108,6 +125,41 @@ class GlobalCorsFilterIntegrationTest {
             .header("Access-Control-Allow-Origin", equalTo("https://ui.example.test"))
             .header("Access-Control-Expose-Headers", containsString("x-visible-header"))
             .header("Vary", containsString("Origin"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"ListUserPools|200|{\"MaxResults\":1}", "InitiateAuth|400|{}"}, delimiter = '|')
+    void cognitoResponsesKeepDefaultAndConfiguredExposedHeaders(String action, int status, String body) {
+        given()
+            .header("Origin", "https://ui.example.test")
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
+            .contentType("application/x-amz-json-1.1")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(status)
+            .header("Access-Control-Allow-Origin", equalTo("https://ui.example.test"))
+            .header("Access-Control-Expose-Headers", containsString("x-visible-header"))
+            .header("Access-Control-Expose-Headers", containsString("x-amzn-RequestId"))
+            .header("Access-Control-Expose-Headers", containsString("x-amzn-ErrorType"))
+            .header("Access-Control-Expose-Headers", containsString("x-amzn-ErrorMessage"))
+            .header("Access-Control-Expose-Headers", containsString("Date"));
+    }
+
+    @Test
+    void cognitoResponsesFromUnlistedOriginsGetNoCorsHeaders() {
+        given()
+            .header("Origin", "https://not-allowed.example.test")
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.ListUserPools")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"MaxResults\":1}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .header("Access-Control-Allow-Origin", nullValue())
+            .header("Access-Control-Expose-Headers", nullValue());
     }
 
     @Test

@@ -32,4 +32,9 @@ public record StackUpdateSnapshot(
         this(templateBody, originalTemplateBody, parameters, resolvedParameters, outputs, exports,
                 outputExportNames, resources, null);
     }
+
+    /** The parameter values the template was deployed with: the resolved ones, else the raw ones of an older stack. */
+    public Map<String, String> deployedParameters() {
+        return resolvedParameters.isEmpty() ? parameters : resolvedParameters;
+    }
 }

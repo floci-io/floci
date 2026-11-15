@@ -1,5 +1,7 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
@@ -8,16 +10,25 @@ import org.mockito.ArgumentCaptor;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -27,13 +38,14 @@ class AlarmEvaluatorTest {
     private static final String POLICY_ARN =
             "arn:aws:autoscaling:us-east-1:000000000000:scalingPolicy:x:resource/ecs/y:policyName/z";
 
-    private final CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
+    private final CloudWatchMetricsService metricsService = spy(new CloudWatchMetricsService(
+            new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000")));
     @SuppressWarnings("unchecked")
     private final Instance<AlarmActionHandler> handlers = mock(Instance.class);
     private final AlarmActionHandler handler = mock(AlarmActionHandler.class);
     private final AlarmEvaluator evaluator = new AlarmEvaluator(metricsService, handlers);
 
-    private static MetricAlarm alarm() {
+    private MetricAlarm alarm() {
         MetricAlarm alarm = new MetricAlarm();
         alarm.setAlarmName("TargetTracking-svc-AlarmHigh-abc");
         alarm.setRegion(REGION);
@@ -46,6 +58,7 @@ class AlarmEvaluatorTest {
         alarm.setComparisonOperator("GreaterThanThreshold");
         alarm.setActionsEnabled(true);
         alarm.setAlarmActions(List.of(POLICY_ARN));
+        metricsService.putMetricAlarm(alarm, REGION);
         return alarm;
     }
 
@@ -61,9 +74,8 @@ class AlarmEvaluatorTest {
     }
 
     private void stubMetrics(List<CloudWatchMetricsService.Datapoint> points) {
-        when(metricsService.getMetricStatistics(
-                any(), any(), any(), any(), any(), anyInt(), any(), any(), anyString()))
-                .thenReturn(points);
+        doReturn(points).when(metricsService).getMetricStatistics(
+                any(), any(), any(), any(), any(), anyInt(), any(), any(), anyString());
     }
 
     @Test
@@ -151,6 +163,47 @@ class AlarmEvaluatorTest {
         evaluator.evaluate(alarm);
 
         verify(handler, never()).handle(anyString(), any(), anyDouble(), anyString());
+    }
+
+    @Test
+    void disableDuringMetricEvaluationPreventsDispatchFromTheCapturedAlarm() throws Exception {
+        MetricAlarm alarm = alarm();
+        CountDownLatch evaluationStarted = new CountDownLatch(1);
+        CountDownLatch continueEvaluation = new CountDownLatch(1);
+        when(handlers.iterator()).thenAnswer(invocation -> List.of(handler).iterator());
+        when(handler.supports(POLICY_ARN)).thenReturn(true);
+        doAnswer(invocation -> {
+            evaluationStarted.countDown();
+            assertTrue(continueEvaluation.await(10, TimeUnit.SECONDS), "Evaluation was not released");
+            Instant end = invocation.getArgument(4);
+            List<CloudWatchMetricsService.Datapoint> points = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                points.add(new CloudWatchMetricsService.Datapoint(
+                        end.minusSeconds(60L * i), 1, 80, 80, 80, 80, "Percent"));
+            }
+            return points;
+        }).when(metricsService).getMetricStatistics(
+                any(), any(), any(), any(), any(), anyInt(), any(), any(), anyString());
+
+        try (ExecutorService worker = Executors.newSingleThreadExecutor()) {
+            try {
+                Future<?> evaluation = worker.submit(evaluator::evaluateAll);
+                assertTrue(evaluationStarted.await(10, TimeUnit.SECONDS), "Evaluation did not read the alarm");
+                metricsService.setAlarmActionsEnabled(List.of(alarm.getAlarmName()), false, REGION);
+                continueEvaluation.countDown();
+                evaluation.get(10, TimeUnit.SECONDS);
+
+                assertEquals("ALARM", metricsService.allAlarms().getFirst().getStateValue());
+                verify(handler, never()).handle(anyString(), any(), anyDouble(), anyString());
+                metricsService.setAlarmActionsEnabled(List.of(alarm.getAlarmName()), true, REGION);
+                evaluator.evaluateAll();
+                verify(handler).handle(eq(POLICY_ARN), any(), eq(80.0), eq(REGION));
+            } finally {
+                continueEvaluation.countDown();
+            }
+        } finally {
+            evaluator.stop();
+        }
     }
 
     @Test

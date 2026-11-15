@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Properties;
 
 import static io.floci.aws.testing.Ec2Requests.ec2;
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.floci.aws.testing.RdsRequests.createPostgresInstance;
 import static io.floci.aws.testing.RdsRequests.deleteInstance;
 import static io.floci.aws.testing.RdsRequests.rds;
@@ -76,7 +77,7 @@ class RdsPostgresIamRoleIntegrationTest {
             cleanup.add(0, () -> given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261018/us-east-1/secretsmanager/aws4_request")
                     .header("X-Amz-Target", "secretsmanager.DeleteSecret").contentType("application/x-amz-json-1.1")
                     .body(deleteSecret).post("/").then().statusCode(200));
-            String roleArn = iamService.createRole(role, "/", "{}", null, 3600, Map.of()).getArn();
+            String roleArn = iamService.createRole(role, "/", EMPTY_POLICY_DOCUMENT, null, 3600, Map.of()).getArn();
             cleanup.add(0, () -> iamService.deleteRole(role));
             rds("CreateDBProxy").formParam("DBProxyName", proxy).formParam("EngineFamily", "POSTGRESQL")
                     .formParam("RoleArn", roleArn).formParam("VpcSubnetIds.member.1", subnets.get(0))

@@ -7,9 +7,12 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AccessMode;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
@@ -177,6 +180,7 @@ class ContainerLauncherTest {
                 new ContainerLifecycleManager.ContainerInfo("container-123", Map.of());
         lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
         lenient().when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        workingDirectory("");
         ListContainersCmd inventory = mock(ListContainersCmd.class, RETURNS_SELF);
         lenient().when(dockerClient.listContainersCmd()).thenReturn(inventory);
         lenient().when(inventory.exec()).thenReturn(List.of());
@@ -939,6 +943,67 @@ class ContainerLauncherTest {
 
         // createAndStart must NOT be called — Lambda uses the split path
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void launchFunction_imageWorkingDirectoryLambdasUserCannotEnter_failsInitWithoutStarting() throws Exception {
+        workingDirectory("/home/nonroot");
+        directoryMode("/home", 0755);
+        directoryMode("/home/nonroot", 0700);
+
+        LambdaInitException error = assertThrows(LambdaInitException.class, () -> launcher.launch(imageFunction()));
+
+        assertEquals("Runtime.InvalidEntrypoint", error.errorType());
+        verify(lifecycleManager, never()).startCreated(any(), any());
+    }
+
+    @Test
+    void launchFunction_imageWorkingDirectoryEveryoneCanEnter_starts() throws Exception {
+        workingDirectory("/srv/app");
+        directoryMode("/srv", 0755);
+        directoryMode("/srv/app", 0755);
+
+        launcher.launch(imageFunction());
+
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
+    }
+
+    @Test
+    void launchFunction_imageWorkingDirectoryOnAMountedFileSystem_starts() throws Exception {
+        workingDirectory("/mnt/efs/app");
+        directoryMode("/mnt", 0755);
+        directoryMode("/mnt/efs", 0700);
+        LambdaFunction fn = imageFunction();
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:222233334444:access-point/fsap-0123456789abcdef0",
+                "/mnt/efs")));
+
+        launcher.launch(fn);
+
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
+    }
+
+    private void workingDirectory(String workingDir) {
+        ContainerConfig containerConfig = mock(ContainerConfig.class);
+        lenient().when(containerConfig.getWorkingDir()).thenReturn(workingDir);
+        InspectContainerResponse inspected = mock(InspectContainerResponse.class);
+        lenient().when(inspected.getConfig()).thenReturn(containerConfig);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        lenient().when(inspect.exec()).thenReturn(inspected);
+        lenient().when(dockerClient.inspectContainerCmd("container-123")).thenReturn(inspect);
+    }
+
+    private void directoryMode(String path, int mode) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+            TarArchiveEntry dir = new TarArchiveEntry(path.substring(path.lastIndexOf('/') + 1) + "/");
+            dir.setMode(040000 | mode);
+            tar.putArchiveEntry(dir);
+            tar.closeArchiveEntry();
+        }
+        CopyArchiveFromContainerCmd copy = mock(CopyArchiveFromContainerCmd.class);
+        lenient().when(copy.exec()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
+        lenient().when(dockerClient.copyArchiveFromContainerCmd("container-123", path)).thenReturn(copy);
     }
 
     private static LambdaFunction imageFunction() {

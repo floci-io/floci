@@ -167,7 +167,7 @@ public class MemoryDbContainerManager {
                 ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager, volumeName, "/data");
             } else {
                 String path = ContainerStorageHelper.hostResourcePath(config, "memorydb", volumeId).toString();
-                ContainerStorageHelper.ensureHostDir(path);
+                ContainerStorageHelper.ensureHostDir(containerDetector, path);
                 specBuilder.withBind(path, "/data");
             }
             specBuilder.withCmd(List.of("--appendonly", "yes", "--appendfsync", "always"));

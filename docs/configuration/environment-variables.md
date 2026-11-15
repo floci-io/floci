@@ -51,6 +51,11 @@ Running Floci directly on a Linux host (not in a container) with services that s
 | `FLOCI_SECURITY_DISABLE_CORS_HEADERS` | `false` | Disable Floci's global CORS response headers. Alias: `DISABLE_CORS_HEADERS` |
 | `FLOCI_SECURITY_CORS_ALLOW_PRIVATE_NETWORK` | `false` | Answer Private Network Access preflights with `Access-Control-Allow-Private-Network: true`, letting a page on a public/secure origin reach this loopback backend. Only applies after the origin passes the allow-list above. |
 
+The [Cognito JSON API](../services/cognito.md) follows this same origin allow-list,
+including its empty default, for both preflights and actual responses. For allowed
+origins, Cognito's request ID and error headers are exposed alongside configured extra
+exposed headers. The disable-CORS switch above also disables this behavior.
+
 ---
 
 ## TLS / HTTPS
@@ -60,6 +65,7 @@ Running Floci directly on a Linux host (not in a container) with services that s
 | `FLOCI_TLS_ENABLED` | `false` | Enable TLS/HTTPS on all endpoints (HTTP remains available simultaneously) |
 | `FLOCI_TLS_CERT_PATH` | _(none)_ | Path to a PEM certificate file. When set, disables auto-generation |
 | `FLOCI_TLS_KEY_PATH` | _(none)_ | Path to a PEM private key file. Required when `FLOCI_TLS_CERT_PATH` is set |
+| `FLOCI_TLS_EXTRA_CA_PATH` | _(none)_ | Path to a PEM file of extra CA certificates that Floci's own outbound HTTPS clients (EventBridge API destinations, SNS HTTPS subscriptions, API Gateway HTTP and HTTP_PROXY integrations, JWT issuer fetch) trust on top of the JVM's roots. Works with TLS on or off; containers Floci launches do not receive them |
 | `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate and persist a server certificate signed by Floci's local CA when no cert/key paths are provided |
 
 See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss://`) support.
@@ -113,7 +119,7 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
 | `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds one connection (its exit watcher) plus one per extension; log streams use the streaming pool. See [Docker Configuration](docker.md#connection-pool) |
 | `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `512` | Connection pool size for container log-follow streams, kept apart from the main pool so they never starve create, start, stop and remove. See [Docker Configuration](docker.md#connection-pool) |
-| `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04` |
+| `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04`. An image in a registry on `localhost` or a loopback address, Floci's own ECR among them, is launched as it is |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
 | `FLOCI_DOCKER_RESOURCE_NAMESPACE` | _(none)_ | Optional namespace prefix for managed child Docker container and volume names |
@@ -302,6 +308,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable the Kinesis Data Streams service |
+| `FLOCI_SERVICES_KINESIS_CREATING_DELAY_MILLIS` | `0` | Optional `CREATING` status window after stream creation |
+| `FLOCI_SERVICES_KINESIS_UPDATING_DELAY_MILLIS` | `0` | Optional `UPDATING` status window after a stream change |
 
 ### Firehose
 

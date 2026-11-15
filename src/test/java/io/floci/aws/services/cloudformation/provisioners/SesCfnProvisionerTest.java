@@ -19,6 +19,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -402,6 +403,23 @@ class SesCfnProvisionerTest {
 
         assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, context(null)));
         verify(ses, never()).createEmailIdentity(anyString(), any(), any(), anyString());
+    }
+
+    @Test
+    void aRecoveredUpdateSnapshotKeepsTheEnginesChangesOnTheRecordedContext() throws Exception {
+        Identity identity = domain("example.com");
+        when(identities.getIdentityVerificationAttributes("example.com", "us-east-1")).thenReturn(identity);
+        when(ses.listResourceTags(anyString(), eq("us-east-1"))).thenReturn(List.of());
+        StackResource resource = resource();
+        resource.setPhysicalId("example.com");
+        resource.getAttributes().put("__FlociSesUpdateSnapshot", "{\"managedTags\":\"[]\"}");
+        ProvisionContext engineContext = CarriedChanges.withEngineStatement(context("example.com"));
+        JsonNode desired = props("{\"EmailIdentity\":\"example.com\"}");
+
+        ProvisionContext recorded = CarriedChanges.contextRecorded(
+                () -> provisioner.provision(resource, desired, engineContext));
+
+        assertSame(CarriedChanges.ENGINE_STATEMENT, recorded.changes("AWS::SES::EmailIdentity", null));
     }
 
     @Test

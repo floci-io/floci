@@ -197,6 +197,7 @@ class RdsControlPlaneTest {
                 .dbSubnetGroupName(subnetGroupName));
 
         assertThat(describeResponse.dbSubnetGroups()).hasSize(1);
+        assertThat(describeResponse.marker()).isNull();
         assertThat(describeResponse.dbSubnetGroups().get(0).subnets())
                 .extracting("subnetIdentifier")
                 .containsExactlyElementsOf(subnetIds);
@@ -210,6 +211,7 @@ class RdsControlPlaneTest {
                 .dbInstanceClass("db.t4g.small"));
 
         assertThat(response.orderableDBInstanceOptions()).hasSize(1);
+        assertThat(response.marker()).isNull();
         assertThat(response.orderableDBInstanceOptions().get(0).engine()).isEqualTo("postgres");
         assertThat(response.orderableDBInstanceOptions().get(0).engineVersion()).isEqualTo("16.14");
         assertThat(response.orderableDBInstanceOptions().get(0).dbInstanceClass()).isEqualTo("db.t4g.small");
@@ -540,8 +542,8 @@ class RdsControlPlaneTest {
     }
 
     @Test
-    @DisplayName("ModifyDBInstance resizes and upgrades an instance, and Describe reports it")
-    void sdkResizesAndUpgradesAStandaloneInstance() {
+    @DisplayName("ModifyDBInstance applies minor upgrades and refuses major upgrades atomically")
+    void sdkResizesAndAppliesMinorEngineUpgrades() {
         String instanceName = TestFixtures.uniqueName("rds-resize-db");
         try {
             createDbInstance(rds, instanceName, "resize-secret");
@@ -555,6 +557,7 @@ class RdsControlPlaneTest {
             assertThat(modified.dbInstanceClass()).isEqualTo("db.t3.large");
             assertThat(modified.allocatedStorage()).isEqualTo(100);
             assertThat(modified.engineVersion()).isEqualTo("16.4");
+            assertThat(modified.dbInstanceStatus()).isEqualTo("available");
 
             DBInstance described = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
                     .dbInstances().get(0);
@@ -572,11 +575,20 @@ class RdsControlPlaneTest {
                     .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
                             e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
 
-            DBInstance upgraded = rds.modifyDBInstance(b -> b
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
                     .dbInstanceIdentifier(instanceName)
+                    .dbInstanceClass("db.t3.xlarge")
+                    .allocatedStorage(200)
                     .engineVersion("17.2")
-                    .allowMajorVersionUpgrade(true)).dbInstance();
-            assertThat(upgraded.engineVersion()).isEqualTo("17.2");
+                    .allowMajorVersionUpgrade(true)))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            DBInstance afterRejectedUpgrades = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(afterRejectedUpgrades.engineVersion()).isEqualTo("16.4");
+            assertThat(afterRejectedUpgrades.dbInstanceClass()).isEqualTo("db.t3.large");
+            assertThat(afterRejectedUpgrades.allocatedStorage()).isEqualTo(100);
         } finally {
             deleteDbInstance(rds, instanceName);
         }
@@ -1173,6 +1185,7 @@ class RdsControlPlaneTest {
 
             DescribeOptionGroupsResponse described = rds.describeOptionGroups(b -> b
                     .optionGroupName(optionGroupName));
+            assertThat(described.marker()).isNull();
             assertThat(described.optionGroupsList()).singleElement().satisfies(group ->
                     assertThat(group.options()).extracting("optionName")
                             .containsExactly("MEMCACHED"));

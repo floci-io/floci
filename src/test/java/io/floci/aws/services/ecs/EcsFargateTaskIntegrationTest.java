@@ -274,7 +274,7 @@ class EcsFargateTaskIntegrationTest {
                 + "\"healthCheckGracePeriodSeconds\":30,"
                 + "\"deploymentConfiguration\":{\"maximumPercent\":200,\"minimumHealthyPercent\":100}}", 200)
                 .then()
-                .body("service.platformVersion", equalTo("1.4.0"))
+                .body("service.platformVersion", equalTo("LATEST"))
                 .body("service.platformFamily", equalTo("Linux"))
                 .body("service.enableExecuteCommand", equalTo(true))
                 .body("service.enableECSManagedTags", equalTo(true))
@@ -286,7 +286,7 @@ class EcsFargateTaskIntegrationTest {
         call("DescribeServices", "{\"cluster\":\"" + CLUSTER
                 + "\",\"services\":[\"fargate-members-svc\"]}", 200)
                 .then()
-                .body("services[0].platformVersion", equalTo("1.4.0"))
+                .body("services[0].platformVersion", equalTo("LATEST"))
                 .body("services[0].enableExecuteCommand", equalTo(true))
                 .body("services[0].deploymentConfiguration.minimumHealthyPercent", equalTo(100));
     }

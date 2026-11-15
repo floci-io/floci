@@ -1,6 +1,7 @@
 package io.floci.aws.services.paymentcryptography;
 
 
+import io.floci.aws.services.paymentcryptography.crypto.Bytes;
 import io.floci.aws.services.paymentcryptography.crypto.Ciphers;
 
 import java.security.SecureRandom;
@@ -269,7 +270,7 @@ final class PaymentCryptographyCrypto {
         int n = r.length;
         for (int j = 0; j < 6; j++) {
             for (int i = 0; i < n; i++) {
-                byte[] block = concat(a, r[i]);
+                byte[] block = Bytes.concat(a, r[i]);
                 byte[] encrypted = Ciphers.aesEcbEncrypt(block, key);
                 a = Arrays.copyOfRange(encrypted, 0, 8);
                 r[i] = Arrays.copyOfRange(encrypted, 8, encrypted.length);
@@ -296,7 +297,7 @@ final class PaymentCryptographyCrypto {
         int n = r.length;
         for (int j = 5; j >= 0; j--) {
             for (int i = n - 1; i >= 0; i--) {
-                byte[] block = concat(Ciphers.xor(a, counter(j, n, i)), r[i]);
+                byte[] block = Bytes.concat(Ciphers.xor(a, counter(j, n, i)), r[i]);
                 byte[] decrypted = Ciphers.aesEcbDecrypt(block, key);
                 a = Arrays.copyOfRange(decrypted, 0, 8);
                 r[i] = Arrays.copyOfRange(decrypted, 8, decrypted.length);
@@ -326,13 +327,6 @@ final class PaymentCryptographyCrypto {
         for (int i = 0; i < count; i++) {
             out[i] = Arrays.copyOfRange(bytes, i * size, (i + 1) * size);
         }
-        return out;
-    }
-
-    private static byte[] concat(byte[] left, byte[] right) {
-        byte[] out = new byte[left.length + right.length];
-        System.arraycopy(left, 0, out, 0, left.length);
-        System.arraycopy(right, 0, out, left.length, right.length);
         return out;
     }
 

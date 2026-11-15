@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.Token;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.TokenType;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.function.Function;
 
 /**
  * Applies a DynamoDB ProjectionExpression to a result item, returning a new
@@ -22,9 +25,6 @@ import java.util.TreeMap;
 final class ProjectionEvaluator {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    // The highest list index real DynamoDB accepts in a document path.
-    private static final long MAX_LIST_INDEX = 4_294_967_294L;
 
     private ProjectionEvaluator() {}
 
@@ -42,17 +42,29 @@ final class ProjectionEvaluator {
         if (item == null || !hasProjection(projectionExpression)) {
             return (ObjectNode) item;
         }
+        return projector(projectionExpression, exprAttrNames).apply(item);
+    }
+
+    /**
+     * Validates and reads the expression once and returns a function that projects an item
+     * as {@link #project} does, for a read that projects every item it returns.
+     */
+    static Function<JsonNode, ObjectNode> projector(String projectionExpression, JsonNode exprAttrNames) {
+        if (!hasProjection(projectionExpression)) {
+            return item -> (ObjectNode) item;
+        }
         validateExpression(projectionExpression, exprAttrNames);
         PathTrie root = new PathTrie();
-        for (String rawPath : splitProjectionPaths(projectionExpression)) {
-            List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
-            if (segments.isEmpty()) {
-                continue;
-            }
-            root.insert(segments);
+        for (List<Token> path : readPaths(projectionExpression)) {
+            root.insert(resolvePath(path, exprAttrNames));
         }
-        ObjectNode projected = projectMapEntries(item, root);
-        return projected != null ? projected : MAPPER.createObjectNode();
+        return item -> {
+            if (item == null) {
+                return null;
+            }
+            ObjectNode projected = projectMapEntries(item, root);
+            return projected != null ? projected : MAPPER.createObjectNode();
+        };
     }
 
     /**
@@ -71,66 +83,37 @@ final class ProjectionEvaluator {
 
     static Set<String> topLevelAttributes(String projectionExpression, JsonNode exprAttrNames) {
         Set<String> attributes = new LinkedHashSet<>();
-        for (String rawPath : splitProjectionPaths(projectionExpression)) {
-            List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames);
-            if (segments.isEmpty()) {
-                continue;
-            }
-            PathSegment root = segments.getFirst();
-            if (root.isIndex()) {
-                throw new IllegalArgumentException("Projection path starts with a list index: " + rawPath.trim());
-            }
-            attributes.add(root.name());
+        for (List<Token> path : readPaths(projectionExpression)) {
+            attributes.add(resolvePath(path, exprAttrNames).getFirst().name());
         }
         return Collections.unmodifiableSet(attributes);
     }
 
-    static void validateSyntax(String expression, String expressionType) {
-        if (expression == null || expression.isBlank()) return;
-        char first = expression.charAt(0);
-        if (!Character.isLetterOrDigit(first) && first != '#' && first != '_') {
-            String near = expression.length() > 2 ? expression.substring(1, 3) : expression.substring(1);
-            throw syntaxError(expressionType, String.valueOf(first), near);
-        }
-    }
-
-    private static AwsException syntaxError(String expressionType, String token, String near) {
-        return new AwsException("ValidationException",
-                "Invalid " + expressionType + ": Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
-    }
-
     static void validateExpression(String expression, JsonNode exprAttrNames) {
-        validateSyntax(expression, "ProjectionExpression");
-        DynamoDbReservedWords.check(expression, "ProjectionExpression");
         validatePaths(expression, exprAttrNames);
     }
 
     /**
-     * Rejects an undefined #alias, and any two paths where one covers the other.
-     * DynamoDB applies both before the read, so a request that matches nothing still fails.
+     * Rejects an undefined #alias, a reserved word, and a path that overlaps an earlier one.
+     * DynamoDB checks each path in written order before the read, so a request that matches
+     * nothing still fails.
      */
     static void validatePaths(String expression, JsonNode exprAttrNames) {
         if (expression == null || expression.isBlank()) {
             return;
         }
         List<List<PathSegment>> paths = new ArrayList<>();
-        for (String rawPath : splitProjectionPaths(expression)) {
-            List<PathSegment> segments = resolvePath(rawPath.trim(), exprAttrNames, true);
-            if (!segments.isEmpty()) {
-                paths.add(segments);
-            }
-        }
-        for (int i = 0; i < paths.size(); i++) {
-            List<PathSegment> first = paths.get(i);
-            for (int j = i + 1; j < paths.size(); j++) {
-                List<PathSegment> second = paths.get(j);
-                if (covers(first, second) || covers(second, first)) {
+        for (List<Token> path : readPaths(expression)) {
+            List<PathSegment> segments = resolvePath(path, exprAttrNames, true);
+            for (List<PathSegment> earlier : paths) {
+                if (covers(earlier, segments) || covers(segments, earlier)) {
                     throw new AwsException("ValidationException",
                             "Invalid ProjectionExpression: Two document paths overlap with each other; "
-                            + "must remove or rewrite one of these paths; path one: " + render(first)
-                            + ", path two: " + render(second), 400);
+                            + "must remove or rewrite one of these paths; path one: " + render(earlier)
+                            + ", path two: " + render(segments), 400);
                 }
             }
+            paths.add(segments);
         }
     }
 
@@ -152,25 +135,60 @@ final class ProjectionEvaluator {
         return rendered.append(']').toString();
     }
 
-    // ── Path splitting ──
+    // ── Path reading ──
 
-    private static List<String> splitProjectionPaths(String expression) {
-        List<String> paths = new ArrayList<>();
-        int depth = 0;
-        int start = 0;
-        for (int i = 0; i < expression.length(); i++) {
-            char c = expression.charAt(i);
-            if (c == '(') depth++;
-            else if (c == ')') depth--;
-            else if (c == ',' && depth == 0) {
-                paths.add(expression.substring(start, i).trim());
-                start = i + 1;
+    /**
+     * Reads the paths with the lexer of the other expressions: a name or #alias, then any
+     * .name and [n] steps, the paths separated by commas. A path holds its name and NUMBER
+     * tokens in order.
+     */
+    private static List<List<Token>> readPaths(String expression) {
+        List<Token> tokens = ExpressionEvaluator.tokenize(expression);
+        List<List<Token>> paths = new ArrayList<>();
+        int pos = 0;
+        while (true) {
+            List<Token> path = new ArrayList<>();
+            pos = readName(expression, tokens, pos, path);
+            while (true) {
+                TokenType type = tokens.get(pos).type();
+                if (type == TokenType.DOT) {
+                    pos = readName(expression, tokens, pos + 1, path);
+                } else if (type == TokenType.LBRACKET) {
+                    pos = expect(expression, tokens, pos + 1, TokenType.NUMBER);
+                    path.add(tokens.get(pos - 1));
+                    pos = expect(expression, tokens, pos, TokenType.RBRACKET);
+                } else {
+                    break;
+                }
             }
+            paths.add(path);
+            if (tokens.get(pos).type() == TokenType.EOF) {
+                return paths;
+            }
+            pos = expect(expression, tokens, pos, TokenType.COMMA);
         }
-        if (start < expression.length()) {
-            paths.add(expression.substring(start).trim());
+    }
+
+    // Function names are plain names here: DynamoDB projects an attribute called size.
+    private static int readName(String expression, List<Token> tokens, int pos, List<Token> path) {
+        TokenType type = tokens.get(pos).type();
+        if (type != TokenType.IDENTIFIER && type != TokenType.NAME_REF && type != TokenType.FUNCTION) {
+            throw syntaxError(expression, tokens, pos);
         }
-        return paths;
+        path.add(tokens.get(pos));
+        return pos + 1;
+    }
+
+    private static int expect(String expression, List<Token> tokens, int pos, TokenType type) {
+        if (tokens.get(pos).type() != type) {
+            throw syntaxError(expression, tokens, pos);
+        }
+        return pos + 1;
+    }
+
+    private static AwsException syntaxError(String expression, List<Token> tokens, int pos) {
+        return new AwsException("ValidationException", "Invalid ProjectionExpression: Syntax error; "
+                + ExpressionEvaluator.syntaxErrorDetail(expression, tokens, pos), 400);
     }
 
     // ── Path resolution ──
@@ -191,70 +209,37 @@ final class ProjectionEvaluator {
         }
     }
 
-    private static List<PathSegment> resolvePath(String path, JsonNode exprAttrNames) {
+    private static List<PathSegment> resolvePath(List<Token> path, JsonNode exprAttrNames) {
         return resolvePath(path, exprAttrNames, false);
     }
 
-    private static List<PathSegment> resolvePath(String path, JsonNode exprAttrNames,
+    private static List<PathSegment> resolvePath(List<Token> path, JsonNode exprAttrNames,
                                                  boolean requireDefinedNames) {
         List<PathSegment> segments = new ArrayList<>();
-        // Tokenize on dots, preserving [n] bracket indices
-        String[] parts = path.split("\\.");
-        for (String part : parts) {
-            // A part may end with [n] index(es) like "list[0]" or "[0]"
-            int bracketIdx = part.indexOf('[');
-            if (bracketIdx >= 0) {
-                String name = part.substring(0, bracketIdx);
-                if (!name.isEmpty()) {
-                    segments.add(PathSegment.name(resolveSegment(name, exprAttrNames, requireDefinedNames)));
-                }
-                // Parse each [n] suffix
-                String rest = part.substring(bracketIdx);
-                int i = 0;
-                while (i < rest.length() && rest.charAt(i) == '[') {
-                    int close = rest.indexOf(']', i);
-                    if (close < 0) break;
-                    String content = rest.substring(i + 1, close);
-                    validateListIndex(content);
-                    segments.add(PathSegment.index(Long.parseLong(content)));
-                    i = close + 1;
-                }
+        for (Token token : path) {
+            if (token.type() == TokenType.NUMBER) {
+                segments.add(PathSegment.index(listIndex(token.value())));
             } else {
-                segments.add(PathSegment.name(resolveSegment(part, exprAttrNames, requireDefinedNames)));
+                segments.add(PathSegment.name(resolveSegment(token.value(), exprAttrNames, requireDefinedNames)));
             }
         }
         return segments;
     }
 
-    // DynamoDB rejects a non-numeric bracket segment and a leading zero as syntax
-    // errors, and a numeric index above 4294967294 as out of the allowable range,
-    // all at expression level. Verified on real DynamoDB (us-east-1, 2026-09-05).
-    private static void validateListIndex(String content) {
-        if (content.isEmpty()) {
-            throw syntaxError("ProjectionExpression", "]", "[]");
-        }
-        final int contentLength = content.length();
-        for (int i = 0; i < contentLength; i++) {
-            char c = content.charAt(i);
-            if (c < '0' || '9' < c) {
-                String near = "[" + content + "]";
-                throw syntaxError("ProjectionExpression", String.valueOf(c),
-                        near.substring(0, Math.min(3, near.length())));
-            }
-        }
-        if (contentLength > 1 && content.charAt(0) == '0') {
-            throw syntaxError("ProjectionExpression", "0",
-                    content.substring(0, Math.min(3, contentLength)));
-        }
-        if (contentLength > 10 || Long.parseLong(content) > MAX_LIST_INDEX) {
+    private static long listIndex(String digits) {
+        if (digits.length() > 10 || Integer.MAX_VALUE < Long.parseLong(digits)) {
             throw new AwsException("ValidationException",
                     "Invalid ProjectionExpression: List index is not within the allowable range; "
-                    + "index: [" + content + "]", 400);
+                    + "index: [" + digits + "]", 400);
         }
+        return Long.parseLong(digits);
     }
 
     private static String resolveSegment(String seg, JsonNode exprAttrNames, boolean requireDefinedNames) {
         if (!seg.startsWith("#")) {
+            if (requireDefinedNames && DynamoDbReservedWords.isReserved(seg)) {
+                throw DynamoDbReservedWords.reservedWord("ProjectionExpression", seg);
+            }
             return seg;
         }
         JsonNode resolved = exprAttrNames != null ? exprAttrNames.get(seg) : null;
@@ -262,9 +247,7 @@ final class ProjectionEvaluator {
             return resolved.asText();
         }
         if (requireDefinedNames) {
-            throw new AwsException("ValidationException",
-                    "Invalid ProjectionExpression: An expression attribute name used in the document path "
-                    + "is not defined; attribute name: " + seg, 400);
+            throw ExpressionEvaluator.undefinedName("ProjectionExpression", seg);
         }
         return seg;
     }
@@ -280,7 +263,6 @@ final class ProjectionEvaluator {
     private static final class PathTrie {
         private boolean terminal;
         private final Map<String, PathTrie> names = new LinkedHashMap<>();
-        // Long keys: the allowable index range (up to 4294967294) exceeds Integer.MAX_VALUE.
         private final TreeMap<Long, PathTrie> indices = new TreeMap<>();
 
         void insert(List<PathSegment> segments) {

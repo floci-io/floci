@@ -1077,6 +1077,170 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void malformedMessageAttributeValuesAreRejected() {
+        String attributeQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-attribute-value-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "empty")
+                .formParam("MessageAttribute.1.Value.DataType", "String")
+                .formParam("MessageAttribute.1.Value.StringValue", "")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Type", equalTo("Sender"))
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo(
+                        "Message (user) attribute 'empty' must contain a non-empty value of type 'String'."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "bin")
+                .formParam("MessageAttribute.1.Value.DataType", "Binary")
+                .formParam("MessageAttribute.1.Value.BinaryValue", "not base64!")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "bin")
+                .formParam("MessageAttribute.1.Value.DataType", "Binary")
+                .formParam("MessageAttribute.1.Value.BinaryValue", "")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "novalue")
+                .formParam("MessageAttribute.1.Value.DataType", "String")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo(
+                        "Message (user) attribute 'novalue' must contain a non-empty value of type 'String'."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "notype")
+                .formParam("MessageAttribute.1.Value.StringValue", "v")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo("Missing required parameter DataType"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "odd")
+                .formParam("MessageAttribute.1.Value.DataType", ".")
+                .formParam("MessageAttribute.1.Value.StringValue", "v")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo("Type for parameter "
+                        + "MessageAttributes.Attribute_name.DataType must be prefixed with "
+                        + "\"String\", \"Binary\", or \"Number\", but was: ."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "ok")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", "x")
+                .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Name", "bin")
+                .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.DataType", "Binary")
+                .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.BinaryValue", "AQID")
+                .formParam("SendMessageBatchRequestEntry.2.Id", "empty")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "x")
+                .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Name", "a")
+                .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Value.DataType", "Number")
+                .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Value.StringValue", "")
+                .formParam("SendMessageBatchRequestEntry.3.Id", "bad-binary")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", "x")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Name", "b")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.DataType", "Binary")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.BinaryValue", "not base64!")
+            .when().post("/").then()
+                .statusCode(200)
+                .body("SendMessageBatchResponse.SendMessageBatchResult.SendMessageBatchResultEntry.Id", equalTo("ok"))
+                .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.Id",
+                        contains("empty", "bad-binary"))
+                .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.Code",
+                        everyItem(equalTo("InvalidParameterValue")))
+                .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.SenderFault",
+                        everyItem(equalTo("true")));
+
+            String bigBody = "x".repeat(400_000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Name", "a")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.DataType", "String")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.StringValue", "")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("BatchRequestTooLong"));
+
+            String fittingBody = "x".repeat(300_000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", fittingBody)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", fittingBody)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", fittingBody)
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Name", "big")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.StringValue",
+                        "y".repeat(200_000))
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("BatchRequestTooLong"));
+
+            assertEquals("1", allQueueAttributes(attributeQueueUrl).get("ApproximateNumberOfMessages"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", attributeQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
     void receiveMessageReturnsPerMessageSenderId() {
         String testQueueUrl = given()
             .contentType("application/x-www-form-urlencoded")

@@ -176,7 +176,7 @@ class EmbeddedDnsServerTest {
 
     @Test
     void emptyOwnedNameProducesAuthoritativeNegativeResponse() {
-        byte[] query = buildQuery("empty.sapphire.internal", (short) 0x1234);
+        byte[] query = DnsTestQuery.query("empty.sapphire.internal", 1, 0x1234);
         byte[] response = dns.buildEmptyResponse(query, (short) 0x1234, 12, query.length, 3);
         ByteBuffer header = ByteBuffer.wrap(response);
 
@@ -449,7 +449,7 @@ class EmbeddedDnsServerTest {
     void buildAResponse_usesTheDefaultTtlForFlociNames() {
         DnsAnswer answer = dns.resolveARecordWithOwnership(
                 "bucket.localhost.floci.io", "172.31.0.2").orElseThrow();
-        byte[] query = buildQuery("bucket.localhost.floci.io", (short) 10);
+        byte[] query = DnsTestQuery.query("bucket.localhost.floci.io", 1, 10);
         byte[] response = dns.buildAResponse(query, (short) 10, 12, query.length, answer);
 
         assertEquals(DnsAnswer.DEFAULT_TTL_SECONDS,
@@ -462,7 +462,7 @@ class EmbeddedDnsServerTest {
                 List.of(source("api.sapphire.internal", List.of("172.31.0.6", "172.31.0.7"), 15)));
         DnsAnswer answer = withSource.resolveARecordWithOwnership(
                 "api.sapphire.internal", "172.31.0.2").orElseThrow();
-        byte[] query = buildQuery("api.sapphire.internal", (short) 9);
+        byte[] query = DnsTestQuery.query("api.sapphire.internal", 1, 9);
         byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length, answer);
         int firstTtl = 12 + (query.length - 12) + 6;
         ByteBuffer buffer = ByteBuffer.wrap(response);
@@ -598,7 +598,7 @@ class EmbeddedDnsServerTest {
 
     @Test
     void buildAResponse_hasCorrectTransactionId() {
-        byte[] query = buildQuery("my-bucket.localhost.floci.io", (short) 0x1234);
+        byte[] query = DnsTestQuery.query("my-bucket.localhost.floci.io", 1, 0x1234);
         byte[] response = dns.buildAResponse(query, (short) 0x1234, 12, query.length, answer("172.19.0.2"));
         short txId = ByteBuffer.wrap(response).getShort(0);
         assertEquals((short) 0x1234, txId);
@@ -606,7 +606,7 @@ class EmbeddedDnsServerTest {
 
     @Test
     void buildAResponse_flagsIndicateResponse() {
-        byte[] query = buildQuery("bucket.localhost.floci.io", (short) 1);
+        byte[] query = DnsTestQuery.query("bucket.localhost.floci.io", 1, 1);
         byte[] response = dns.buildAResponse(query, (short) 1, 12, query.length, answer("10.0.0.1"));
         short flags = ByteBuffer.wrap(response).getShort(2);
         assertTrue((flags & 0x8000) != 0, "QR bit must be set");
@@ -614,7 +614,7 @@ class EmbeddedDnsServerTest {
 
     @Test
     void buildAResponse_answerCountMatchesTheAddressCount() {
-        byte[] query = buildQuery("api.sapphire.internal", (short) 9);
+        byte[] query = DnsTestQuery.query("api.sapphire.internal", 1, 9);
         byte[] response = dns.buildAResponse(query, (short) 9, 12, query.length,
                 answer("172.31.0.6", "172.31.0.7"));
         int questionLength = query.length - 12;
@@ -632,7 +632,7 @@ class EmbeddedDnsServerTest {
 
     @Test
     void buildAResponse_answerCountIsOne() {
-        byte[] query = buildQuery("bucket.localhost.floci.io", (short) 2);
+        byte[] query = DnsTestQuery.query("bucket.localhost.floci.io", 1, 2);
         byte[] response = dns.buildAResponse(query, (short) 2, 12, query.length, answer("10.0.0.1"));
         short ancount = ByteBuffer.wrap(response).getShort(6);
         assertEquals(1, ancount);
@@ -640,7 +640,7 @@ class EmbeddedDnsServerTest {
 
     @Test
     void buildAResponse_ipAddressIsCorrect() {
-        byte[] query = buildQuery("bucket.localhost.floci.io", (short) 3);
+        byte[] query = DnsTestQuery.query("bucket.localhost.floci.io", 1, 3);
         byte[] response = dns.buildAResponse(query, (short) 3, 12, query.length, answer("172.19.0.42"));
         // IP starts at offset: 12 (header) + questionLength + 2+2+2+4+2 = questionLength + 24
         int questionLength = query.length - 12;
@@ -697,7 +697,7 @@ class EmbeddedDnsServerTest {
     void forwardToUpstreams_returnsResponseLargerThan512BytesIntact() throws Exception {
         // Regression guard: a 512-byte receive buffer silently truncated EDNS0 responses from
         // CDN-backed public hosts, corrupting the answer forwarded back to the Lambda container.
-        byte[] query = buildQuery("business-api.tiktok.com", (short) 0x1234);
+        byte[] query = DnsTestQuery.query("business-api.tiktok.com", 1, 0x1234);
         byte[] bigResponse = replyTo(query, 1500);
         for (int i = query.length; i < bigResponse.length; i++) {
             bigResponse[i] = (byte) (i & 0xFF);
@@ -720,7 +720,7 @@ class EmbeddedDnsServerTest {
         // Nothing listens on port 1 of the loopback, so every target fails and the caller decides
         // what a failed rule means rather than silently getting an upstream answer.
         assertThrows(Exception.class, () -> EmbeddedDnsServer.forwardToTargets(
-                buildQuery("db.corp.internal", (short) 8),
+                DnsTestQuery.query("db.corp.internal", 1, 8),
                 List.of(new DnsForwardingRule.Target("127.0.0.1", 1))));
     }
 
@@ -788,28 +788,13 @@ class EmbeddedDnsServerTest {
         return reply;
     }
 
-    private byte[] buildQuery(String name, short txId) {
-        byte[] encodedName = encodeName(name);
-        // header(12) + name + type(2) + class(2)
-        ByteBuffer buf = ByteBuffer.allocate(12 + encodedName.length + 4);
-        buf.putShort(txId);
-        buf.putShort((short) 0x0100); // standard query, RD=1
-        buf.putShort((short) 1);       // qdcount
-        buf.putShort((short) 0);
-        buf.putShort((short) 0);
-        buf.putShort((short) 0);
-        buf.put(encodedName);
-        buf.putShort((short) 1); // type A
-        buf.putShort((short) 1); // class IN
-        return buf.array();
-    }
 
     @Test
     void forwardToTargets_discardsForgedAnswerFromAnotherPortBeforeRealAnswer() throws Exception {
         // Catches: a datagram from a port other than the queried target is relayed as the answer
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"));
              DatagramSocket spoof = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
-            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] query = DnsTestQuery.query("db.corp.internal", 1, 7);
             byte[] realReply = replyTo(query, query.length);
             // Same txId and question as the real answer; only the rcode (NXDOMAIN) differs.
             byte[] forgedReply = replyTo(query, query.length);
@@ -838,7 +823,7 @@ class EmbeddedDnsServerTest {
     void forwardToTargets_discardsWrongTxIdDatagramBeforeRealAnswer() throws Exception {
         // Catches: a datagram with a wrong transaction ID is relayed as the answer
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
-            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] query = DnsTestQuery.query("db.corp.internal", 1, 7);
             byte[] realReply = replyTo(query, query.length);
             byte[] badReply = replyTo(query, query.length);
             badReply[1] ^= 0x01;
@@ -854,7 +839,7 @@ class EmbeddedDnsServerTest {
     void forwardToTargets_acceptsAnswerToQueryCarryingAnEdnsOptRecord() throws Exception {
         // Catches: validation compares bytes past the question (the client's OPT record), so every
         // real answer to an EDNS query is discarded and forwarding times out
-        byte[] plain = buildQuery("db.corp.internal", (short) 7);
+        byte[] plain = DnsTestQuery.query("db.corp.internal", 1, 7);
         byte[] query = Arrays.copyOf(plain, plain.length + 11);
         query[11] = 1; // arcount
         ByteBuffer.wrap(query, plain.length, 11)
@@ -874,9 +859,9 @@ class EmbeddedDnsServerTest {
     void forwardToTargets_discardsWrongQuestionDatagramBeforeRealAnswer() throws Exception {
         // Catches: a datagram with a matching txId but different question section is relayed as the answer
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
-            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] query = DnsTestQuery.query("db.corp.internal", 1, 7);
             byte[] realReply = replyTo(query, query.length);
-            byte[] wrongQuery = buildQuery("other.corp.internal", (short) 7);
+            byte[] wrongQuery = DnsTestQuery.query("other.corp.internal", 1, 7);
             byte[] badReply = replyTo(wrongQuery, wrongQuery.length);
             startResponder(real, badReply, realReply);
 
@@ -890,7 +875,7 @@ class EmbeddedDnsServerTest {
     void forwardToTargets_discardsZeroQuestionDatagramBeforeRealAnswer() throws Exception {
         // Catches: a datagram declaring QDCOUNT 0 but carrying copied question bytes is relayed as the answer
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
-            byte[] query = buildQuery("db.corp.internal", (short) 7);
+            byte[] query = DnsTestQuery.query("db.corp.internal", 1, 7);
             byte[] realReply = replyTo(query, query.length);
             byte[] noQuestionReply = replyTo(query, query.length);
             noQuestionReply[5] = 0; // qdcount
@@ -906,8 +891,8 @@ class EmbeddedDnsServerTest {
     void forwardToTargets_acceptsAnswerThatEchoesTheNameInDifferentCase() throws Exception {
         // Catches: a resolver that case-folds the echoed name has every answer dropped
         try (DatagramSocket real = new DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
-            byte[] query = buildQuery("db.corp.internal", (short) 7);
-            byte[] upperReply = replyTo(buildQuery("DB.CORP.INTERNAL", (short) 7), query.length);
+            byte[] query = DnsTestQuery.query("db.corp.internal", 1, 7);
+            byte[] upperReply = replyTo(DnsTestQuery.query("DB.CORP.INTERNAL", 1, 7), query.length);
             startResponder(real, upperReply);
 
             byte[] response = EmbeddedDnsServer.forwardToTargets(

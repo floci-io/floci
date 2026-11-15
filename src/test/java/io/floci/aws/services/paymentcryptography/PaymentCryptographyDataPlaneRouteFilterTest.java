@@ -59,12 +59,11 @@ class PaymentCryptographyDataPlaneRouteFilterTest {
         Set<String> prefixes = new LinkedHashSet<>();
         routes.fields().forEachRemaining(entry -> {
             String uri = entry.getValue().path("requestUri").asText();
-            // The route is the model's path under the internal prefix.
-            assertTrue(uri.startsWith(PaymentCryptographyDataPlaneRouteFilter.INTERNAL_PREFIX),
-                    "the route " + uri + " does not sit under the internal prefix");
-            String rest = uri.substring(PaymentCryptographyDataPlaneRouteFilter.INTERNAL_PREFIX.length());
-            assertTrue(rest.startsWith("/"), "the route " + uri + " names no path");
-            rest = rest.substring(1);
+            // The route is the model's path: IAM matches a moved request on its path without the prefix.
+            assertTrue(!uri.startsWith(PaymentCryptographyDataPlaneRouteFilter.INTERNAL_PREFIX),
+                    "the route " + uri + " sits under the internal prefix, not at the model's path");
+            assertTrue(uri.startsWith("/"), "the route " + uri + " names no path");
+            String rest = uri.substring(1);
             int slash = rest.indexOf('/');
             assertTrue(slash > 0, "the route " + uri + " names no path");
             prefixes.add("/" + rest.substring(0, slash));

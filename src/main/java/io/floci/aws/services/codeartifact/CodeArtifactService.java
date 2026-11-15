@@ -12,6 +12,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServiceConfigAccess;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -20,11 +21,14 @@ import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import io.floci.aws.services.codeartifact.model.PackageAsset;
+import io.floci.aws.services.codeartifact.model.PackageGroup;
+import io.floci.aws.services.codeartifact.model.PackageGroupRestriction;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -85,7 +89,7 @@ public class CodeArtifactService implements Resettable {
      * and the backfill in {@link #ensureFormatContainerId} already handle it, including for
      * repositories created before that format's proxy existed.
      */
-    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget");
+    private static final List<String> CONTAINER_BACKED_FORMATS = List.of("maven", "npm", "pypi", "nuget", "cargo");
     private static final Set<String> ORIGIN_RESTRICTION_VALUES = Set.of("ALLOW", "BLOCK");
     /**
      * Formats AWS documents as valid for {@code GetPackageVersionReadme} specifically: the
@@ -114,6 +118,26 @@ public class CodeArtifactService implements Resettable {
     private static final Set<String> DISPOSE_EXPECTED_STATUSES =
             Set.of("Published", "Unlisted", "Archived", "Unfinished", "Disposed");
 
+    /** The real {@code PackageGroupOriginRestrictionType} wire enum, in the order every
+     * restrictions map this service returns iterates them. */
+    private static final List<String> PACKAGE_GROUP_RESTRICTION_TYPES =
+            List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM");
+    /** The pattern of the root package group every domain holds from its creation, which matches every package. */
+    static final String ROOT_PACKAGE_GROUP = "/*";
+    /** The description CodeArtifact gives the root package group, the same in every domain. */
+    private static final String ROOT_PACKAGE_GROUP_DESCRIPTION = "Default root package group";
+    /** The real {@code PackageGroupOriginRestrictionMode} wire enum. */
+    private static final Set<String> PACKAGE_GROUP_MODES =
+            Set.of("ALLOW", "ALLOW_SPECIFIC_REPOSITORIES", "BLOCK", "INHERIT");
+    /** {@code PackageGroupPattern}'s own wire pattern: any run of characters that are neither a
+     * Unicode "Other" category codepoint nor whitespace, 2-520 characters long. Deliberately not
+     * reused from {@link #PACKAGE_TOKEN}: that pattern forbids {@code #}/{@code /}/whitespace,
+     * but a package group pattern's own {@code /}-separated shape and {@code $}/{@code ~}/{@code *}
+     * terminators are exactly what {@link PackageGroupPatterns#parse} exists to interpret, so this
+     * only rejects what AWS itself rejects at the wire level, leaving syntax validation to parse().
+     */
+    private static final Pattern PACKAGE_GROUP_PATTERN_TOKEN = Pattern.compile("[^\\p{C}\\p{IsWhitespace}]+");
+
     private static final Logger LOG = Logger.getLogger(CodeArtifactService.class);
 
     private static final Pattern DOMAIN_NAME = Pattern.compile("[a-z][a-z0-9\\-]{0,48}[a-z0-9]");
@@ -132,6 +156,14 @@ public class CodeArtifactService implements Resettable {
     // Package-private: reused by CodeArtifactMavenController so the Maven proxy enforces the same
     // documented 5 GB AWS quota rather than duplicating the constant.
     static final long MAX_ASSET_FILE_SIZE_BYTES = 5L * 1024 * 1024 * 1024;
+    // Package-private: the pypi/NuGet push controllers stage their whole raw multipart request
+    // body to disk before they have parsed far enough to know the real asset's own size (the
+    // envelope's boundaries, headers, and handful of small text fields have no size semantics of
+    // their own against the 5 GB asset quota). Without a cap on that staging step itself, a
+    // client could still force an arbitrarily large, wholly uncapped file onto disk before the
+    // real per-asset quota check downstream ever gets a chance to run. 64 MiB of slack is many
+    // times more than any real multipart envelope's own overhead ever needs.
+    static final long MAX_MULTIPART_ENVELOPE_BYTES = MAX_ASSET_FILE_SIZE_BYTES + 64L * 1024 * 1024;
     private static final int MAX_ASSETS_PER_PACKAGE_VERSION = 350;
     // AWS's own wire model: every batch package-version action's own PackageVersionList shape
     // (CopyPackageVersionsRequest.versions, UpdatePackageVersionsStatusRequest.versions,
@@ -153,6 +185,13 @@ public class CodeArtifactService implements Resettable {
     public record ResourcePolicy(String resourceArn, String revision, String document) {}
     public record PublishPackageVersionResult(CodeArtifactPackageVersion packageVersion, PackageAsset asset) {}
     public record PackageVersionAssetResult(PackageAsset asset, String packageVersionRevision) {}
+    /**
+     * {@link PackageVersionAssetResult}'s streamed sibling, for {@code GetPackageVersionAsset}'s
+     * real HTTP entry point: the caller owns closing {@code content}. {@code contentLength} is -1
+     * when it could not be determined up front.
+     */
+    public record PackageVersionAssetStreamResult(InputStream content, long contentLength, String assetName,
+            String packageVersionRevision) {}
     public record PackageVersionReadmeResult(String format, String namespace, String packageName, String version,
             String versionRevision, String readme) {}
     public record SuccessfulPackageVersionInfo(String revision, String status) {}
@@ -163,7 +202,7 @@ public class CodeArtifactService implements Resettable {
     public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
             String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
     public record PackageVersionSummary(String version, String revision, String status, String originType,
-            String externalConnectionName) {}
+            String externalConnectionName, String upstreamRepositoryName) {}
     public record ListPackageVersionsResult(String format, String namespace, String packageName,
             String defaultDisplayVersion, List<PackageVersionSummary> versions, String nextToken) {}
     public record PackageSummaryEntry(String format, String namespace, String packageName,
@@ -186,16 +225,40 @@ public class CodeArtifactService implements Resettable {
      * #listPackageVersions} before status/origin filtering and pagination are applied.
      * {@code publishedEpochSeconds} is {@code null} when nothing is known to order by. */
     private record PackageVersionEntry(String version, String revision, String status,
-            Long publishedEpochSeconds, String originType, String externalConnectionName) {}
+            Long publishedEpochSeconds, String originType, String externalConnectionName,
+            String upstreamRepositoryName) {}
     public record AuthorizationToken(String token, long expirationEpochSeconds) {}
     public record AuthorizationTokenScope(String owner, String region) {}
     private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
+
+    // ------------------------------------------------------------- package groups (views)
+
+    public record PackageGroupOriginRestrictionView(String mode, String effectiveMode, String inheritedFromArn,
+            String inheritedFromPattern, long repositoriesCount) {}
+    public record PackageGroupDescriptionView(String arn, String pattern, String domainName, String domainOwner,
+            long createdTime, String contactInfo, String description,
+            Map<String, PackageGroupOriginRestrictionView> restrictions, String parentArn, String parentPattern) {}
+    public record PackageGroupListResult(List<PackageGroupDescriptionView> packageGroups, String nextToken) {}
+    public record ListAllowedRepositoriesForGroupResult(List<String> allowedRepositories, String nextToken) {}
+    public record AssociatedPackageView(String format, String namespace, String packageName, String associationType) {}
+    public record ListAssociatedPackagesResult(List<AssociatedPackageView> packages, String nextToken) {}
+    public record GetAssociatedPackageGroupResult(PackageGroupDescriptionView packageGroup, String associationType) {}
+    public record UpdatePackageGroupOriginConfigurationResult(PackageGroupDescriptionView packageGroup,
+            Map<String, Map<String, List<String>>> allowedRepositoryUpdates) {}
+    /** The most specific existing group whose pattern matches a package path, with how strongly
+     * it matched; {@code null} fields are never used, {@link Optional#empty} models "no group in
+     * this domain matches this package at all" (see {@link #findAssociatedGroup}'s own javadoc). */
+    private record AssociatedGroupMatch(PackageGroup group, PackageGroupPatterns.MatchStrength strength) {}
+    /** One restriction type's resolved mode for a group, and the ancestor it was inherited from
+     * (if any) — see {@link #resolveEffectiveMode}'s own javadoc. */
+    private record EffectiveModeResult(String mode, PackageGroup inheritedFrom) {}
 
     private final AccountAwareStorageBackend<CodeArtifactDomain> domains;
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
     private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
     private final AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs;
     private final Set<String> migratedOriginConfigAccounts = new HashSet<>();
+    private final AccountAwareStorageBackend<PackageGroup> packageGroups;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CodeArtifactSidecarRegistry sidecarRegistry;
@@ -311,22 +374,51 @@ public class CodeArtifactService implements Resettable {
     private final AtomicLong retainedVersionOriginEpisodeCounter = new AtomicLong();
 
     /**
-     * One version's current claim on {@code externalConnectionName}, tagged with {@code
-     * episodeId}: {@code inFlightAttempts} counts how many calls into {@link
+     * One version's current claim on {@code originName} (an external connection's name, or a
+     * same-domain upstream repository's name, told apart by {@code originKind}), tagged with
+     * {@code episodeId}: {@code inFlightAttempts} counts how many calls into {@link
      * #claimRetainedVersionOrigin} for this exact version and episode have not yet reached
      * their own matching {@link #finishRetainedVersionOriginAttempt} call, and {@code
      * confirmed} is {@code true} once any one of them actually wrote real content under this
      * claim. A claim is only ever removed by {@link #finishRetainedVersionOriginAttempt}
      * once {@code inFlightAttempts} reaches 0 <em>and</em> {@code confirmed} is still {@code
-     * false}: as long as either holds, the connection stays reserved, so a concurrent attempt
-     * under a different connection is refused outright rather than slipping in once a sibling
+     * false}: as long as either holds, the source stays reserved, so a concurrent attempt
+     * under a different source is refused outright rather than slipping in once a sibling
      * attempt's own cleanup happens to run first. {@code episodeId} is assigned fresh only when a
      * claim is created from nothing (never on an increment of an existing one), so a finish call
-     * for an episode already torn down and replaced by a new one under the same connection name
+     * for an episode already torn down and replaced by a new one under the same source name
      * can never be mistaken for a finish of that new episode (see the field's own javadoc above).
+     * {@code entryPoint} is where the version entered the domain, which is what the version's
+     * origin reports (see {@link #entryPointThrough}).
      */
-    private record RetainedVersionOriginClaim(String externalConnectionName, int inFlightAttempts,
-            boolean confirmed, long episodeId) {
+    private record RetainedVersionOriginClaim(String originName, RetentionOriginKind originKind,
+            int inFlightAttempts, boolean confirmed, long episodeId, EntryPoint entryPoint) {
+    }
+
+    /**
+     * Where a package version entered the domain, AWS's {@code DomainEntryPoint}: the external
+     * connection it was fetched from, or the repository it was published to.
+     */
+    private record EntryPoint(RetentionOriginKind kind, String name) {
+    }
+
+    /**
+     * The entry point of a version retained from {@code upstreamRepository}: the one its copy there
+     * has when that copy was itself retained, from an external connection or from a repository
+     * further up, and the upstream repository when the version was published there. A claim still
+     * in flight there counts: the copy read from the upstream can be the one that claim just wrote,
+     * before the attempt that wrote it confirms it. Read when the version is retained, and again
+     * when its own claim is confirmed (see {@link #finishRetainedVersionOriginAttempt}), so a later
+     * change at the upstream does not move it, as the retained version itself is not affected by
+     * one.
+     */
+    private EntryPoint entryPointThrough(String owner, String region, String domain, String upstreamRepository,
+            String format, String namespace, String packageName, String version) {
+        RetainedVersionOriginClaim upstreamClaim = retainedVersionOriginConnections.get(ownerScopedKey(owner,
+                packageVersionKey(region, domain, upstreamRepository, format, namespace,
+                        accountingPackageName(format, packageName), normalizedContainerBackedVersion(format, version))));
+        return upstreamClaim != null ? upstreamClaim.entryPoint()
+                : new EntryPoint(RetentionOriginKind.UPSTREAM_REPOSITORY, upstreamRepository);
     }
 
     /**
@@ -374,6 +466,8 @@ public class CodeArtifactService implements Resettable {
                         new TypeReference<Map<String, CodeArtifactPackageVersion>>() {}),
                 storageFactory.create("codeartifact", "codeartifact-package-origin-configs.json",
                         new TypeReference<Map<String, PackageOriginConfig>>() {}),
+                storageFactory.create("codeartifact", "codeartifact-package-groups.json",
+                        new TypeReference<Map<String, PackageGroup>>() {}),
                 regionResolver, config,
                 "memory".equals(serviceConfigAccess.storageMode("codeartifact")),
                 Path.of(config.storage().persistentPath()).resolve(ASSET_STORAGE_DIR),
@@ -385,12 +479,14 @@ public class CodeArtifactService implements Resettable {
                          AccountAwareStorageBackend<CodeArtifactRepository> repositories,
                          AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions,
                          AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs,
+                         AccountAwareStorageBackend<PackageGroup> packageGroups,
                          RegionResolver regionResolver, EmulatorConfig config,
                          boolean inMemory, Path assetRoot, CodeArtifactSidecarRegistry sidecarRegistry) {
         this.domains = domains;
         this.repositories = repositories;
         this.packageVersions = packageVersions;
         this.packageOriginConfigs = packageOriginConfigs;
+        this.packageGroups = packageGroups;
         this.regionResolver = regionResolver;
         this.config = config;
         this.sidecarRegistry = sidecarRegistry;
@@ -430,7 +526,48 @@ public class CodeArtifactService implements Resettable {
         d.setCreatedTime(Instant.now().getEpochSecond());
         d.setTags(validateTags(tags, Map.of(), domain, "domain"));
         domains.putForAccount(owner, key, d);
+        try {
+            packageGroups.putForAccount(owner, packageGroupKey(region, domain, ROOT_PACKAGE_GROUP),
+                    rootPackageGroup(owner, d));
+        } catch (RuntimeException e) {
+            // A domain left without its root would refuse the retry as a duplicate.
+            domains.deleteForAccount(owner, key);
+            throw e;
+        }
         return new DomainView(d, 0, 0L);
+    }
+
+    /**
+     * The root package group a domain is created with. "Every domain in CodeArtifact automatically contains a root
+     * package group", which "allows package versions to enter repositories in the domain from all origin types by
+     * default": each of its restrictions is {@code ALLOW} rather than {@code INHERIT}, as it has no parent to inherit
+     * from, and a group under it inherits from it. Its description is the one CodeArtifact gives it.
+     */
+    private PackageGroup rootPackageGroup(String owner, CodeArtifactDomain d) {
+        String arn = regionResolver.buildArn("codeartifact", d.getRegion(), owner,
+                "package-group/" + d.getName() + ROOT_PACKAGE_GROUP);
+        PackageGroup root = new PackageGroup(ROOT_PACKAGE_GROUP, arn, d.getName(), owner, d.getRegion(), null,
+                ROOT_PACKAGE_GROUP_DESCRIPTION, d.getCreatedTime());
+        Map<String, PackageGroupRestriction> restrictions = new LinkedHashMap<>();
+        PACKAGE_GROUP_RESTRICTION_TYPES.forEach(type ->
+                restrictions.put(type, new PackageGroupRestriction("ALLOW", new ArrayList<>())));
+        root.setRestrictions(restrictions);
+        return root;
+    }
+
+    /**
+     * Gives every stored domain without one its root package group, for a domain stored by a release that did not
+     * create the group with it. Run once storage is loaded.
+     */
+    public synchronized void seedRootPackageGroups() {
+        for (AccountAwareStorageBackend.AccountEntry<CodeArtifactDomain> entry
+                : domains.scanAllAccountEntries(k -> true)) {
+            CodeArtifactDomain d = entry.value();
+            String key = packageGroupKey(d.getRegion(), d.getName(), ROOT_PACKAGE_GROUP);
+            if (packageGroups.getForAccount(entry.accountId(), key).isEmpty()) {
+                packageGroups.putForAccount(entry.accountId(), key, rootPackageGroup(entry.accountId(), d));
+            }
+        }
     }
 
     /**
@@ -447,6 +584,17 @@ public class CodeArtifactService implements Resettable {
                     + "until they are deleted.", domain, "domain");
         }
         domains.deleteForAccount(owner, key);
+        // Unlike packageOriginConfigs/packageVersions (repository-scoped, already cleaned up by
+        // deleteRepository above this point in the call chain), package groups are domain-scoped
+        // and outlive every repository in the domain being gone: without this, a domain deleted
+        // and recreated under the same name would inherit the previous one's package groups,
+        // including a PUBLISH/EXTERNAL_UPSTREAM BLOCK that would reject a publish or retention
+        // with no way for the caller to know why, and creating a group under an old pattern would
+        // fail as a duplicate.
+        String groupPrefix = region + "::" + domain + "::";
+        packageGroups.keysForAccount(owner).stream()
+                .filter(k -> k.startsWith(groupPrefix))
+                .forEach(k -> packageGroups.deleteForAccount(owner, k));
         return new DomainView(d, 0, 0L);
     }
 
@@ -720,6 +868,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         String key = repositoryKey(region, domain, repository);
         CodeArtifactRepository r = requireRepository(owner, key, repository);
+        validateDescription(description);
         if (upstreams != null) {
             if (!upstreams.isEmpty() && !r.getExternalConnections().isEmpty()) {
                 throw conflict("Repository '" + repository + "' has an external connection; "
@@ -730,7 +879,6 @@ public class CodeArtifactService implements Resettable {
             r.setUpstreams(new ArrayList<>(upstreams));
         }
         if (description != null) {
-            validateDescription(description);
             r.setDescription(description);
         }
         repositories.putForAccount(owner, key, r);
@@ -872,30 +1020,76 @@ public class CodeArtifactService implements Resettable {
 
     // ------------------------------------------------------- package versions
 
-    public synchronized PublishPackageVersionResult publishPackageVersion(String region, String domain,
+    public PublishPackageVersionResult publishPackageVersion(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
             String version, String assetName, String assetSha256, String unfinishedParam, byte[] content) {
+        byte[] assetContent = content != null ? content : new byte[0];
+        return publishPackageVersion(region, domain, domainOwner, repository, format, namespace, packageName,
+                version, assetName, assetSha256, unfinishedParam, new ByteArrayInputStream(assetContent));
+    }
+
+    /**
+     * {@code byte[]}-taking sibling's own streamed real implementation: every production caller
+     * (the generic {@code PublishPackageVersion} controller route) goes through this one, for an
+     * asset too large to ever hold as a single {@code byte[]} (~2 GiB, the JVM array limit) the
+     * way the one above still does. Staging the body to disk and digesting it (the only genuinely
+     * slow part of a large publish) happens here, outside this method's own lock, so a multi-GB
+     * upload does not serialize every other CodeArtifact operation for as long as it takes to
+     * read; {@link #publishPackageVersionLocked} then does the fast, lock-protected decision and
+     * write against the already-staged file and already-computed hashes.
+     */
+    public PublishPackageVersionResult publishPackageVersion(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String assetSha256, String unfinishedParam, InputStream body) {
         if (!"generic".equals(format)) {
             throw validation("format must be 'generic'; PublishPackageVersion only supports the generic "
                     + "package format.");
-        }
-        boolean unfinished = parseBoolean(unfinishedParam);
-        validatePackageToken("package", packageName);
-        validatePackageToken("packageVersion", version);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
         }
         validateAssetName(assetName);
         if (assetSha256 == null || !SigV4RequestValidator.isSha256Hex(assetSha256)) {
             throw validation("assetSHA256 is required and must be a 64-character SHA-256 hex digest.");
         }
-        byte[] assetContent = content != null ? content : new byte[0];
-        if (assetContent.length > MAX_ASSET_FILE_SIZE_BYTES) {
+        // Raised by Qodo's review of this PR: these are cheap, request-only checks with no
+        // dependency on the upload itself, so running them before staging+digesting (up to 5 GB,
+        // the only genuinely slow part of this method) rejects a malformed coordinate or a
+        // request aimed at a nonexistent repository immediately, instead of only after paying for
+        // the full staging cost first. publishPackageVersionLocked has exactly one caller (this
+        // method), so this is a move, not a duplicate: the repository/domain checks that still
+        // need the lock stay there.
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        AssetUpload upload;
+        try {
+            AssetDigestingInputStream digesting = new AssetDigestingInputStream(body, MAX_ASSET_FILE_SIZE_BYTES);
+            Path staged = stageAssetBody(digesting);
+            upload = new AssetUpload(staged, digesting.size(), digesting.hashesHex());
+        } catch (AssetDigestingInputStream.AssetTooLargeException e) {
             throw new AwsException("ServiceQuotaExceededException",
                     "The maximum asset file size is 5 Gigabytes.", 402,
                     resourceFields(assetName, "asset"));
         }
-        String actualSha256 = Digests.sha256Hex(assetContent);
+        try {
+            return publishPackageVersionLocked(region, domain, domainOwner, repository, format, namespace,
+                    packageName, version, assetName, assetSha256, unfinishedParam, upload);
+        } finally {
+            // A no-op when the write below already moved this same file into place: deleting an
+            // already-moved path is simply not there to delete.
+            deleteStagedAssetBody(upload.content());
+        }
+    }
+
+    /** {@link #publishPackageVersion(String, String, String, String, String, String, String, String, String,
+     * String, String, InputStream)}'s own already-staged, already-digested upload. */
+    private record AssetUpload(Path content, long size, Map<String, String> hashes) {}
+
+    private synchronized PublishPackageVersionResult publishPackageVersionLocked(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String assetSha256, String unfinishedParam, AssetUpload upload) {
+        boolean unfinished = parseBoolean(unfinishedParam);
+        String actualSha256 = upload.hashes().get("SHA-256");
         if (!assetSha256.equalsIgnoreCase(actualSha256)) {
             throw validation("assetSHA256 does not match the SHA-256 hash of the uploaded content.");
         }
@@ -954,7 +1148,7 @@ public class CodeArtifactService implements Resettable {
             // (missing file, or bytes corrupted independently of Floci) still self-heal here, since
             // existingFileMatches actually reads the file back rather than trusting it's fine.
             if (!existingFileMatches(owner, key, assetName, actualSha256)) {
-                writeAssetContent(owner, key, assetName, assetContent);
+                writeAssetContent(owner, key, assetName, upload.content());
             }
             return new PublishPackageVersionResult(pv, existingAsset);
         }
@@ -982,7 +1176,7 @@ public class CodeArtifactService implements Resettable {
                 // Only rewrites when the actual disk bytes don't check out: see the identical
                 // reasoning on the Published branch above.
                 if (!existingFileMatches(owner, key, assetName, actualSha256)) {
-                    writeAssetContent(owner, key, assetName, assetContent);
+                    writeAssetContent(owner, key, assetName, upload.content());
                 }
                 return new PublishPackageVersionResult(pv, existingAsset);
             }
@@ -995,10 +1189,9 @@ public class CodeArtifactService implements Resettable {
 
         PackageAsset asset = new PackageAsset();
         asset.setName(assetName);
-        asset.setSize(assetContent.length);
-        asset.setContent(assetContent);
-        asset.setHashes(computeHashes(assetContent));
-        writeAssetContent(owner, key, assetName, assetContent);
+        asset.setSize(upload.size());
+        asset.setHashes(new LinkedHashMap<>(upload.hashes()));
+        writeAssetContent(owner, key, assetName, upload.content());
         assets.put(assetName, asset);
         pv.setAssets(assets);
 
@@ -1096,12 +1289,12 @@ public class CodeArtifactService implements Resettable {
                         nextToken, 100, 1000, "ValidationException");
                 List<AssetSummary> pageAssets = new ArrayList<>();
                 for (String assetName : namePage.items()) {
-                    byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
-                                    packageName, version, assetName)
+                    RepositorySidecarManager.AssetDigest digest = manager.fetchPackageVersionAssetDigest(repoId,
+                                    domain, repository, namespace, packageName, version, assetName)
                             .orElseThrow(() -> new AwsException("InternalServerException", "Could not list version '"
                                     + version + "' of package '" + packageName + "': its asset '" + assetName
                                     + "' disappeared between listing and fetching it.", 500));
-                    pageAssets.add(new AssetSummary(assetName, content.length, computeHashes(content)));
+                    pageAssets.add(new AssetSummary(assetName, digest.size(), digest.hashes()));
                 }
                 page = new PaginatedResult<>(pageAssets, namePage.nextToken());
                 revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
@@ -1228,12 +1421,13 @@ public class CodeArtifactService implements Resettable {
                         packageName, v.version());
                 if (override != null) {
                     return new PackageVersionEntry(v.version(), override.revision(), override.status(),
-                            override.publishedEpochSeconds(), origin.originType(), origin.externalConnectionName());
+                            override.publishedEpochSeconds(), origin.originType(), origin.externalConnectionName(),
+                            origin.upstreamRepositoryName());
                 }
                 return new PackageVersionEntry(v.version(),
                         synthesizeContainerBackedRevision(format, repoId, namespace, packageName, v.version()),
                         "Published", v.publishedTime() == null ? null : v.publishedTime().getEpochSecond(),
-                        origin.originType(), origin.externalConnectionName());
+                        origin.originType(), origin.externalConnectionName(), origin.upstreamRepositoryName());
             });
             Stream<PackageVersionEntry> disposedOnly = overridesByVersion.entrySet().stream()
                     .filter(e -> !coveredVersions.contains(e.getKey()))
@@ -1242,7 +1436,7 @@ public class CodeArtifactService implements Resettable {
                                 packageName, e.getKey());
                         return new PackageVersionEntry(e.getKey(), e.getValue().revision(), e.getValue().status(),
                                 e.getValue().publishedEpochSeconds(), origin.originType(),
-                                origin.externalConnectionName());
+                                origin.externalConnectionName(), origin.upstreamRepositoryName());
                     });
             entries = Stream.concat(fromSidecar, disposedOnly).toList();
         } else {
@@ -1252,8 +1446,13 @@ public class CodeArtifactService implements Resettable {
                 throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
             }
             entries = versions.stream()
-                    .map(pv -> new PackageVersionEntry(pv.getVersion(), pv.getRevision(), pv.getStatus(),
-                            pv.getPublishedTime(), "INTERNAL", null))
+                    .map(pv -> {
+                        VersionOrigin origin = versionOrigin(region, domain, owner, repository, format, namespace,
+                                packageName, pv.getVersion());
+                        return new PackageVersionEntry(pv.getVersion(), pv.getRevision(), pv.getStatus(),
+                                pv.getPublishedTime(), origin.originType(), origin.externalConnectionName(),
+                                origin.upstreamRepositoryName());
+                    })
                     .toList();
         }
 
@@ -1261,15 +1460,20 @@ public class CodeArtifactService implements Resettable {
         // Raised by Greptile's review: npm's own Verdaccio sidecar always points its own
         // dist-tags.latest at whichever version a package's very first-ever stored version
         // happens to be, confirmed live, with no way for a caller's write to suppress that
-        // default. A version retained through an external connection (never a deliberate local
-        // publish) is excluded from being read as this preference for exactly that reason:
-        // downloading an old, specifically-pinned version must never change what an unpinned
-        // npm install resolves to, the same most-recently-published fallback this already uses
-        // when preferredDisplayVersion itself is unset.
-        boolean preferredVersionIsExternallyRetained = preferredVersion != null
+        // default. A version retained through a claim (an external connection, or, since
+        // 16f-UPSTREAM-REPO, a same-domain upstream repository, never a deliberate local publish)
+        // is excluded from being read as this preference for exactly that reason: downloading an
+        // old, specifically-pinned version must never change what an unpinned npm install resolves
+        // to, the same most-recently-published fallback this already uses when
+        // preferredDisplayVersion itself is unset. Checked via externalConnectionName/
+        // upstreamRepositoryName rather than originType, since a retained version's originType is
+        // "INTERNAL" for an upstream-repository claim, not "EXTERNAL" (matching AWS's real
+        // PackageVersionOrigin.originType enum), so originType alone can't tell a retained version
+        // apart from a direct publish here.
+        boolean preferredVersionIsRetained = preferredVersion != null
                 && entries.stream().anyMatch(e -> e.version().equals(preferredVersion)
-                        && "EXTERNAL".equals(e.originType()));
-        String defaultDisplayVersion = preferredVersion != null && !preferredVersionIsExternallyRetained
+                        && (e.externalConnectionName() != null || e.upstreamRepositoryName() != null));
+        String defaultDisplayVersion = preferredVersion != null && !preferredVersionIsRetained
                 && entries.stream().anyMatch(e -> e.version().equals(preferredVersion)
                         && "Published".equals(e.status()))
                 ? preferredVersion
@@ -1289,7 +1493,7 @@ public class CodeArtifactService implements Resettable {
                 "ValidationException");
         List<PackageVersionSummary> summaries = page.items().stream()
                 .map(e -> new PackageVersionSummary(e.version(), e.revision(), e.status(), e.originType(),
-                        e.externalConnectionName()))
+                        e.externalConnectionName(), e.upstreamRepositoryName()))
                 .toList();
         return new ListPackageVersionsResult(format, namespace, packageName, defaultDisplayVersion, summaries,
                 page.nextToken());
@@ -1543,6 +1747,10 @@ public class CodeArtifactService implements Resettable {
                             asset.getName(), e.getMessage());
                 }
             }
+            // A generic version deleted and republished under the same coordinates must not
+            // inherit its previous CopyPackageVersions(includeFromUpstream) claim, the same
+            // container-backed cleanup already does just above for its own deleted versions.
+            retainedVersionOriginConnections.remove(ownerScopedKey(owner, key));
             successes.put(version, new SuccessfulPackageVersionInfo(pv.getRevision(), "Deleted"));
         }
         return new PackageVersionStatusChangeResult(successes, Map.of());
@@ -2054,8 +2262,9 @@ public class CodeArtifactService implements Resettable {
             String version, List<String> assetNames) {
         Map<String, Long> sizeByAssetName = new LinkedHashMap<>();
         for (String assetName : assetNames) {
-            sizeByAssetName.put(assetName, manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
-                    packageName, version, assetName).map(bytes -> (long) bytes.length).orElse(0L));
+            sizeByAssetName.put(assetName, manager.fetchPackageVersionAssetDigest(repoId, domain, repository,
+                    namespace, packageName, version, assetName).map(RepositorySidecarManager.AssetDigest::size)
+                    .orElse(0L));
         }
         String key = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName)));
@@ -2267,6 +2476,17 @@ public class CodeArtifactService implements Resettable {
      * the same config {@link #putPackageOriginConfiguration} and {@link
      * #isUpstreamRetentionBlocked} key by for a format (nuget, pypi) whose names are
      * case/punctuation normalized.
+     *
+     * <p>Both the generic {@link #publishPackageVersion} and every native proxy controller (via
+     * {@link #requireContainerBackedPackagePublishAllowed}) call this one method before their own
+     * real write, so the package-level check below and the package-group check that follows it
+     * apply identically regardless of format. Raised by Qodo's review of this PR: the group check
+     * originally lived inline in {@code publishPackageVersionLocked} (the generic-only caller),
+     * so {@code mvn deploy}/{@code npm publish}/{@code twine upload}/{@code dotnet nuget push}
+     * could publish straight past a package group's {@code PUBLISH: BLOCK}, allow-list, or
+     * weak-match block. Moving it here, below the package-level check both callers already
+     * shared, closes that gap for every format at once instead of duplicating the check in each
+     * native controller.
      */
     private void requireDirectPublishAllowed(String owner, String region, String domain, String repository,
             String format, String namespace, String packageName) {
@@ -2278,6 +2498,29 @@ public class CodeArtifactService implements Resettable {
         if ("BLOCK".equals(publishRestriction)) {
             throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
                     + "blocks direct publish.", packageName, "package");
+        }
+        // The package's own origin configuration isn't BLOCK (just enforced above), which the
+        // User Guide describes as "effectively deferring to the associated package group's
+        // origin control settings": resolve this package's associated group (if any) and apply
+        // "How package origin controls interact with package group origin controls" (BLOCK
+        // always wins over ALLOW). A weak match (see PackageGroupPatterns' own javadoc) is
+        // blocked outright, regardless of the group's configured mode, as CodeArtifact's defense
+        // against a dependency-confusion attack that spells a package to just barely dodge a
+        // strong match.
+        List<PackageGroup> groupsInDomain = allPackageGroupsInDomain(owner, region, domain);
+        Optional<AssociatedGroupMatch> associatedGroup = findAssociatedGroup(groupsInDomain,
+                PackageGroupPatterns.packagePath(format, namespace, packageName));
+        if (associatedGroup.isPresent()) {
+            if (associatedGroup.get().strength() == PackageGroupPatterns.MatchStrength.WEAK) {
+                throw conflict("Package '" + packageName + "' cannot be published because it only weakly "
+                        + "matches package group '" + associatedGroup.get().group().getPattern() + "', which "
+                        + "blocks direct publish for weak matches.", packageName, "package");
+            }
+            if (!groupAllowsPublish(groupsInDomain, associatedGroup.get().group(), repository)) {
+                throw conflict("Package '" + packageName + "' cannot be published because its associated "
+                        + "package group '" + associatedGroup.get().group().getPattern() + "' blocks direct "
+                        + "publish for this repository.", packageName, "package");
+            }
         }
     }
 
@@ -2576,18 +2819,25 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * {@code originType} plus, for an {@code EXTERNAL} version, the exact external connection it
-     * was retained from: AWS's own {@code DomainEntryPoint} reference describes an ingested
-     * package's entry point as the external connection it came from, {@code repositoryName} only
-     * for one published directly, so a caller surfacing a domain entry point needs the connection
-     * name itself, not just the originType flag.
+     * {@code originType} plus the domain entry point a caller needs to render it, where the version
+     * "originally entered" the domain ({@code DomainEntryPoint}): for {@code EXTERNAL}, the external
+     * connection it was fetched through, this repository's or an upstream's; for an {@code INTERNAL}
+     * version retained from a same-domain upstream repository (real AWS has no third {@code
+     * originType} value for this, confirmed against the live {@code PackageVersionOrigin} API
+     * reference, which lists only {@code INTERNAL}/{@code EXTERNAL}/{@code UNKNOWN}), the repository
+     * it was published to, as {@code upstreamRepositoryName}, however many upstreams it came
+     * through; for a true direct publish, neither is set.
      */
-    private record VersionOrigin(String originType, String externalConnectionName) {}
+    private record VersionOrigin(String originType, String externalConnectionName, String upstreamRepositoryName) {}
 
     private VersionOrigin versionOrigin(String region, String domain, String owner, String repository, String format,
             String namespace, String packageName, String version) {
-        return retainedVersionOriginConnection(region, domain, owner, repository, format, namespace, packageName,
-                version).map(name -> new VersionOrigin("EXTERNAL", name)).orElse(new VersionOrigin("INTERNAL", null));
+        return confirmedRetainedVersionOriginClaim(region, domain, owner, repository, format, namespace, packageName,
+                version)
+                .map(c -> c.entryPoint().kind() == RetentionOriginKind.EXTERNAL_CONNECTION
+                        ? new VersionOrigin("EXTERNAL", c.entryPoint().name(), null)
+                        : new VersionOrigin("INTERNAL", null, c.entryPoint().name()))
+                .orElse(new VersionOrigin("INTERNAL", null, null));
     }
 
     /**
@@ -2968,9 +3218,21 @@ public class CodeArtifactService implements Resettable {
      * real content yet, so it is itself the proof this package's real origin is external,
      * without weakening the default block a package that has never had such a claim, and so can
      * only have gotten real content from a direct publish, still gets.
+     *
+     * <p>Once the package's own setting resolves to allowed, this also defers to the package's
+     * associated package group's {@code groupRestrictionType} mode (the caller passes {@code
+     * EXTERNAL_UPSTREAM} for an external-connection retention attempt, {@code INTERNAL_UPSTREAM}
+     * for a same-domain upstream-repository one, see {@link RetentionOriginKind}), the same
+     * "{@code BLOCK} always wins over {@code ALLOW}" interaction {@link #publishPackageVersion}'s
+     * own group check applies for {@code PUBLISH} (see that method's own javadoc). A weak pattern
+     * match (see {@link PackageGroupPatterns}' own javadoc) is blocked outright here too,
+     * regardless of which restriction type applies: the User Guide's package group
+     * pattern-matching page states the weak-match block applies to a package "being pulled from
+     * upstreams or published," generically, not scoped to {@code PUBLISH} or to one upstream kind
+     * by name.
      */
     public boolean isUpstreamRetentionBlocked(String region, String domain, String domainOwner, String repository,
-            String format, String namespace, String packageName) {
+            String format, String namespace, String packageName, String groupRestrictionType) {
         String owner = effectiveOwner(domainOwner);
         // accountingPackageName, not the raw packageName (found by Greptile's review): a nuget
         // client's own native route always lowercases the id, while an operator setting
@@ -2980,14 +3242,30 @@ public class CodeArtifactService implements Resettable {
         String key = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
         Optional<PackageOriginConfig> config = packageOriginConfig(owner, key, format);
+        boolean packageLevelBlocked;
         if (config.isPresent()) {
-            return "BLOCK".equals(config.get().getUpstreamRestriction());
-        }
-        if (hasRetainedVersionOriginClaimForAnyVersion(region, domain, owner, repository, format, namespace,
+            packageLevelBlocked = "BLOCK".equals(config.get().getUpstreamRestriction());
+        } else if (hasRetainedVersionOriginClaimForAnyVersion(region, domain, owner, repository, format, namespace,
                 packageName)) {
+            packageLevelBlocked = false;
+        } else {
+            packageLevelBlocked = packageExistsViaVersionsOrSidecar(region, domain, owner, repository, format,
+                    namespace, packageName);
+        }
+        if (packageLevelBlocked) {
+            return true;
+        }
+        List<PackageGroup> groupsInDomain = allPackageGroupsInDomain(owner, region, domain);
+        Optional<AssociatedGroupMatch> associatedGroup = findAssociatedGroup(groupsInDomain,
+                PackageGroupPatterns.packagePath(format, namespace, packageName));
+        if (associatedGroup.isEmpty()) {
             return false;
         }
-        return packageExistsViaVersionsOrSidecar(region, domain, owner, repository, format, namespace, packageName);
+        if (associatedGroup.get().strength() == PackageGroupPatterns.MatchStrength.WEAK) {
+            return true;
+        }
+        return !groupAllowsRestriction(groupsInDomain, associatedGroup.get().group(), groupRestrictionType,
+                repository);
     }
 
     /**
@@ -3098,16 +3376,41 @@ public class CodeArtifactService implements Resettable {
      * Generic sibling of {@link #mavenRetainedVersionOriginConnection}, for any container-backed
      * format (npm, pypi, nuget) whose own external-connection importer claims and confirms a
      * retention origin through {@link #claimRetainedVersionOrigin}/{@link
-     * #finishRetainedVersionOriginAttempt} the same way Maven's own does.
+     * #finishRetainedVersionOriginAttempt} the same way Maven's own does. Only ever reports a name
+     * for a confirmed {@link RetentionOriginKind#EXTERNAL_CONNECTION} claim, exactly as before this
+     * method had to tell that kind apart from {@link RetentionOriginKind#UPSTREAM_REPOSITORY} at
+     * all (see {@link #retainedUpstreamRepositoryOrigin} for that kind's own equivalent lookup).
      */
     public Optional<String> retainedVersionOriginConnection(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version) {
         String owner = effectiveOwner(domainOwner);
+        return confirmedRetainedVersionOriginClaim(region, domain, owner, repository, format, namespace, packageName,
+                version)
+                .filter(c -> c.originKind() == RetentionOriginKind.EXTERNAL_CONNECTION)
+                .map(RetainedVersionOriginClaim::originName);
+    }
+
+    /**
+     * {@link RetentionOriginKind#UPSTREAM_REPOSITORY} counterpart of {@link
+     * #retainedVersionOriginConnection}: the name of the same-domain upstream repository a package
+     * version was genuinely retained from, or {@link Optional#empty()} for anything else (never
+     * retained at all, or retained from an external connection instead).
+     */
+    public Optional<String> retainedUpstreamRepositoryOrigin(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version) {
+        String owner = effectiveOwner(domainOwner);
+        return confirmedRetainedVersionOriginClaim(region, domain, owner, repository, format, namespace, packageName,
+                version)
+                .filter(c -> c.originKind() == RetentionOriginKind.UPSTREAM_REPOSITORY)
+                .map(RetainedVersionOriginClaim::originName);
+    }
+
+    private Optional<RetainedVersionOriginClaim> confirmedRetainedVersionOriginClaim(String region, String domain,
+            String owner, String repository, String format, String namespace, String packageName, String version) {
         String key = packageVersionKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName), normalizedContainerBackedVersion(format, version));
         return Optional.ofNullable(retainedVersionOriginConnections.get(ownerScopedKey(owner, key)))
-                .filter(RetainedVersionOriginClaim::confirmed)
-                .map(RetainedVersionOriginClaim::externalConnectionName);
+                .filter(RetainedVersionOriginClaim::confirmed);
     }
 
     /**
@@ -3157,9 +3460,9 @@ public class CodeArtifactService implements Resettable {
      */
     public synchronized MavenClaimOutcome claimMavenRetainedVersionOrigin(String region, String domain,
             String domainOwner, String repository, String namespace, String packageName, String version,
-            String externalConnectionName, long packageFenceSnapshot) {
+            String originName, RetentionOriginKind originKind, long packageFenceSnapshot) {
         RetainedVersionOriginClaimOutcome outcome = claimRetainedVersionOrigin(region, domain, domainOwner,
-                repository, "maven", namespace, packageName, version, externalConnectionName, packageFenceSnapshot);
+                repository, "maven", namespace, packageName, version, originName, originKind, packageFenceSnapshot);
         return new MavenClaimOutcome(outcome.claimed(), outcome.episodeId());
     }
 
@@ -3182,7 +3485,7 @@ public class CodeArtifactService implements Resettable {
      */
     public synchronized RetainedVersionOriginClaimOutcome claimRetainedVersionOrigin(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
-            String version, String externalConnectionName, long packageFenceSnapshot) {
+            String version, String originName, RetentionOriginKind originKind, long packageFenceSnapshot) {
         String owner = effectiveOwner(domainOwner);
         String accountingName = accountingPackageName(format, packageName);
         String packageKeyStr = packageKey(region, domain, repository, format, namespace, accountingName);
@@ -3196,15 +3499,18 @@ public class CodeArtifactService implements Resettable {
         RetainedVersionOriginClaim existing = retainedVersionOriginConnections.get(key);
         if (existing == null) {
             long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
+            EntryPoint entryPoint = originKind == RetentionOriginKind.EXTERNAL_CONNECTION
+                    ? new EntryPoint(originKind, originName)
+                    : entryPointThrough(owner, region, domain, originName, format, namespace, packageName, version);
             retainedVersionOriginConnections.put(key,
-                    new RetainedVersionOriginClaim(externalConnectionName, 1, false, episodeId));
+                    new RetainedVersionOriginClaim(originName, originKind, 1, false, episodeId, entryPoint));
             return new RetainedVersionOriginClaimOutcome(true, episodeId);
         }
-        if (!existing.externalConnectionName().equals(externalConnectionName)) {
+        if (!existing.originName().equals(originName) || existing.originKind() != originKind) {
             return new RetainedVersionOriginClaimOutcome(false, 0L);
         }
-        retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(externalConnectionName,
-                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId()));
+        retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(originName, originKind,
+                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId(), existing.entryPoint()));
         return new RetainedVersionOriginClaimOutcome(true, existing.episodeId());
     }
 
@@ -3250,8 +3556,15 @@ public class CodeArtifactService implements Resettable {
         if (remaining == 0 && !confirmed) {
             retainedVersionOriginConnections.remove(key);
         } else {
+            // Read again as the claim is confirmed: the upstream's own claim may have been confirmed,
+            // or given up, since this one was taken.
+            EntryPoint entryPoint = confirmed && !existing.confirmed()
+                    && existing.originKind() == RetentionOriginKind.UPSTREAM_REPOSITORY
+                    ? entryPointThrough(owner, region, domain, existing.originName(), format, namespace, packageName,
+                            version)
+                    : existing.entryPoint();
             retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(
-                    existing.externalConnectionName(), remaining, confirmed, episodeId));
+                    existing.originName(), existing.originKind(), remaining, confirmed, episodeId, entryPoint));
         }
     }
 
@@ -3341,6 +3654,38 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * {@link #deployMavenAssetUnderVersionFence(String, String, String, String, String, String,
+     * String, long, long, long, ReposiliteSidecarClient, String, String, byte[])}'s own streamed
+     * sibling, for a release too large to ever hold as one {@code byte[]} (Maven's real-world
+     * assets are the least likely of any format here to actually need this, but the mechanism is
+     * shared infrastructure, not a per-format one): {@code contentLength} is the caller's own
+     * already-known size (from staging/digesting the upload), passed through rather than re-read
+     * from disk a second time.
+     */
+    public synchronized MavenDeployAttemptResult deployMavenAssetUnderVersionFence(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, String version,
+            long versionFenceSnapshot, long packageFenceSnapshot, long episodeId, ReposiliteSidecarClient reposilite,
+            String repoId, String gav, Path content, long contentLength) {
+        if (!retentionWriteStillAllowed(region, domain, domainOwner, repository, "maven", namespace, packageName,
+                version, repoId, versionFenceSnapshot, episodeId)) {
+            return new MavenDeployAttemptResult(false, null);
+        }
+        ReposiliteSidecarClient.DeployOutcome outcome;
+        try {
+            outcome = reposilite.deployArtifact(repoId, gav, content);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not deploy {0} while retaining a Maven release through an external connection.",
+                    gav);
+            return new MavenDeployAttemptResult(true, null);
+        }
+        if ((outcome.status() == 200 || outcome.status() == 201) && outcome.wroteNewContent()) {
+            recordContainerBackedAssetBytes(region, domain, domainOwner, repository, "maven", namespace,
+                    packageName, contentLength, packageFenceSnapshot);
+        }
+        return new MavenDeployAttemptResult(true, outcome);
+    }
+
+    /**
      * The shared fence/status/claim-episode gate {@link #deployMavenAssetUnderVersionFence} and
      * {@link #retainAssetUnderVersionFence} both check, inside the very same {@code synchronized}
      * call, right before their own format-specific sidecar write: see {@link
@@ -3354,7 +3699,12 @@ public class CodeArtifactService implements Resettable {
             String format, String namespace, String packageName, String version, String repoId,
             long versionFenceSnapshot, long episodeId) {
         String owner = effectiveOwner(domainOwner);
-        if ("nuget".equals(format)) {
+        // Not a nuget-specific quirk: needed by any format whose sidecar client holds a real
+        // per-request container lease (beginUse/endUse actually doing something, not the no-op
+        // default) that could go stale if the repository is deleted and recreated mid-write.
+        // KellnrSidecarClient (cargo) delegates beginUse/endUse to a real lease exactly like
+        // BagetterSidecarClient (nuget) does, so it has the identical exposure.
+        if ("nuget".equals(format) || "cargo".equals(format)) {
             if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repoId)) {
                 return false;
             }
@@ -3407,7 +3757,7 @@ public class CodeArtifactService implements Resettable {
     public synchronized AssetRetentionAttemptResult retainAssetUnderVersionFence(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
             String version, long versionFenceSnapshot, long packageFenceSnapshot, long episodeId,
-            String repositoryContainerId, String assetName, byte[] content, Runnable write) {
+            String repositoryContainerId, String assetName, long contentLength, Runnable write) {
         if (!retentionWriteStillAllowed(region, domain, domainOwner, repository, format, namespace, packageName,
                 version, repositoryContainerId, versionFenceSnapshot, episodeId)) {
             return new AssetRetentionAttemptResult(false, false);
@@ -3420,7 +3770,7 @@ public class CodeArtifactService implements Resettable {
             return new AssetRetentionAttemptResult(true, false);
         }
         recordContainerBackedAssetBytes(region, domain, domainOwner, repository, format, namespace, packageName,
-                content.length, packageFenceSnapshot);
+                contentLength, packageFenceSnapshot);
         return new AssetRetentionAttemptResult(true, true);
     }
 
@@ -3459,7 +3809,7 @@ public class CodeArtifactService implements Resettable {
     public synchronized boolean mergeMavenMetadataUnderPackageFence(String region, String domain,
             String domainOwner, String repository, String namespace, String packageName, long packageFenceSnapshot,
             ReposiliteSidecarClient reposilite, String repoId, byte[] externalMetadataXml,
-            Predicate<String> versionAllowed) {
+            Predicate<String> versionAllowed, boolean allowSnapshots) {
         if (currentContainerBackedPackageFence(region, domain, domainOwner, repository, "maven", namespace,
                 packageName) != packageFenceSnapshot) {
             return false;
@@ -3469,7 +3819,7 @@ public class CodeArtifactService implements Resettable {
             return false;
         }
         return reposilite.mergeExternalConnectionReleaseVersions(repoId, namespace, packageName, externalMetadataXml,
-                versionAllowed);
+                versionAllowed, allowSnapshots);
     }
 
     /**
@@ -3617,6 +3967,10 @@ public class CodeArtifactService implements Resettable {
                                 asset.getName(), e.getMessage());
                     }
                 }
+                // Same reasoning as the container-backed branch's own cleanup just above: a
+                // generic package deleted and republished under the same coordinates must not
+                // inherit a previous version's CopyPackageVersions(includeFromUpstream) claim.
+                retainedVersionOriginConnections.remove(ownerScopedKey(owner, versionKey));
             }
         }
         if (!hadRealContent && originConfig.isEmpty()) {
@@ -3707,20 +4061,8 @@ public class CodeArtifactService implements Resettable {
     public PackageVersionAssetResult getPackageVersionAsset(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version,
             String assetName, String packageVersionRevision) {
-        if (format == null || !PACKAGE_FORMATS.contains(format)) {
-            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
-        }
-        requireNonBlank(domain, "domain");
-        requireNonBlank(repository, "repository");
-        requireNonBlank(packageName, "package");
-        requireNonBlank(version, "packageVersion");
-        requireNonBlank(assetName, "asset");
-        validatePackageToken("package", packageName);
-        validatePackageToken("packageVersion", version);
-        if (namespace != null) {
-            validatePackageToken("namespace", namespace);
-        }
-        String owner = effectiveOwner(domainOwner);
+        String owner = validateAssetFetchArguments(format, domain, repository, packageName, version, assetName,
+                namespace, domainOwner);
 
         // Maven, npm, pypi, and nuget are metadata-free passthroughs straight to their own sidecar
         // (ReposiliteSidecarClient/VerdaccioSidecarClient/PypiserverSidecarClient/BagetterSidecarClient): publish for
@@ -3752,6 +4094,60 @@ public class CodeArtifactService implements Resettable {
         // rather than trusting whatever happens to already be on the object.
         asset.setContent(readAssetContent(owner, key, assetName));
         return new PackageVersionAssetResult(asset, pv.getRevision());
+    }
+
+    /**
+     * {@link #getPackageVersionAsset}'s streamed sibling, for {@code GetPackageVersionAsset}'s real
+     * HTTP entry point, which has to hand back whatever was actually published, and that can be
+     * gigabytes: the {@code byte[]}-returning method above stays exactly as it was for its ~40
+     * direct test call sites and anything else that only ever fetches a small fixture. The caller
+     * owns closing the returned stream.
+     */
+    public PackageVersionAssetStreamResult getPackageVersionAssetStreamed(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String packageVersionRevision) {
+        String owner = validateAssetFetchArguments(format, domain, repository, packageName, version, assetName,
+                namespace, domainOwner);
+
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return getContainerBackedPackageVersionAssetStreamed(region, domain, owner, repository, format,
+                    namespace, packageName, version, assetName, packageVersionRevision);
+        }
+
+        String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+        CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        requireAssetDownloadable(pv.getStatus(), version);
+        if (packageVersionRevision != null && !packageVersionRevision.equals(pv.getRevision())) {
+            throw notFound("Package version '" + version + "' was not found at revision '"
+                    + packageVersionRevision + "'.", version, "package-version");
+        }
+        PackageAsset asset = pv.getAssets().get(assetName);
+        if (asset == null) {
+            throw notFound("Asset '" + assetName + "' was not found on package version '" + version + "'.",
+                    assetName, "asset");
+        }
+        return new PackageVersionAssetStreamResult(openAssetContent(owner, key, assetName), asset.getSize(),
+                assetName, pv.getRevision());
+    }
+
+    private String validateAssetFetchArguments(String format, String domain, String repository, String packageName,
+            String version, String assetName, String namespace, String domainOwner) {
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        requireNonBlank(packageName, "package");
+        requireNonBlank(version, "packageVersion");
+        requireNonBlank(assetName, "asset");
+        validatePackageToken("package", packageName);
+        validatePackageToken("packageVersion", version);
+        if (namespace != null) {
+            validatePackageToken("namespace", namespace);
+        }
+        return effectiveOwner(domainOwner);
     }
 
     private PackageVersionAssetResult getContainerBackedPackageVersionAsset(String region, String domain,
@@ -3790,6 +4186,47 @@ public class CodeArtifactService implements Resettable {
             return new PackageVersionAssetResult(asset, revision);
         } finally {
             endSidecarUse(manager, repoId);
+        }
+    }
+
+    /** {@link #getContainerBackedPackageVersionAsset}'s streamed sibling; see that method's own javadoc. */
+    private PackageVersionAssetStreamResult getContainerBackedPackageVersionAssetStreamed(String region,
+            String domain, String owner, String repository, String format, String namespace, String packageName,
+            String version, String assetName, String packageVersionRevision) {
+        if ("maven".equals(format) && (namespace == null || namespace.isBlank())) {
+            throw validation("namespace is required when requesting an asset from a maven package version.");
+        }
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version"));
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        boolean leaseTransferred = false;
+        try {
+            PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                    format, namespace, packageName, version, repoId);
+            String revision = state.revision();
+            if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
+                throw notFound("Package version '" + version + "' was not found at revision '"
+                        + packageVersionRevision + "'.", version, "package-version");
+            }
+            requireAssetDownloadable(state.status(), version);
+            RepositorySidecarManager.StreamedAsset streamed = manager.fetchPackageVersionAssetStreamed(repoId,
+                            domain, repository, namespace, packageName, version, assetName)
+                    .orElseThrow(() -> notFound("Asset '" + assetName + "' was not found on package version '"
+                            + version + "'.", assetName, "asset"));
+            // The caller (CodeArtifactController) only drains this stream later, when JAX-RS
+            // actually writes the deferred StreamingOutput response body: releasing the lease
+            // here, as soon as this method returns, would let a concurrent DeleteRepository stop
+            // this sidecar container mid-download. Tying the release to the stream's own close
+            // instead keeps the container alive for exactly as long as beginUse/endUse promise.
+            InputStream content = StreamingResponses.closingWith(streamed.content(),
+                    () -> endSidecarUse(manager, repoId));
+            leaseTransferred = true;
+            return new PackageVersionAssetStreamResult(content, streamed.contentLength(), assetName, revision);
+        } finally {
+            if (!leaseTransferred) {
+                endSidecarUse(manager, repoId);
+            }
         }
     }
 
@@ -3886,9 +4323,18 @@ public class CodeArtifactService implements Resettable {
      * never produces any of the three, rather than guessing at a condition AWS never actually
      * documents for this action.
      *
-     * <p>{@code includeFromUpstream} is accepted for wire compatibility but has no effect: Floci
-     * has no upstream-ingestion path for any format (see {@code docs/services/codeartifact.md}'s
-     * Known limitations), so there is never a separate upstream repository to also search.
+     * <p>{@code includeFromUpstream} (real AWS flag, default {@code false}): on a miss against
+     * the literal {@code sourceRepository}, searches its {@code upstreams} chain (see {@link
+     * #resolveUpstreamSearchOrder}) for the first repository with a usable (not Archived, not
+     * Disposed) copy of the version and copies from there instead, for every format. Deliberately
+     * does not consult {@code isUpstreamRetentionBlocked}/{@code INTERNAL_UPSTREAM} at all, the
+     * same "distinct, explicit API action reached through neither mechanism" reasoning this
+     * method's own javadoc already gives for skipping origin-configuration entirely: that
+     * restriction is documented as gating retention "when requested by a package manager," which
+     * this explicit administrative action is not. A version found directly at {@code
+     * sourceRepository} records no new claim; one resolved from the upstream chain records the
+     * real (possibly several hops deep) source via the same widened claim mechanism the
+     * native-protocol importers use (see {@code RetentionOriginKind}).
      *
      * <p>For {@code generic}, a freshly copied version gets a new revision of its own ({@link
      * #newRevision()}, never the source's): the User Guide's own definition of "package version
@@ -3914,7 +4360,7 @@ public class CodeArtifactService implements Resettable {
             String namespace, String packageName, List<String> versions, Map<String, String> versionRevisions,
             boolean allowOverwrite, boolean includeFromUpstream) {
         if (!"generic".equals(format) && !CONTAINER_BACKED_FORMATS.contains(format)) {
-            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', or 'nuget'.");
+            throw validation("format must be 'generic', 'maven', 'npm', 'pypi', 'nuget', or 'cargo'.");
         }
         boolean hasVersions = versions != null && !versions.isEmpty();
         boolean hasRevisions = versionRevisions != null && !versionRevisions.isEmpty();
@@ -3968,16 +4414,42 @@ public class CodeArtifactService implements Resettable {
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
             return copyContainerBackedPackageVersions(region, domain, owner, sourceRepository,
                     destinationRepository, format, namespace, packageName, requestedVersions, versionRevisions,
-                    hasRevisions, allowOverwrite);
+                    hasRevisions, allowOverwrite, includeFromUpstream);
         }
 
         Map<String, PackageVersionError> failures = new LinkedHashMap<>();
         List<String> pendingCopies = new ArrayList<>();
         Map<String, CodeArtifactPackageVersion> sourceByVersion = new LinkedHashMap<>();
+        // Only ever populated for a version actually resolved from the upstream chain below (not
+        // the literal sourceRepository): a direct copy from sourceRepository itself records no
+        // claim at all, exactly as before this emulator had any upstream-repository mechanism.
+        Map<String, String> resolvedUpstreamSourceByVersion = new LinkedHashMap<>();
         for (String version : requestedVersions) {
             String sourceKey = packageVersionKey(region, domain, sourceRepository, format, namespace, packageName,
                     version);
             CodeArtifactPackageVersion sourcePv = packageVersions.getForAccount(owner, sourceKey).orElse(null);
+            // includeFromUpstream (real AWS flag, confirmed cross-format, default false): only
+            // consulted on a miss against the literal sourceRepository, matching AWS's own
+            // documented CopyPackageVersions behavior ("by default, only copies package versions
+            // that are stored in the target repository"). Archived is excluded here too, stricter
+            // than the direct-source check just below (which only excludes Disposed): a version
+            // this emulator would never resolve against an upstream through any other mechanism
+            // should not be silently resurrected into a fresh destination copy just because this
+            // one explicit, administrative action went looking further than a direct copy would.
+            if (sourcePv == null && includeFromUpstream) {
+                for (String candidate : resolveUpstreamSearchOrder(region, domain, owner, sourceRepository)) {
+                    String candidateKey = packageVersionKey(region, domain, candidate, format, namespace,
+                            packageName, version);
+                    CodeArtifactPackageVersion candidatePv = packageVersions.getForAccount(owner, candidateKey)
+                            .orElse(null);
+                    if (candidatePv != null && !"Disposed".equals(candidatePv.getStatus())
+                            && !"Archived".equals(candidatePv.getStatus())) {
+                        sourcePv = candidatePv;
+                        resolvedUpstreamSourceByVersion.put(version, candidate);
+                        break;
+                    }
+                }
+            }
             if (sourcePv == null) {
                 failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version "
                         + version));
@@ -4049,20 +4521,46 @@ public class CodeArtifactService implements Resettable {
         // hashes before any version in this same batch has anything written to the destination
         // or committed: a missing or corrupted source asset for version 3 of 5 must never leave
         // versions 1 and 2 committed while the batch as a whole fails, and must never be
-        // discovered only after this method already started mutating the destination.
-        Map<String, Map<String, byte[]>> verifiedContentByVersion = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            verifiedContentByVersion.put(version, verifyAndReadSourceAssets(owner, sourceByVersion.get(version)));
-        }
+        // discovered only after this method already started mutating the destination. Each
+        // asset is staged to its own temp file rather than held as a byte[] (a whole batch's
+        // worth of multi-GB assets could never fit as resident arrays at once); every staged
+        // file across the whole batch call is collected here and deleted exactly once in the
+        // finally below, regardless of how the batch finishes, the same convention
+        // copyContainerBackedPackageVersions already uses.
+        List<Path> stagedFiles = new ArrayList<>();
+        try {
+            Map<String, Map<String, Path>> verifiedContentByVersion = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                verifiedContentByVersion.put(version, verifyAndReadSourceAssets(owner, sourceByVersion.get(version),
+                        stagedFiles));
+            }
 
-        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            CodeArtifactPackageVersion copied = copyGenericPackageVersionAssets(owner, region, domain,
-                    destinationRepository, format, namespace, packageName, version, sourceByVersion.get(version),
-                    verifiedContentByVersion.get(version));
-            successes.put(version, new SuccessfulPackageVersionInfo(copied.getRevision(), copied.getStatus()));
+            Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                CodeArtifactPackageVersion copied = copyGenericPackageVersionAssets(owner, region, domain,
+                        destinationRepository, format, namespace, packageName, version,
+                        sourceByVersion.get(version), verifiedContentByVersion.get(version));
+                String resolvedUpstreamSource = resolvedUpstreamSourceByVersion.get(version);
+                if (resolvedUpstreamSource != null) {
+                    recordUpstreamRepositoryOriginForCopiedVersion(region, domain, owner, destinationRepository,
+                            format, namespace, packageName, version, resolvedUpstreamSource);
+                } else {
+                    // A direct copy (resolved straight from the literal sourceRepository, not the
+                    // upstream chain) must not leave an earlier CopyPackageVersions(
+                    // includeFromUpstream) overwrite's own stale claim behind at this exact
+                    // destination coordinate, the same way copyMavenRetainedVersionOriginIfApplicable
+                    // already clears its own container-backed equivalent for a plain copy.
+                    retainedVersionOriginConnections.remove(ownerScopedKey(owner, packageVersionKey(region, domain,
+                            destinationRepository, format, namespace, packageName, version)));
+                }
+                successes.put(version, new SuccessfulPackageVersionInfo(copied.getRevision(), copied.getStatus()));
+            }
+            return new CopyPackageVersionsResult(successes, Map.of());
+        } finally {
+            for (Path staged : stagedFiles) {
+                deleteStagedAssetBody(staged);
+            }
         }
-        return new CopyPackageVersionsResult(successes, Map.of());
     }
 
     /**
@@ -4100,7 +4598,7 @@ public class CodeArtifactService implements Resettable {
     private CopyPackageVersionsResult copyContainerBackedPackageVersions(String region, String domain, String owner,
             String sourceRepository, String destinationRepository, String format, String namespace,
             String packageName, List<String> requestedVersions, Map<String, String> versionRevisions,
-            boolean hasRevisions, boolean allowOverwrite) {
+            boolean hasRevisions, boolean allowOverwrite, boolean includeFromUpstream) {
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> new AwsException("InternalServerException", "Copying a " + format
                         + " package version is not yet supported by this emulator.", 500));
@@ -4111,10 +4609,42 @@ public class CodeArtifactService implements Resettable {
         List<String> pendingCopies = new ArrayList<>();
         Map<String, List<String>> sourceAssetNamesByVersion = new LinkedHashMap<>();
         Map<String, List<String>> destAssetNamesByVersion = new LinkedHashMap<>();
+        // Per-version, since includeFromUpstream lets different requested versions in the same
+        // batch resolve from different repositories: defaults to the literal sourceRepository/
+        // sourceRepoId for every version, overridden below only for one actually resolved from the
+        // upstream chain. resolvedUpstreamSourceByVersion stays unpopulated for a direct hit, the
+        // same "no claim recorded for a direct copy" rule the generic branch above applies.
+        Map<String, String> effectiveSourceRepositoryByVersion = new LinkedHashMap<>();
+        Map<String, String> effectiveSourceRepoIdByVersion = new LinkedHashMap<>();
+        Map<String, String> resolvedUpstreamSourceByVersion = new LinkedHashMap<>();
         try {
             for (String version : requestedVersions) {
+                String effectiveSourceRepository = sourceRepository;
+                String effectiveSourceRepoId = sourceRepoId;
                 if (!manager.packageVersionExists(sourceRepoId, domain, sourceRepository, namespace, packageName,
-                        version)) {
+                        version) && includeFromUpstream) {
+                    for (String candidate : resolveUpstreamSearchOrder(region, domain, owner, sourceRepository)) {
+                        String candidateRepoId = ensureFormatContainerId(format, region, domain, owner, candidate);
+                        if (!manager.packageVersionExists(candidateRepoId, domain, candidate, namespace, packageName,
+                                version)) {
+                            continue;
+                        }
+                        // Stricter than the direct-source check just below (which only ever
+                        // excludes Disposed): matches the generic branch's own reasoning for why
+                        // an Archived candidate upstream must not be resolved either.
+                        String candidateStatus = currentContainerBackedVersionStatus(owner, region, domain,
+                                candidate, format, namespace, packageName, version, candidateRepoId).status();
+                        if ("Disposed".equals(candidateStatus) || "Archived".equals(candidateStatus)) {
+                            continue;
+                        }
+                        effectiveSourceRepository = candidate;
+                        effectiveSourceRepoId = candidateRepoId;
+                        resolvedUpstreamSourceByVersion.put(version, candidate);
+                        break;
+                    }
+                }
+                if (!manager.packageVersionExists(effectiveSourceRepoId, domain, effectiveSourceRepository,
+                        namespace, packageName, version)) {
                     failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version "
                             + version));
                     continue;
@@ -4127,7 +4657,8 @@ public class CodeArtifactService implements Resettable {
                 // override directly, the same way the generic path's own source-side guard
                 // already does, before this version's real files are ever listed or copied.
                 PackageVersionStatusOverride sourceOverride = currentContainerBackedVersionStatus(owner, region,
-                        domain, sourceRepository, format, namespace, packageName, version, sourceRepoId);
+                        domain, effectiveSourceRepository, format, namespace, packageName, version,
+                        effectiveSourceRepoId);
                 if ("Disposed".equals(sourceOverride.status())) {
                     failures.put(version, new PackageVersionError("NOT_ALLOWED", "Package version " + version
                             + " has already been disposed at the source and cannot be copied"));
@@ -4155,16 +4686,16 @@ public class CodeArtifactService implements Resettable {
                             + " has already been disposed at the destination and cannot be republished"));
                     continue;
                 }
-                List<String> sourceAssetNames = manager.listPackageVersionAssetNames(sourceRepoId, domain,
-                        sourceRepository, namespace, packageName, version);
+                List<String> sourceAssetNames = manager.listPackageVersionAssetNames(effectiveSourceRepoId, domain,
+                        effectiveSourceRepository, namespace, packageName, version);
                 boolean destExists = manager.packageVersionExists(destRepoId, domain, destinationRepository,
                         namespace, packageName, version);
                 if (destExists) {
                     List<String> destAssetNames = manager.listPackageVersionAssetNames(destRepoId, domain,
                             destinationRepository, namespace, packageName, version);
-                    if (containerBackedVersionContentMatches(manager, sourceRepoId, sourceRepository, destRepoId,
-                            destinationRepository, domain, namespace, packageName, version, sourceAssetNames,
-                            destAssetNames)) {
+                    if (containerBackedVersionContentMatches(manager, effectiveSourceRepoId, effectiveSourceRepository,
+                            destRepoId, destinationRepository, domain, namespace, packageName, version,
+                            sourceAssetNames, destAssetNames)) {
                         // Identical in both repositories already: the same already-successful,
                         // not-listed-anywhere no-op the generic path applies (see
                         // #copyPackageVersions's own javadoc).
@@ -4177,6 +4708,8 @@ public class CodeArtifactService implements Resettable {
                     }
                     destAssetNamesByVersion.put(version, destAssetNames);
                 }
+                effectiveSourceRepositoryByVersion.put(version, effectiveSourceRepository);
+                effectiveSourceRepoIdByVersion.put(version, effectiveSourceRepoId);
                 sourceAssetNamesByVersion.put(version, sourceAssetNames);
                 pendingCopies.add(version);
             }
@@ -4195,97 +4728,156 @@ public class CodeArtifactService implements Resettable {
 
         // Same verify-before-write ordering as the generic path's own two-pass split: every
         // pending version's source assets are fetched and confirmed present before any version in
-        // this batch has anything written to the destination.
-        Map<String, Map<String, byte[]>> verifiedContentByVersion = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            Map<String, byte[]> contentByAsset = new LinkedHashMap<>();
-            for (String assetName : sourceAssetNamesByVersion.get(version)) {
-                byte[] content = manager.fetchPackageVersionAsset(sourceRepoId, domain, sourceRepository, namespace,
-                                packageName, version, assetName)
-                        .orElseThrow(() -> new AwsException("InternalServerException", "Could not copy version '"
-                                + version + "' of package '" + packageName + "': its asset '" + assetName
-                                + "' disappeared from the source repository between listing and fetching it.",
-                                500));
-                contentByAsset.put(assetName, content);
+        // this batch has anything written to the destination. Each asset is staged to its own
+        // temp file rather than held as a byte[] (a whole batch's worth of multi-GB assets could
+        // never fit as resident arrays at once); every staged file across the whole batch call,
+        // source content and destination rollback snapshots alike, is collected here and deleted
+        // exactly once in the finally below, regardless of how the batch finishes.
+        List<Path> stagedFiles = new ArrayList<>();
+        try {
+            Map<String, Map<String, Path>> verifiedContentByVersion = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                Map<String, Path> contentByAsset = new LinkedHashMap<>();
+                String effectiveSourceRepository = effectiveSourceRepositoryByVersion.get(version);
+                String effectiveSourceRepoId = effectiveSourceRepoIdByVersion.get(version);
+                for (String assetName : sourceAssetNamesByVersion.get(version)) {
+                    RepositorySidecarManager.StreamedAsset streamed = manager.fetchPackageVersionAssetStreamed(
+                                    effectiveSourceRepoId, domain, effectiveSourceRepository, namespace, packageName,
+                                    version, assetName)
+                            .orElseThrow(() -> new AwsException("InternalServerException", "Could not copy "
+                                    + "version '" + version + "' of package '" + packageName + "': its asset '"
+                                    + assetName + "' disappeared from the source repository between listing and "
+                                    + "fetching it.", 500));
+                    Path staged = stageStreamedAsset(streamed);
+                    stagedFiles.add(staged);
+                    contentByAsset.put(assetName, staged);
+                }
+                verifiedContentByVersion.put(version, contentByAsset);
             }
-            verifiedContentByVersion.put(version, contentByAsset);
-        }
 
-        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
-        for (String version : pendingCopies) {
-            List<String> destAssetNames = destAssetNamesByVersion.getOrDefault(version, List.of());
-            Map<String, byte[]> originalContent = new LinkedHashMap<>();
-            for (String destAssetName : destAssetNames) {
-                manager.fetchPackageVersionAsset(destRepoId, domain, destinationRepository, namespace, packageName,
-                                version, destAssetName)
-                        .ifPresent(content -> originalContent.put(destAssetName, content));
-            }
-            List<String> touchedAssetNames = new ArrayList<>();
-            // Snapshotted immediately before this version's own writes, the same way every other
-            // container-backed write path already takes its fence snapshot right before issuing
-            // the real write it will later report: recording this version's bytes must still
-            // reflect the latest live state even if an earlier version in this same batch call
-            // already changed it (there is no shared snapshot spanning the whole batch to go
-            // stale as later versions are processed).
-            long packageFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
-                    destinationRepository, format, namespace, packageName);
-            long bytesWritten = 0L;
-            try {
-                // Every asset this version already held at the destination is deleted first, in
-                // its own phase, before anything new is written: pypiserver's own delete call
-                // (confirmed live) removes every file sharing that exact package name and
-                // version, not just the one asset name passed to it, so deleting a same-named
-                // asset in the middle of a per-asset write loop would silently wipe a sibling
-                // asset (e.g. the wheel of a release also carrying an sdist) already rewritten
-                // earlier in that same loop. Clearing everything up front, before any of this
-                // version's new content exists to be collaterally wiped, is correct for every
-                // format: Reposilite/Verdaccio/BaGetter's own deletes are already scoped to
-                // exactly the asset (or, for npm/nuget, the single asset their formats ever hold
-                // per version) being removed, so doing them first changes nothing for them, and
-                // still satisfies Reposilite's own redeployment:false rejection of a plain PUT
-                // over differing existing content the same way the previous interleaved ordering
-                // did.
+            Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+            for (String version : pendingCopies) {
+                String effectiveSourceRepository = effectiveSourceRepositoryByVersion.get(version);
+                String effectiveSourceRepoId = effectiveSourceRepoIdByVersion.get(version);
+                List<String> destAssetNames = destAssetNamesByVersion.getOrDefault(version, List.of());
+                Map<String, Path> originalContent = new LinkedHashMap<>();
                 for (String destAssetName : destAssetNames) {
-                    manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
-                            packageName, version, destAssetName);
-                    touchedAssetNames.add(destAssetName);
+                    manager.fetchPackageVersionAssetStreamed(destRepoId, domain, destinationRepository, namespace,
+                                    packageName, version, destAssetName)
+                            .ifPresent(streamed -> {
+                                Path staged = stageStreamedAsset(streamed);
+                                stagedFiles.add(staged);
+                                originalContent.put(destAssetName, staged);
+                            });
                 }
-                for (Map.Entry<String, byte[]> entry : verifiedContentByVersion.get(version).entrySet()) {
-                    String assetName = entry.getKey();
-                    manager.copyPackageVersionAsset(sourceRepoId, domain, sourceRepository, destRepoId,
-                            destinationRepository, namespace, packageName, version, assetName, entry.getValue());
-                    if (!touchedAssetNames.contains(assetName)) {
-                        touchedAssetNames.add(assetName);
+                List<String> touchedAssetNames = new ArrayList<>();
+                // Snapshotted immediately before this version's own writes, the same way every other
+                // container-backed write path already takes its fence snapshot right before issuing
+                // the real write it will later report: recording this version's bytes must still
+                // reflect the latest live state even if an earlier version in this same batch call
+                // already changed it (there is no shared snapshot spanning the whole batch to go
+                // stale as later versions are processed).
+                long packageFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
+                        destinationRepository, format, namespace, packageName);
+                long bytesWritten = 0L;
+                try {
+                    // Every asset this version already held at the destination is deleted first, in
+                    // its own phase, before anything new is written: pypiserver's own delete call
+                    // (confirmed live) removes every file sharing that exact package name and
+                    // version, not just the one asset name passed to it, so deleting a same-named
+                    // asset in the middle of a per-asset write loop would silently wipe a sibling
+                    // asset (e.g. the wheel of a release also carrying an sdist) already rewritten
+                    // earlier in that same loop. Clearing everything up front, before any of this
+                    // version's new content exists to be collaterally wiped, is correct for every
+                    // format: Reposilite/Verdaccio/BaGetter's own deletes are already scoped to
+                    // exactly the asset (or, for npm/nuget, the single asset their formats ever hold
+                    // per version) being removed, so doing them first changes nothing for them, and
+                    // still satisfies Reposilite's own redeployment:false rejection of a plain PUT
+                    // over differing existing content the same way the previous interleaved ordering
+                    // did.
+                    for (String destAssetName : destAssetNames) {
+                        manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
+                                packageName, version, destAssetName);
+                        touchedAssetNames.add(destAssetName);
                     }
-                    bytesWritten += entry.getValue().length;
+                    for (Map.Entry<String, Path> entry : verifiedContentByVersion.get(version).entrySet()) {
+                        String assetName = entry.getKey();
+                        long contentLength = Files.size(entry.getValue());
+                        manager.copyPackageVersionAsset(effectiveSourceRepoId, domain, effectiveSourceRepository,
+                                destRepoId, destinationRepository, namespace, packageName, version, assetName,
+                                entry.getValue(), contentLength);
+                        if (!touchedAssetNames.contains(assetName)) {
+                            touchedAssetNames.add(assetName);
+                        }
+                        bytesWritten += contentLength;
+                    }
+                    manager.recordVersionAvailable(destRepoId, domain, destinationRepository, namespace, packageName,
+                            version);
+                } catch (IOException e) {
+                    rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository,
+                            namespace, packageName, version, originalContent, touchedAssetNames);
+                    throw new UncheckedIOException(e);
+                } catch (RuntimeException e) {
+                    rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository,
+                            namespace, packageName, version, originalContent, touchedAssetNames);
+                    throw e;
                 }
-                manager.recordVersionAvailable(destRepoId, domain, destinationRepository, namespace, packageName,
+                if (bytesWritten > 0) {
+                    recordContainerBackedAssetBytes(region, domain, owner, destinationRepository, format, namespace,
+                            packageName, bytesWritten, packageFenceSnapshot);
+                }
+                copyCapturedReadmeIfApplicable(region, domain, owner, effectiveSourceRepository,
+                        destinationRepository, format, namespace, packageName, version);
+                String resolvedUpstreamSource = resolvedUpstreamSourceByVersion.get(version);
+                if (resolvedUpstreamSource != null) {
+                    // Resolved from the upstream chain, not the literal sourceRepository named in
+                    // the request: there is no claim at sourceRepository itself to carry forward
+                    // (nothing was found there at all), so this records a fresh one pointing at
+                    // the real, resolved source instead of calling
+                    // copyMavenRetainedVersionOriginIfApplicable below, which reads sourceRepository's
+                    // own claim and would otherwise just clear the destination's.
+                    recordUpstreamRepositoryOriginForCopiedVersion(region, domain, owner, destinationRepository,
+                            format, namespace, packageName, version, resolvedUpstreamSource);
+                } else {
+                    copyMavenRetainedVersionOriginIfApplicable(region, domain, owner, effectiveSourceRepository,
+                            destinationRepository, format, namespace, packageName, version);
+                }
+                // Drops any status override left over from whatever used to be at this destination
+                // coordinate (an Archived version this copy's allowOverwrite just replaced, most
+                // concretely): the response below reports Published, and a stale override would
+                // otherwise keep describing (and keep requireAssetDownloadable blocking downloads of)
+                // content that no longer matches what is now really there. A destination that
+                // never had an override is an inexpensive no-op (see that method's own javadoc).
+                clearContainerBackedStatusOverride(owner, region, domain, destinationRepository, format, namespace,
+                        packageName, version);
+                String revision = synthesizeContainerBackedRevision(format, destRepoId, namespace, packageName,
                         version);
-            } catch (RuntimeException e) {
-                rollbackContainerBackedVersionWrite(manager, destRepoId, domain, destinationRepository, namespace,
-                        packageName, version, originalContent, touchedAssetNames);
-                throw e;
+                successes.put(version, new SuccessfulPackageVersionInfo(revision, "Published"));
             }
-            if (bytesWritten > 0) {
-                recordContainerBackedAssetBytes(region, domain, owner, destinationRepository, format, namespace,
-                        packageName, bytesWritten, packageFenceSnapshot);
+            return new CopyPackageVersionsResult(successes, Map.of());
+        } finally {
+            for (Path staged : stagedFiles) {
+                deleteStagedAssetBody(staged);
             }
-            copyCapturedReadmeIfApplicable(region, domain, owner, sourceRepository, destinationRepository, format,
-                    namespace, packageName, version);
-            copyMavenRetainedVersionOriginIfApplicable(region, domain, owner, sourceRepository,
-                    destinationRepository, format, namespace, packageName, version);
-            // Drops any status override left over from whatever used to be at this destination
-            // coordinate (an Archived version this copy's allowOverwrite just replaced, most
-            // concretely): the response below reports Published, and a stale override would
-            // otherwise keep describing (and keep requireAssetDownloadable blocking downloads of)
-            // content that no longer matches what is now really there. A destination that
-            // never had an override is an inexpensive no-op (see that method's own javadoc).
-            clearContainerBackedStatusOverride(owner, region, domain, destinationRepository, format, namespace,
-                    packageName, version);
-            String revision = synthesizeContainerBackedRevision(format, destRepoId, namespace, packageName, version);
-            successes.put(version, new SuccessfulPackageVersionInfo(revision, "Published"));
         }
-        return new CopyPackageVersionsResult(successes, Map.of());
+    }
+
+    /**
+     * Stages an already-fetched streamed asset to a temp file via {@link #stageAssetBody}, closing
+     * the stream afterward regardless of outcome: {@link #stageAssetBody} itself never closes the
+     * body it is handed, since its other caller (a controller's own inbound request stream) owns
+     * that separately. Package-private (not {@code private}): the upstream-repository importers
+     * (npm/pypi/nuget) reuse this directly to stage an asset read from another repository's own
+     * sidecar via {@link RepositorySidecarManager#fetchPackageVersionAssetStreamed}, the same
+     * primitive {@link #copyContainerBackedPackageVersions} already uses for a cross-repository
+     * read.
+     */
+    Path stageStreamedAsset(RepositorySidecarManager.StreamedAsset streamed) {
+        try {
+            return stageAssetBody(streamed.content());
+        } finally {
+            StreamingResponses.closeQuietly(streamed.content());
+        }
     }
 
     /**
@@ -4368,15 +4960,38 @@ public class CodeArtifactService implements Resettable {
         String key = ownerScopedKey(owner, packageVersionKey(region, domain, destinationRepository, format,
                 namespace, accountingPackageName(format, packageName),
                 normalizedContainerBackedVersion(format, version)));
-        Optional<String> sourceConnection = retainedVersionOriginConnection(region, domain, owner, sourceRepository,
-                format, namespace, packageName, version);
-        if (sourceConnection.isEmpty()) {
+        Optional<RetainedVersionOriginClaim> sourceClaim = confirmedRetainedVersionOriginClaim(region, domain, owner,
+                sourceRepository, format, namespace, packageName, version);
+        if (sourceClaim.isEmpty()) {
             retainedVersionOriginConnections.remove(key);
             return;
         }
         long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
-        retainedVersionOriginConnections.put(key,
-                new RetainedVersionOriginClaim(sourceConnection.get(), 0, true, episodeId));
+        retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(sourceClaim.get().originName(),
+                sourceClaim.get().originKind(), 0, true, episodeId, sourceClaim.get().entryPoint()));
+    }
+
+    /**
+     * Records {@code destinationRepository}'s freshly-copied version as genuinely retained from
+     * {@code upstreamRepository} (a {@code CopyPackageVersions} call with {@code
+     * includeFromUpstream} resolved it from there rather than from the literal {@code
+     * sourceRepository} named in the request): written directly as an already-confirmed claim,
+     * the same shape {@link #copyMavenRetainedVersionOriginIfApplicable} already uses for a plain
+     * copy, since the real write this claim describes has already finished by the time this runs,
+     * there is no concurrent writer to arbitrate against the way {@link
+     * #claimRetainedVersionOrigin}'s own claim-or-reject gate exists for.
+     */
+    private void recordUpstreamRepositoryOriginForCopiedVersion(String region, String domain, String owner,
+            String destinationRepository, String format, String namespace, String packageName, String version,
+            String upstreamRepository) {
+        String key = ownerScopedKey(owner, packageVersionKey(region, domain, destinationRepository, format,
+                namespace, accountingPackageName(format, packageName),
+                normalizedContainerBackedVersion(format, version)));
+        long episodeId = retainedVersionOriginEpisodeCounter.incrementAndGet();
+        EntryPoint entryPoint = entryPointThrough(owner, region, domain, upstreamRepository, format, namespace,
+                packageName, version);
+        retainedVersionOriginConnections.put(key, new RetainedVersionOriginClaim(upstreamRepository,
+                RetentionOriginKind.UPSTREAM_REPOSITORY, 0, true, episodeId, entryPoint));
     }
 
     /**
@@ -4393,18 +5008,18 @@ public class CodeArtifactService implements Resettable {
      */
     private void rollbackContainerBackedVersionWrite(RepositorySidecarManager manager, String destRepoId,
             String domain, String destinationRepository, String namespace, String packageName, String version,
-            Map<String, byte[]> originalContent, List<String> touchedAssetNames) {
+            Map<String, Path> originalContent, List<String> touchedAssetNames) {
         for (String assetName : touchedAssetNames) {
             try {
-                byte[] original = originalContent.get(assetName);
+                Path original = originalContent.get(assetName);
                 if (original != null) {
                     manager.storePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
-                            packageName, version, assetName, original);
+                            packageName, version, assetName, original, Files.size(original));
                 } else {
                     manager.deletePackageVersionAsset(destRepoId, domain, destinationRepository, namespace,
                             packageName, version, assetName);
                 }
-            } catch (RuntimeException rollbackFailure) {
+            } catch (IOException | RuntimeException rollbackFailure) {
                 LOG.warnv(rollbackFailure, "Best-effort rollback could not restore {0}/{1} package ''{2}'' "
                         + "version ''{3}'' asset ''{4}'' after a failed copy; the destination may still be "
                         + "left in a partially-copied state for this version.", domain, destinationRepository,
@@ -4417,7 +5032,9 @@ public class CodeArtifactService implements Resettable {
      * {@code true} only when {@code source} and {@code dest} hold the exact same asset names for
      * this version, each fetching to byte-identical content: the container-backed equivalent of
      * {@link #packageVersionContentMatches}, which compares persisted hashes instead since generic
-     * assets have one and these don't.
+     * assets have one and these don't. Streams both sides against each other rather than fetching
+     * either as a resident {@code byte[]}, the same reason {@code ReposiliteSidecarClient
+     * #existingArtifactMatches}'s own {@code Path} overload does.
      */
     private static boolean containerBackedVersionContentMatches(RepositorySidecarManager manager,
             String sourceRepoId, String sourceRepository, String destRepoId, String destinationRepository,
@@ -4427,35 +5044,69 @@ public class CodeArtifactService implements Resettable {
             return false;
         }
         for (String assetName : sourceAssetNames) {
-            byte[] sourceContent = manager.fetchPackageVersionAsset(sourceRepoId, domain, sourceRepository,
-                    namespace, packageName, version, assetName).orElse(null);
-            byte[] destContent = manager.fetchPackageVersionAsset(destRepoId, domain, destinationRepository,
-                    namespace, packageName, version, assetName).orElse(null);
-            if (!Arrays.equals(sourceContent, destContent)) {
+            Optional<RepositorySidecarManager.StreamedAsset> source = manager.fetchPackageVersionAssetStreamed(
+                    sourceRepoId, domain, sourceRepository, namespace, packageName, version, assetName);
+            Optional<RepositorySidecarManager.StreamedAsset> dest = manager.fetchPackageVersionAssetStreamed(
+                    destRepoId, domain, destinationRepository, namespace, packageName, version, assetName);
+            if (source.isEmpty() != dest.isEmpty()) {
+                source.ifPresent(s -> StreamingResponses.closeQuietly(s.content()));
+                dest.ifPresent(d -> StreamingResponses.closeQuietly(d.content()));
+                return false;
+            }
+            if (source.isPresent() && !streamsEqual(source.get().content(), dest.get().content())) {
                 return false;
             }
         }
         return true;
     }
 
+    /** Reads both streams in lockstep without ever holding either one's content whole, then closes both. */
+    private static boolean streamsEqual(InputStream a, InputStream b) {
+        try (InputStream closeA = a; InputStream closeB = b) {
+            return StreamEquality.contentsMatch(closeA, closeB);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     /**
-     * Reads every one of {@code source}'s assets and confirms each one's actual bytes still hash
-     * to what its own persisted metadata claims, returning the verified bytes keyed by asset name.
-     * Guards against two distinct ways {@link #readAssetContent} can otherwise hand back the
-     * wrong bytes silently: a missing in-memory entry, which it answers with an empty array
-     * rather than an error, and disk corruption independent of Floci, which it never checks at
-     * all. Thrown as {@code InternalServerException} rather than folded into a per-version
-     * {@code CopyPackageVersionsResult} failure: this is this emulator's own storage integrity
-     * failing, not a caller-facing outcome any AWS-documented error code for this action
-     * describes.
+     * Stages every one of {@code source}'s assets to its own temp file and confirms each one's
+     * actual bytes still hash to what its own persisted metadata claims, returning the verified
+     * content keyed by asset name. Guards against two distinct ways {@link #readAssetContent}
+     * could otherwise hand back the wrong bytes silently: a missing in-memory entry, which it
+     * answers with an empty array rather than an error, and disk corruption independent of Floci,
+     * which it never checks at all. Thrown as {@code InternalServerException} rather than folded
+     * into a per-version {@code CopyPackageVersionsResult} failure: this is this emulator's own
+     * storage integrity failing, not a caller-facing outcome any AWS-documented error code for
+     * this action describes.
+     *
+     * <p>Each asset is staged via {@link #openAssetContent} wrapped in an {@link
+     * AssetDigestingInputStream} rather than read whole with {@link #readAssetContent}: a source
+     * asset can be up to the real 5 GB CodeArtifact quota, far past what a {@code byte[]} can ever
+     * hold (~2 GiB), and this digests it in the same single streaming pass that stages it, rather
+     * than a separate full-array hash afterward. Every staged file, verified or not, is appended
+     * to {@code stagedFiles} so the caller's own batch-wide cleanup deletes it exactly once,
+     * including a file staged for an asset that then fails its own hash check.
      */
-    private Map<String, byte[]> verifyAndReadSourceAssets(String owner, CodeArtifactPackageVersion source) {
+    private Map<String, Path> verifyAndReadSourceAssets(String owner, CodeArtifactPackageVersion source,
+            List<Path> stagedFiles) {
         String sourceKey = packageVersionKey(source.getRegion(), source.getDomainName(), source.getRepositoryName(),
                 source.getFormat(), source.getNamespace(), source.getPackageName(), source.getVersion());
-        Map<String, byte[]> verified = new LinkedHashMap<>();
+        Map<String, Path> verified = new LinkedHashMap<>();
         for (PackageAsset sourceAsset : source.getAssets().values()) {
-            byte[] content = readAssetContent(owner, sourceKey, sourceAsset.getName());
-            String actualSha256 = computeHashes(content).get("SHA-256");
+            AssetDigestingInputStream digesting = new AssetDigestingInputStream(
+                    openAssetContent(owner, sourceKey, sourceAsset.getName()), MAX_ASSET_FILE_SIZE_BYTES);
+            Path staged;
+            try {
+                staged = stageAssetBody(digesting);
+            } finally {
+                // stageAssetBody itself never closes the body it is handed (see
+                // stageStreamedAsset's own javadoc); openAssetContent's disk-mode source is a real
+                // file handle, so without this it leaks one descriptor per asset copied.
+                StreamingResponses.closeQuietly(digesting);
+            }
+            stagedFiles.add(staged);
+            String actualSha256 = digesting.hashesHex().get("SHA-256");
             String expectedSha256 = sourceAsset.getHashes().get("SHA-256");
             if (expectedSha256 == null || !expectedSha256.equalsIgnoreCase(actualSha256)) {
                 throw new AwsException("InternalServerException", "Could not copy version '" + source.getVersion()
@@ -4463,7 +5114,7 @@ public class CodeArtifactService implements Resettable {
                         + "' is missing from the source repository's storage or no longer matches its recorded "
                         + "hash.", 500);
             }
-            verified.put(sourceAsset.getName(), content);
+            verified.put(sourceAsset.getName(), staged);
         }
         return verified;
     }
@@ -4517,7 +5168,7 @@ public class CodeArtifactService implements Resettable {
      */
     private CodeArtifactPackageVersion copyGenericPackageVersionAssets(String owner, String region, String domain,
             String destinationRepository, String format, String namespace, String packageName, String version,
-            CodeArtifactPackageVersion source, Map<String, byte[]> verifiedContent) {
+            CodeArtifactPackageVersion source, Map<String, Path> verifiedContent) {
         String destKey = packageVersionKey(region, domain, destinationRepository, format, namespace, packageName,
                 version);
         CodeArtifactPackageVersion existingDest = packageVersions.getForAccount(owner, destKey).orElse(null);
@@ -4755,11 +5406,450 @@ public class CodeArtifactService implements Resettable {
         return Base64Url.encode(bytes);
     }
 
+    // -------------------------------------------------------------- package groups
+
+    /**
+     * Creates a package group. Per the User Guide, a brand-new group starts with every
+     * restriction type at {@code INHERIT} (see {@link #resolveEffectiveMode}'s own javadoc for
+     * how that resolves): nothing is configured here until a caller calls
+     * {@link #updatePackageGroupOriginConfiguration}.
+     */
+    public synchronized PackageGroupDescriptionView createPackageGroup(String region, String domain,
+            String domainOwner, String pattern, String contactInfo, String description, Map<String, String> tags) {
+        validatePackageGroupPattern(pattern);
+        validateDescription(description);
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        requireDomain(owner, domainKey(region, domain), domain);
+        if (ROOT_PACKAGE_GROUP.equals(pattern) || packageGroups.getForAccount(owner, key).isPresent()) {
+            throw conflict("A package group with pattern '" + pattern + "' already exists.", pattern,
+                    "package-group");
+        }
+        // Unlike domains and repositories (MAX_DOMAINS_PER_ACCOUNT, repositoryCountForDomain's own
+        // caller), the real CodeArtifact quotas page publishes no numbered "package groups per
+        // domain" limit at all (confirmed against docs.aws.amazon.com/codeartifact/latest/ug/
+        // service-limits.html's full table), so there is no documented threshold to enforce here.
+        String arn = regionResolver.buildArn("codeartifact", region, "package-group/" + domain + pattern);
+        PackageGroup group = new PackageGroup(pattern, arn, domain, owner, region, contactInfo, description,
+                Instant.now().getEpochSecond());
+        group.setTags(validateTags(tags, Map.of(), pattern, "package-group"));
+        packageGroups.putForAccount(owner, key, group);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return toDescriptionView(all, group);
+    }
+
+    public synchronized PackageGroupDescriptionView deletePackageGroup(String region, String domain,
+            String domainOwner, String pattern) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        PackageGroup group = requirePackageGroup(owner, key, pattern);
+        if (ROOT_PACKAGE_GROUP.equals(group.getPattern())) {
+            // The service's own sentence, as recorded against AWS.
+            throw validation("The root package group, '/*', cannot be deleted.");
+        }
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        // Computed before the delete removes it from storage: DeletePackageGroup's own documented
+        // behavior ("the direct child package groups will become children of the package group's
+        // direct parent") is a property of the hierarchy as it stood right before this group was
+        // removed, and the response describes this now-deleted group's own view as it last was.
+        PackageGroupDescriptionView view = toDescriptionView(all, group);
+        packageGroups.deleteForAccount(owner, key);
+        return view;
+    }
+
+    public PackageGroupDescriptionView describePackageGroup(String region, String domain, String domainOwner,
+            String pattern) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        PackageGroup group = requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return toDescriptionView(all, group);
+    }
+
+    /** Unlike every other package group action, this one cannot change {@code pattern} or
+     * {@code restrictions}: the wire model's own {@code UpdatePackageGroupRequest} carries only
+     * {@code contactInfo}/{@code description}, confirmed against {@code service-2.json}. */
+    public synchronized PackageGroupDescriptionView updatePackageGroup(String region, String domain,
+            String domainOwner, String pattern, String contactInfo, String description) {
+        validateDescription(description);
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        PackageGroup group = requirePackageGroup(owner, key, pattern);
+        group.setContactInfo(contactInfo);
+        group.setDescription(description);
+        packageGroups.putForAccount(owner, key, group);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return toDescriptionView(all, group);
+    }
+
+    public synchronized UpdatePackageGroupOriginConfigurationResult updatePackageGroupOriginConfiguration(
+            String region, String domain, String domainOwner, String pattern, Map<String, String> restrictions,
+            List<PackageGroupAllowedRepositoryEdit> addAllowedRepositories,
+            List<PackageGroupAllowedRepositoryEdit> removeAllowedRepositories) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        String key = packageGroupKey(region, domain, pattern);
+        PackageGroup group = requirePackageGroup(owner, key, pattern);
+        if (restrictions != null) {
+            restrictions.forEach((type, mode) -> {
+                if (!PACKAGE_GROUP_RESTRICTION_TYPES.contains(type)) {
+                    throw validation("restrictions key must be one of " + PACKAGE_GROUP_RESTRICTION_TYPES + ".");
+                }
+                if (!PACKAGE_GROUP_MODES.contains(mode)) {
+                    throw validation("restrictions value must be one of " + PACKAGE_GROUP_MODES + ".");
+                }
+            });
+        }
+        Map<String, PackageGroupRestriction> stored = new LinkedHashMap<>(group.getRestrictions());
+        Map<String, Map<String, List<String>>> allowedRepositoryUpdates = new LinkedHashMap<>();
+        if (restrictions != null) {
+            restrictions.forEach((type, mode) ->
+                    stored.put(type, new PackageGroupRestriction(mode, copyAllowedRepositories(stored.get(type)))));
+        }
+        applyAllowedRepositoryEdits(stored, addAllowedRepositories, "ADDED", allowedRepositoryUpdates);
+        applyAllowedRepositoryEdits(stored, removeAllowedRepositories, "REMOVED", allowedRepositoryUpdates);
+        group.setRestrictions(stored);
+        packageGroups.putForAccount(owner, key, group);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        return new UpdatePackageGroupOriginConfigurationResult(toDescriptionView(all, group), allowedRepositoryUpdates);
+    }
+
+    /** One {@code addAllowedRepositories}/{@code removeAllowedRepositories} list entry. */
+    public record PackageGroupAllowedRepositoryEdit(String repositoryName, String originRestrictionType) {}
+
+    /**
+     * {@code existing}'s own allowed-repository list, copied so a caller can mutate it without
+     * reaching back into stored state, or a fresh empty list when there is no existing restriction
+     * to copy from yet. Shared by {@link #updatePackageGroupOriginConfiguration} and {@link
+     * #applyAllowedRepositoryEdits}, which both start from the same "copy what's there, or start
+     * empty" rule before making their own edit.
+     */
+    private static List<String> copyAllowedRepositories(PackageGroupRestriction existing) {
+        return existing == null ? new ArrayList<>() : new ArrayList<>(existing.getAllowedRepositories());
+    }
+
+    private void applyAllowedRepositoryEdits(Map<String, PackageGroupRestriction> stored,
+            List<PackageGroupAllowedRepositoryEdit> edits, String updateType,
+            Map<String, Map<String, List<String>>> allowedRepositoryUpdates) {
+        if (edits == null) {
+            return;
+        }
+        for (PackageGroupAllowedRepositoryEdit edit : edits) {
+            // Raised by Qodo's review of this PR: PACKAGE_GROUP_RESTRICTION_TYPES is an immutable
+            // List.of(...), whose contains(null) throws NullPointerException rather than returning
+            // false, so a request that omits originRestrictionType must be rejected explicitly
+            // before reaching it, not left to fall through to a 500.
+            if (edit.originRestrictionType() == null
+                    || !PACKAGE_GROUP_RESTRICTION_TYPES.contains(edit.originRestrictionType())) {
+                throw validation("originRestrictionType must be one of " + PACKAGE_GROUP_RESTRICTION_TYPES + ".");
+            }
+            validateRepositoryName(edit.repositoryName());
+            PackageGroupRestriction existing = stored.get(edit.originRestrictionType());
+            List<String> allowedRepositories = copyAllowedRepositories(existing);
+            String mode = existing == null ? "INHERIT" : existing.getMode();
+            if ("ADDED".equals(updateType)) {
+                if (!allowedRepositories.contains(edit.repositoryName())) {
+                    allowedRepositories.add(edit.repositoryName());
+                }
+            } else {
+                allowedRepositories.remove(edit.repositoryName());
+            }
+            stored.put(edit.originRestrictionType(), new PackageGroupRestriction(mode, allowedRepositories));
+            allowedRepositoryUpdates
+                    .computeIfAbsent(edit.originRestrictionType(), ignored -> new LinkedHashMap<>())
+                    .computeIfAbsent(updateType, ignored -> new ArrayList<>())
+                    .add(edit.repositoryName());
+        }
+    }
+
+    public PackageGroupListResult listPackageGroups(String region, String domain, String domainOwner,
+            String prefix, Integer maxResults, String nextToken) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        requireDomain(owner, domainKey(region, domain), domain);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        List<PackageGroup> matching = all.stream()
+                .filter(g -> prefix == null || g.getPattern().startsWith(prefix))
+                .toList();
+        PaginatedResult<PackageGroup> page = Pagination.paginate(matching, PackageGroup::getPattern, maxResults,
+                nextToken, 100, 1000, "ValidationException");
+        List<PackageGroupDescriptionView> views = page.items().stream().map(g -> toDescriptionView(all, g)).toList();
+        return new PackageGroupListResult(views, page.nextToken());
+    }
+
+    public PackageGroupListResult listSubPackageGroups(String region, String domain, String domainOwner,
+            String pattern, Integer maxResults, String nextToken) {
+        requireNonBlank(domain, "domain");
+        String owner = effectiveOwner(domainOwner);
+        PackageGroup group = requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        List<PackageGroup> children = all.stream()
+                .filter(candidate -> !candidate.getPattern().equals(group.getPattern()))
+                .filter(candidate -> findParent(all, parsedPattern(candidate))
+                        .map(PackageGroup::getPattern).filter(p -> p.equals(group.getPattern())).isPresent())
+                .toList();
+        PaginatedResult<PackageGroup> page = Pagination.paginate(children, PackageGroup::getPattern, maxResults,
+                nextToken, 100, 1000, "ValidationException");
+        List<PackageGroupDescriptionView> views = page.items().stream().map(g -> toDescriptionView(all, g)).toList();
+        return new PackageGroupListResult(views, page.nextToken());
+    }
+
+    public ListAllowedRepositoriesForGroupResult listAllowedRepositoriesForGroup(String region, String domain,
+            String domainOwner, String pattern, String originRestrictionType, Integer maxResults, String nextToken) {
+        requireNonBlank(domain, "domain");
+        if (originRestrictionType == null || !PACKAGE_GROUP_RESTRICTION_TYPES.contains(originRestrictionType)) {
+            throw validation("originRestrictionType must be one of " + PACKAGE_GROUP_RESTRICTION_TYPES + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        PackageGroup group = requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        PackageGroupRestriction restriction = group.getRestrictions().get(originRestrictionType);
+        List<String> repositories = restriction == null ? List.of() : restriction.getAllowedRepositories();
+        PaginatedResult<String> page = Pagination.paginate(repositories, Function.identity(), maxResults, nextToken,
+                100, 1000, "ValidationException");
+        return new ListAllowedRepositoriesForGroupResult(page.items(), page.nextToken());
+    }
+
+    public ListAssociatedPackagesResult listAssociatedPackages(String region, String domain, String domainOwner,
+            String pattern, Integer maxResults, String nextToken, boolean preview) {
+        requireNonBlank(domain, "domain");
+        validatePackageGroupPattern(pattern);
+        String owner = effectiveOwner(domainOwner);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        if (!preview) {
+            requirePackageGroup(owner, packageGroupKey(region, domain, pattern), pattern);
+        }
+        PackageGroupPatterns.ParsedPattern target = PackageGroupPatterns.parse(pattern);
+        List<AssociatedPackageView> associated = new ArrayList<>();
+        for (PackageCoordinate coordinate : allPackageCoordinatesInDomain(owner, region, domain)) {
+            PackageGroupPatterns.PackagePath path = PackageGroupPatterns.packagePath(coordinate.format(),
+                    coordinate.namespace(), coordinate.packageName());
+            Optional<AssociatedGroupMatch> match = findAssociatedGroup(all, path);
+            // preview=true answers "what would be associated with this pattern if it existed",
+            // so a package only counts if this hypothetical pattern would actually win the
+            // specificity contest against every group that is already real.
+            PackageGroupPatterns.MatchStrength targetStrength = PackageGroupPatterns.matchStrength(target, path);
+            if (targetStrength == null) {
+                continue;
+            }
+            boolean targetWins = match.isEmpty()
+                    || PackageGroupPatterns.compareSpecificity(target, parsedPattern(match.get().group())) > 0
+                    || match.get().group().getPattern().equals(pattern);
+            if (!targetWins) {
+                continue;
+            }
+            associated.add(new AssociatedPackageView(coordinate.format(), coordinate.namespace(),
+                    coordinate.packageName(), targetStrength.name()));
+        }
+        PaginatedResult<AssociatedPackageView> page = Pagination.paginate(associated,
+                v -> v.format() + "::" + escapeKeySegment(v.namespace()) + "::" + escapeKeySegment(v.packageName()),
+                maxResults, nextToken, 100, 1000, "ValidationException");
+        return new ListAssociatedPackagesResult(page.items(), page.nextToken());
+    }
+
+    public GetAssociatedPackageGroupResult getAssociatedPackageGroup(String region, String domain,
+            String domainOwner, String format, String namespace, String packageName) {
+        requireNonBlank(domain, "domain");
+        if (format == null || !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        requireNonBlank(packageName, "package");
+        String owner = effectiveOwner(domainOwner);
+        requireDomain(owner, domainKey(region, domain), domain);
+        List<PackageGroup> all = allPackageGroupsInDomain(owner, region, domain);
+        PackageGroupPatterns.PackagePath path = PackageGroupPatterns.packagePath(format, namespace, packageName);
+        AssociatedGroupMatch match = findAssociatedGroup(all, path)
+                .orElseThrow(() -> notFound("No package group in domain '" + domain + "' is associated with "
+                        + "package '" + packageName + "'.", packageName, "package"));
+        return new GetAssociatedPackageGroupResult(toDescriptionView(all, match.group()), match.strength().name());
+    }
+
+    private List<PackageGroup> allPackageGroupsInDomain(String owner, String region, String domain) {
+        String prefix = region + "::" + domain + "::";
+        return packageGroups.scanForAccount(owner, k -> k.startsWith(prefix));
+    }
+
+    private static PackageGroupPatterns.ParsedPattern parsedPattern(PackageGroup group) {
+        return PackageGroupPatterns.parse(group.getPattern());
+    }
+
+    /**
+     * The most specific OTHER group in {@code all} that structurally contains {@code pattern}
+     * (every package {@code pattern} can ever match also matches that other group), per the User
+     * Guide's own hierarchy rule: "a group's parent is the most specific other existing group
+     * that is a strict superset." Recomputed from the current set of groups on every call rather
+     * than stored, since {@link #deletePackageGroup}'s own documented behavior (children
+     * reparent onto the deleted group's own parent) means this relationship is never stable
+     * across a create/delete elsewhere in the domain.
+     */
+    private Optional<PackageGroup> findParent(List<PackageGroup> all, PackageGroupPatterns.ParsedPattern pattern) {
+        PackageGroup best = null;
+        PackageGroupPatterns.ParsedPattern bestParsed = null;
+        for (PackageGroup candidate : all) {
+            PackageGroupPatterns.ParsedPattern candidateParsed = parsedPattern(candidate);
+            if (!PackageGroupPatterns.isStrictAncestor(candidateParsed, pattern)) {
+                continue;
+            }
+            if (best == null || PackageGroupPatterns.compareSpecificity(candidateParsed, bestParsed) > 0) {
+                best = candidate;
+                bestParsed = candidateParsed;
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * The single group a package is associated with: the most specific group in {@code all}
+     * whose pattern matches {@code path} at all (strong or weak), per the User Guide's own
+     * "a package is associated with exactly one package group" rule. Every domain holds the root
+     * group {@code /*}, which matches every package, so a package of a domain always has one;
+     * {@link Optional#empty} is left for a list of groups that has no root.
+     */
+    private Optional<AssociatedGroupMatch> findAssociatedGroup(List<PackageGroup> all,
+            PackageGroupPatterns.PackagePath path) {
+        PackageGroup best = null;
+        PackageGroupPatterns.ParsedPattern bestParsed = null;
+        PackageGroupPatterns.MatchStrength bestStrength = null;
+        for (PackageGroup candidate : all) {
+            PackageGroupPatterns.ParsedPattern candidateParsed = parsedPattern(candidate);
+            PackageGroupPatterns.MatchStrength strength = PackageGroupPatterns.matchStrength(candidateParsed, path);
+            if (strength == null) {
+                continue;
+            }
+            int rank = best == null ? 1 : PackageGroupPatterns.compareSpecificity(candidateParsed, bestParsed);
+            // Raised by Qodo's review of this PR: two patterns can tie on specificity while
+            // differing only by case or separators (e.g. /npm//foo$ and /npm//Foo$), in which case
+            // whichever happened to be scanned first used to win regardless of match strength. A
+            // package that strongly matches one of them must prefer that one over a tied-rank
+            // pattern it only weakly matches, so its enforcement isn't decided by storage order.
+            boolean strongDisplacesWeakTie = rank == 0 && strength == PackageGroupPatterns.MatchStrength.STRONG
+                    && bestStrength == PackageGroupPatterns.MatchStrength.WEAK;
+            if (best == null || rank > 0 || strongDisplacesWeakTie) {
+                best = candidate;
+                bestParsed = candidateParsed;
+                bestStrength = strength;
+            }
+        }
+        return best == null ? Optional.empty() : Optional.of(new AssociatedGroupMatch(best, bestStrength));
+    }
+
+    /**
+     * Resolves {@code restrictionType}'s real effective mode for {@code group}, walking up to its
+     * nearest ancestor with a concrete (non-{@code INHERIT}) setting, per {@code
+     * PackageGroupOriginRestriction}'s own documented resolution rule ("the first parent group
+     * which does not have a value of INHERIT"). A brand-new group, and the top of any hierarchy
+     * that never set this restriction type at all, defaults to {@code ALLOW}: not directly stated
+     * for this exact case, but the only reading consistent with the User Guide's "Default package
+     * origin control settings" section, which describes a package associated with such a group as
+     * seeing {@code ALLOW} for every restriction type.
+     */
+    private EffectiveModeResult resolveEffectiveMode(List<PackageGroup> all, PackageGroup group,
+            String restrictionType) {
+        PackageGroup current = group;
+        while (true) {
+            PackageGroupRestriction restriction = current.getRestrictions().get(restrictionType);
+            String mode = restriction == null ? "INHERIT" : restriction.getMode();
+            if (!"INHERIT".equals(mode)) {
+                return new EffectiveModeResult(mode, current == group ? null : current);
+            }
+            Optional<PackageGroup> parent = findParent(all, parsedPattern(current));
+            if (parent.isEmpty()) {
+                return new EffectiveModeResult("ALLOW", null);
+            }
+            current = parent.get();
+        }
+    }
+
+    private Map<String, PackageGroupOriginRestrictionView> buildRestrictionsView(List<PackageGroup> all,
+            PackageGroup group) {
+        Map<String, PackageGroupOriginRestrictionView> views = new LinkedHashMap<>();
+        for (String type : PACKAGE_GROUP_RESTRICTION_TYPES) {
+            PackageGroupRestriction stored = group.getRestrictions().get(type);
+            String rawMode = stored == null ? "INHERIT" : stored.getMode();
+            EffectiveModeResult effective = resolveEffectiveMode(all, group, type);
+            long repositoriesCount = stored == null ? 0 : stored.getAllowedRepositories().size();
+            String inheritedFromArn = effective.inheritedFrom() == null ? null : effective.inheritedFrom().getArn();
+            String inheritedFromPattern = effective.inheritedFrom() == null ? null
+                    : effective.inheritedFrom().getPattern();
+            views.put(type, new PackageGroupOriginRestrictionView(rawMode, effective.mode(), inheritedFromArn,
+                    inheritedFromPattern, repositoriesCount));
+        }
+        return views;
+    }
+
+    private PackageGroupDescriptionView toDescriptionView(List<PackageGroup> all, PackageGroup group) {
+        Optional<PackageGroup> parent = findParent(all, parsedPattern(group));
+        return new PackageGroupDescriptionView(group.getArn(), group.getPattern(), group.getDomainName(),
+                group.getDomainOwner(), group.getCreatedTime(), group.getContactInfo(), group.getDescription(),
+                buildRestrictionsView(all, group), parent.map(PackageGroup::getArn).orElse(null),
+                parent.map(PackageGroup::getPattern).orElse(null));
+    }
+
+    /**
+     * Resolves {@code group}'s own effective {@code PUBLISH} mode for {@code repository}, folding
+     * in {@code ALLOW_SPECIFIC_REPOSITORIES}'s own per-repository allow-list: used by {@link
+     * #publishPackageVersion} to decide a direct publish once the package's own origin
+     * configuration has already deferred to its group (see that method's own javadoc for the
+     * full "BLOCK always wins" interaction this is one half of).
+     */
+    private boolean groupAllowsPublish(List<PackageGroup> all, PackageGroup group, String repository) {
+        return groupAllowsRestriction(all, group, "PUBLISH", repository);
+    }
+
+    /**
+     * Resolves {@code group}'s own effective mode for {@code restrictionType} (one of {@code
+     * PUBLISH}, {@code EXTERNAL_UPSTREAM}, {@code INTERNAL_UPSTREAM}), folding in {@code
+     * ALLOW_SPECIFIC_REPOSITORIES}'s own per-repository allow-list: the User Guide's package
+     * group origin controls page documents the exact same three modes, the same allow-list
+     * shape, for all three restriction types alike, not something specific to {@code PUBLISH}.
+     */
+    private boolean groupAllowsRestriction(List<PackageGroup> all, PackageGroup group, String restrictionType,
+            String repository) {
+        EffectiveModeResult effective = resolveEffectiveMode(all, group, restrictionType);
+        return switch (effective.mode()) {
+            case "ALLOW" -> true;
+            case "BLOCK" -> false;
+            case "ALLOW_SPECIFIC_REPOSITORIES" -> {
+                // Raised by Qodo's review of this PR: ALLOW_SPECIFIC_REPOSITORIES can itself be an
+                // INHERITed mode (resolveEffectiveMode walked up to inheritedFrom to find it), in
+                // which case the allow-list living on it belongs to that ancestor, not to `group`
+                // itself, which has no restriction of its own here at all (its own mode was
+                // INHERIT). Reading group's own (absent) restriction instead of the ancestor's
+                // rejected every repository the ancestor actually allowed.
+                PackageGroup source = effective.inheritedFrom() == null ? group : effective.inheritedFrom();
+                PackageGroupRestriction restriction = source.getRestrictions().get(restrictionType);
+                yield restriction != null && restriction.getAllowedRepositories().contains(repository);
+            }
+            default -> throw new IllegalStateException("resolveEffectiveMode must never return " + effective.mode());
+        };
+    }
+
+    /** Every (format, namespace, packageName) coordinate with at least one real package anywhere
+     * in {@code domain}, across every repository, for {@link #listAssociatedPackages}: package
+     * groups are domain-wide, so association is checked against every package the domain holds,
+     * not just one repository's. */
+    private List<PackageCoordinate> allPackageCoordinatesInDomain(String owner, String region, String domain) {
+        Set<PackageCoordinate> coordinates = new LinkedHashSet<>();
+        String repositoryPrefix = region + "::" + domain + "::";
+        for (CodeArtifactRepository repository : repositories.scanForAccount(owner, k -> k.startsWith(repositoryPrefix))) {
+            coordinates.addAll(allPackagesInRepository(region, domain, owner, owner, repository.getName(), null)
+                    .coordinates());
+        }
+        return new ArrayList<>(coordinates);
+    }
+
     // -------------------------------------------------------------------- tags
 
     public synchronized void tagResource(String resourceArn, Map<String, String> newTags) {
         ResourceRef ref = parseResourceArn(resourceArn);
-        if (ref.repository() == null) {
+        if ("package-group".equals(ref.type())) {
+            String key = packageGroupKey(ref.region(), ref.domain(), ref.packageGroupPattern());
+            PackageGroup g = requirePackageGroup(ref.owner(), key, ref.packageGroupPattern());
+            g.setTags(validateTags(newTags, g.getTags(), ref.packageGroupPattern(), "package-group"));
+            packageGroups.putForAccount(ref.owner(), key, g);
+        } else if (ref.repository() == null) {
             String key = domainKey(ref.region(), ref.domain());
             CodeArtifactDomain d = requireDomain(ref.owner(), key, ref.domain());
             d.setTags(validateTags(newTags, d.getTags(), ref.domain(), "domain"));
@@ -4774,7 +5864,14 @@ public class CodeArtifactService implements Resettable {
 
     public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         ResourceRef ref = parseResourceArn(resourceArn);
-        if (ref.repository() == null) {
+        if ("package-group".equals(ref.type())) {
+            String key = packageGroupKey(ref.region(), ref.domain(), ref.packageGroupPattern());
+            PackageGroup g = requirePackageGroup(ref.owner(), key, ref.packageGroupPattern());
+            Map<String, String> tags = new LinkedHashMap<>(g.getTags());
+            tagKeys.forEach(tags::remove);
+            g.setTags(tags);
+            packageGroups.putForAccount(ref.owner(), key, g);
+        } else if (ref.repository() == null) {
             String key = domainKey(ref.region(), ref.domain());
             CodeArtifactDomain d = requireDomain(ref.owner(), key, ref.domain());
             Map<String, String> tags = new LinkedHashMap<>(d.getTags());
@@ -4793,6 +5890,10 @@ public class CodeArtifactService implements Resettable {
 
     public Map<String, String> listTagsForResource(String resourceArn) {
         ResourceRef ref = parseResourceArn(resourceArn);
+        if ("package-group".equals(ref.type())) {
+            return requirePackageGroup(ref.owner(), packageGroupKey(ref.region(), ref.domain(),
+                    ref.packageGroupPattern()), ref.packageGroupPattern()).getTags();
+        }
         if (ref.repository() == null) {
             return requireDomain(ref.owner(), domainKey(ref.region(), ref.domain()), ref.domain()).getTags();
         }
@@ -4809,6 +5910,7 @@ public class CodeArtifactService implements Resettable {
             packageOriginConfigs.clear();
             migratedOriginConfigAccounts.clear();
         }
+        packageGroups.clear();
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
         containerBackedVersionDeletionFence.clear();
@@ -4827,7 +5929,8 @@ public class CodeArtifactService implements Resettable {
 
     // ----------------------------------------------------------------- helpers
 
-    private record ResourceRef(String type, String region, String owner, String domain, String repository) {}
+    private record ResourceRef(String type, String region, String owner, String domain, String repository,
+            String packageGroupPattern) {}
 
     private ResourceRef parseResourceArn(String resourceArn) {
         AwsArnUtils.Arn arn;
@@ -4839,14 +5942,23 @@ public class CodeArtifactService implements Resettable {
         if (!"codeartifact".equals(arn.service())) {
             throw validation("resourceArn must be a CodeArtifact ARN.");
         }
-        String[] parts = arn.resource().split("/");
+        // split(..., -1) keeps a trailing empty segment, since a package group pattern can itself
+        // end in a '/' component (a namespace-less format's pattern, e.g. "/python//requests$"),
+        // which the default split() would otherwise silently drop.
+        String[] parts = arn.resource().split("/", -1);
         if (parts.length == 2 && "domain".equals(parts[0])) {
-            return new ResourceRef("domain", arn.region(), arn.accountId(), parts[1], null);
+            return new ResourceRef("domain", arn.region(), arn.accountId(), parts[1], null, null);
         }
         if (parts.length == 3 && "repository".equals(parts[0])) {
-            return new ResourceRef("repository", arn.region(), arn.accountId(), parts[1], parts[2]);
+            return new ResourceRef("repository", arn.region(), arn.accountId(), parts[1], parts[2], null);
         }
-        throw validation("resourceArn must reference a domain or a repository.");
+        if (parts.length >= 3 && "package-group".equals(parts[0])) {
+            // The pattern's own literal '/' separators were split apart along with the ARN's;
+            // rejoin everything after the domain and restore the pattern's leading '/'.
+            String pattern = "/" + String.join("/", Arrays.asList(parts).subList(2, parts.length));
+            return new ResourceRef("package-group", arn.region(), arn.accountId(), parts[1], null, pattern);
+        }
+        throw validation("resourceArn must reference a domain, a repository, or a package group.");
     }
 
     private String effectiveOwner(String domainOwner) {
@@ -5184,6 +6296,23 @@ public class CodeArtifactService implements Resettable {
         return domains.scanForAccount(owner, k -> k.startsWith(region + "::")).size();
     }
 
+    /**
+     * Rejects a transitive cycle, not just a direct self-reference: no AWS documentation was found
+     * confirming CreateRepository/UpdateRepository rejects a cycle specifically (unlike the direct
+     * self-reference check below, nothing here cites an AWS error for this), so this is implemented
+     * defensively, by analogy with that same check's own spirit, rather than a confirmed AWS
+     * behavior. Checked by walking each candidate upstream's own transitive closure, using the
+     * graph as currently stored (before this update commits): if {@code repository} itself is
+     * already reachable from a candidate, adding that candidate would close a cycle, whichever
+     * direction it was introduced from (this repository adding an upstream that already reaches
+     * back to it, or discovered symmetrically when that upstream later tries to add this repository
+     * in turn, since at that point this repository already transitively reaches it). Uses {@link
+     * UpstreamRepositoryResolver#isReachable}, not {@link UpstreamRepositoryResolver#resolveSearchOrder},
+     * deliberately: the latter is capped at {@link UpstreamRepositoryResolver#MAX_RESOLUTION_REPOSITORIES}
+     * to match AWS's own documented per-resolution search quota, but a domain can hold up to 1,000
+     * repositories, so a cycle whose closing edge sits beyond that cap would otherwise pass
+     * validation and persist undetected.
+     */
     private void validateUpstreams(String owner, String region, String domain, String repository,
                                     List<String> upstreams) {
         if (upstreams == null) {
@@ -5202,7 +6331,29 @@ public class CodeArtifactService implements Resettable {
                 throw notFound("Upstream repository '" + upstream + "' was not found in domain '" + domain + "'.",
                         upstream, "repository");
             }
+            if (UpstreamRepositoryResolver.isReachable(upstream, repository,
+                    upstreamsOfFunction(owner, region, domain))) {
+                throw validation("Repository '" + upstream + "' already has '" + repository + "' in its own "
+                        + "upstream chain; adding it as an upstream here would create a cycle.");
+            }
         }
+    }
+
+    /**
+     * The priority-ordered, deduplicated, cycle-safe chain of repositories AWS searches when
+     * resolving a package-manager request against {@code repository}'s own {@code upstreams}
+     * (never including {@code repository} itself), depth-first in list order; see {@link
+     * UpstreamRepositoryResolver}'s own javadoc.
+     */
+    List<String> resolveUpstreamSearchOrder(String region, String domain, String domainOwner, String repository) {
+        String owner = effectiveOwner(domainOwner);
+        return UpstreamRepositoryResolver.resolveSearchOrder(repository, upstreamsOfFunction(owner, region, domain));
+    }
+
+    private Function<String, List<String>> upstreamsOfFunction(String owner, String region, String domain) {
+        return repositoryName -> repositories.getForAccount(owner, repositoryKey(region, domain, repositoryName))
+                .map(CodeArtifactRepository::getUpstreams)
+                .orElse(List.of());
     }
 
     // Used by DeleteDomain too: AWS returns ResourceNotFoundException for a missing domain there,
@@ -5221,6 +6372,30 @@ public class CodeArtifactService implements Resettable {
         }
         return repositories.getForAccount(owner, key)
                 .orElseThrow(() -> notFound("Repository not found.", repositoryName, "repository"));
+    }
+
+    private PackageGroup requirePackageGroup(String owner, String key, String pattern) {
+        if (pattern == null || pattern.isBlank()) {
+            throw validation("packageGroup is required.");
+        }
+        return packageGroups.getForAccount(owner, key)
+                .orElseThrow(() -> notFound("Package group with pattern '" + pattern + "' was not found.",
+                        pattern, "package-group"));
+    }
+
+    private static void validatePackageGroupPattern(String pattern) {
+        if (pattern == null || pattern.length() < 2 || pattern.length() > 520
+                || !PACKAGE_GROUP_PATTERN_TOKEN.matcher(pattern).matches()) {
+            throw validation("packageGroup must be 2-520 characters with no control characters or whitespace.");
+        }
+        // Surfaces a malformed pattern (missing '/', bad terminator, too many components) as a
+        // clean ValidationException up front, rather than letting it reach matching/hierarchy
+        // logic later and fail in a way that looks like an internal error.
+        try {
+            PackageGroupPatterns.parse(pattern);
+        } catch (IllegalArgumentException e) {
+            throw validation("packageGroup pattern is invalid: " + e.getMessage());
+        }
     }
 
     private void checkRevision(String currentRevision, String requestedRevision, String resourceId,
@@ -5336,7 +6511,7 @@ public class CodeArtifactService implements Resettable {
         if (("maven".equals(format) || "generic".equals(format)) && (namespace == null || namespace.isBlank())) {
             throw validation("namespace is required when " + action + " a " + format + " package.");
         }
-        if (("pypi".equals(format) || "nuget".equals(format)) && namespace != null) {
+        if (("pypi".equals(format) || "nuget".equals(format) || "cargo".equals(format)) && namespace != null) {
             throw validation(format + " packages do not have a namespace.");
         }
     }
@@ -5407,16 +6582,112 @@ public class CodeArtifactService implements Resettable {
             Path tmp = filePath.resolveSibling(filePath.getFileName() + ".tmp-" + UUID.randomUUID());
             try {
                 Files.write(tmp, content);
-                try {
-                    Files.move(tmp, filePath, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (AtomicMoveNotSupportedException e) {
-                    Files.move(tmp, filePath, StandardCopyOption.REPLACE_EXISTING);
-                }
+                moveIntoPlace(tmp, filePath);
             } finally {
                 Files.deleteIfExists(tmp);
             }
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to write CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    /**
+     * {@link #writeAssetContent(String, String, String, byte[])}'s own streamed sibling: {@code
+     * stagedContent} already holds the asset's full bytes on disk (written by {@link
+     * #stageAssetBody}), so the disk-mode path is a plain atomic move into place rather than a
+     * second full write, the one real saving streaming a large upload is for, versus buffering
+     * it into a {@code byte[]} first and writing that out the way the method above still does for
+     * small, already-resident content. {@code inMemory} test mode has no file to move, so it reads
+     * the (necessarily small, test-fixture-sized) staged file back into a {@code byte[]} and
+     * reuses the exact same map-based store the byte[] overload does.
+     */
+    private void writeAssetContent(String owner, String packageVersionKey, String assetName, Path stagedContent) {
+        if (inMemory) {
+            try {
+                writeAssetContent(owner, packageVersionKey, assetName, Files.readAllBytes(stagedContent));
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to read staged CodeArtifact asset body: "
+                        + stagedContent, e);
+            }
+            return;
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            Files.createDirectories(filePath.getParent());
+            moveIntoPlace(stagedContent, filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to write CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    private static void moveIntoPlace(Path source, Path destination) throws IOException {
+        try {
+            Files.move(source, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, destination, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * Writes a streamed asset upload to a new file under a staging directory and returns it, the
+     * CodeArtifact sibling of {@code S3Service#stageBody}: an upload larger than a {@code byte[]}
+     * can ever hold (~2 GiB) needs somewhere real to land before anything else: hashing,
+     * forwarding to a sidecar, an idempotency compare, can all happen against it. The caller owns
+     * deleting the returned file exactly once, on every exit path (written into place, discarded
+     * as an idempotent no-op, rejected for being too large, or failed outright); it is never
+     * deleted automatically just by virtue of being staged.
+     */
+    Path stageAssetBody(InputStream body) {
+        Path staged;
+        try {
+            if (inMemory) {
+                // inMemory test mode constructs this service with no real asset directory on
+                // disk at all (nothing backs the asset store itself in that mode): the JVM's own
+                // default temp directory is the only place to stage a streamed body, and it is
+                // never moved into assetRoot in this mode anyway, just read back into a byte[]
+                // for the in-memory map (see writeAssetContent(..., Path)).
+                staged = Files.createTempFile("codeartifact-asset-", ".incoming");
+            } else {
+                // Staged under assetRoot itself, not the JVM's default temp directory: the real
+                // write path below (writeAssetContent(..., Path) -> moveIntoPlace) needs source
+                // and destination on the same filesystem for its ATOMIC_MOVE to actually be
+                // atomic, rather than silently falling back to a copy+delete the moment assetRoot
+                // happens to sit on a different mount than the default temp directory, which
+                // would double the disk I/O for every large asset this streams.
+                Path incoming = assetRoot.resolve(".incoming");
+                Files.createDirectories(incoming);
+                staged = Files.createTempFile(incoming, "codeartifact-asset-", ".incoming");
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to create a staging file for a CodeArtifact asset upload", e);
+        }
+        try {
+            Files.copy(body, staged, StandardCopyOption.REPLACE_EXISTING);
+            return staged;
+        } catch (IOException e) {
+            deleteQuietlyStaged(staged);
+            throw new UncheckedIOException("Failed to stage a CodeArtifact asset upload", e);
+        } catch (RuntimeException e) {
+            deleteQuietlyStaged(staged);
+            throw e;
+        }
+    }
+
+    private void deleteQuietlyStaged(Path staged) {
+        deleteStagedAssetBody(staged);
+    }
+
+    /**
+     * Every controller that calls {@link #stageAssetBody} owns deleting the file it gets back
+     * exactly once, on every exit path. This is the one place that deletion happens, so a
+     * controller's own {@code finally} block never needs to hand-roll the same
+     * log-and-swallow-{@code IOException} logic four times over.
+     */
+    void deleteStagedAssetBody(Path staged) {
+        try {
+            Files.deleteIfExists(staged);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete a staged CodeArtifact asset upload at {0}", staged);
         }
     }
 
@@ -5428,6 +6699,20 @@ public class CodeArtifactService implements Resettable {
         Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
         try {
             return Files.readAllBytes(filePath);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
+        }
+    }
+
+    /** {@link #readAssetContent}'s streamed sibling, for an asset too large to hold as one {@code byte[]}. */
+    private InputStream openAssetContent(String owner, String packageVersionKey, String assetName) {
+        if (inMemory) {
+            byte[] content = memoryAssetStore.get(assetStoreKey(owner, packageVersionKey, assetName));
+            return new ByteArrayInputStream(content != null ? content : new byte[0]);
+        }
+        Path filePath = resolveAssetPath(owner, packageVersionKey, assetName);
+        try {
+            return Files.newInputStream(filePath);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read CodeArtifact asset file: " + filePath, e);
         }
@@ -5537,32 +6822,49 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
-     * Escapes a namespace/package/version segment before it goes into a {@code ::}-joined storage
-     * key. {@code region}/{@code domain}/{@code repository}/{@code format} never need this: they're
-     * each validated against a pattern that already excludes {@code :}. Namespace, package name, and
-     * version are different, {@link #PACKAGE_TOKEN} only excludes {@code #}, {@code /}, and
-     * whitespace, so {@code ::} itself is a legal character sequence in any of them. Without
-     * escaping, namespace {@code "a::b"} + package {@code "c"} and namespace {@code "a"} + package
-     * {@code "b::c"} join to the identical key, so one package's stored origin configuration (or
-     * published version) silently answers for the other.
+     * {@code escapeKeySegment} applies here too: {@code PackageGroupPattern}'s own wire regex
+     * ({@code [^\p{C}\p{IsWhitespace}]+}) does not forbid {@code :} or {@code #}, unlike
+     * {@link #PACKAGE_TOKEN}, so a pattern containing {@code ::} or a literal {@code #} could
+     * otherwise collide with this store's own {@code ::}-joined key separator, or with this
+     * method's own escape introducer (see that method's own javadoc for why escaping {@code #}
+     * too keeps this safe).
+     */
+    private static String packageGroupKey(String region, String domain, String pattern) {
+        return region + "::" + domain + "::" + escapeKeySegment(pattern);
+    }
+
+    /**
+     * Escapes a namespace/package/version segment, or a package-group pattern, before it goes
+     * into a {@code ::}-joined storage key. {@code region}/{@code domain}/{@code repository}/
+     * {@code format} never need this: they're each validated against a pattern that already
+     * excludes {@code :}. Namespace, package name, and version are different: {@link
+     * #PACKAGE_TOKEN} only excludes {@code #}, {@code /}, and whitespace, so {@code ::} itself is
+     * a legal character sequence in any of them. Without escaping, namespace {@code "a::b"} +
+     * package {@code "c"} and namespace {@code "a"} + package {@code "b::c"} join to the
+     * identical key, so one package's stored origin configuration (or published version) silently
+     * answers for the other. A package-group pattern (see {@link #packageGroupKey}) is looser
+     * still: unlike a namespace/package/version, its own wire pattern permits a literal {@code #}
+     * or {@code :} outright.
      *
-     * <p>{@code #} is the escape introducer, not {@code \}: every {@code \} becomes {@code #b} and
-     * every {@code :} becomes {@code #c}. {@code #} is itself one of the three characters
-     * {@link #PACKAGE_TOKEN} (and AWS's own {@code PackageName}/{@code PackageNamespace} wire
-     * pattern) forbids, so no namespace/package/version ever validated through this service, before
-     * or after this method existed, can contain one. An escaped segment therefore never collides
-     * with a pre-existing stored key built from a segment that happened to contain a literal
-     * backslash: that old raw key cannot contain {@code #}, and this method's output only does when
-     * it actually escaped something. For the overwhelming majority of packages, whose
-     * namespace/name/version never contain a backslash or colon, this returns the input unchanged,
-     * so the key built from those segments is byte-identical to the one built before this method
-     * existed.
+     * <p>{@code #} is the escape introducer, not {@code \}: every {@code \} becomes {@code #b},
+     * every {@code :} becomes {@code #c}, and every literal {@code #} becomes {@code #h} (escaping
+     * the introducer itself, not just the two characters it was first added for). Raised by
+     * Qodo's review of this PR: before this, a literal {@code #} passed through unescaped, so
+     * pattern {@code /npm//#c$} (literal {@code #} then {@code c}) and pattern {@code /npm//:$}
+     * (a literal {@code :}, escaped to {@code #c}) produced the identical key. Escaping every
+     * literal {@code #} as well means a bare {@code #} can never appear in this method's output
+     * except as the first character of one of its own three two-character escape sequences, which
+     * keeps every output injective: no two distinct inputs can ever produce the same escaped
+     * string. For namespace/package/version, this is a pure no-op change: {@link #PACKAGE_TOKEN}
+     * already forbids {@code #} there, so no existing stored key built from one of those segments
+     * can contain a literal {@code #} for this to newly escape, and the output for every such
+     * segment is byte-identical to what this method returned before.
      */
     private static String escapeKeySegment(String value) {
         if (value == null) {
             return "";
         }
-        if (value.indexOf(':') < 0 && value.indexOf('\\') < 0) {
+        if (value.indexOf(':') < 0 && value.indexOf('\\') < 0 && value.indexOf('#') < 0) {
             return value;
         }
         StringBuilder escaped = new StringBuilder(value.length() + 4);
@@ -5572,6 +6874,8 @@ public class CodeArtifactService implements Resettable {
                 escaped.append("#b");
             } else if (c == ':') {
                 escaped.append("#c");
+            } else if (c == '#') {
+                escaped.append("#h");
             } else {
                 escaped.append(c);
             }

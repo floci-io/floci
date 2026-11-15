@@ -2,10 +2,14 @@ package io.floci.aws.services.ce;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsErrorResponse;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+
+import java.util.Set;
 
 /**
  * JSON 1.1 handler for AWS Cost Explorer operations.
@@ -18,18 +22,28 @@ import org.jboss.logging.Logger;
 public class CostExplorerJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(CostExplorerJsonHandler.class);
+    /** The reads that take a {@code BillingViewArn}, which they answer the costs of. */
+    private static final Set<String> BILLING_VIEW_READS = Set.of("GetCostAndUsage", "GetCostAndUsageWithResources",
+            "GetDimensionValues", "GetTags", "GetCostCategories");
 
     private final CostExplorerService service;
     private final CostAnomalyService anomalies;
 
+    private final RegionResolver regionResolver;
+
     @Inject
-    public CostExplorerJsonHandler(CostExplorerService service, CostAnomalyService anomalies) {
+    public CostExplorerJsonHandler(CostExplorerService service, CostAnomalyService anomalies,
+                                   RegionResolver regionResolver) {
         this.service = service;
         this.anomalies = anomalies;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("CostExplorer action: {0}", action);
+        if (BILLING_VIEW_READS.contains(action)) {
+            requireServedBillingView(request);
+        }
         return switch (action) {
             case "GetCostAndUsage" -> Response.ok(service.getCostAndUsage(request, region)).build();
             case "GetCostAndUsageWithResources" -> Response.ok(service.getCostAndUsageWithResources(request, region)).build();
@@ -68,5 +82,22 @@ public class CostExplorerJsonHandler {
                             "Unknown operation: AWSInsightsIndexService." + action))
                     .build();
         };
+    }
+
+    /**
+     * Refuses a billing view other than the caller's primary one, the costs of the whole account, the only view Floci
+     * answers the costs of: AWS answers {@code ResourceNotFoundException}, "The specified ARN in the request doesn't
+     * exist.", for a view it does not hold. AWS does not document the primary view's ARN; Floci takes it as
+     * {@code billingview/primary}. The view is that ARN exactly, of AWS Billing, global, in the request's partition
+     * and account, as IAM checks it: one of another service or with a Region names no view IAM could check.
+     */
+    private void requireServedBillingView(JsonNode request) {
+        String view = request.path("BillingViewArn").asText("");
+        if (view.isEmpty()) {
+            return;
+        }
+        if (!regionResolver.buildGlobalArn("billing", "billingview/primary").equals(view)) {
+            throw new AwsException("ResourceNotFoundException", "The specified ARN in the request doesn't exist.", 400);
+        }
     }
 }

@@ -50,7 +50,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -619,6 +621,39 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 handle.getContainerId(), engine.defaultPort(), preferredNetwork);
     }
 
+    /**
+     * Moves a runtime to a new id, as a blue/green switchover does when it renames an instance and
+     * so changes its ARN. The running container, its storage claims, pending cleanup and
+     * auto-pause follow the instance, so a later stop or delete under the new ARN still finds
+     * them. The container itself is not touched.
+     */
+    public void renameRuntime(String oldRuntimeId, String newRuntimeId, String newInstanceId) {
+        if (oldRuntimeId == null || newRuntimeId == null || oldRuntimeId.equals(newRuntimeId)) {
+            return;
+        }
+        if (activeContainers.containsKey(newRuntimeId) || claimedRuntimes.contains(newRuntimeId)) {
+            throw new IllegalStateException("RDS runtime " + newRuntimeId + " already has an active container");
+        }
+        RdsContainerHandle handle = activeContainers.remove(oldRuntimeId);
+        if (handle != null) {
+            RdsContainerHandle moved = new RdsContainerHandle(handle.getContainerId(), newRuntimeId,
+                    newInstanceId, handle.getHost(), handle.getPort(),
+                    handle.getStorageKey(), handle.getContainerKey());
+            moved.setLogStream(handle.getLogStream());
+            activeContainers.put(newRuntimeId, moved);
+        }
+        activeStorageOwners.replaceAll((key, owner) -> owner.equals(oldRuntimeId) ? newRuntimeId : owner);
+        for (Set<String> runtimes : List.of(claimedRuntimes, cleanupPending, preCreateCleanupPending)) {
+            if (runtimes.remove(oldRuntimeId)) {
+                runtimes.add(newRuntimeId);
+            }
+        }
+        AutoPauseController autoPause = autoPauses.remove(oldRuntimeId);
+        if (autoPause != null) {
+            autoPauses.put(newRuntimeId, autoPause);
+        }
+    }
+
     /** Returns the retained runtime handle used to persist cleanup identity after a failed start. */
     public RdsContainerHandle getActiveHandle(String runtimeId) {
         if (runtimeId == null || runtimeId.isBlank()) {
@@ -806,9 +841,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         // Legacy host-path mode: host-persistent-path is an absolute path
         String hostDataPath = ContainerStorageHelper.hostResourcePath(
                 config, "rds", storageResourceId).toString();
-        if (!containerDetector.isRunningInContainer()) {
-            ContainerStorageHelper.ensureHostDir(hostDataPath);
-        }
+        ContainerStorageHelper.ensureHostDir(containerDetector, hostDataPath);
         specBuilder.withBind(hostDataPath, engineDefaultDataPath(engine, image));
     }
 
@@ -907,6 +940,24 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 """;
     }
 
+    static final class PostgresStartupSignal implements Consumer<String> {
+        final Semaphore signal = new Semaphore(0);
+        private boolean tcpListener;
+        private boolean signalled;
+
+        @Override
+        public synchronized void accept(String line) {
+            if (line.contains("listening on IPv4 address") || line.contains("listening on IPv6 address")) {
+                tcpListener = true;
+            }
+            if (tcpListener && !signalled && line.contains("database system is ready to accept connections")) {
+                signalled = true;
+                signal.release();
+            }
+        }
+
+    }
+
     /**
      * Connects over TCP loopback on purpose. The official image runs first-boot init against a
      * temporary server that listens only on the Unix socket, so a socket connection can succeed
@@ -922,7 +973,13 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 "-d", "postgres",
                 "-c", postgresIamRoleInitSql()
         };
-        execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role");
+        PostgresStartupSignal startup = new PostgresStartupSignal();
+        // This path receives a newly created container, so replay cannot include a prior start.
+        try (Closeable observation = logStreamer.observe(containerId, startup)) {
+            execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role", startup.signal);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not close PostgreSQL startup observation for {0}", containerName);
+        }
     }
 
     /**
@@ -1021,6 +1078,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
+        execUntilSuccess(containerName, containerId, cmd, description, new Semaphore(0));
+    }
+
+    private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description,
+                                  Semaphore startupSignal) {
         String lastOutput = "";
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
@@ -1034,7 +1096,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 lastOutput = e.getMessage();
             }
             try {
-                TimeUnit.SECONDS.sleep(1);
+                startupSignal.tryAcquire(1, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);

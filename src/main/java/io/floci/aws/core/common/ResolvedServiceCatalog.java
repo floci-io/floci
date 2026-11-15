@@ -26,7 +26,9 @@ import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreResourcePol
 import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreToolsController;
 import io.floci.aws.services.bedrockruntime.BedrockRuntimeController;
 import io.floci.aws.services.cloudfront.CloudFrontController;
+import io.floci.aws.services.cloudfront.CloudFrontKeyValueStoreController;
 import io.floci.aws.services.cloudfront.CloudFrontServingController;
+import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.codeartifact.CodeArtifactController;
 import io.floci.aws.services.codeartifact.CodeArtifactMavenController;
 import io.floci.aws.services.codeartifact.CodeArtifactPypiController;
@@ -107,6 +109,7 @@ import io.floci.aws.services.signin.SigninController;
 import io.floci.aws.services.ssooidc.SsoOidcController;
 import io.floci.aws.services.ssoportal.SsoPortalController;
 import io.floci.aws.services.swf.model.SwfConstants;
+import io.floci.aws.services.xray.XrayController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -302,7 +305,7 @@ public class ResolvedServiceCatalog {
                         config.storage().services().cloudwatchmetrics().flushIntervalMs(), AwsNamespaces.CW, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY, ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("GraniteServiceVersion20100801."), Set.of("monitoring"),
-                        Set.of("GraniteServiceVersion20100801"), Set.of(), "CloudWatchVersion20130116."),
+                        Set.of("GraniteServiceVersion20100801"), Set.of(OtlpMetricsController.class), "CloudWatchVersion20130116."),
                 descriptor("paymentcryptography", "paymentcryptography",
                         config.services().paymentcryptography().enabled(), true,
                         "paymentcryptography",
@@ -665,7 +668,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("Comprehend_20171127."), Set.of("comprehend"), Set.of(), Set.of()),
                 descriptor("rekognition", "rekognition", config.services().rekognition().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "rekognition", storageMode(config.storage().services().rekognition().mode(), config.storage().mode()),
+                        config.storage().services().rekognition().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("RekognitionService."), Set.of("rekognition"), Set.of(), Set.of()),
                 descriptor("pricing", "pricing", config.services().pricing().enabled(), true,
@@ -713,6 +717,12 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_XML),
                         Set.of(), Set.of("cloudfront"), Set.of(),
                         Set.of(CloudFrontController.class, CloudFrontServingController.class)),
+                descriptor("cloudfront-keyvaluestore", "cloudfront-keyvaluestore",
+                        config.services().cloudfront().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("cloudfront-keyvaluestore"), Set.of(),
+                        Set.of(CloudFrontKeyValueStoreController.class)),
                 descriptor("appsync", "appsync", config.services().appsync().enabled(), true,
                         "appsync", storageMode(config.storage().services().appsync().mode(), config.storage().mode()),
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
@@ -776,6 +786,10 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("app-integrations"), Set.of(),
                         Set.of(AppIntegrationsController.class)),
+                descriptor("xray", "xray", config.services().xray().enabled(), true,
+                        "xray", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("xray"), Set.of(), Set.of(XrayController.class)),
                 descriptor("dlm", "dlm", config.services().dlm().enabled(), true,
                         "dlm", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),

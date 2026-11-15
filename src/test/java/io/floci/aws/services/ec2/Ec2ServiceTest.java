@@ -288,11 +288,15 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
-        Ec2Service service = mockModeService();
+    void defaultSecurityGroupOfIsEmptyWhenTheStoredDefaultGroupIsMissing() {
+        AccountAwareStorageBackend<SecurityGroup> groups = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-security-groups.json", groups)));
         String region = "us-east-1";
         String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
-        service.deleteSecurityGroup(region, service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+        // Model a missing persisted record; the public API cannot delete a default group.
+        groups.delete(region + "::" + service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
 
         assertTrue(service.defaultSecurityGroupOf(region, vpcId).isEmpty());
     }
@@ -3556,6 +3560,25 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesRefusesAnImageWhoseArchitectureTheInstanceTypeCannotRun() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException graviton = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-amd64", "m6g.large", 1, 1, null, List.of(), null, null, List.of(), null, null));
+        AwsException intel = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-arm64", "t3.micro", 1, 1, null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", graviton.getErrorCode());
+        assertEquals("The architecture 'arm64' of the specified instance type does not match the architecture "
+                + "'x86_64' of the specified AMI.", graviton.getMessage());
+        assertEquals("The architecture 'x86_64' of the specified instance type does not match the architecture "
+                + "'arm64' of the specified AMI.", intel.getMessage());
+    }
+
+    @Test
     void runInstancesKeepsX8664FallbackForUnknownImageAndType() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -3644,6 +3667,103 @@ class Ec2ServiceTest {
         // lookup it goes through keeps answering with an empty list instead of raising NotFound.
         assertTrue(service.describeLaunchTemplateVersions(
                 "us-east-1", null, "absent-template", List.of()).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify"})
+    void launchTemplateMutationCannotRestoreADeletedTemplate(String operation) throws Exception {
+        ParkingStore<LaunchTemplate> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<LaunchTemplate> store =
+                new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", store)));
+        LaunchTemplate template = service.createLaunchTemplate(
+                "us-east-1", "deleted-while-resolving", new LaunchTemplateData(), List.of());
+        String id = template.getLaunchTemplateId();
+        parking.parkNextRead();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<LaunchTemplate> mutation = worker.submit(() -> "create".equals(operation)
+                    ? service.createLaunchTemplateVersion("us-east-1", id, null, "1", new LaunchTemplateData())
+                    : service.modifyLaunchTemplate("us-east-1", id, null, "1"));
+            assertTrue(parking.awaitParked(), "mutation must have read the original template before deletion");
+            service.deleteLaunchTemplate("us-east-1", id, null);
+            assertTrue(service.describeLaunchTemplates("us-east-1", List.of(), List.of(), Map.of()).isEmpty());
+            parking.release();
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> mutation.get(10, TimeUnit.SECONDS));
+            AwsException missing = assertInstanceOf(AwsException.class, failure.getCause());
+            assertEquals("InvalidLaunchTemplateId.NotFound", missing.getErrorCode());
+            assertEquals(400, missing.getHttpStatus());
+            assertTrue(service.describeLaunchTemplates("us-east-1", List.of(), List.of(), Map.of()).isEmpty(),
+                    "the rejected operation must not resurrect a deleted template");
+            assertEquals("1", template.getLatestVersionNumber(), "rejection must precede object mutation");
+        } finally {
+            parking.release();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify"})
+    void launchTemplateMutationByNameCannotReplaceANewTemplate(String operation) throws Exception {
+        Ec2Service service = sgService();
+        String name = "reused-template-name";
+        LaunchTemplate original = service.createLaunchTemplate(
+                "us-east-1", name, new LaunchTemplateData(), List.of());
+        AtomicReference<Thread> mutationThread = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<LaunchTemplate> mutation;
+            LaunchTemplate replacement;
+            synchronized (original) {
+                mutation = worker.submit(() -> {
+                    mutationThread.set(Thread.currentThread());
+                    return "create".equals(operation)
+                            ? service.createLaunchTemplateVersion("us-east-1", null, name, "1", new LaunchTemplateData())
+                            : service.modifyLaunchTemplate("us-east-1", null, name, "1");
+                });
+                Thread owner = Thread.currentThread();
+                String method = "create".equals(operation) ? "createLaunchTemplateVersion" : "modifyLaunchTemplate";
+                Awaitility.await("mutation has resolved the original name and waits for its monitor")
+                        .atMost(Duration.ofSeconds(10))
+                        .until(() -> isBlockedIn(mutationThread.get(), method, owner));
+                service.deleteLaunchTemplate("us-east-1", original.getLaunchTemplateId(), null);
+                replacement = service.createLaunchTemplate("us-east-1", name, new LaunchTemplateData(), List.of());
+            }
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> mutation.get(10, TimeUnit.SECONDS));
+            AwsException missing = assertInstanceOf(AwsException.class, failure.getCause());
+            assertEquals("InvalidLaunchTemplateName.NotFoundException", missing.getErrorCode());
+            assertEquals(400, missing.getHttpStatus());
+            assertEquals(List.of(replacement.getLaunchTemplateId()), service.describeLaunchTemplates(
+                    "us-east-1", List.of(), List.of(name), Map.of()).stream()
+                    .map(LaunchTemplate::getLaunchTemplateId).toList());
+            assertEquals("1", original.getLatestVersionNumber());
+            assertEquals("1", replacement.getLatestVersionNumber());
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify"})
+    void launchTemplateMutationStillWorksWhileTemplateExists(String operation) {
+        Ec2Service service = sgService();
+        LaunchTemplate template = service.createLaunchTemplate(
+                "us-east-1", "existing-template", new LaunchTemplateData(), List.of());
+        String id = template.getLaunchTemplateId();
+        service.createLaunchTemplateVersion("us-east-1", id, null, "1", new LaunchTemplateData());
+        if ("create".equals(operation)) {
+            assertEquals("3", service.createLaunchTemplateVersion(
+                    "us-east-1", id, null, "2", new LaunchTemplateData()).getLatestVersionNumber());
+        } else {
+            assertEquals("2", service.modifyLaunchTemplate("us-east-1", id, null, "2").getDefaultVersionNumber());
+        }
+
+        assertEquals(1, service.describeLaunchTemplates("us-east-1", List.of(), List.of(), Map.of()).size());
     }
 
     @Test
@@ -9483,6 +9603,92 @@ class Ec2ServiceTest {
         assertEquals("InvalidInstanceID.NotFound", error.getErrorCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"instance-state", "instance-groups", "interface-groups", "endpoint-groups",
+            "ingress", "egress", "group-pairs"})
+    void deleteSecurityGroupToleratesUnrelatedNullAttachmentFields(String field) {
+        AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<NetworkInterface> interfaceStore = AccountAwareStorageBackend.inMemory("000000000000");
+        AccountAwareStorageBackend<VpcEndpoint> endpointStore = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of(
+                        "ec2-instances.json", instanceStore, "ec2-network-interfaces.json", interfaceStore,
+                        "ec2-vpc-endpoints.json", endpointStore)));
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup selected = service.createSecurityGroup(region, "selected", "selected", vpc);
+        SecurityGroup unrelated = service.createSecurityGroup(region, "unrelated", "unrelated", vpc);
+        Instance instance = new Instance();
+        instance.setInstanceId("i-null-fields");
+        instance.setRegion(region);
+        instance.setState("instance-state".equals(field) ? null : InstanceState.running());
+        instance.setSecurityGroups("instance-groups".equals(field) ? null : List.of());
+        instanceStore.put(region + "::i-null-fields", instance);
+        NetworkInterface networkInterface = new NetworkInterface();
+        networkInterface.setNetworkInterfaceId("eni-null-fields");
+        networkInterface.setGroups("interface-groups".equals(field) ? null : List.of());
+        interfaceStore.put(region + "::eni-null-fields", networkInterface);
+        VpcEndpoint endpoint = new VpcEndpoint();
+        endpoint.setVpcEndpointId("vpce-null-fields");
+        endpoint.setSecurityGroupIds("endpoint-groups".equals(field) ? null : List.of());
+        endpointStore.put(region + "::vpce-null-fields", endpoint);
+        if ("ingress".equals(field)) {
+            unrelated.setIpPermissions(null);
+        }
+        if ("egress".equals(field)) {
+            unrelated.setIpPermissionsEgress(null);
+        }
+        if ("group-pairs".equals(field)) {
+            IpPermission permission = new IpPermission();
+            permission.setUserIdGroupPairs(null);
+            unrelated.setIpPermissions(List.of(permission));
+        }
+
+        service.deleteSecurityGroup(region, selected.getGroupId());
+
+        assertTrue(service.describeSecurityGroups(region, List.of(selected.getGroupId()), List.of(), Map.of()).isEmpty());
+        assertEquals(unrelated.getGroupId(), service.describeSecurityGroups(
+                region, List.of(unrelated.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+    }
+
+    @Test
+    void deleteSecurityGroupRetainsAttachmentWithUnknownInstanceState() {
+        AccountAwareStorageBackend<Instance> instances = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-instances.json", instances)));
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup selected = service.createSecurityGroup(region, "selected", "selected", vpc);
+        Instance instance = new Instance();
+        instance.setState(null);
+        instance.setSecurityGroups(List.of(new GroupIdentifier(selected.getGroupId(), selected.getGroupName())));
+        instances.put(region + "::i-unknown-state", instance);
+
+        assertEquals("DependencyViolation", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, selected.getGroupId())).getErrorCode());
+        assertEquals(selected.getGroupId(), service.describeSecurityGroups(
+                region, List.of(selected.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " "})
+    void deleteSecurityGroupRequiresAnIdentifierWithoutMutation(String blank) {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.79.0.0/16", false).getVpcId();
+        SecurityGroup selected = service.createSecurityGroup(region, "selected", "selected", vpc);
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, null, blank, false)).getErrorCode());
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, blank, null, false)).getErrorCode());
+        assertEquals("MissingParameter", assertThrows(AwsException.class,
+                () -> service.deleteSecurityGroup(region, null, null, false)).getErrorCode());
+        assertEquals(selected.getGroupId(), service.describeSecurityGroups(
+                region, List.of(selected.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+    }
+
     private static Ec2Service mockModeService() {
         return mockModeService(mockConfig(true));
     }
@@ -9505,6 +9711,130 @@ class Ec2ServiceTest {
         when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
         when(ec2.mockPublicAddress()).thenReturn(Optional.empty());
         return config;
+    }
+
+    @Test
+    void templateResolutionCopiesVersionBeforeConcurrentDeletion() throws Exception {
+        AccountAwareStorageBackend<LaunchTemplate> templates = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
+        LaunchTemplateData first = new LaunchTemplateData();
+        first.setImageId("ami-first");
+        LaunchTemplate created = service.createLaunchTemplate("us-east-1", "resolution-race", first, List.of());
+        LaunchTemplateData second = new LaunchTemplateData();
+        second.setImageId("ami-second");
+        service.createLaunchTemplateVersion("us-east-1", created.getLaunchTemplateId(), null, null, second);
+        LaunchTemplate template = spy(created);
+        Map<String, LaunchTemplateData> versions = spy(new LinkedHashMap<>(template.getVersions()));
+        doReturn(versions).when(template).getVersions();
+        templates.put("us-east-1::" + template.getLaunchTemplateId(), template);
+        CountDownLatch checked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Thread> reader = new AtomicReference<>();
+        doAnswer(call -> {
+            boolean present = (boolean) call.callRealMethod();
+            if (Thread.currentThread() == reader.get() && checked.getCount() != 0) {
+                checked.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            }
+            return present;
+        }).when(versions).containsKey("2");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<LaunchTemplateData> resolved = executor.submit(() -> {
+                reader.set(Thread.currentThread());
+                return service.resolveLaunchTemplateData("us-east-1", template.getLaunchTemplateId(), null, "2");
+            });
+            assertTrue(checked.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> deletingThread = new AtomicReference<>();
+            Future<List<Ec2Service.LaunchTemplateVersionDeletion>> deleted = executor.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                return service.deleteLaunchTemplateVersions("us-east-1", template.getLaunchTemplateId(), null,
+                        List.of("2"), false);
+            });
+            awaitBlockedOrDone(deletingThread, deleted);
+            release.countDown();
+            assertEquals("ami-second", assertDoesNotThrow(() -> resolved.get(5, TimeUnit.SECONDS)).getImageId());
+            assertNull(deleted.get(5, TimeUnit.SECONDS).getFirst().errorCode());
+            assertEquals(Set.of("1"), template.getVersions().keySet());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void deletingOnlyReconstructedLegacyVersionPreservesItsData() {
+        Ec2Service service = sgService();
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-legacy-latest");
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "legacy-singleton", data, List.of());
+        template.setVersions(Map.of());
+        template.setLatestVersionNumber("9");
+        template.setDefaultVersionNumber("1");
+        Ec2Service.LaunchTemplateVersionDeletion result = assertDoesNotThrow(() -> service.deleteLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("9"), false)).getFirst();
+        assertEquals("unexpectedError", result.errorCode());
+        assertEquals(Set.of("9"), template.getVersions().keySet());
+        assertEquals("ami-legacy-latest", template.getVersions().get("9").getImageId());
+        assertEquals("9", template.getLatestVersionNumber());
+        assertEquals("1", template.getDefaultVersionNumber());
+    }
+
+    @Test
+    void templateResolutionAfterVersionDeletionReturnsNotFound() {
+        Ec2Service service = sgService();
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "already-deleted-version",
+                new LaunchTemplateData(), List.of());
+        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, null,
+                new LaunchTemplateData());
+        service.deleteLaunchTemplateVersions("us-east-1", template.getLaunchTemplateId(), null, List.of("2"), false);
+        AwsException error = assertThrows(AwsException.class, () -> service.resolveLaunchTemplateData(
+                "us-east-1", template.getLaunchTemplateId(), null, "2"));
+        assertEquals("InvalidLaunchTemplateVersion.NotFound", error.getErrorCode());
+        assertNotNull(service.resolveLaunchTemplateData("us-east-1", template.getLaunchTemplateId(), null, "1"));
+    }
+
+    @Test
+    void deletingOnlyDefaultVersionStillReturnsDefaultError() {
+        Ec2Service service = sgService();
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "default-singleton",
+                new LaunchTemplateData(), List.of());
+        Ec2Service.LaunchTemplateVersionDeletion result = service.deleteLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("1"), false).getFirst();
+        assertEquals("unexpectedError", result.errorCode());
+        assertEquals("The default version of a launch template cannot be deleted.", result.errorMessage());
+        assertEquals(Set.of("1"), template.getVersions().keySet());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void versionDeletionRetainsSelectorErrorAfterTemplateDisappears(boolean byId) {
+        AccountAwareStorageBackend<LaunchTemplate> templates = spy(
+                AccountAwareStorageBackend.<LaunchTemplate>inMemory("000000000000"));
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "stale-selector",
+                new LaunchTemplateData(), List.of());
+        String storageKey = "us-east-1::" + template.getLaunchTemplateId();
+        templates.delete(storageKey);
+        if (byId) {
+            doReturn(Optional.of(template), Optional.empty()).when(templates).get(storageKey);
+        } else {
+            doReturn(List.of(template)).when(templates).scan(any());
+        }
+
+        List<Ec2Service.LaunchTemplateVersionDeletion> results = service.deleteLaunchTemplateVersions(
+                "us-east-1", byId ? template.getLaunchTemplateId() : null,
+                byId ? null : template.getLaunchTemplateName(), List.of("1", "2"), false);
+
+        assertEquals(2, results.size());
+        assertTrue(results.stream().allMatch(result -> (byId
+                ? "launchTemplateIdDoesNotExist" : "launchTemplateNameDoesNotExist").equals(result.errorCode())));
+        assertEquals(List.of(1, 2), results.stream()
+                .map(Ec2Service.LaunchTemplateVersionDeletion::versionNumber).toList());
+        assertEquals(Set.of("1"), template.getVersions().keySet());
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
@@ -9617,6 +9947,41 @@ class Ec2ServiceTest {
             copy.setTags(source.getTags() == null ? List.of() : new ArrayList<>(source.getTags()));
             return copy;
         }
+    }
+
+    /**
+     * A cluster node found by its id keeps the address its provider recorded for the container behind it, which an
+     * ELB instance target naming the node connects to.
+     */
+    @Test
+    void aClusterNodeFoundByIdKeepsTheContainerAddressItsProviderRecorded() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance nodeInstance = new Instance();
+        nodeInstance.setInstanceId("i-0de1234567890abd");
+        nodeInstance.setRegion("us-east-1");
+        nodeInstance.setPlacement(new Placement("us-east-1a"));
+        nodeInstance.setState(InstanceState.running());
+        nodeInstance.setPrivateIpAddress("10.10.80.10");
+        nodeInstance.setDockerContainerId("node-container");
+        nodeInstance.setContainerBridgeIp("10.10.80.10");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return "i-0de1234567890abd".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return List.of(nodeInstance);
+            }
+        });
+
+        Instance found = service.findInstanceById("123456789012", "i-0de1234567890abd");
+
+        assertEquals("node-container", found.getDockerContainerId());
+        assertEquals("10.10.80.10", found.getContainerBridgeIp());
     }
 
     @Test
@@ -9792,6 +10157,41 @@ class Ec2ServiceTest {
         AwsException terminateEx = assertThrows(AwsException.class, () ->
                 service.terminateInstances("us-east-1", List.of("i-node1234567890abc")));
         assertEquals("OperationNotPermitted", terminateEx.getErrorCode());
+    }
+
+    @Test
+    void providerInstancesSharingAReservationAreDescribedTogether() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        List<Instance> nodes = new ArrayList<>();
+        for (String id : List.of("i-node1111111111111", "i-node2222222222222")) {
+            Instance node = new Instance();
+            node.setInstanceId(id);
+            node.setRegion("us-east-1");
+            node.setPlacement(new Placement("us-east-1a"));
+            node.setState(InstanceState.running());
+            node.setInstanceType("m5.large");
+            node.setReservationId("r-sharedprovider01");
+            nodes.add(node);
+        }
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return nodes.stream().filter(node -> node.getInstanceId().equals(instanceId)).findFirst();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return nodes;
+            }
+        });
+
+        List<Reservation> reservations = service.describeInstances("us-east-1", List.of(), Map.of());
+
+        assertEquals(1, reservations.size());
+        assertEquals("r-sharedprovider01", reservations.getFirst().getReservationId());
+        assertEquals(2, reservations.getFirst().getInstances().size());
     }
 
     @Test

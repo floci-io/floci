@@ -44,6 +44,8 @@ class ElastiCacheQueryHandlerTest {
     void setUp() {
         SigV4Validator sigV4Validator = mock(SigV4Validator.class);
         service = mock(ElastiCacheService.class);
+        // Every record these tests describe belongs to the request's Region.
+        when(service.inRequestRegion(any())).thenReturn(true);
         memcachedService = mock(ElastiCacheMemcachedService.class);
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getRegion()).thenReturn("us-east-1");

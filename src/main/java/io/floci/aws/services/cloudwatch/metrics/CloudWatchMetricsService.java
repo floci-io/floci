@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
@@ -536,6 +537,18 @@ public class CloudWatchMetricsService {
                 .map(MetricAlarm.class::cast).toList();
     }
 
+    /**
+     * Reads current action settings after metric evaluation. Handlers run outside this monitor;
+     * disabling actions does not cancel work already admitted by this lookup.
+     */
+    public synchronized Optional<MetricAlarm> enabledMetricAlarm(String name, String region) {
+        Alarm current = alarmStore.get(region + "::" + name).orElse(null);
+        if (current instanceof MetricAlarm alarm && alarm.isActionsEnabled()) {
+            return Optional.of(alarm);
+        }
+        return Optional.empty();
+    }
+
     public List<MetricAlarm> describeAlarms(List<String> names, String prefix, String region) {
         return matchingAlarms(names, prefix, region).stream().filter(MetricAlarm.class::isInstance)
                 .map(MetricAlarm.class::cast).toList();
@@ -831,6 +844,32 @@ public class CloudWatchMetricsService {
 
     private static String createdSummary(String name) {
         return "Alarm \"" + name + "\" created";
+    }
+
+    /** Changes action execution for metric and composite alarms while preserving their state and other configuration. */
+    public synchronized void setAlarmActionsEnabled(List<String> alarmNames, boolean enabled, String region) {
+        String violation = alarmNames == null ? SmithyValidationErrors.notNull("alarmNames")
+                : SmithyValidationErrors.sizeOutOfRange("alarmNames", alarmNames.size(), 0, 100);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationError(violation);
+        }
+        for (int i = 0; i < alarmNames.size(); i++) {
+            String name = alarmNames.get(i);
+            String path = "alarmNames.member." + (i + 1);
+            violation = name == null ? SmithyValidationErrors.notNull(path)
+                    : SmithyValidationErrors.lengthOutOfRange(path, name, 1, 255);
+            if (violation != null) {
+                throw SmithyValidationErrors.validationError(violation);
+            }
+        }
+        for (String name : new LinkedHashSet<>(alarmNames)) {
+            Alarm alarm = alarmStore.get(region + "::" + name).orElse(null);
+            if (alarm != null && alarm.isActionsEnabled() != enabled) {
+                Alarm updated = MAPPER.convertValue(alarm, alarm.getClass());
+                updated.setActionsEnabled(enabled);
+                putAlarm(updated, region);
+            }
+        }
     }
 
     /**

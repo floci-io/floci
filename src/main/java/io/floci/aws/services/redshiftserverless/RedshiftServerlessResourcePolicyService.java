@@ -20,8 +20,8 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Resource policies for Redshift Serverless snapshots. A policy is stored and echoed, not
- * evaluated: no principal named in it gains access.
+ * Resource policies for Redshift Serverless snapshots. A policy is stored and echoed here; IAM
+ * enforcement evaluates it through {@link RedshiftServerlessResourcePolicyProvider}.
  *
  * <p>A policy belongs to a snapshot but lives in its own store, so deleting the snapshot needs no
  * hook here. Each read checks that the snapshot is still there and drops the policy otherwise.
@@ -65,6 +65,17 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
     public synchronized void deleteResourcePolicy(String resourceArn, String region) {
         require(resourceArn, region);
         policies.delete(storageKey(region, resourceArn));
+    }
+
+    /**
+     * The policy on a snapshot of {@code ownerAccount}, read for whoever is calling. A policy left by a
+     * snapshot since replaced under the same name is not this snapshot's, so it is not returned.
+     */
+    public synchronized Optional<String> policyOfSnapshot(String ownerAccount, RedshiftServerlessSnapshot snapshot,
+                                                          String region) {
+        return policies.getForAccount(ownerAccount, storageKey(region, snapshot.getSnapshotArn()))
+                .filter(stored -> Objects.equals(stored.getSnapshotCreateTime(), snapshot.getSnapshotCreateTime()))
+                .map(ResourcePolicy::getPolicy);
     }
 
     synchronized void deleteExpiredSnapshotPolicy(

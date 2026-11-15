@@ -364,7 +364,8 @@ class StsPresignedSignatureIntegrationTest {
     void malformedFormCannotEscapeAsServerError(String body) throws Exception {
         URI uri = presignRequest("test", "test", "POST", "/", "iam", body, new TreeMap<>(), null);
         given().urlEncodingEnabled(false).contentType("application/x-www-form-urlencoded").body(body).post(uri)
-                .then().statusCode(400);
+                .then().statusCode(404).contentType("application/xml")
+                .body("ErrorResponse.Error.Code", equalTo("MalformedQueryString"));
     }
 
     private static URI presign(String key, String secret, String body, TreeMap<String, String> query) throws Exception {

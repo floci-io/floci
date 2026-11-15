@@ -260,9 +260,17 @@ public class OrganizationsCfnProvisioner implements CfnResourceProvisioner {
     // ──────────────────────────── Resource policy ────────────────────────────
 
     private void provisionResourcePolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
-        // PutResourcePolicy is already create-or-update, so the same call serves both paths.
-        OrganizationsService.ResourcePolicyView policy = organizationsService.putResourcePolicy(
-                ctx.accountId(), resolveContent(props, ctx), resolveTags(props, ctx));
+        String content = resolveContent(props, ctx);
+        Map<String, String> tags = resolveTags(props, ctx);
+
+        OrganizationsService.ResourcePolicyView policy;
+        if (ctx.isUpdate()) {
+            // PutResourcePolicy applies Tags only when it creates the policy.
+            policy = organizationsService.putResourcePolicy(ctx.accountId(), content, null);
+            replaceTags(ctx.accountId(), policy.id(), tags);
+        } else {
+            policy = organizationsService.putResourcePolicy(ctx.accountId(), content, tags);
+        }
 
         r.setPhysicalId(policy.id());
         r.getAttributes().put("Id", policy.id());

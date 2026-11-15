@@ -14,7 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -241,6 +243,52 @@ class S3ObjectIndexJournalTest {
         }
     }
 
+    @Test
+    void restoredVersionsAndTheCurrentAliasSurviveJournalReplay() throws IOException {
+        Path directory = root.resolve("live");
+        Path afterCrash = root.resolve("after-crash");
+        Instant started = Instant.parse("2026-11-12T12:00:00Z");
+        String request = "<RestoreRequest><Days>1</Days></RestoreRequest>";
+        String older;
+        String current;
+        StorageFactory first = newFactory(directory);
+        try {
+            S3Service service = newService(first, directory, Clock.fixed(started, ZoneOffset.UTC), 60);
+            service.createBucket(VERSIONED_BUCKET, REGION);
+            service.putBucketVersioning(VERSIONED_BUCKET, "Enabled");
+            older = service.putObject(VERSIONED_BUCKET, key(0), body(0), "text/plain", Map.of(),
+                    "GLACIER", null, null, null).getVersionId();
+            current = service.putObject(VERSIONED_BUCKET, key(0), body(1), "text/plain", Map.of(),
+                    "GLACIER", null, null, null).getVersionId();
+            assertTrue(service.restoreObject(VERSIONED_BUCKET, key(0), older, request));
+            assertTrue(service.restoreObject(VERSIONED_BUCKET, key(0), current, request));
+            copyAsLeftByAKill(directory, afterCrash);
+        } finally {
+            first.shutdownAll();
+        }
+
+        StorageFactory second = newFactory(afterCrash);
+        try {
+            S3Service ongoing = newService(second, afterCrash,
+                    Clock.fixed(started.plusSeconds(30), ZoneOffset.UTC), 60);
+            assertTrue(ongoing.restoreStatus(ongoing.headObject(VERSIONED_BUCKET, key(0), older)).inProgress());
+            assertTrue(ongoing.restoreStatus(ongoing.headObject(VERSIONED_BUCKET, key(0), current)).inProgress());
+            assertTrue(ongoing.restoreStatus(ongoing.headObject(VERSIONED_BUCKET, key(0))).inProgress());
+
+            S3Service completed = newService(second, afterCrash,
+                    Clock.fixed(started.plusSeconds(60), ZoneOffset.UTC), 60);
+            Instant expiry = Instant.parse("2026-11-14T00:00:00Z");
+            assertEquals(new S3Service.RestoreStatus(false, expiry),
+                    completed.restoreStatus(completed.headObject(VERSIONED_BUCKET, key(0), older)));
+            assertEquals(new S3Service.RestoreStatus(false, expiry),
+                    completed.restoreStatus(completed.headObject(VERSIONED_BUCKET, key(0), current)));
+            assertEquals(new S3Service.RestoreStatus(false, expiry),
+                    completed.restoreStatus(completed.headObject(VERSIONED_BUCKET, key(0))));
+        } finally {
+            second.shutdownAll();
+        }
+    }
+
     /**
      * The storage directory as a process killed now would leave it, with no shutdown compaction.
      * Replaying a copy keeps the restarted factory from sharing the journal with the live writer.
@@ -271,6 +319,10 @@ class S3ObjectIndexJournalTest {
     }
 
     private static S3Service newService(StorageFactory factory, Path storage) {
+        return newService(factory, storage, Clock.systemUTC(), 0);
+    }
+
+    private static S3Service newService(StorageFactory factory, Path storage, Clock clock, long delaySeconds) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(storage.toString());
         when(config.storage().mode()).thenReturn("persistent");
@@ -278,8 +330,9 @@ class S3ObjectIndexJournalTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         when(config.services().s3().enforceAuth()).thenReturn(false);
         when(config.services().s3().globalBucketNamespace()).thenReturn(false);
+        when(config.services().s3().restoreCompletionDelaySeconds()).thenReturn(delaySeconds);
         return new S3Service(factory, config, null, null, null, null, null,
-                new RegionResolver(REGION, ACCOUNT), new ObjectMapper(), null);
+                new RegionResolver(REGION, ACCOUNT), new ObjectMapper(), null, clock);
     }
 
     private static StorageFactory newFactory(Path storage) {

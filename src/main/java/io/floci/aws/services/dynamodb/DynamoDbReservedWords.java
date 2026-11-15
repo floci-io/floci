@@ -17,11 +17,10 @@ final class DynamoDbReservedWords {
     // and should not be treated as attribute name tokens.
     private static final Set<String> CLAUSE_KEYWORDS = Set.of(
         "SET", "REMOVE", "ADD", "DELETE",
-        "AND", "OR", "NOT", "BETWEEN", "IN",
-        "TRUE", "FALSE"
+        "AND", "OR", "NOT", "BETWEEN", "IN"
     );
 
-    // Full DynamoDB reserved words list (uppercase)
+    // DynamoDB reserved words list (uppercase). DynamoDB documents SIZE too, but accepts it as an attribute name.
     private static final Set<String> RESERVED = Set.of(
         "ABORT", "ABSOLUTE", "ACTION", "ADD", "AFTER", "AGENT", "AGGREGATE", "ALL",
         "ALLOCATE", "ALTER", "ANALYZE", "AND", "ANY", "ARCHIVE", "ARE", "ARRAY", "AS", "ASC",
@@ -85,7 +84,7 @@ final class DynamoDbReservedWords {
         "SAMPLE", "SATISFIES", "SAVE", "SAVEPOINT", "SCAN", "SCHEMA", "SCOPE", "SCROLL", "SEARCH",
         "SECOND", "SECTION", "SEGMENT", "SEGMENTS", "SELECT", "SELF", "SEMI", "SENSITIVE",
         "SEPARATE", "SEQUENCE", "SERIALIZABLE", "SESSION", "SET", "SETS", "SHARD", "SHARE",
-        "SHARED", "SHORT", "SHOW", "SIGNAL", "SIMILAR", "SIZE", "SKEWED", "SMALLINT", "SNAPSHOT",
+        "SHARED", "SHORT", "SHOW", "SIGNAL", "SIMILAR", "SKEWED", "SMALLINT", "SNAPSHOT",
         "SOME", "SOURCE", "SPACE", "SPACES", "SPARSE", "SPECIFIC", "SPECIFICTYPE", "SPLIT", "SQL",
         "SQLCODE", "SQLERROR", "SQLEXCEPTION", "SQLSTATE", "SQLWARNING", "START", "STATE", "STATIC",
         "STATUS", "STORAGE", "STORE", "STORED", "STREAM", "STRING", "STRUCT", "STYLE", "SUB",
@@ -114,14 +113,21 @@ final class DynamoDbReservedWords {
         if (expression == null || expression.isBlank()) return;
         List<String> bareIdents = extractBareIdentifiers(expression);
         for (String ident : bareIdents) {
-            String upper = ident.toUpperCase();
-            if (CLAUSE_KEYWORDS.contains(upper)) continue;
-            if (RESERVED.contains(upper)) {
-                throw new AwsException("ValidationException",
-                        "Invalid " + expressionType + ": Attribute name is a reserved keyword; "
-                        + "reserved word: " + ident, 400);
+            if (isReserved(ident)) {
+                throw reservedWord(expressionType, ident);
             }
         }
+    }
+
+    static boolean isReserved(String ident) {
+        String upper = ident.toUpperCase();
+        return !CLAUSE_KEYWORDS.contains(upper) && RESERVED.contains(upper);
+    }
+
+    static AwsException reservedWord(String expressionType, String ident) {
+        return new AwsException("ValidationException",
+                "Invalid " + expressionType + ": Attribute name is a reserved keyword; "
+                + "reserved keyword: " + ident, 400);
     }
 
     private static List<String> extractBareIdentifiers(String expr) {

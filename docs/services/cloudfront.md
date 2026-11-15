@@ -2,9 +2,9 @@
 
 CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle,
 cache policies, origin request policies, response headers policies, origin access controls, origin
-access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and
-viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD, OPTIONS, POST,
-PUT, PATCH and DELETE).
+access identities, public keys, trusted key groups, CloudFront Functions, key value stores, invalidations,
+tagging, and viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD,
+OPTIONS, POST, PUT, PATCH and DELETE).
 
 **Protocol:** REST XML
 **API version:** `2020-05-31`
@@ -75,9 +75,12 @@ PUT, PATCH and DELETE).
 | `CreateOriginAccessControl` | POST | `/2020-05-31/origin-access-control` |
 | `GetOriginAccessControl` | GET | `/2020-05-31/origin-access-control/{Id}` |
 | `GetOriginAccessControlConfig` | GET | `/2020-05-31/origin-access-control/{Id}/config` |
-| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}` |
+| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}/config` |
 | `DeleteOriginAccessControl` | DELETE | `/2020-05-31/origin-access-control/{Id}` |
 | `ListOriginAccessControls` | GET | `/2020-05-31/origin-access-control` |
+
+`UpdateOriginAccessControl` accepts the current `If-Match` ETag and a complete configuration.
+With IAM enforcement enabled, its permission can be scoped to the selected origin access control ARN.
 
 ### Origin Access Identity (OAI — legacy)
 
@@ -101,6 +104,31 @@ PUT, PATCH and DELETE).
 | `PublishFunction` | POST | `/2020-05-31/function/{Name}/publish` |
 | `DeleteFunction` | DELETE | `/2020-05-31/function/{Name}` |
 | `ListFunctions` | GET | `/2020-05-31/function` |
+
+### Key Value Stores
+
+Control plane, served with the rest of CloudFront:
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateKeyValueStore` | POST | `/2020-05-31/key-value-store` |
+| `DescribeKeyValueStore` | GET | `/2020-05-31/key-value-store/{Name}` |
+| `ListKeyValueStores` | GET | `/2020-05-31/key-value-store` |
+| `UpdateKeyValueStore` | PUT | `/2020-05-31/key-value-store/{Name}` |
+| `DeleteKeyValueStore` | DELETE | `/2020-05-31/key-value-store/{Name}` |
+
+The keys of a store are read and written through the separate `cloudfront-keyvaluestore` data plane
+(REST JSON, signing name `cloudfront-keyvaluestore`). It names the store by its ARN, percent-encoded in
+the path:
+
+| Operation | Method | Path |
+|---|---|---|
+| `DescribeKeyValueStore` | GET | `/key-value-stores/{KvsARN}` |
+| `ListKeys` | GET | `/key-value-stores/{KvsARN}/keys` |
+| `UpdateKeys` | POST | `/key-value-stores/{KvsARN}/keys` |
+| `GetKey` | GET | `/key-value-stores/{KvsARN}/keys/{Key}` |
+| `PutKey` | PUT | `/key-value-stores/{KvsARN}/keys/{Key}` |
+| `DeleteKey` | DELETE | `/key-value-stores/{KvsARN}/keys/{Key}` |
 
 ### Public Keys and Key Groups
 
@@ -319,15 +347,98 @@ PUT, PATCH and DELETE).
   policies attached to a cache behavior cannot be deleted.
 - `ViewerCertificate.IAMCertificateId` must be the `ServerCertificateId` of an uploaded IAM server
   certificate: distribution create and update reject an unknown one with `InvalidViewerCertificate`,
-  and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it.
+  and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it. A blank
+  value names no certificate, which is what a distribution on the CloudFront domain name sends. The
+  `/cloudfront` upload path AWS documents for a certificate meant for CloudFront is not enforced, so
+  a certificate uploaded anywhere serves a distribution: a deliberate divergence, with both sources
+  and what would move it under Server Certificates in [IAM](iam.md).
 - `ViewerCertificate.ACMCertificateArn` must name an existing ACM certificate: distribution create and
   update reject an unknown one with `InvalidViewerCertificate`. ACM lists the distribution's ARN under
   `InUseBy`, and `DeleteCertificate` returns `ResourceInUseException` while a distribution references it.
+- A `ViewerCertificate` that names a certificate is held to the two rules its own entry states.
+  The location is `ACMCertificateArn` or `IAMCertificateId` and "not both", and a certificate named
+  in either one "must also specify values for MinimumProtocolVersion and SSLSupportMethod". Both
+  refusals are `InvalidViewerCertificate` 400, which is Floci's reading rather than a published
+  answer: `InvalidArgument` and `InvalidMinimumProtocolVersion` are modelled on the distribution
+  writes as well, and no sentence says which one a caller gets, so both cases read as the
+  certificate the request carries not being valid. The Developer Guide page that enumerates what
+  `InvalidViewerCertificate` answers reaches neither case either: it names the certificate's own
+  trust, its chain, its format and the names it covers. A member carried blank counts as no value, the
+  way a blank location member names no certificate, and a distribution on the CloudFront domain
+  name needs neither member. The rules are read before the certificate is looked up, so a request
+  that breaks one is refused for the rule and not for a certificate nothing matches.
+- The viewer certificate's two protocol members are held to the values they admit and to the one
+  pair they cannot carry together. A `MinimumProtocolVersion` outside `SSLv3`, `TLSv1`,
+  `TLSv1_2016`, `TLSv1.1_2016`, `TLSv1.2_2018`, `TLSv1.2_2019`, `TLSv1.2_2021`, `TLSv1.2_2025` and
+  `TLSv1.3_2025` is `InvalidMinimumProtocolVersion` 400, which is published rather than read: that
+  code's own sentence names this case. An `SSLSupportMethod` outside `sni-only`, `vip` and
+  `static-ip` has no code of its own and is `InvalidArgument` 400, what this service already
+  answers a member outside its shape with. `SSLv3` alongside `sni-only` is
+  `InvalidProtocolSettings` 400 on `CreateDistribution`, `CreateDistributionWithTags` and
+  `CopyDistribution`, whose sentence names that pair and nothing else and which is the same rule as
+  the floor the member states for SNI, "you must specify TLSv1 or higher". `UpdateDistribution` has
+  never declared that code and has declared `InvalidMinimumProtocolVersion` since 2015, so the
+  update answers the pair with the code it declares, which is the one a caller's SDK can map, and
+  keeps the pair's published sentence, so the two causes the update answers under one code stay
+  apart. The pair is
+  read for a distribution on a certificate of its own alone, since on the CloudFront certificate
+  the policy is replaced and the value that would make the pair is discarded. Both enumerations are
+  read either way.
+- A distribution on the CloudFront domain name sets `CloudFrontDefaultCertificate` and is told to
+  "leave all other fields empty". The member is declared `boolean`, so it is held to the four forms
+  XML gives a boolean, `true`, `false`, `1` and `0`, and anything else is `InvalidArgument` 400.
+  That refusal is Floci's reading: CloudFront models no error for a malformed document, and reading
+  the member for the word `true` alone would let a request saying `yes` dodge every rule below. A
+  certificate named beside it, in `ACMCertificateArn` or `IAMCertificateId`, contradicts the
+  request's own claim and is `InvalidViewerCertificate` 400, Floci's reading again. A
+  `MinimumProtocolVersion` beside it is not refused: the member's entry says CloudFront
+  "automatically sets the security policy to TLSv1 regardless of the value that you set here", so
+  the policy a request asks for there is replaced and the config reads back `TLSv1`. A distribution
+  created with no `ViewerCertificate` at all reads the same way, the default certificate on `TLSv1`.
+  The `us-east-1` restriction AWS states for ACM certificates is not enforced: a certificate is
+  resolved from whatever region its ARN names, as long as it exists.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with
   `ListResponseHeadersPolicies?Type=managed`; `Type` uses the AWS lowercase `managed` or `custom`
   values.
+
+## Key Value Stores
+
+A key value store holds the key value pairs a CloudFront Function reads at the edge. The store is created
+and described through the CloudFront control plane, and its keys are managed through the
+`cloudfront-keyvaluestore` data plane, which Floci serves on the same port.
+
+- A store has a name (1 to 64 letters, digits, hyphens and underscores) and an ARN,
+  `arn:aws:cloudfront::<account>:key-value-store/<uuid>`. Stores are `READY` as soon as they are created.
+- The data plane takes the store's ARN in the request path, percent-encoded. The AWS SDKs prepend the
+  account id of that ARN to the endpoint host (`000000000000.localhost.floci.io`), which the embedded DNS
+  and the generated TLS certificate already cover. The requests are signed with SigV4A; Floci reads the
+  `cloudfront-keyvaluestore` signing name from its credential scope and does not verify the signature.
+  With `floci.auth.validate-signatures` on, these requests are refused: signature validation does not accept
+  SigV4A outside S3 yet, so leave it off when using the data plane.
+- With IAM enforcement on, the data plane is authorized as `cloudfront-keyvaluestore:<Operation>` on the store's ARN,
+  and the control plane as `cloudfront:<Operation>`.
+- Keys are listed in key order, 10 per page by default and up to 50 (`MaxResults`).
+- Quotas: a key is at most 512 bytes, a value at most 1,024 bytes and a store at most 5 MiB, counting the
+  UTF-8 bytes of every key and value. Exceeding the first two is a `ValidationException`, and exceeding the
+  store size is a `ServiceQuotaExceededException`. `ItemCount` and `TotalSizeInBytes` follow the same count.
+- Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
+  applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
+  entry is invalid, including a put without a `Value`. A stale or missing ETag on the
+  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"), and on the
+  control plane an `InvalidIfMatchVersion`.
+- The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
+  ETag, and a key write only the data plane ETag.
+- An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100
+  functions (`TooManyFunctionsAssociatedToKeyValueStore`). Deleting a store also drops its tags.
+- Deleting a key that is not in the store is a `ResourceNotFoundException`. In `UpdateKeys` the delete of an
+  absent key is skipped.
+- A function can name at most one store in `FunctionConfig.KeyValueStoreAssociations`, and only with the
+  `cloudfront-js-2.0` runtime. The store has to exist (`EntityNotFound`), and a store that a function
+  uses cannot be deleted (`CannotDeleteEntityWhileInUse`).
+- Floci does not run CloudFront Functions. A function that reads the store with `cf.kvs()` is stored and
+  associated, but nothing executes it, so the store is useful for testing the code that writes it.
 
 ## Configuration
 
@@ -515,7 +626,13 @@ signatures must still return 403. Verify those cases through the proxy after con
 - Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
-- VPC origins, Anycast IP lists, key value stores
+- VPC origins, Anycast IP lists
+- Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
+  `InvalidArgument`
+- Running CloudFront Functions, so the key value store can only be read and written through its API, not
+  from a function with `cf.kvs()`
+- CloudFormation provisioning of `AWS::CloudFront::KeyValueStore`, and `KeyValueStoreAssociations` on
+  `AWS::CloudFront::Function`
 - Monitoring subscriptions
 - CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
   (literal custom or managed policy IDs are supported on distributions)

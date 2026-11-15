@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
@@ -493,6 +494,34 @@ class EventsCfnProvisionerTest {
                 r, mapper.createObjectNode().put("Name", "renamed"), ctx("orders-bus")));
 
         assertTrue(thrown.getMessage().contains("requires resource replacement"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws.partner/example.com", "partner/example.com/orders", "aws.partner/example.com/x y"})
+    void aMalformedEventSourceNameIsAValidationError(String eventSourceName) {
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBus", "Bus"),
+                mapper.createObjectNode().put("Name", eventSourceName).put("EventSourceName", eventSourceName),
+                ctx(null)));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Invalid AWS::Events::EventBus EventSourceName"));
+        verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aPolicyOnAPartnerEventBusIsAValidationError() {
+        String name = "aws.partner/example.com/orders";
+        ObjectNode props = mapper.createObjectNode().put("Name", name).put("EventSourceName", name);
+        props.putObject("Policy").put("Version", "2012-10-17");
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBus", "Bus"), props, ctx(null)));
+
+        assertEquals("ValidationError", thrown.getErrorCode());
+        assertTrue(thrown.getMessage().contains("Policy is not supported on a partner event bus"));
+        verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+        verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
     }
 
     // ── the policy statement id is held to the modeled pattern ────────────────

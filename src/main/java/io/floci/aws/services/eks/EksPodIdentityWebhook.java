@@ -94,12 +94,22 @@ public class EksPodIdentityWebhook {
      * the cluster would only ever be looked up in the default account.
      */
     public Map<String, Object> review(String clusterName, String accountId, Map<String, Object> admissionReview) {
+        return review(clusterName, accountId, null, admissionReview);
+    }
+
+    /**
+     * As {@link #review(String, String, Map)}, for the cluster in {@code region}: cluster names are
+     * unique only within a Region. A null Region, from a route registered before the Region was
+     * part of it, resolves the cluster created before Regional names that registered it.
+     */
+    public Map<String, Object> review(String clusterName, String accountId, String region,
+                                      Map<String, Object> admissionReview) {
         String apiVersion = admissionReview != null && admissionReview.get("apiVersion") instanceof String version
                 ? version : DEFAULT_API_VERSION;
         Map<String, Object> request = admissionReview == null ? null : asMap(admissionReview.get("request"));
         String uid = request != null && request.get("uid") instanceof String value ? value : "";
         try {
-            return admissionReview(apiVersion, uid, decide(clusterName, accountId, request));
+            return admissionReview(apiVersion, uid, decide(clusterName, accountId, region, request));
         } catch (RuntimeException e) {
             LOG.warnv("EKS pod-identity-webhook: admitting pod unchanged for cluster {0} after an "
                     + "internal error: {1}", clusterName, e.toString());
@@ -107,7 +117,7 @@ public class EksPodIdentityWebhook {
         }
     }
 
-    private List<Map<String, Object>> decide(String clusterName, String accountId,
+    private List<Map<String, Object>> decide(String clusterName, String accountId, String region,
                                              Map<String, Object> request) {
         if (request == null) {
             return List.of();
@@ -120,7 +130,11 @@ public class EksPodIdentityWebhook {
         if (namespace == null) {
             return List.of();
         }
-        Optional<Cluster> cluster = eks.findAuthenticationCluster(accountId, clusterName);
+        // A route without a Region was registered by a cluster created before cluster names became
+        // Regional, so that cluster answers it, not a same-named one created since.
+        Optional<Cluster> cluster = region == null
+                ? eks.findPreRegionalCluster(accountId, clusterName)
+                : eks.findAuthenticationCluster(accountId, region, clusterName);
         if (cluster.isEmpty()) {
             return List.of();
         }

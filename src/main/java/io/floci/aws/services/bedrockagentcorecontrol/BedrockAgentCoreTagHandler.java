@@ -88,11 +88,14 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
         if (resource.startsWith("gateway/")) {
             return ResourceKind.GATEWAY;
         }
+        if (resource.startsWith("agentEndpoint/")) {
+            return ResourceKind.ENDPOINT;
+        }
         if (resource.startsWith("agent/")) {
             return ResourceKind.RUNTIME;
         }
-        if (resource.startsWith("agentEndpoint/")) {
-            return ResourceKind.ENDPOINT;
+        if (resource.startsWith("runtime/")) {
+            return resource.contains("/runtime-endpoint/") ? ResourceKind.ENDPOINT : ResourceKind.RUNTIME;
         }
         if (resource.startsWith("memory/")) {
             return ResourceKind.MEMORY;

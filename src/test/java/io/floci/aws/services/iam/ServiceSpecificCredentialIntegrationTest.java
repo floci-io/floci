@@ -310,10 +310,62 @@ class ServiceSpecificCredentialIntegrationTest {
                 .body(not(containsString("NotSupportedService")));
         }
 
-        // An absent or blank name never reaches that check: it fails the required-parameter one.
+        // A blank name is a value the request carried, and `serviceName` declares no length,
+        // pattern or value set for anything ahead of the operation to hold it to, so it reaches
+        // the same check with nothing standing where the name goes. Only an absent one fails the
+        // required-parameter check.
         iam("CreateServiceSpecificCredential")
             .formParam("UserName", userName).formParam("ServiceName", "")
+        .when().post("/").then().statusCode(404)
+            .body(containsString("NoSuchEntity"))
+            .body(containsString("No such service  is supported for Service Specific Credentials"));
+
+        iam("CreateServiceSpecificCredential")
+            .formParam("UserName", userName)
         .when().post("/").then().statusCode(400).body(containsString("ValidationError"));
+    }
+
+    /**
+     * A request wrong in both halves is answered for the user. Recordings validated against AWS
+     * answer a user that does not exist with the user whether the service beside it is supported
+     * or not, so the user is looked up before the service name is read.
+     */
+    @Test
+    void aRequestNamingNeitherAUserNorASupportedServiceAnswersForTheUser() {
+        String missing = "ssc-absent-" + suffix();
+
+        for (String service : List.of(CODECOMMIT, "nonexistentservice.amazonaws.com",
+                "lambda.amazonaws.com", "o3on3n3onosneo", "")) {
+            iam("CreateServiceSpecificCredential")
+                .formParam("UserName", missing)
+                .formParam("ServiceName", service)
+            .when().post("/").then().statusCode(404)
+                .body(containsString("NoSuchEntity"))
+                .body(containsString("The user with name " + missing + " cannot be found."))
+                .body(not(containsString("No such service")));
+        }
+    }
+
+    /** The list reads the two the same way round, and AllUsers leaves the filter alone to be wrong. */
+    @Test
+    void theListAnswersForTheUserBeforeTheServiceFilter() {
+        String missing = "ssc-absent-list-" + suffix();
+
+        iam("ListServiceSpecificCredentials")
+            .formParam("UserName", missing)
+            .formParam("ServiceName", "nonexistentservice.amazonaws.com")
+        .when().post("/").then().statusCode(404)
+            .body(containsString("NoSuchEntity"))
+            .body(containsString("The user with name " + missing + " cannot be found."))
+            .body(not(containsString("No such service")));
+
+        iam("ListServiceSpecificCredentials")
+            .formParam("AllUsers", "true")
+            .formParam("ServiceName", "nonexistentservice.amazonaws.com")
+        .when().post("/").then().statusCode(404)
+            .body(containsString("NoSuchEntity"))
+            .body(containsString("No such service nonexistentservice.amazonaws.com "
+                    + "is supported for Service Specific Credentials"));
     }
 
     /** The list takes the same filter, so it rejects the same way. */

@@ -34,14 +34,17 @@ import org.mockito.Mockito;
 import org.mockito.stubbing.Answer;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -135,20 +138,45 @@ class RdsCfnProvisionerTest {
 
     /** Any {@code createDbInstance} call returns {@code instance}. */
     private void stubCreateDbInstance(DbInstance instance) {
+        stubCreateDbInstance(invocation -> instance);
+    }
+
+    private void stubCreateDbInstance(Answer<DbInstance> answer) {
         when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), anyMap(), anyList(), nullable(String.class), nullable(String.class),
-                anyBoolean(), any(DbInstanceSettings.class))).thenReturn(instance);
+                anyBoolean(), any(DbInstanceSettings.class))).thenAnswer(answer);
+    }
+
+    /** Any {@code createDbInstance} call returns an instance named {@code id}, which this returns. */
+    private DbInstance stubCreatedInstance(String id) {
+        DbInstance created = dbInstance(id);
+        stubCreateDbInstance(created);
+        return created;
+    }
+
+    /** RdsService has an instance named {@code id} on file and hands it back from an in-place modify. */
+    private DbInstance stubInstanceOnFile(String id) {
+        DbInstance onFile = dbInstance(id);
+        when(rdsService.getDbInstance(id)).thenReturn(onFile);
+        when(rdsService.modifyDbInstance(eq(id), any(), any(), any(), any(), any(), any(), any(),
+                any(DbInstanceSettings.class))).thenReturn(onFile);
+        return onFile;
+    }
+
+    /** A DB instance named {@code id}; stubbed with doReturn so it can be built inside an Answer. */
+    private static DbInstance dbInstance(String id) {
+        DbInstance instance = mock(DbInstance.class);
+        doReturn(id).when(instance).getDbInstanceIdentifier();
+        return instance;
     }
 
     @Test
     void provisionsDbInstanceWithMappedArgsAndEndpointAttributes() {
-        DbInstance instance = mock(DbInstance.class);
-        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
+        DbInstance instance = stubCreatedInstance("mydb");
         when(instance.getEndpoint()).thenReturn(new DbEndpoint("mydb.local", 5432));
         when(instance.getDbInstanceArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db:mydb");
         when(instance.getDbiResourceId()).thenReturn("db-ABCDEFGHIJKLMNOP");
-        stubCreateDbInstance(instance);
 
         StackResource r = provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","EngineVersion":"16",
@@ -173,9 +201,7 @@ class RdsCfnProvisionerTest {
 
     @Test
     void aDbInstanceTakesItsCaCertificateAndExposesItsDetails() {
-        DbInstance instance = mock(DbInstance.class);
-        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        stubCreateDbInstance(instance);
+        DbInstance instance = stubCreatedInstance("mydb");
         when(rdsService.instanceCertificate(instance)).thenReturn(
                 new RdsService.InstanceCertificate("rds-ca-ecc384-g1", Instant.parse("2121-05-25T23:41:55Z")));
 
@@ -195,9 +221,7 @@ class RdsCfnProvisionerTest {
 
     @Test
     void deletesANewDbInstanceWhoseAssociatedRolesAreRefused() {
-        DbInstance instance = mock(DbInstance.class);
-        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        stubCreateDbInstance(instance);
+        DbInstance instance = stubCreatedInstance("mydb");
         when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/a", "s3Import"))
                 .thenReturn(instance);
         when(rdsService.addRoleToDbInstance("us-east-1", "mydb", "arn:aws:iam::000000000000:role/b", "s3Import"))
@@ -217,9 +241,7 @@ class RdsCfnProvisionerTest {
 
     @Test
     void provisionsDbInstanceInStackRegion() {
-        DbInstance instance = mock(DbInstance.class);
-        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        stubCreateDbInstance(instance);
+        stubCreatedInstance("mydb");
 
         provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
@@ -437,9 +459,7 @@ class RdsCfnProvisionerTest {
                 "{\"username\":\"resolved-user\",\"password\":\"resolved-secret\"}");
         when(secretsManagerService.getSecretValue(any(), any(), any(), any())).thenReturn(version);
 
-        DbInstance instance = mock(DbInstance.class);
-        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        stubCreateDbInstance(instance);
+        stubCreatedInstance("mydb");
 
         provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres",
@@ -722,9 +742,7 @@ class RdsCfnProvisionerTest {
         Parameter param = new Parameter("/db/password", "resolved-secure", "SecureString");
         when(ssmService.getParameter("/db/password", "us-east-1")).thenReturn(param);
 
-        DbInstance instance = mock(DbInstance.class);
-        when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
-        stubCreateDbInstance(instance);
+        stubCreatedInstance("mydb");
 
         StackResource resource = provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres",
@@ -1408,12 +1426,7 @@ class RdsCfnProvisionerTest {
 
     @Test
     void updateStackReconcilesExistingDbInstanceInsteadOfRecreating() {
-        DbInstance existing = mock(DbInstance.class);
-        when(rdsService.getDbInstance("mydb")).thenReturn(existing);
-        DbInstance reconciled = mock(DbInstance.class);
-        when(reconciled.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.modifyDbInstance(eq("mydb"), any(), any(), any(), any(), any(), any(), any(),
-                any(DbInstanceSettings.class))).thenReturn(reconciled);
+        stubInstanceOnFile("mydb");
 
         StackResource r = provisionUpdate("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
@@ -1431,11 +1444,7 @@ class RdsCfnProvisionerTest {
 
     @Test
     void updateStackChangesAnExistingDbInstancesCaCertificate() {
-        when(rdsService.getDbInstance("mydb")).thenReturn(mock(DbInstance.class));
-        DbInstance reconciled = mock(DbInstance.class);
-        when(reconciled.getDbInstanceIdentifier()).thenReturn("mydb");
-        when(rdsService.modifyDbInstance(eq("mydb"), any(), any(), any(), any(), any(), any(), any(),
-                any(DbInstanceSettings.class))).thenReturn(reconciled);
+        stubInstanceOnFile("mydb");
 
         provisionUpdate("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
@@ -1614,17 +1623,11 @@ class RdsCfnProvisionerTest {
         String old = "arn:aws:iam::000000000000:role/old";
         String lambda = "arn:aws:iam::000000000000:role/lambda";
         String refused = "arn:aws:iam::000000000000:role/refused";
-        DbInstance before = mock(DbInstance.class);
-        when(before.getDbInstanceIdentifier()).thenReturn("mydb");
+        DbInstance before = stubInstanceOnFile("mydb");
         when(before.getAssociatedRoles()).thenReturn(List.of(new DbRoleAssociation(old, "s3Import")));
-        DbInstance withoutOld = mock(DbInstance.class);
-        when(withoutOld.getDbInstanceIdentifier()).thenReturn("mydb");
-        DbInstance withLambda = mock(DbInstance.class);
-        when(withLambda.getDbInstanceIdentifier()).thenReturn("mydb");
+        DbInstance withoutOld = dbInstance("mydb");
+        DbInstance withLambda = dbInstance("mydb");
         when(withLambda.getAssociatedRoles()).thenReturn(List.of(new DbRoleAssociation(lambda, "Lambda")));
-        when(rdsService.getDbInstance("mydb")).thenReturn(before);
-        when(rdsService.modifyDbInstance(eq("mydb"), any(), any(), any(), any(), any(), any(), any(),
-                any(DbInstanceSettings.class))).thenReturn(before);
         when(rdsService.removeRoleFromDbInstance("us-east-1", "mydb", old, "s3Import")).thenReturn(withoutOld);
         when(rdsService.addRoleToDbInstance("us-east-1", "mydb", lambda, "Lambda")).thenReturn(withLambda);
         when(rdsService.addRoleToDbInstance("us-east-1", "mydb", refused, "s3Export"))
@@ -1632,7 +1635,7 @@ class RdsCfnProvisionerTest {
 
         StackResource r = provisionExisting("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",
-                 "MasterUserPassword":"secret","AssociatedRoles":[
+                 "MasterUserPassword":"secret","VPCSecurityGroups":["sg-new"],"AssociatedRoles":[
                    {"RoleArn":"arn:aws:iam::000000000000:role/lambda","FeatureName":"Lambda"},
                    {"RoleArn":"arn:aws:iam::000000000000:role/refused","FeatureName":"s3Export"}]}
                 """, "us-east-1", "mydb", Map.of("DBInstanceIdentifier", "mydb",
@@ -1643,15 +1646,16 @@ class RdsCfnProvisionerTest {
         undo.verify(rdsService).removeRoleFromDbInstance("us-east-1", "mydb", lambda, "Lambda");
         undo.verify(rdsService).addRoleToDbInstance("us-east-1", "mydb", old, "s3Import");
         verify(rdsService, never()).deleteDbInstance(any(), any());
+        // The groups change last, so the engine, which restores this resource without calling
+        // rollbackUpdate, is right that the instance still has the groups it had.
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
     }
 
     @Test
     void renamedDbInstanceKeepsItsPredecessorWhenTheNewRolesAreRefused() {
         // The roles go on before the renamed instance's predecessor is deleted, so a refused list
         // costs only the new instance.
-        DbInstance renamed = mock(DbInstance.class);
-        when(renamed.getDbInstanceIdentifier()).thenReturn("newdb");
-        stubCreateDbInstance(renamed);
+        stubCreatedInstance("newdb");
         when(rdsService.addRoleToDbInstance(any(), eq("newdb"), any(), any()))
                 .thenThrow(new AwsException("InvalidParameterValue", "feature not supported", 400));
 
@@ -1716,12 +1720,16 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
-    void dbClusterCleanupTreatsAnAlreadyGoneClusterAsDeleted() {
+    void replacementCleanupTreatsAnAlreadyGoneClusterOrInstanceAsDeleted() {
         doThrow(new AwsException("DBClusterNotFoundFault", "DB cluster gone not found.", 404))
                 .when(rdsService).deleteDbCluster("gone", "us-east-1");
+        doThrow(new AwsException("DBInstanceNotFound", "DB instance gone not found.", 404))
+                .when(rdsService).deleteDbInstance("gone", "us-east-1");
 
         assertDoesNotThrow(() -> provisioner.delete("AWS::RDS::DBCluster", "gone", "us-east-1"));
+        assertDoesNotThrow(() -> provisioner.delete("AWS::RDS::DBInstance", "gone", "us-east-1"));
         verify(rdsService).deleteDbCluster("gone", "us-east-1");
+        verify(rdsService).deleteDbInstance("gone", "us-east-1");
     }
 
     @Test
@@ -2055,6 +2063,309 @@ class RdsCfnProvisionerTest {
         assertEquals("mycluster", r.getPhysicalId());
         verify(rdsService, never()).deleteDbCluster(any(), any());
         verify(rdsService, never()).modifyDbCluster(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    // ── VPCSecurityGroups and StorageEncrypted of AWS::RDS::DBInstance ──
+
+    private static final String ENCRYPTION_ATTR = "__FlociDbInstanceStorageEncrypted";
+    private static final String IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
+    private static final String PLAIN = "{\"Engine\":\"postgres\"}";
+    private static final String SG_FIRST = "{\"Engine\":\"postgres\",\"VPCSecurityGroups\":[\"sg-first\"]}";
+    private static final String SG_SECOND = "{\"Engine\":\"postgres\",\"VPCSecurityGroups\":[\"sg-second\"]}";
+    private static final String ENCRYPTED = "{\"Engine\":\"postgres\",\"StorageEncrypted\":true}";
+    private static final String MEMBER = "{\"DBClusterIdentifier\":\"cluster\"";
+
+    /** What one {@code createDbInstance} call asked for, of what these tests read. */
+    private record CreateRequest(String id, List<String> groups, DbInstanceSettings settings) { }
+
+    /**
+     * A DB instance a CreateStack of {@code template} left on file as {@code onFile}, and every
+     * {@code createDbInstance} call made since, that one first.
+     */
+    private record Created(StackResource resource, String id, String template, DbInstance onFile,
+                           List<CreateRequest> requests) { }
+
+    /**
+     * A CreateStack of the unnamed instance {@code json}. RdsService then has it on file with
+     * {@code groupsOnFile}, and modifies it in place without changing anything else.
+     */
+    private Created createInstance(String json, String... groupsOnFile) {
+        List<CreateRequest> requests = new ArrayList<>();
+        stubCreateDbInstance(invocation -> {
+            requests.add(new CreateRequest(invocation.getArgument(0), invocation.getArgument(17),
+                    invocation.getArgument(21)));
+            return dbInstance(invocation.getArgument(0));
+        });
+        StackResource created = provision("Db", "AWS::RDS::DBInstance", json);
+        assertEquals("CREATE_COMPLETE", created.getStatus(), created.getStatusReason());
+        DbInstance onFile = stubInstanceOnFile(created.getPhysicalId());
+        when(onFile.getVpcSecurityGroupIds()).thenReturn(List.of(groupsOnFile));
+        return new Created(created, created.getPhysicalId(), json, onFile, requests);
+    }
+
+    /** An UpdateStack from the template the instance was created with to {@code json}. */
+    private StackResource updateInstance(Created created, String json) {
+        return provisioner.provision("Db", "AWS::RDS::DBInstance", props(json), engine(), "us-east-1",
+                "000000000000", "my-stack", created.id(), created.resource().getAttributes(), event -> { },
+                props(created.template()));
+    }
+
+    /** An instance created on {@code sg-first}, then updated to {@code json}; it is kept, under the same id. */
+    private StackResource updateFromFirstGroup(String json) {
+        return updateFromFirstGroup(json, created -> { });
+    }
+
+    /** As {@link #updateFromFirstGroup(String)}, with {@code beforeUpdate} given the created instance first. */
+    private StackResource updateFromFirstGroup(String json, Consumer<Created> beforeUpdate) {
+        Created created = createInstance(SG_FIRST, "sg-first");
+        beforeUpdate.accept(created);
+        return updateInstance(created, json);
+    }
+
+    /** An instance created encrypted, then replaced by an update that drops StorageEncrypted. */
+    private Created replaceEncryptedInstance() {
+        Created created = createInstance(ENCRYPTED);
+        StackResource replaced = updateInstance(created, PLAIN);
+        assertNotEquals(created.id(), replaced.getPhysicalId());
+        return new Created(replaced, created.id(), PLAIN, created.onFile(), created.requests());
+    }
+
+    /** How many times the provisioner asked RdsService to modify an instance, whatever the arguments. */
+    private long modifyCalls() {
+        return Mockito.mockingDetails(rdsService).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals("modifyDbInstance"))
+                .count();
+    }
+
+    @Test
+    void aDbInstanceIsCreatedWithItsVpcSecurityGroupsAndStorageEncrypted() {
+        Created created = createInstance("""
+                {"Engine":"postgres","VPCSecurityGroups":["sg-first","sg-second"],"StorageEncrypted":true}
+                """);
+
+        assertEquals(List.of(new CreateRequest(created.id(), List.of("sg-first", "sg-second"),
+                new DbInstanceSettings(true, null, null, null, null, null))), created.requests());
+        assertEquals("true", created.resource().getAttributes().get(ENCRYPTION_ATTR));
+    }
+
+    @Test
+    void aMalformedStorageEncryptedFailsInsteadOfLeavingTheInstanceUnencrypted() {
+        stubCreateDbInstance(mock(DbInstance.class));
+
+        StackResource r = provision("Db", "AWS::RDS::DBInstance", """
+                {"Engine":"postgres","StorageEncrypted":"yes"}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("StorageEncrypted must be true or false"), r.getStatusReason());
+    }
+
+    /** Every group the instance had comes back, however many, and an instance that had none gets none. */
+    @ParameterizedTest
+    @ValueSource(strings = {"sg-first", "sg-first,sg-other", ""})
+    void anUpdateMovesTheInstanceToTheNewGroupsLastAndARollbackPutsTheOldOnesBack(String groupsOnFile) {
+        String[] before = groupsOnFile.isEmpty() ? new String[0] : groupsOnFile.split(",");
+        StackResource r = updateInstance(createInstance(PLAIN, before), SG_SECOND);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        InOrder order = inOrder(rdsService);
+        order.verify(rdsService).modifyDbInstance(eq(r.getPhysicalId()), any(), any(), any(), any(), any(), any(),
+                any(), any(DbInstanceSettings.class));
+        order.verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-second"));
+
+        assertTrue(provisioner.rollbackUpdate(r), "the groups were all the update changed");
+
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of(before));
+        assertFalse(r.getAttributes().containsKey(IN_PLACE_ATTR));
+    }
+
+    @Test
+    void droppedGroupsPutTheInstanceOnItsVpcsDefaultGroupAndARollbackPutsThemBack() {
+        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any())).thenReturn(List.of("sg-default"));
+
+        StackResource r = updateFromFirstGroup(PLAIN);
+
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-default"));
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        PLAIN + " | " + PLAIN + " | sg-default",
+        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + "} | sg-default",
+        SG_FIRST + " | " + PLAIN + " |"
+    })
+    void theGroupsStayWhenTheTemplateNeverDeclaredThemAMemberDropsThemOrTheVpcHasNoDefault(
+            String template, String updated, String defaultGroup) {
+        // AWS's handler gives the VPC's default group only to a standalone instance whose previous
+        // template declared groups, and only when there is such a group; a member's are its cluster's.
+        when(rdsService.defaultVpcSecurityGroupIds(eq("us-east-1"), any()))
+                .thenReturn(defaultGroup == null ? List.of() : List.of(defaultGroup));
+        Created created = createInstance(template, "sg-manual");
+
+        StackResource r = updateInstance(created, updated);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-second\"]}",
+        MEMBER + "} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-cluster\"]}"
+    })
+    void aClusterMemberWhoseTemplateChangesItsGroupsFailsBeforeAnythingChanges(String template, String updated) {
+        // AWS's handler sends the change to ModifyDBInstance, and RDS refuses it for a member, even one
+        // that names the groups the member already has.
+        StackResource r = updateInstance(createInstance(template, "sg-cluster"), updated);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("Modify vpc security group for the DB Cluster"), r.getStatusReason());
+        assertEquals(0, modifyCalls());
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+    }
+
+    @Test
+    void aClusterMemberWhoseTemplateKeepsItsGroupsIsGivenThemAndNotRefused() {
+        // A member a stack created before Floci applied VPCSecurityGroups has none of them on file, but
+        // its template did not change them, so AWS's handler would send RDS nothing to refuse.
+        String template = MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]}";
+        StackResource r = updateInstance(createInstance(template), template);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+    }
+
+    @Test
+    void aRollbackOfAnUpdateThatAlsoChangedOtherSettingsPutsTheGroupsBackButIsNotComplete() {
+        // The instance reports IAM authentication off when the update starts and on once modified.
+        StackResource r = updateFromFirstGroup("""
+                {"Engine":"postgres","VPCSecurityGroups":["sg-second"],"EnableIAMDatabaseAuthentication":true}
+                """, created -> when(created.onFile().isIamDatabaseAuthenticationEnabled()).thenReturn(false, true));
+
+        assertFalse(provisioner.rollbackUpdate(r), "IAM authentication has no rollback here");
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+    }
+
+    @Test
+    void aRollbackThatFindsTheInstanceGoneFailsAndKeepsWhatItOwes() {
+        StackResource r = updateFromFirstGroup(SG_SECOND);
+        doThrow(new AwsException("DBInstanceNotFound", "DB instance not found.", 404))
+                .when(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("DBInstanceNotFound", failure.getErrorCode());
+        assertTrue(r.getAttributes().containsKey(IN_PLACE_ATTR), "a retried rollback tries again");
+    }
+
+    @Test
+    void aCommittedInPlaceUpdateDropsWhatARollbackWouldHavePutBack() {
+        // An in-place update owes no cleanup, so the engine calls completeUpdate and not clearUpdate;
+        // a record left here would be put back by the rollback of the next update.
+        StackResource r = updateFromFirstGroup(SG_SECOND);
+        assertTrue(r.getAttributes().containsKey("__FlociAssociatedRolesPrior"));
+
+        assertFalse(provisioner.completeUpdate(r).applicable());
+
+        assertFalse(r.getAttributes().containsKey("__FlociAssociatedRolesPrior"));
+        assertFalse(r.getAttributes().containsKey(ENCRYPTION_ATTR + "Prior"));
+        assertFalse(r.getAttributes().containsKey(IN_PLACE_ATTR));
+    }
+
+    @Test
+    void aRollbackPutsBackTheRolesRecordTheUpdateFoundAndNotOneAnOlderFlociLeftBehind() {
+        // Before completeUpdate dropped it, a committed in-place update left the roles record it
+        // overwrote on the resource, and a stack can still carry one from then. The update found one
+        // record, writes another, and the rollback has to put back the one it found.
+        String found = "[{\"RoleArn\":\"arn:aws:iam::000000000000:role/declared\"}]";
+        StackResource r = updateFromFirstGroup(SG_SECOND, created -> created.resource().getAttributes().putAll(Map.of(
+                "__FlociAssociatedRoles", found,
+                "__FlociAssociatedRolesPrior", "[{\"RoleArn\":\"arn:aws:iam::000000000000:role/old\"}]")));
+        assertEquals("[]", r.getAttributes().get("__FlociAssociatedRoles"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(found, r.getAttributes().get("__FlociAssociatedRoles"));
+    }
+
+    @Test
+    void aStorageEncryptedChangeCreatesTheReplacementAndDeletesTheOldInstanceOnlyOnCommit() {
+        // Dropping StorageEncrypted: true is the change to an unencrypted instance, which AWS can
+        // only make by creating another one.
+        Created replaced = replaceEncryptedInstance();
+
+        String replacement = replaced.resource().getPhysicalId();
+        assertEquals(new CreateRequest(replacement, List.of(), DbInstanceSettings.defaults()),
+                replaced.requests().get(1));
+        assertEquals(0, modifyCalls());
+        verify(rdsService, never()).deleteDbInstance(any(), any());
+        verify(rdsService, never()).deleteDbInstance(any());
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+        assertEquals(replaced.id(), provisioner.updateCleanupPhysicalId(replaced.resource()));
+
+        assertTrue(provisioner.completeUpdate(replaced.resource()).complete());
+
+        verify(rdsService).deleteDbInstance(replaced.id(), "us-east-1");
+        assertEquals("false", replaced.resource().getAttributes().get(ENCRYPTION_ATTR));
+    }
+
+    @Test
+    void aRolledBackReplacementIsDeletedAndTheRecordFollowsTheOldInstanceBack() {
+        Created replaced = replaceEncryptedInstance();
+        String replacement = replaced.resource().getPhysicalId();
+
+        assertTrue(provisioner.rollbackUpdate(replaced.resource()));
+
+        assertEquals(replaced.id(), replaced.resource().getPhysicalId());
+        verify(rdsService).deleteDbInstance(replacement, "us-east-1");
+        verify(rdsService, never()).deleteDbInstance(replaced.id(), "us-east-1");
+        assertEquals("true", replaced.resource().getAttributes().get(ENCRYPTION_ATTR));
+    }
+
+    @Test
+    void aReplacementWhoseDeleteFailsStillLeavesTheRecordWithTheOldInstance() {
+        // The resource names the old instance again before the delete is tried, so a rollback the
+        // stack later skips, rather than retries, must not leave the replacement's record behind.
+        Created replaced = replaceEncryptedInstance();
+        doThrow(new AwsException("InvalidDBInstanceState", "DB instance is busy.", 400))
+                .when(rdsService).deleteDbInstance(replaced.resource().getPhysicalId(), "us-east-1");
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(replaced.resource()));
+
+        assertEquals(replaced.id(), replaced.resource().getPhysicalId());
+        assertEquals("true", replaced.resource().getAttributes().get(ENCRYPTION_ATTR));
+    }
+
+    @Test
+    void aCustomNamedInstanceRefusesAStorageEncryptedChange() {
+        Created created = createInstance("{\"DBInstanceIdentifier\":\"mydb\",\"Engine\":\"postgres\"}");
+
+        StackResource r = updateInstance(created, """
+                {"DBInstanceIdentifier":"mydb","Engine":"postgres","StorageEncrypted":true}
+                """);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains(
+                "custom-named resource requires replacing. Rename mydb and update the stack again."));
+        assertEquals(1, created.requests().size());
+        assertEquals(0, modifyCalls());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {ENCRYPTED + " | false", PLAIN + " | true"})
+    void anInstanceFromBeforeStorageEncryptedWasRecordedIsComparedWithThePreviousTemplate(
+            String updated, boolean replaced) {
+        // Its template said true, but nothing records that, so the update reads the previous template:
+        // keeping true keeps the instance, dropping it replaces the instance.
+        Created created = createInstance(ENCRYPTED);
+        created.resource().getAttributes().remove(ENCRYPTION_ATTR);
+
+        StackResource r = updateInstance(created, updated);
+
+        assertEquals(replaced, !created.id().equals(r.getPhysicalId()));
+        assertEquals(String.valueOf(!replaced), r.getAttributes().get(ENCRYPTION_ATTR));
     }
 
     @Test

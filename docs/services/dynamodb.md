@@ -14,9 +14,9 @@ The listing is not filtered to the caller's individually authorized tables.
 This resource matching was checked against live AWS with isolated role sessions.
 Pagination and ignored table selectors do not change the collection being authorized.
 Other DynamoDB operations retain their own authorization resources.
-The generated IAM request-resource table records `ListTables` as a measured correction to
-the Service Reference. Other DynamoDB operations keep their existing resource builders,
-including batch, transaction and PartiQL table extraction.
+The Service Reference lists no resource type for the action, so the collection comes from that
+measurement, the one thing the generated table of request resources states by hand. Other DynamoDB
+operations keep their existing resource builders, including batch, transaction and PartiQL table extraction.
 
 ## Supported Actions
 
@@ -26,6 +26,8 @@ including batch, transaction and PartiQL table extraction.
 | `DeleteTable` | Delete a table |
 | `DescribeTable` | Get table metadata |
 | `ListTables` | List all tables |
+| `DescribeLimits` | Get the default account and table capacity quotas, which `CreateTable` and `UpdateTable` enforce |
+| `DescribeEndpoints` | Get Floci's own host and port as the endpoint |
 | `UpdateTable` | Update throughput, indexes, streams |
 | `PutItem` | Write an item |
 | `GetItem` | Read an item by primary key |
@@ -102,6 +104,10 @@ use a `dynamodb:Select` condition when the policy must require specific attribut
 
 ## Legacy conditional requests
 
+Legacy `QueryFilter` and `ScanFilter` honor `ConditionalOperator`: `OR` retains an
+item when any condition matches; `AND`, including the omitted default, requires
+every condition. Read limits and scanned counts apply before filtering.
+
 The native backend accepts `KeyConditions` together with `FilterExpression`.
 For legacy `Expected` conditions it also accepts `ComparisonOperator` with a single
 `Value`, including EQ and NE, just as the live AWS service does. Supplying both
@@ -134,7 +140,7 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 
 Redshift zero-ETL integrations can consume these stream records directly. See the
 [Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported sources and targets,
-landing table, checkpoint, and retry behavior.
+landing table, current-state table, checkpoint, and retry behavior.
 
 Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
 tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before

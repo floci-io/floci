@@ -1426,6 +1426,7 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
     }
 
+
     private Response handleTagRole(MultivaluedMap<String, String> params) {
         iamService.tagRole(getParam(params, "RoleName"), extractTags(params, true));
         return Response.ok(AwsQueryResponse.envelopeNoResult("TagRole", AwsNamespaces.IAM)).build();
@@ -2142,9 +2143,19 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
+    /**
+     * The principal's own policies, less whatever {@code PolicyExclusionList} asked to leave out
+     * and beside whatever documents the request handed in. The identifiers are request inputs, so
+     * they are read and refused ahead of the lookup, which is where this package answers an input;
+     * a simulation that excludes nothing and hands nothing in resolves the context it always did.
+     */
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = validatedPolicySourceArn(params);
-        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        PolicyExclusions exclusions = PolicyExclusions.from(params);
+        List<String> inputDocuments = readablePolicyInputList(params);
+        String inputBoundary = inputBoundaryDocument(params);
+        CallerContext caller = withInputDocuments(
+                iamService.resolvePrincipalContext(policySourceArn, exclusions), inputDocuments, inputBoundary);
         List<String> actionNames = requireActionNames(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
         // Keyed without regard to case, as the evaluator compares condition key names: a value
@@ -2173,12 +2184,83 @@ public class IamQueryHandler {
         List<String> actionNames = requireActionNames(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
         Map<String, List<String>> context = extractContextEntries(params);
-        // AWS accepts only one permissions boundary document per simulation; a request that
-        // provides more than one is not modeled and only the first is applied.
-        List<String> boundaryInputList = getMemberList(params, "PermissionsBoundaryPolicyInputList");
-        String boundaryDocument = boundaryInputList.isEmpty() ? null : boundaryInputList.get(0);
-        CallerContext caller = new CallerContext(policyInputList, null, boundaryDocument);
+        CallerContext caller = new CallerContext(policyInputList, null, inputBoundaryDocument(params));
         return simulationResults("SimulateCustomPolicy", params, caller, actionNames, resourceArns, context);
+    }
+
+    /**
+     * The documents a principal simulation was handed beside the principal's own.
+     * {@code PolicyInputList} is "an optional list of additional policy documents to include in
+     * the simulation", so each is evaluated like a policy the principal holds: AWS's own example
+     * for this operation allows an action the attached policies do not, on the strength of an
+     * input document alone. A permissions boundary handed in "is used for the simulation" in place
+     * of the stored one, which is what the member says of an entity carrying one, and is the
+     * boundary when the entity carries none.
+     *
+     * <p>Neither document is attached to anything, so no {@code PolicyExclusionList} identifier
+     * reaches either: that member names the policies "actually attached to the principal", where
+     * these are the request's own. Both are read before the principal is resolved, which is where
+     * this package answers an input, so a document the operation cannot read is refused whether or
+     * not the ARN names anybody.
+     */
+    private CallerContext withInputDocuments(CallerContext caller, List<String> documents,
+                                             String boundaryDocument) {
+        CallerContext simulated = caller.withIdentityPolicies(documents);
+        return boundaryDocument == null ? simulated : simulated.withBoundaryPolicy(boundaryDocument);
+    }
+
+    /**
+     * The one permissions boundary document a simulation runs with, read the same way for both
+     * simulators. AWS accepts only one, "You can input only one permissions boundary when you pass
+     * a policy to this operation", so a request carrying more is not modelled and only the first
+     * is applied.
+     */
+    private String inputBoundaryDocument(MultivaluedMap<String, String> params) {
+        List<String> boundaryInputList = getMemberList(params, "PermissionsBoundaryPolicyInputList");
+        if (boundaryInputList.isEmpty()) {
+            return null;
+        }
+        String boundary = boundaryInputList.get(0);
+        if (!policyEvaluator.readsAsPolicyDocument(boundary)) {
+            // The member carries one document, so the refusal identifies none: this is the fixed
+            // sentence AWS's own emulator answers for every supplied document but an entry of
+            // PolicyInputList, which is named by its index instead.
+            throw new AwsException("InvalidInput", "Syntax errors in policy.", 400);
+        }
+        return boundary;
+    }
+
+    /**
+     * The {@code PolicyInputList} documents a request supplied, each held to being a policy
+     * document before anything is decided from it. The member takes "the complete, valid JSON text
+     * of an IAM policy", so a value that is no policy document is an invalid input value rather
+     * than a document the evaluation reads nothing out of, and the modelled {@code InvalidInput} is
+     * what this package answers a value it cannot read as the member's type at all, the declared
+     * format and length being answered by the constraints ahead of the operation.
+     *
+     * <p>The 500 {@code PolicyEvaluation} the two simulators model is not that answer: it carries
+     * no sender fault where {@code InvalidInput} does, and the two context-key readers take this
+     * same member and model no {@code PolicyEvaluation} at all, so one defect on one member would
+     * otherwise be answered two ways across the four operations that take it.
+     *
+     * <p>No wording for the refusal is published. This is the sentence AWS's own emulator answers,
+     * naming the offending entry by the index it arrived under, the member carrying several
+     * documents and the caller needing to know which of them was refused.
+     */
+    private List<String> readablePolicyInputList(MultivaluedMap<String, String> params) {
+        List<String> documents = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember member : AwsQueryLists.members(params, "PolicyInputList", null)) {
+            String document = params.getFirst(member.prefix());
+            if (document == null) {
+                continue;
+            }
+            if (!policyEvaluator.readsAsPolicyDocument(document)) {
+                throw new AwsException("InvalidInput",
+                        "Policy input list item " + member.index() + " has invalid content", 400);
+            }
+            documents.add(document);
+        }
+        return documents;
     }
 
     private List<String> requireActionNames(MultivaluedMap<String, String> params) {
@@ -2190,7 +2272,7 @@ public class IamQueryHandler {
     }
 
     private List<String> requirePolicyInputList(MultivaluedMap<String, String> params) {
-        List<String> policyInputList = getMemberList(params, "PolicyInputList");
+        List<String> policyInputList = readablePolicyInputList(params);
         if (policyInputList.isEmpty()) {
             throw new AwsException("ValidationError", "At least one PolicyInputList member is required.", 400);
         }
@@ -2242,9 +2324,10 @@ public class IamQueryHandler {
         // entity, and any additional policies that you provide, are included": a grant the account
         // applies without attaching it is therefore not read here, though a simulation evaluates
         // with it.
+        List<String> inputDocuments = readablePolicyInputList(params);
         CallerContext caller = iamService.resolveAttachedPrincipalContext(policySourceArn);
         List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
-        allDocuments.addAll(getMemberList(params, "PolicyInputList"));
+        allDocuments.addAll(inputDocuments);
         List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
         return Response.ok(AwsQueryResponse.envelope("GetContextKeysForPrincipalPolicy", AwsNamespaces.IAM,
                 contextKeyNamesXml(keys))).build();
@@ -2420,17 +2503,19 @@ public class IamQueryHandler {
      * {@code PolicySourceArn} held to the 20 to 2048 characters {@code arnType} declares, before
      * the entity it names is resolved. IAM answers that minimum on a sibling ARN member with a
      * {@code ValidationError} naming the length, so a value too short to be any ARN is refused on
-     * its shape rather than resolved to whatever follows its last slash.
+     * its shape rather than resolved to whatever follows its last slash. A blank is such a value:
+     * the request carried it, so it is held to the same minimum, which is the answer
+     * {@code GetContextKeysForPrincipalPolicy} gives for the same member through the walk.
      *
      * <p>A value that clears 20 characters and still parses as no ARN is left to the resolver
      * below, which refuses it as {@code InvalidInput} on a capture of its own: the member publishes
-     * a length and no pattern, so there is no shape to hold it to here. An absent or blank value
-     * is left there too, that resolver reporting it.
+     * a length and no pattern, so there is no shape to hold it to here. An absent member is left
+     * there too, that resolver answering it in the operation's own sentence.
      */
     private String validatedPolicySourceArn(MultivaluedMap<String, String> params) {
         String arn = getParam(params, "PolicySourceArn");
-        if (arn == null || arn.isBlank()) {
-            return arn;
+        if (arn == null) {
+            return null;
         }
         return arnOfDeclaredLength(arn, "policySourceArn");
     }
@@ -3610,14 +3695,23 @@ public class IamQueryHandler {
      * malformed request read as a valid empty answer, so anything the model marks required is read
      * through here instead.
      *
-     * <p>A blank value is a value the request carries, and the constraints read ahead of this
-     * answer it against the minimum length its shape declares. What is left here is a member the
-     * model gives no minimum and an operation the vendored file does not carry, where a blank is
-     * still read as a member that never arrived rather than passed to the operation.
+     * <p>Only an absent member is reported as absent. A blank value is a value the request
+     * carries on this protocol, so what it breaks is the shape declared for it: the constraints
+     * read ahead of this answer every member declaring a minimum, a pattern or a value set.
+     *
+     * <p>Satisfying a shape is not the same as being usable, and this reader does not stand in for
+     * the rules above it. Fourteen required members declare a shape a blank satisfies: a minimum of
+     * 1 beside a pattern admitting the space, tab, line feed and carriage return characters, or
+     * none of the three at all. Seven of those are policy documents, and one that is no policy
+     * document reaches the operation and is stored, because nothing here holds a policy document to
+     * being one on a write; that gap takes a bare {@code +} the same way, so it is wider than a
+     * blank and is not this reader's to close. {@code serviceName} on
+     * {@code CreateServiceSpecificCredential} declares none of the three and answers a service name
+     * nothing supports.
      */
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             throw IamValidationErrors.notNull(memberPath(name));
         }
         return value;

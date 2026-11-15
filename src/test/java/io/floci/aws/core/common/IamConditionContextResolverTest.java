@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbService;
@@ -10,6 +11,7 @@ import io.floci.aws.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
@@ -20,6 +22,7 @@ import io.floci.aws.services.lambdaweb.LambdaWebService;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.inject.Instance;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -33,11 +36,14 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,11 +55,16 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,12 +78,33 @@ class IamConditionContextResolverTest {
     private Ec2Service ec2Service;
     private S3Service s3Service;
     private CloudWatchLogsService logsService;
+    private CloudWatchLogsCrossAccountService crossAccountService;
     private IamService iamService;
     private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
     private ResolvedServiceCatalog serviceCatalog;
+
+    @Test
+    void eksRequestConditionsUseModeledPathsAndLeaveOmissionsAbsent() {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"accessConfig":{"authenticationMode":"API","bootstrapClusterCreatorAdminPermissions":false},
+                 "resourcesVpcConfig":{"endpointPrivateAccess":true,"endpointPublicAccess":false}}"""));
+        Map<String, List<String>> create = resolver.resolve("eks", "eks:CreateCluster", request);
+        assertEquals(Map.of("eks:authenticationMode", List.of("API"),
+                "eks:bootstrapClusterCreatorAdminPermissions", List.of("false"),
+                "eks:endpointPrivateAccess", List.of("true"), "eks:endpointPublicAccess", List.of("false")), create);
+        Map<String, List<String>> update = resolver.resolve("eks", "eks:UpdateClusterConfig", request);
+        assertEquals(3, update.size());
+        assertFalse(update.containsKey("eks:bootstrapClusterCreatorAdminPermissions"));
+        assertNull(resolver.resolve("eks", "eks:DescribeCluster", request));
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"accessConfig":{"authenticationMode":null},"resourcesVpcConfig":{"endpointPrivateAccess":[]}}"""));
+        assertNull(resolver.resolve("eks", "eks:CreateCluster", request));
+        assertNull(resolver.resolve("eks", "eks:UpdateClusterConfig", request));
+    }
 
     @SuppressWarnings("unchecked")
     @BeforeEach
@@ -95,6 +127,10 @@ class IamConditionContextResolverTest {
         Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
         when(logsServiceInstance.isResolvable()).thenReturn(true);
         when(logsServiceInstance.get()).thenReturn(logsService);
+        crossAccountService = mock(CloudWatchLogsCrossAccountService.class);
+        Instance<CloudWatchLogsCrossAccountService> crossAccountServiceInstance = mock(Instance.class);
+        when(crossAccountServiceInstance.isResolvable()).thenReturn(true);
+        when(crossAccountServiceInstance.get()).thenReturn(crossAccountService);
         iamService = mock(IamService.class);
         Instance<IamService> iamServiceInstance = mock(Instance.class);
         when(iamServiceInstance.isResolvable()).thenReturn(true);
@@ -116,9 +152,10 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
-                lambdaWebServiceInstance,
-                requestContext, config,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
+                crossAccountServiceInstance, iamServiceInstance,
+                lambdaWebServiceInstance, spellings(new ShapeNamingSpelling()), mock(Instance.class),
+                requestContext, new RegionResolver("us-east-1", "123456789012"), config,
                 null, serviceCatalog);
     }
 
@@ -134,29 +171,69 @@ class IamConditionContextResolverTest {
         String resource = "lambda:Resource/WebFunctionAuthType";
 
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
-                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+                webRequest("PUT", "/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
-                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                "lambda:CreateWebFunctionEndpoint", webRequest("PUT", "/2025-03-07/web-functions/app/endpoints",
                         "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
                 resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
-                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+                        webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
-                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev",
                         "{\"description\":\"d\"}")), "an update without authType names none");
-        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
-            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
-                            "")));
-            assertNull(resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        // A function and an endpoint named by their ARNs, which a client sends encoded.
+        String encoded = function.replace("/", "%2F");
+        for (String[] action : new String[][] {{"lambda:GetWebFunctionEndpoint", "GET"},
+                {"lambda:DeleteWebFunctionEndpoint", "DELETE"}}) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/" + encoded + "/endpoints/" + encoded
+                            + "%2Fendpoint%2Fdev", "")));
+            assertNull(resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/app/endpoints/gone", "")),
+                    "a missing endpoint has none");
         }
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
-                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
+                webRequest("GET", "/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
-                webRequest("/2025-03-07/web-functions/app", "")));
+                webRequest("GET", "/2025-03-07/web-functions/app", "")));
         assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
-                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
+                webRequest("POST", "/2025-03-07/web-functions/app/list-endpoints", "{}")));
+    }
+
+    /**
+     * A change batch carries the keys the generated table names for its action, read from the elements its members
+     * name and spelled by the namespace's service for each member's shape; an element of the same name elsewhere is
+     * not read.
+     */
+    @Test
+    void aChangeBatchCarriesTheKeysItsMembersNameSpelledByShape() {
+        String body = """
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch><Changes>
+                    <Change><Action>UPSERT</Action><ResourceRecordSet><Name>Probe.Example.test</Name><Type>A</Type>
+                      <GeoLocation><Name>elsewhere.example.test</Name></GeoLocation></ResourceRecordSet></Change>
+                    <Change><Action>DELETE</Action><ResourceRecordSet><Name>second.example.test.</Name>
+                      <Type>TXT</Type></ResourceRecordSet></Change>
+                  </Changes></ChangeBatch>
+                </ChangeResourceRecordSetsRequest>""";
+
+        assertEquals(Map.of(
+                "route53:ChangeResourceRecordSetsActions", List.of("ChangeAction:UPSERT", "ChangeAction:DELETE"),
+                "route53:ChangeResourceRecordSetsRecordTypes", List.of("RRType:A", "RRType:TXT"),
+                "route53:ChangeResourceRecordSetsNormalizedRecordNames",
+                List.of("DNSName:Probe.Example.test", "DNSName:second.example.test.")),
+                resolver.resolve("route53", "route53:ChangeResourceRecordSets", xmlRequest(body)));
+        assertNull(resolver.resolve("route53", "route53:ChangeResourceRecordSets",
+                xmlRequest("<ChangeResourceRecordSetsRequest><ChangeBatch><Changes>")), "a body that does not parse");
+        assertNull(resolver.resolve("route53", "route53:ListResourceRecordSets", xmlRequest(body)));
+    }
+
+    @Test
+    void aQueryRequestCarriesTheKeysItsMembersNameAsGiven() {
+        assertEquals(Map.of("redshift:DbUser", List.of("analyst")), resolver.resolve("redshift",
+                "redshift:GetClusterCredentials", formRequest("Action=GetClusterCredentials&DbUser=analyst")));
+        assertNull(resolver.resolve("redshift", "redshift:GetClusterCredentials",
+                formRequest("Action=GetClusterCredentials")));
     }
 
     @Test
@@ -208,11 +285,44 @@ class IamConditionContextResolverTest {
         return containerRequest;
     }
 
-    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+    /** An XML request whose body can be read again, as a real request's restored stream can. */
+    private static ContainerRequestContext xmlRequest(String body) {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        when(containerRequest.getEntityStream())
+                .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return containerRequest;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Instance<RequestConditionSpelling> spellings(RequestConditionSpelling... spellings) {
+        Instance<RequestConditionSpelling> instance = mock(Instance.class);
+        when(instance.isUnsatisfied()).thenReturn(spellings.length == 0);
+        when(instance.iterator()).thenAnswer(invocation -> List.of(spellings).iterator());
+        return instance;
+    }
+
+    /** Spells each Route 53 member as its shape and value, so a test sees which shape each value was read with. */
+    private static final class ShapeNamingSpelling implements RequestConditionSpelling {
+        @Override
+        public String namespace() {
+            return "route53";
+        }
+
+        @Override
+        public String spell(String shape, String value) {
+            return shape + ":" + value;
+        }
+    }
+
+    private ContainerRequestContext webRequest(String method, String path, String body) throws Exception {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
-        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getMethod()).thenReturn(method);
+        when(uriInfo.getPath()).thenReturn(URI.create(path).getPath());
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566" + path));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getProperty("floci.bufferedJsonBody"))
                 .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
         return containerRequest;
@@ -529,6 +639,41 @@ class IamConditionContextResolverTest {
                 resolver.resolve("iam", "iam:AttachRolePolicy", queryRequest("iam", query)));
     }
 
+    @Test
+    void aTagBatchLooksUpItsInterfacesOnceAndGivesEachTargetItsOwnKeys() {
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", "DeleteTags");
+        query.add("ResourceId.1", "eni-1");
+        query.add("ResourceId.2", "eni-2");
+        query.add("ResourceId.3", "eni-3");
+        ContainerRequestContext request = queryRequest("ec2", query);
+        Map<String, Object> properties = new HashMap<>();
+        properties.put(AwsProtocolClaimFilter.CLAIM_PROPERTY,
+                request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY));
+        when(request.getProperty(anyString())).thenAnswer(call -> properties.get(call.<String>getArgument(0)));
+        doAnswer(call -> properties.put(call.getArgument(0), call.getArgument(1)))
+                .when(request).setProperty(anyString(), any());
+        when(ec2Service.heldResources(eq("us-east-1"), eq("network-interface"), anyCollection())).thenReturn(Map.of(
+                "eni-1", networkInterface("eni-1", "vpc-a"), "eni-2", networkInterface("eni-2", "vpc-b"),
+                "eni-3", networkInterface("eni-3", "vpc-a")));
+
+        Map<String, List<String>> first = resolver.resolve("ec2", "ec2:DeleteTags", request);
+        List<Map<String, List<String>>> rest = resolver.resolveRemainingTargets("ec2", "ec2:DeleteTags", request);
+
+        assertEquals(List.of("arn:aws:ec2:us-east-1:123456789012:vpc/vpc-a"), first.get("ec2:Vpc"));
+        assertEquals(List.of("arn:aws:ec2:us-east-1:123456789012:vpc/vpc-b"), rest.get(0).get("ec2:Vpc"));
+        assertEquals(List.of("eni-3"), rest.get(1).get("ec2:NetworkInterfaceID"));
+        verify(ec2Service, times(1)).heldResources(anyString(), anyString(), anyCollection());
+        verify(ec2Service).heldResources("us-east-1", "network-interface", Set.of("eni-1", "eni-2", "eni-3"));
+    }
+
+    private static NetworkInterface networkInterface(String id, String vpcId) {
+        NetworkInterface networkInterface = new NetworkInterface();
+        networkInterface.setNetworkInterfaceId(id);
+        networkInterface.setVpcId(vpcId);
+        return networkInterface;
+    }
+
     private static ContainerRequestContext queryRequest(String service, MultivaluedMap<String, String> query) {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         UriInfo uri = mock(UriInfo.class);
@@ -710,8 +855,63 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                spellings(), mock(Instance.class), requestContext, new RegionResolver("us-east-1", "123456789012"),
+                config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+    }
+
+    /** A resolver whose only finder of stored resources is {@code stored}. */
+    private IamConditionContextResolver resolverReading(StoredResourceArns stored) {
+        @SuppressWarnings("unchecked")
+        Instance<StoredResourceArns> instance = mock(Instance.class);
+        when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
+        return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                spellings(), instance, requestContext, new RegionResolver("us-east-1", "123456789012"), config,
+                null, serviceCatalog, Clock.systemUTC());
+    }
+
+    @Test
+    void resourceTagsAreTheGeneratedKeysOfTheArnsTypeValuedFromItsServicesStoredTags() {
+        String secret = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app-AbCdEf";
+        Map<String, String> held = new LinkedHashMap<>();
+        held.put("Environment", "prod");
+        held.put("environment", "dev");
+        IamConditionContextResolver reading = resolverReading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "secretsmanager";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, String> storedTags(String arn) {
+                return secret.equals(arn) ? held : Map.of();
+            }
+        });
+
+        Map<String, List<String>> tags = reading.resourceTags(secret);
+        assertEquals(2, tags.size());
+        assertEquals(List.of("prod", "dev"), tags.get("aws:ResourceTag/Environment"));
+        assertEquals(List.of("prod", "dev"), tags.get("secretsmanager:resourcetag/environment"));
+        assertNull(reading.resourceTags(secret.replace("AbCdEf", "ZyXwVu")));
+        assertNull(reading.resourceTags("*"));
+        // Events' types have resource-tag keys too, but no finder of its stored resources is registered here.
+        assertNull(reading.resourceTags("arn:aws:events:eu-west-1:123456789012:rule/nightly"));
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        context.put("AWS:ResourceTag/environment", List.of("forged"));
+        context.put("aws:RequestTag/Owner", List.of("me"));
+        Map<String, List<String>> checked = IamConditionContextResolver.withResourceTags(context, tags);
+        assertEquals(List.of("prod", "dev"), checked.get("aws:ResourceTag/Environment"));
+        assertFalse(checked.containsKey("AWS:ResourceTag/environment"));
+        assertEquals(List.of("me"), checked.get("aws:RequestTag/Owner"));
+        assertSame(context, IamConditionContextResolver.withResourceTags(context, null));
     }
 
     @Test
@@ -1034,7 +1234,7 @@ class IamConditionContextResolverTest {
     void instanceActionsResolveResourceTagsFromTheFirstNamedInstance() {
         when(ec2Service.resourceTags("us-east-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
 
-        for (String action : List.of("ec2:TerminateInstances", "ec2:DescribeInstances")) {
+        for (String action : List.of("ec2:StartInstances", "ec2:StopInstances", "ec2:TerminateInstances", "ec2:RebootInstances")) {
             Map<String, List<String>> conditions = resolver.resolve("ec2", action,
                     formRequest("Action=X&InstanceId.1=i-0123456789&InstanceId.2=i-9999999999"));
             assertEquals(List.of("payments"), conditions.get("aws:ResourceTag/Team"), action);
@@ -1046,6 +1246,14 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void describeInstancesHasNoResourceTagContextsEvenWhenInstancesAreNamed() {
+        ContainerRequestContext request = formRequest("Action=DescribeInstances&InstanceId.1=i-first&InstanceId.2=i-second");
+        assertNull(resolver.resolve("ec2", "ec2:DescribeInstances", request));
+        assertEquals(List.of(), resolver.resolveRemainingTargets("ec2", "ec2:DescribeInstances", request));
+        verify(ec2Service, never()).resourceTags(anyString(), anyString());
+    }
+
+    @Test
     void resourceTagsAreReadInTheRequestRegion() {
         requestContext.setRegion("eu-west-1");
         when(ec2Service.resourceTags("eu-west-1", "i-0123456789")).thenReturn(List.of(new Tag("Team", "payments")));
@@ -1053,6 +1261,37 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("payments"), resolver.resolve("ec2", "ec2:TerminateInstances",
                 formRequest("Action=TerminateInstances&InstanceId.1=i-0123456789")).get("aws:ResourceTag/Team"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ec2:StartInstances", "ec2:StopInstances", "ec2:RebootInstances", "ec2:TerminateInstances"})
+    void instanceLifecycleContextsPreserveOrderEmptyTagsAndTheRequestRegion(String action) {
+        requestContext.setRegion("eu-west-1");
+        when(ec2Service.resourceTags("eu-west-1", "i-first")).thenReturn(List.of(new Tag("Env", "development")));
+        when(ec2Service.resourceTags("eu-west-1", "i-second")).thenReturn(List.of(new Tag("Env", "production")));
+        ContainerRequestContext request = formRequest("InstanceId.1=i-first&InstanceId.1=i-decoy"
+                + "&InstanceId.2=i-second&InstanceId.3=i-untagged&InstanceId.4=i-first&InstanceId.6=i-gap"
+                + "&ResourceId.1=i-decoy");
+        Map<String, List<String>> first = Map.of("aws:ResourceTag/Env", List.of("development"),
+                "ec2:ResourceTag/Env", List.of("development"));
+        assertEquals(first, resolver.resolve("ec2", action, request));
+        assertEquals(List.of(Map.of("aws:ResourceTag/Env", List.of("production"),
+                        "ec2:ResourceTag/Env", List.of("production")), Map.of(), first),
+                resolver.resolveRemainingTargets("ec2", action, request));
+        assertNull(resolver.resolve("ec2", action, formRequest("ResourceId.1=i-first&InstanceId.2=i-second")));
+        assertEquals(List.of(), resolver.resolveRemainingTargets("ec2", action,
+                formRequest("ResourceId.1=i-first&InstanceId.2=i-second")));
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.add("Action", action.substring(4));
+        query.add("InstanceId.1", "i-first");
+        query.add("InstanceId.1", "i-decoy");
+        query.add("InstanceId.2", "i-second");
+        query.add("InstanceId.4", "i-gap");
+        ContainerRequestContext get = queryRequest("ec2", query);
+        assertEquals(first, resolver.resolve("ec2", action, get));
+        assertEquals(List.of(Map.of("aws:ResourceTag/Env", List.of("production"),
+                        "ec2:ResourceTag/Env", List.of("production"))),
+                resolver.resolveRemainingTargets("ec2", action, get));
     }
 
     @Test
@@ -1072,6 +1311,20 @@ class IamConditionContextResolverTest {
 
         verify(containerRequest).setEntityStream(any());
         verify(containerRequest).setProperty(eq("floci.bufferedFormBody"), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Value=%ZZ", "Value=%", "Value=%A", "%ZZ=value"})
+    void malformedFormsNeverReturnOrCachePartialParameters(String malformed) {
+        ContainerRequestContext request = formRequest("Action=StartInstances&InstanceId.1=i-first&" + malformed);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            WebApplicationException error = assertThrows(WebApplicationException.class,
+                    () -> IamConditionContextResolver.formParameters(request));
+            assertEquals(404, error.getResponse().getStatus());
+            assertEquals("application/xml", error.getResponse().getMediaType().toString());
+            assertTrue(error.getResponse().getEntity().toString().contains("<Code>MalformedQueryString</Code>"));
+        }
+        verify(request, never()).setProperty(eq("floci.bufferedFormBody"), any());
     }
 
     // ── The resolved context drives the real evaluator ─────────────────────────

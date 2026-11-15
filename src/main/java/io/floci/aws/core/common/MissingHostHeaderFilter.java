@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
+import io.vertx.core.http.HttpVersion;
 import io.vertx.core.net.SocketAddress;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.annotation.Priority;
@@ -68,9 +69,11 @@ public class MissingHostHeaderFilter implements ContainerRequestFilter {
         if (routingContext == null) {
             return;
         }
-        // An HTTP/2 request has no Host header either, but carries :authority, which Vert.x
-        // surfaces here. A null authority is the one case with nothing to route by.
         HttpServerRequest request = routingContext.request();
+        // vertx-web answers 400 to any other version without a valid authority before a filter runs.
+        if (request.version() != HttpVersion.HTTP_1_0) {
+            return;
+        }
         if (request.authority() != null) {
             return;
         }

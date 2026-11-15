@@ -93,7 +93,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
-        MultivaluedMap<String, String> query = ctx.getUriInfo().getQueryParameters();
+        MultivaluedMap<String, String> query = ResteasyRequests.queryParameters(ctx);
         String sessionToken = extractSessionToken(ctx, query);
         String auth = ctx.getHeaderString("Authorization");
         if (rejectAmbiguousRegion(ctx, auth, query)) {

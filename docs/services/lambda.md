@@ -43,6 +43,7 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `ListCodeSigningConfigs` | List the configurations in the region |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
+| `ListFunctionUrlConfigs` | List a function's URL configurations across its unpublished version and aliases, with marker pagination |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
 | `ListTags` | List tags on a function or event source mapping |
@@ -75,6 +76,22 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 supported ranges before changing any stored settings. A rejected value returns
 `InvalidParameterValueException` and leaves the function configuration unchanged.
 
+`CreateFunction` and `UpdateFunctionConfiguration` enforce the 4 KB environment-variable
+limit. The compact JSON `Variables` object must fit within 4,096 UTF-8 bytes, including
+keys, values, punctuation, and JSON escaping, as described in the
+[AWS deployment guidance](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html).
+An oversized environment returns HTTP 400 with `InvalidParameterValueException` before
+creating a function or changing any stored configuration. Omitting `Environment` on an
+update preserves the existing variables; an empty `Variables` object clears them.
+Validation stops serializing oversized input without allocating full JSON and UTF-8 copies.
+Quota errors include AWS's `String measured:` detail. The diagnostic retains up to 5,120
+UTF-8 bytes of compact variables JSON; larger inputs end with `...`, dropping any incomplete
+trailing UTF-8 character. This keeps diagnostic allocation and serialization bounded.
+CloudFormation omits unchanged environment variables during in-place configuration updates,
+so a function persisted before quota enforcement can retain an oversized environment when
+another property changes. Changing or removing its variables still updates the environment
+and enforces the quota.
+
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
 `sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
@@ -99,15 +116,18 @@ part in authorizing calls to the function:
 - Provisioned-concurrency configuration operations also act in the account named by the function
   reference. Cross-account access requires that function's policy to allow the caller.
 - Other operations act on the caller's own function of the name the ARN gives, whatever account
-  the ARN names, and are authorized against that function. Floci does not serve them on another
-  account's function, which AWS allows through a function policy.
+  the ARN names, and are authorized against both the function the ARN names and the caller's own
+  function of that name. Floci does not serve them on another account's function, which AWS allows
+  through a function policy.
 - Within one account, a statement naming the caller grants on its own. One naming only the
   account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
   caller's identity policy has to allow the call too.
-- An invoke or provisioned-concurrency configuration operation is authorized against the version or
-  alias it names, in the function name or in `Qualifier`. A grant added with `Qualifier` covers that
-  version or alias only, and a grant on the function does not cover a qualified operation.
-  Other operations are authorized against the unqualified function.
+- A version or alias written into the function name is part of the function an operation is
+  authorized against, so a grant added with `Qualifier` covers a call naming that version or alias,
+  and a grant on the function does not. `Qualifier` itself names a version or alias only for the
+  provisioned-concurrency configuration operations, which act on it; every other operation is
+  authorized against the function as its name gives it, as the Service Reference lists the function
+  alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.
@@ -222,6 +242,11 @@ other than the `{Status, Result, Error}` envelope fails its execution with
 1, 2, 4 and 8 seconds, and then fails the execution with its error. AWS does the same over a few
 minutes.
 
+The operations under a child context closed without `ReplayChildren=true` are left out of the
+invocation event and `GetDurableExecutionState`, as the API reference describes.
+
+`DeleteFunction` of a durable function or one of its versions answers 202.
+
 A callback (`createCallback`, `waitForCallback`) gets a callback id that the
 `SendDurableExecutionCallback*` APIs complete. Its `TimeoutSeconds` and `HeartbeatTimeoutSeconds`
 fail it with `Callback.Timeout` or `Callback.Heartbeat`, and each heartbeat restarts the heartbeat
@@ -235,6 +260,16 @@ operation as `SUCCEEDED`, `FAILED`, `TIMED_OUT` or `STOPPED`. Any other function
 and an output over 1 MB fails the operation. A missing function or an unqualified durable one
 fails the operation at once, and a target in another account or Region is rejected at checkpoint.
 Stopping the parent leaves the child running, as on AWS.
+
+Each durable execution gets an X-Ray trace header. It is built from the `X-Amzn-Trace-Id` header of
+Invoke when the request carries one. `GetDurableExecution` returns it as `TraceHeader`. Every
+invocation of the execution gets the same `Root` in `_X_AMZN_TRACE_ID`. A `PassThrough` function
+gets the `Parent` of the execution. When the header has none, the function gets only the `Root` if
+`Sampled=1`, and a new `Parent` on each invocation if `Sampled=0`. An `Active` function gets a new
+`Parent` on each invocation.
+A durable execution started by a chained invoke takes its header from
+`ChainedInvokeOptions.XAmznTraceId`, or from the calling execution when that is absent. A plain
+function invoked this way gets the same header.
 
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
@@ -253,9 +288,12 @@ Not emulated yet:
 - Durable executions started by Step Functions or by an event source mapping. These invoke the
   function as a plain one.
 - Payload encryption. `KMSKeyArn` is stored and returned only.
-- EventBridge status-change events, the X-Ray `TraceHeader`, and a dead-letter queue or
-  destinations for durable executions.
+- EventBridge status-change events and a dead-letter queue or destinations for durable
+  executions.
+- The `Lineage` field AWS adds to the trace header.
 - The per-execution limits of 3,000 operations and 100 MB of persisted payload.
+- The `Deleting` state AWS shows for about a minute after `DeleteFunction` of a durable function.
+  Floci removes it at once.
 
 ## Code signing configuration pagination
 
@@ -429,11 +467,20 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+`ListFunctionUrlConfigs` lists the unpublished function's URL and its alias URLs.
+It accepts `MaxItems` from 1 through 50, defaulting to 50, and resumes with `Marker`.
+Pagination uses Lambda's shared validation: out-of-range integers return
+`ValidationException`, non-integers return `SerializationException`, and an invalid
+marker returns `InvalidParameterValueException` with `Invalid pagination key.`.
+Missing or inaccessible function references return `ResourceNotFoundException`.
+
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
 [China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
-`CreateFunctionUrlConfig` is an `InvalidParameterValueException` in those regions, and an
-`AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
+`CreateFunctionUrlConfig` and `ListFunctionUrlConfigs` return `InvalidParameterValueException`
+in those regions, and an `AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
 [AWS Partitions](../configuration/partitions.md).
 
 **Versions:** `CreateFunction` and `UpdateFunctionCode` honour `Publish`, publishing a version
@@ -474,6 +521,11 @@ same-named layer of the caller's own, matching the live service, which answers t
 validate each `Layers` ARN in the caller's own account eagerly against that storage, matching
 real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
 ... does not exist.`, not silently accepted.
+
+`DeleteLayerVersion` accepts either a layer name or an unversioned layer ARN, with
+`VersionNumber` supplied separately. ARN deletion resolves the stored version in the ARN's
+region and removes its archive. IAM checks use that same layer-version ARN; another
+account's ARN cannot select a same-named layer in the caller's account.
 
 An ARN naming another account or another partition is answered on the live service by the layer's
 resource policy: an AWS-managed public layer resolves, and everything else is
@@ -967,7 +1019,9 @@ invocation to time out.
 
 **Floci solves this automatically** by running an embedded DNS server (UDP/53)
 on its container IP. All Lambda containers launched by Floci are configured to
-use it as their DNS resolver. The embedded DNS server:
+use it as their DNS resolver. It binds that advertised IP so replies retain the
+queried source address even when the container has multiple network interfaces.
+The embedded DNS server:
 
 - Resolves `*.localhost.floci.io` → Floci's Docker network IP
 - Forwards all other queries to the upstream resolver(s) from `/etc/resolv.conf`,
@@ -1178,6 +1232,10 @@ A container image function whose `ImageUri` names an image already present on th
 ### Private registry authentication
 
 Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.
+
+### Image user and working directory
+
+AWS runs a container image function as its own least-privileged user, not the image's `USER`. Floci keeps running the container as the image's user, but before it starts the container it checks that Lambda's user could enter the working directory (`ImageConfig.WorkingDirectory`, or the image's `WORKDIR`). Lambda's user owns nothing in the image, so a directory on that path must be executable by other users. Symlinks on the path are followed, and the check stops at a file system the function mounts from EFS, which Lambda enters as the access point's user. When a directory is not executable by other users, such as a `0700` home directory owned by the image's user, the invocation fails with `Runtime.InvalidEntrypoint`, as on AWS. Set `WORKDIR` to a directory everyone can enter, such as `/`.
 
 ## Examples
 

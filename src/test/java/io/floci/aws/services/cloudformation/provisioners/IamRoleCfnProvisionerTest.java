@@ -477,7 +477,9 @@ class IamRoleCfnProvisionerTest {
         InOrder order = inOrder(iam);
         order.verify(iam).putRolePolicy("app-role", "first", EMPTY_TRUST);
         order.verify(iam).deleteRolePolicy("app-role", "first");
-        order.verify(iam).putRolePolicy("app-role", "first", priorDocument);
+        // The restore goes through the seam that does not re-read the document: putting back
+        // what the store already held is not a new write.
+        order.verify(iam).restoreRolePolicy("app-role", "first", priorDocument);
         verify(iam, never()).deleteRole(anyString());
     }
 

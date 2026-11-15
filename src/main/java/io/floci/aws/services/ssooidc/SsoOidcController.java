@@ -409,6 +409,25 @@ public class SsoOidcController {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("error", error);
         response.put("error_description", description);
-        return Response.status(status).type(MediaType.APPLICATION_JSON).entity(response).build();
+        // AWS SDKs read the modeled exception from this header, not from the OAuth "error" body
+        // member: without it a pending device authorization is not retried and `aws sso login` fails.
+        return Response.status(status).type(MediaType.APPLICATION_JSON)
+                .header("x-amzn-ErrorType", exceptionName(error))
+                .entity(response).build();
+    }
+
+    /** OAuth error code to the SSO OIDC exception name, e.g. authorization_pending to AuthorizationPendingException. */
+    static String exceptionName(String error) {
+        // The one modeled exception not named after its OAuth code.
+        if ("server_error".equals(error)) {
+            return "InternalServerException";
+        }
+        StringBuilder name = new StringBuilder();
+        for (String part : error.split("_")) {
+            if (!part.isEmpty()) {
+                name.append(Character.toUpperCase(part.charAt(0))).append(part.substring(1));
+            }
+        }
+        return name.append("Exception").toString();
     }
 }

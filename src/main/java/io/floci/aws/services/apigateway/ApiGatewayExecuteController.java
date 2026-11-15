@@ -26,6 +26,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.CookieHeaders;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.auth.SigV4AuthorizationHeader;
 import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
@@ -42,9 +43,12 @@ import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
+import io.floci.aws.services.apigatewayv2.model.IntegrationSubtype;
 import io.floci.aws.services.apigatewayv2.model.Route;
+import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
 import io.floci.aws.services.apigatewayv2.proxy.CloudMapInstanceResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpApiForwardedHeaders;
+import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
 import io.floci.aws.services.apigatewayv2.websocket.ConnectionInfo;
 import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.floci.aws.services.elbv2.ElbV2Service;
@@ -142,6 +146,8 @@ public class ApiGatewayExecuteController {
     private final RestLambdaAuthorizer restLambdaAuthorizer;
     private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
     private final CloudMapInstanceResolver cloudMapInstanceResolver;
+    private final AwsServiceIntegrationMapper awsServiceIntegrationMapper;
+    private final HttpProxyInvoker httpProxyInvoker;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -157,7 +163,8 @@ public class ApiGatewayExecuteController {
                                        RequestContext requestContext,
                                        ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
                                        AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
-                                       CloudMapInstanceResolver cloudMapInstanceResolver) {
+                                       CloudMapInstanceResolver cloudMapInstanceResolver,
+                                       HttpProxyInvoker httpProxyInvoker) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -170,6 +177,7 @@ public class ApiGatewayExecuteController {
                 .build();
         this.vtlEngine = vtlEngine;
         this.serviceRouter = serviceRouter;
+        this.awsServiceIntegrationMapper = new AwsServiceIntegrationMapper(objectMapper);
         this.webSocketConnectionManager = webSocketConnectionManager;
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
@@ -180,6 +188,7 @@ public class ApiGatewayExecuteController {
         this.restLambdaAuthorizer = restLambdaAuthorizer;
         this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
         this.cloudMapInstanceResolver = cloudMapInstanceResolver;
+        this.httpProxyInvoker = httpProxyInvoker;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -661,7 +670,7 @@ public class ApiGatewayExecuteController {
         }
         Map<String, List<String>> multiValueQuery = new LinkedHashMap<>();
         Map<String, String> queryMap = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (e.getValue().isEmpty()) continue;
             multiValueQuery.put(e.getKey(), List.copyOf(e.getValue()));
             queryMap.put(e.getKey(), String.join(",", e.getValue()));
@@ -762,19 +771,33 @@ public class ApiGatewayExecuteController {
 
     /**
      * The method's own settings, falling back to the stage-wide wildcard entry. Settings are keyed
-     * by the resource path without its leading slash ({@code pets/GET}), matching what AWS reports.
+     * by the patch path as the client sent it, so the method is found under either the JSON Pointer
+     * escaped resource path AWS reports ({@code ~1pets/GET}) or the plain one ({@code pets/GET}).
      */
     private static MethodSetting methodSettingFor(Stage stage, String resourcePath, String httpMethod) {
-        String normalized = resourcePath != null && resourcePath.startsWith("/")
-                ? resourcePath.substring(1) : resourcePath;
-        MethodSetting exact = stage.getMethodSettings().get(normalized + "/" + httpMethod);
-        return exact != null ? exact : stage.getMethodSettings().get("*/*");
+        Map<String, MethodSetting> settings = stage.getMethodSettings();
+        if (resourcePath != null) {
+            MethodSetting escaped = settings.get(escapeJsonPointer(resourcePath) + "/" + httpMethod);
+            if (escaped != null) {
+                return escaped;
+            }
+            String plain = resourcePath.startsWith("/") ? resourcePath.substring(1) : resourcePath;
+            MethodSetting exact = settings.get(plain + "/" + httpMethod);
+            if (exact != null) {
+                return exact;
+            }
+        }
+        return settings.get("*/*");
+    }
+
+    private static String escapeJsonPointer(String segment) {
+        return segment.replace("~", "~0").replace("/", "~1");
     }
 
     private String cacheKeyParameterValue(String param, HttpHeaders headers, UriInfo uriInfo,
                                           String resourcePath, String path) {
         if (param.startsWith("method.request.querystring.")) {
-            return uriInfo.getQueryParameters()
+            return ResteasyRequests.queryParameters(uriInfo)
                     .getFirst(param.substring("method.request.querystring.".length()));
         }
         if (param.startsWith("method.request.header.")) {
@@ -972,7 +995,7 @@ public class ApiGatewayExecuteController {
             if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
         }
         Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
         }
         Map<String, String> pathMap = new HashMap<>();
@@ -1203,7 +1226,7 @@ public class ApiGatewayExecuteController {
             return null;
         }
         if (source.startsWith("method.request.querystring.")) {
-            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
+            return ResteasyRequests.queryParameters(scope.uriInfo()).getFirst(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("stageVariables.")) {
             return scope.stage().getVariables().get(source.substring("stageVariables.".length()));
@@ -1231,7 +1254,7 @@ public class ApiGatewayExecuteController {
         if (validator.isValidateRequestParameters()) {
             Map<String, Boolean> requiredParams = method.getRequestParameters();
             if (requiredParams != null) {
-                MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+                MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
                 for (Map.Entry<String, Boolean> entry : requiredParams.entrySet()) {
                     if (!Boolean.TRUE.equals(entry.getValue())) continue;
                     String paramKey = entry.getKey();
@@ -1647,7 +1670,7 @@ public class ApiGatewayExecuteController {
     }
 
     void putQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
         if (!queryParams.isEmpty()) {
             ObjectNode qsp = event.putObject("queryStringParameters");
             queryParams.forEach((name, values) -> {
@@ -1663,7 +1686,7 @@ public class ApiGatewayExecuteController {
     }
 
     void putMultiValueQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
         if (!queryParams.isEmpty()) {
             ObjectNode mqsp = event.putObject("multiValueQueryStringParameters");
             queryParams.forEach((name, values) -> {
@@ -1882,7 +1905,7 @@ public class ApiGatewayExecuteController {
             if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().getFirst());
         }
         Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().getFirst());
         }
         Map<String, String> pathMap = new HashMap<>();
@@ -2396,7 +2419,7 @@ public class ApiGatewayExecuteController {
             return nonemptyValues(scope.headers().getRequestHeader(source.substring("method.request.multivalueheader.".length())));
         }
         if (source.startsWith("method.request.multivaluequerystring.")) {
-            return nonemptyValues(scope.uriInfo().getQueryParameters().get(source.substring("method.request.multivaluequerystring.".length())));
+            return nonemptyValues(ResteasyRequests.queryParameters(scope.uriInfo()).get(source.substring("method.request.multivaluequerystring.".length())));
         }
         String value = resolveScalarRequestParameter(source, scope, path, context);
         return value != null ? List.of(value) : null;
@@ -2409,7 +2432,7 @@ public class ApiGatewayExecuteController {
     private String resolveScalarRequestParameter(String source, GatewayResponseScope scope,
                                                   Map<String, String> path, Map<String, Object> context) {
         if (source.startsWith("method.request.querystring.")) {
-            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
+            return ResteasyRequests.queryParameters(scope.uriInfo()).getFirst(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("method.request.path.")) {
             return path.get(source.substring("method.request.path.".length()));
@@ -2478,7 +2501,7 @@ public class ApiGatewayExecuteController {
             }
         }
         Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) {
                 queryMap.put(e.getKey(), e.getValue().get(0));
             }
@@ -2915,6 +2938,11 @@ public class ApiGatewayExecuteController {
                     apiId, stageName, jwtClaims, lambdaAuthorizerContext, region);
         }
 
+        if (integration.getIntegrationSubtype() != null && !integration.getIntegrationSubtype().isEmpty()) {
+            return dispatchAwsServiceV2(integration, route, httpMethod, path, headers, uriInfo, body,
+                    apiId, stageName, stageVariables, jwtClaims, lambdaAuthorizerContext, region);
+        }
+
         String functionName = functionNameFromUri(integration.getIntegrationUri());
         if (functionName == null) {
             return Response.status(500)
@@ -2948,8 +2976,95 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    private final io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker httpProxyInvoker =
-            new io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker();
+    /**
+     * Runs an integration subtype's AWS service action with the request parameters mapped from the
+     * request, and answers 200 with the action's result, or the action's error and status.
+     */
+    private Response dispatchAwsServiceV2(io.floci.aws.services.apigatewayv2.model.Integration integration,
+                                          Route route, String httpMethod, String path,
+                                          HttpHeaders headers, UriInfo uriInfo, byte[] body,
+                                          String apiId, String stageName, Map<String, String> stageVariables,
+                                          Map<String, String> jwtClaims, ObjectNode lambdaAuthorizerContext,
+                                          String region) {
+        IntegrationSubtype subtype = IntegrationSubtype.fromName(integration.getIntegrationSubtype()).orElse(null);
+        if (subtype == null || !subtype.isInvocable()) {
+            LOG.warnv("execute-api v2: integration subtype {0} is not implemented",
+                    integration.getIntegrationSubtype());
+            return httpApiError(500, "Internal Server Error");
+        }
+
+        Map<String, String> requestHeaders = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                requestHeaders.put(e.getKey(), String.join(",", e.getValue()));
+            }
+        }
+        Map<String, String> queryParams = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                queryParams.put(e.getKey(), String.join(",", e.getValue()));
+            }
+        }
+        Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
+        Map<String, Object> claims = jwtClaims != null ? Map.copyOf(jwtClaims) : Map.of();
+        Map<String, Object> authorizerContext = lambdaAuthorizerContext == null
+                ? Map.of() : objectMapper.convertValue(lambdaAuthorizerContext, MAP_TYPE);
+        String requestId = routeContext.requestId(headers);
+        io.floci.aws.services.apigatewayv2.proxy.RequestContext ctx =
+                new io.floci.aws.services.apigatewayv2.proxy.RequestContext(
+                        apiId, stageName, httpMethod, path, pathParams.getOrDefault("proxy", ""),
+                        route.getRouteKey(), requestId, routeContext.sourceIp(),
+                        requestHeaders, queryParams, pathParams, body, claims, authorizerContext);
+
+        Instant requestTime = routeContext.requestTime();
+        String hostRegion = region != null ? region : regionResolver.getDefaultRegion();
+        String domain = restDomainName(apiId, hostRegion, headers);
+        Map<String, String> contextVariables = new LinkedHashMap<>();
+        contextVariables.put("accountId", regionResolver.getAccountId());
+        contextVariables.put("apiId", apiId);
+        contextVariables.put("domainName", domain);
+        contextVariables.put("domainPrefix", domain.split("\\.")[0]);
+        contextVariables.put("extendedRequestId", routeContext.extendedRequestId());
+        contextVariables.put("httpMethod", httpMethod);
+        contextVariables.put("path", ("$default".equals(stageName) ? "" : "/" + stageName) + path);
+        contextVariables.put("protocol", "HTTP/1.1");
+        contextVariables.put("requestTime", GATEWAY_REQUEST_TIME.format(requestTime.atZone(ZoneOffset.UTC)));
+        contextVariables.put("requestTimeEpoch", Long.toString(requestTime.toEpochMilli()));
+        contextVariables.put("routeKey", route.getRouteKey());
+        contextVariables.put("stage", stageName);
+
+        LOG.debugv("execute-api v2: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
+                subtype.subtypeName());
+
+        try {
+            Map<String, String> parameters = awsServiceIntegrationMapper.resolveParameters(subtype,
+                    integration.getRequestParameters(), ctx, stageVariables, contextVariables);
+            String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
+            if (serviceRegion == null || serviceRegion.isEmpty()) {
+                serviceRegion = hostRegion;
+            }
+            ObjectNode actionRequest = awsServiceIntegrationMapper.actionRequest(subtype, parameters);
+            Response serviceResponse = serviceRouter.invoke(subtype.service(), subtype.action(), actionRequest,
+                    serviceRegion);
+            Object entity = serviceResponse.getEntity();
+            if (serviceResponse.getStatus() >= 300) {
+                String code = entity instanceof AwsErrorResponse error ? error.type() : "InternalFailure";
+                String message = entity instanceof AwsErrorResponse error ? error.message() : null;
+                return awsServiceErrorV2(code, message, serviceResponse.getStatus(), requestId);
+            }
+            JsonNode result = entity instanceof JsonNode node ? node : objectMapper.valueToTree(entity);
+            return Response.ok(awsServiceIntegrationMapper.actionResponse(subtype, result, requestId).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (AwsException e) {
+            return awsServiceErrorV2(e.getErrorCode(), e.getMessage(), e.getHttpStatus(), requestId);
+        }
+    }
+
+    private Response awsServiceErrorV2(String code, String message, int status, String requestId) {
+        return Response.status(status)
+                .entity(awsServiceIntegrationMapper.actionError(code, message, status, requestId).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
 
     /** REST integrations default to AWS's 29s and may opt out of backend TLS verification. */
     private static io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions
@@ -3027,7 +3142,7 @@ public class ApiGatewayExecuteController {
         }
         Map<String, List<String>> multiValueQueryParams = new LinkedHashMap<>();
         Map<String, String> queryParams = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (e.getValue().isEmpty()) {
                 continue;
             }
@@ -3597,7 +3712,7 @@ public class ApiGatewayExecuteController {
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), ResteasyRequests.queryParameters(uriInfo));
 
         event.putObject("pathParameters");
         putStageVariables(event, stageVariables);
@@ -3676,7 +3791,7 @@ public class ApiGatewayExecuteController {
                 if (value != null) return stripBearer(value);
             } else if (source.startsWith("$request.querystring.")) {
                 String paramName = source.substring("$request.querystring.".length());
-                String value = uriInfo.getQueryParameters().getFirst(paramName);
+                String value = ResteasyRequests.queryParameters(uriInfo).getFirst(paramName);
                 if (value != null) return stripBearer(value);
             }
         }
@@ -3961,7 +4076,7 @@ public class ApiGatewayExecuteController {
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), ResteasyRequests.queryParameters(uriInfo));
 
         Map<String, String> pathParams = extractV2PathParams(routeKey, path);
         if (!pathParams.isEmpty()) {
@@ -4286,7 +4401,7 @@ public class ApiGatewayExecuteController {
             return queryMap.get(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("method.request.multivaluequerystring.")) {
-            return joinedValues(scope.uriInfo() != null ? scope.uriInfo().getQueryParameters() : null,
+            return joinedValues(scope.uriInfo() != null ? ResteasyRequests.queryParameters(scope.uriInfo()) : null,
                     source.substring("method.request.multivaluequerystring.".length()));
         }
         if (source.startsWith("method.request.path.")) {
@@ -4369,10 +4484,10 @@ public class ApiGatewayExecuteController {
 
     private static Map<String, String> gatewayRequestQuery(UriInfo uriInfo) {
         Map<String, String> queryMap = new HashMap<>();
-        if (uriInfo == null || uriInfo.getQueryParameters() == null) {
+        if (uriInfo == null || ResteasyRequests.queryParameters(uriInfo) == null) {
             return queryMap;
         }
-        for (Map.Entry<String, List<String>> entry : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> entry : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (entry.getValue() != null && !entry.getValue().isEmpty()) {
                 queryMap.put(entry.getKey(), entry.getValue().get(0));
             }

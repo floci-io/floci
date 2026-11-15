@@ -212,6 +212,10 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: xray
+    doc: docs/services/xray.md
+    sources:
+      - { path: services/xray/XrayController.java, mode: rest }
   - service: connect
     doc: docs/services/connect.md
     sources:
@@ -485,6 +489,7 @@ deferred_handlers:
   - { path: services/cloudwatch/logs/CloudWatchLogsHandler.java }  # multi-table doc (nested handler)
   - { path: services/cloudwatch/logs/CloudWatchLogsMetricFilterHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
   - { path: services/cloudwatch/logs/CloudWatchLogsDeliveryHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
+  - { path: services/cloudwatch/logs/CloudWatchLogsQueryDefinitionHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
   - { path: services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java }  # multi-table doc (nested handler)
   - { path: services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java }  # multi-table doc (nested handler)
   - { path: services/codebuild/CodeBuildJsonHandler.java }  # non-tabular doc (grouped/inline)

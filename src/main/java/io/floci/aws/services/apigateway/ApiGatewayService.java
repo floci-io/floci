@@ -1160,16 +1160,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             String suffix = "/" + settingKey;
             if (!path.endsWith(suffix)) continue;
 
-            String prefix = path.substring(1, path.length() - suffix.length());
-            int lastSlash = prefix.lastIndexOf('/');
-            if (lastSlash < 0) return;
-            // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
-            // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
-            // escaped and unescaped spellings onto that one key.
-            String resourcePath = unescapeJsonPointer(prefix.substring(0, lastSlash));
-            if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
-            String httpMethod = prefix.substring(lastSlash + 1);
-            String methodKey = resourcePath + "/" + httpMethod;
+            String methodKey = path.substring(1, path.length() - suffix.length());
+            if (methodKey.lastIndexOf('/') < 0) {
+                return;
+            }
 
             MethodSetting setting = stage.getMethodSettings()
                     .computeIfAbsent(methodKey, k -> new MethodSetting());
@@ -2537,11 +2531,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                     || !Set.of("type", "path", "method", "statusCode", "name").contains(key)) {
                 throw new AwsException("BadRequestException", "Invalid documentation part location", 400);
             }
-            location.put(key, fieldValue);
+            // Terraform sends unset location members as empty strings.
+            if (!fieldValue.isBlank()) {
+                location.put(key, fieldValue);
+            }
         }
         // AWS REST examples allow REQUEST_BODY without a name despite the model's required marker.
         if (DOCUMENTATION_PART_NAMED_TYPES.contains(type) && !"REQUEST_BODY".equals(type)
-                && (location.get("name") == null || location.get("name").isBlank())) {
+                && !location.containsKey("name")) {
             throw new AwsException("BadRequestException", "Documentation part location name is required", 400);
         }
         if (location.containsKey("name") && !DOCUMENTATION_PART_NAMED_TYPES.contains(type)

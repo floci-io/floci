@@ -217,6 +217,15 @@ def test_an_operation_naming_no_role_must_say_why(corrections):
         r.entry_for("svc:CreateThing", ["svc"], empty)
 
 
+def test_an_operation_botocore_does_not_have_yet_is_not_read_until_a_bump_brings_it(corrections):
+    before = {"svc": model({"CreateOther": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", ["svc"], before) == {"passedTo": ["svc"],
+                                                               "notRead": r.NOT_IN_BOTOCORE}
+    bumped = {"svc": model({"CreateThing": "In"}, {"In": structure(RoleArn="String")})}
+    assert r.entry_for("svc:CreateThing", ["svc"], bumped) == {"passedTo": ["svc"],
+                                                               "roles": [{"member": "RoleArn", "passedTo": "svc"}]}
+
+
 # --------------------------------------------------------------------------- #
 # The whole document
 # --------------------------------------------------------------------------- #

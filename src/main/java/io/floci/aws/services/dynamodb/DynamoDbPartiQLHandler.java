@@ -497,11 +497,7 @@ class DynamoDbPartiQLHandler {
         }
         List<String> unprojected = keys.unprojectedFilterAttributes(accessPath.projectedAttributeNames(table));
         if (!unprojected.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Secondary index "
-                            + accessPath.indexName()
-                            + " does not project one or more filter attributes: ["
-                            + String.join(", ", unprojected) + "]", 400);
+            throw DynamoDbAccessPathValidator.unprojectedFilterAttributes(accessPath.indexName(), unprojected);
         }
     }
 

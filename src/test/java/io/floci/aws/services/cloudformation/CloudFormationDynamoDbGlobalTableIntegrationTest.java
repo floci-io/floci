@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 
+import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.parameterValue;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -33,8 +34,6 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String DDB_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/dynamodb/aws4_request";
-    private static final String SSM_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ssm/aws4_request";
     private static final Duration STACK_DELETE_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration STACK_DELETE_POLL_INTERVAL = Duration.ofMillis(50);
 
@@ -83,6 +82,9 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
         JsonPath described = describeTable(tableName).jsonPath();
+        assertEquals("PAY_PER_REQUEST", described.getString("Table.BillingModeSummary.BillingMode"));
+        assertEquals(0L, described.getLong("Table.ProvisionedThroughput.ReadCapacityUnits"));
+        assertEquals(0L, described.getLong("Table.ProvisionedThroughput.WriteCapacityUnits"));
         String tableArn = described.getString("Table.TableArn");
         String tableId = described.getString("Table.TableId");
         assertTrue(tableArn != null && tableArn.startsWith("arn:aws:dynamodb:"), "TableArn: " + tableArn);
@@ -152,15 +154,5 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body("Table.TableName", equalTo(tableName))
             .extract().response();
-    }
-
-    private String parameterValue(String name) {
-        return given()
-            .contentType("application/x-amz-json-1.1")
-            .header("Authorization", SSM_AUTH)
-            .header("X-Amz-Target", "AmazonSSM.GetParameter")
-            .body("{\"Name\":\"" + name + "\"}")
-        .when().post("/").then().statusCode(200)
-            .extract().jsonPath().getString("Parameter.Value");
     }
 }

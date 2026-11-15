@@ -103,6 +103,30 @@ public class S3VectorsController {
     ) {}
 
     @RegisterForReflection
+    public record PutVectorBucketPolicyRequest(
+            String vectorBucketName,
+            String vectorBucketArn,
+            String policy
+    ) {}
+
+    @RegisterForReflection
+    public record GetVectorBucketPolicyRequest(
+            String vectorBucketName,
+            String vectorBucketArn
+    ) {}
+
+    @RegisterForReflection
+    public record GetVectorBucketPolicyResponse(
+            String policy
+    ) {}
+
+    @RegisterForReflection
+    public record DeleteVectorBucketPolicyRequest(
+            String vectorBucketName,
+            String vectorBucketArn
+    ) {}
+
+    @RegisterForReflection
     public record CreateIndexRequest(
             String vectorBucketName,
             String vectorBucketArn,
@@ -313,6 +337,43 @@ public class S3VectorsController {
     public Response deleteVectorBucket(@Context HttpHeaders headers, DeleteVectorBucketRequest request) {
         String region = regionResolver.resolveRegion(headers);
         service.deleteVectorBucket(request.vectorBucketName(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/PutVectorBucketPolicy")
+    public Response putVectorBucketPolicy(@Context HttpHeaders headers, PutVectorBucketPolicyRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        service.putVectorBucketPolicy(
+                request != null ? request.vectorBucketName() : null,
+                request != null ? request.vectorBucketArn() : null,
+                request != null ? request.policy() : null,
+                region
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/GetVectorBucketPolicy")
+    public Response getVectorBucketPolicy(@Context HttpHeaders headers, GetVectorBucketPolicyRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        String policy = service.getVectorBucketPolicy(
+                request != null ? request.vectorBucketName() : null,
+                request != null ? request.vectorBucketArn() : null,
+                region
+        );
+        return Response.ok(new GetVectorBucketPolicyResponse(policy)).build();
+    }
+
+    @POST
+    @Path("/DeleteVectorBucketPolicy")
+    public Response deleteVectorBucketPolicy(@Context HttpHeaders headers, DeleteVectorBucketPolicyRequest request) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteVectorBucketPolicy(
+                request != null ? request.vectorBucketName() : null,
+                request != null ? request.vectorBucketArn() : null,
+                region
+        );
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

@@ -3,6 +3,7 @@ package io.floci.aws.testing;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.vertx.core.http.WebSocket;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -91,6 +92,22 @@ public final class AlbFixtures {
                 .post("/")
             .then()
                 .statusCode(200);
+    }
+
+    /** The ids of the targets registered with {@code targetGroupArn}, in the order DescribeTargetHealth lists them. */
+    public static List<String> targetIds(String account, String targetGroupArn) {
+        return given()
+                .formParam("Action", "DescribeTargetHealth")
+                .formParam("TargetGroupArn", targetGroupArn)
+                .header("Authorization", auth(account))
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .xmlPath()
+                .getList("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member"
+                        + ".Target.Id", String.class);
     }
 
     /** An HTTP listener on {@code port} that forwards every request to {@code targetGroupArn}. */

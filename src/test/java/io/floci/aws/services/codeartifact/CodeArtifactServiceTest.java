@@ -9,12 +9,20 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import io.floci.aws.services.codeartifact.CodeArtifactService.DomainView;
+import io.floci.aws.services.codeartifact.CodeArtifactService.GetAssociatedPackageGroupResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.ListAllowedRepositoriesForGroupResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.ListAssociatedPackagesResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupAllowedRepositoryEdit;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupDescriptionView;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupListResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.ResourcePolicy;
+import io.floci.aws.services.codeartifact.CodeArtifactService.UpdatePackageGroupOriginConfigurationResult;
 import io.floci.aws.services.codeartifact.model.CodeArtifactDomain;
 import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
+import io.floci.aws.services.codeartifact.model.PackageGroup;
 import io.floci.aws.services.codeartifact.model.PackageOriginConfig;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
@@ -24,14 +32,20 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,6 +63,7 @@ import java.util.stream.IntStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -59,12 +74,17 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doCallRealMethod;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -83,6 +103,7 @@ class CodeArtifactServiceTest {
     private RegionResolver regionResolver;
     private AccountAwareStorageBackend<CodeArtifactRepository> repoStore;
     private AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigStore;
+    private AccountAwareStorageBackend<PackageGroup> packageGroupStore;
     private VerdaccioSidecarClient verdaccioClient;
     private ReposiliteSidecarClient reposiliteClient;
     private PypiserverSidecarClient pypiserverClient;
@@ -95,6 +116,7 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersionStore =
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
         packageOriginConfigStore = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+        packageGroupStore = spy(AccountAwareStorageBackend.<PackageGroup>inMemory(ACCOUNT_ID));
 
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -114,7 +136,7 @@ class CodeArtifactServiceTest {
         bagetterClient = mock(BagetterSidecarClient.class);
         when(bagetterClient.format()).thenReturn("nuget");
         service = new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
-                regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
+                packageGroupStore, regionResolver, config, true, null, new CodeArtifactSidecarRegistry(
                         List.of(verdaccioClient, reposiliteClient, pypiserverClient, bagetterClient)));
     }
 
@@ -352,6 +374,61 @@ class CodeArtifactServiceTest {
     }
 
     /**
+     * Stands in for a real sidecar's {@code fetchPackageVersionAssetDigest} (the digest-only
+     * sibling {@code listPackageVersionAssets}/dispose byte-accounting now call instead of the
+     * full {@code fetchPackageVersionAsset}, so a mocked sidecar needs this stubbed too), computed
+     * over the exact algorithm set {@code CodeArtifactService} itself uses.
+     */
+    private static RepositorySidecarManager.AssetDigest digestOf(byte[] content) {
+        try {
+            MessageDigest sha512 = MessageDigest.getInstance("SHA-512");
+            Map<String, String> hashes = new HashMap<>();
+            hashes.put("MD5", Digests.md5Hex(content));
+            hashes.put("SHA-1", Digests.sha1Hex(content));
+            hashes.put("SHA-256", Digests.sha256Hex(content));
+            hashes.put("SHA-512", HexFormat.of().formatHex(sha512.digest(content)));
+            return new RepositorySidecarManager.AssetDigest(content.length, hashes);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * {@code copyContainerBackedPackageVersions} now writes a copy through {@code
+     * copyPackageVersionAsset}'s {@code Path} overload, a file staged under the batch's own
+     * cleanup, deleted by the time the call returns, too late for a test to read it back
+     * afterward. Call this to set up the capture BEFORE invoking {@code copyPackageVersions},
+     * reading the file's bytes from inside the stubbed answer instead, while it still exists; the
+     * real write still happens underneath (the answer calls the real method), so this is additive
+     * instrumentation, not a replacement stub.
+     */
+    private static AtomicReference<byte[]> captureCopiedAssetContent(ReposiliteSidecarClient client,
+            String sourceRepoId, String sourceRepo, String destRepoId, String destRepo, String namespace,
+            String packageName, String version, String assetName) {
+        AtomicReference<byte[]> captured = new AtomicReference<>();
+        doAnswer(invocation -> {
+            captured.set(Files.readAllBytes(invocation.getArgument(9)));
+            return null;
+        }).when(client).copyPackageVersionAsset(eq(sourceRepoId), eq("dom"), eq(sourceRepo), eq(destRepoId),
+                eq(destRepo), eq(namespace), eq(packageName), eq(version), eq(assetName), any(Path.class),
+                anyLong());
+        return captured;
+    }
+
+    /** {@link #captureCopiedAssetContent}'s own counterpart for a rollback's {@code storePackageVersionAsset}. */
+    private static AtomicReference<byte[]> captureStoredAssetContent(ReposiliteSidecarClient client,
+            String destRepoId, String destRepo, String namespace, String packageName, String version,
+            String assetName) {
+        AtomicReference<byte[]> captured = new AtomicReference<>();
+        doAnswer(invocation -> {
+            captured.set(Files.readAllBytes(invocation.getArgument(7)));
+            return null;
+        }).when(client).storePackageVersionAsset(eq(destRepoId), eq("dom"), eq(destRepo), eq(namespace),
+                eq(packageName), eq(version), eq(assetName), any(Path.class), anyLong());
+        return captured;
+    }
+
+    /**
      * {@code recordContainerBackedAssetBytes} is what each of the three sidecar-backed proxies
      * calls after a real (non-idempotent, non-rejected) write; this is the unit-level proof that
      * it feeds {@code assetSizeBytes} correctly across all three formats plus generic at once,
@@ -510,6 +587,13 @@ class CodeArtifactServiceTest {
         HttpClient http = mock(HttpClient.class);
         HttpResponse<byte[]> absent = mock(HttpResponse.class);
         when(absent.statusCode()).thenReturn(404);
+        // A real HttpClient's body() is never null even for a 404 (Copilot's review of this PR:
+        // compareExistingNupkg now closes this body on the 404 branch), so this stub matches that
+        // instead of letting Mockito's default null stand in for a response shape that never
+        // actually occurs. doReturn, not when(...).thenReturn(...): this same mock also answers
+        // calls expecting an HttpResponse<byte[]>, and an InputStream is what the one caller that
+        // actually reads body() here (BodyHandlers.ofInputStream()) needs.
+        doReturn(new ByteArrayInputStream(new byte[0])).when(absent).body();
         HttpResponse<Void> published = mock(HttpResponse.class);
         when(published.statusCode()).thenReturn(201);
         when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenAnswer(call -> {
@@ -524,7 +608,8 @@ class CodeArtifactServiceTest {
             return published;
         });
         CodeArtifactNuGetController controller = new CodeArtifactNuGetController(service, bagetterClient,
-                mock(CodeArtifactNuGetExternalConnectionImporter.class), http);
+                mock(CodeArtifactNuGetExternalConnectionImporter.class),
+                mock(CodeArtifactNuGetUpstreamRepositoryImporter.class), http);
 
         byte[] packageBytes;
         try (ByteArrayOutputStream output = new ByteArrayOutputStream(); ZipOutputStream zip =
@@ -544,7 +629,7 @@ class CodeArtifactServiceTest {
         body.writeBytes(packageBytes);
         body.writeBytes("\r\n--boundary123--\r\n".getBytes(StandardCharsets.UTF_8));
 
-        Response response = controller.push(headers, "dom", "repo", body.toByteArray());
+        Response response = controller.push(headers, "dom", "repo", new ByteArrayInputStream(body.toByteArray()));
 
         assertEquals(201, response.getStatus());
         assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
@@ -661,21 +746,21 @@ class CodeArtifactServiceTest {
         long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
                 "demo", "1.0.0");
         CodeArtifactService.RetainedVersionOriginClaimOutcome oldClaim = service.claimRetainedVersionOrigin(REGION,
-                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence);
         assertTrue(oldClaim.claimed());
         service.deleteRepository(REGION, "dom", null, "repo");
         CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
                 Map.of());
         assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
         CodeArtifactService.RetainedVersionOriginClaimOutcome newClaim = service.claimRetainedVersionOrigin(REGION,
-                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence);
         assertTrue(newClaim.claimed());
         assertNotEquals(oldClaim.episodeId(), newClaim.episodeId());
 
         AtomicBoolean wroteOldAsset = new AtomicBoolean();
         CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
-                oldClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                oldClaim.episodeId(), oldId, "demo.1.0.0.nupkg", 1,
                 () -> wroteOldAsset.set(true));
 
         assertFalse(result.fenceMatched());
@@ -697,13 +782,13 @@ class CodeArtifactServiceTest {
         long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
                 "demo", "1.0.0");
         CodeArtifactService.RetainedVersionOriginClaimOutcome newClaim = service.claimRetainedVersionOrigin(REGION,
-                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence);
         assertTrue(newClaim.claimed());
 
         AtomicBoolean wroteOldAsset = new AtomicBoolean();
         CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
-                newClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                newClaim.episodeId(), oldId, "demo.1.0.0.nupkg", 1,
                 () -> wroteOldAsset.set(true));
 
         assertFalse(result.fenceMatched());
@@ -941,11 +1026,46 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void updateRepositoryRejectsATwoRepositoryCycle() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, List.of("repo-a"), Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.updateRepository(REGION, "dom", null, "repo-a", null, List.of("repo-b")));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void updateRepositoryRejectsALongerCycle() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, List.of("repo-a"), Map.of());
+        service.createRepository(REGION, "dom", null, "repo-c", null, List.of("repo-b"), Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.updateRepository(REGION, "dom", null, "repo-a", null, List.of("repo-c")));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void aNonCyclicUpstreamChainIsAccepted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, List.of("repo-a"), Map.of());
+
+        CodeArtifactRepository repoC = service.createRepository(REGION, "dom", null, "repo-c", null,
+                List.of("repo-b"), Map.of());
+
+        assertEquals(List.of("repo-b"), repoC.getUpstreams());
+    }
+
+    @Test
     void createRepositoryAssignsFreshContainerIdsForEveryContainerBackedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
-        assertEquals(Set.of("maven", "npm", "pypi", "nuget"), created.getSidecarContainerIds().keySet());
+        assertEquals(Set.of("maven", "npm", "pypi", "nuget", "cargo"), created.getSidecarContainerIds().keySet());
         created.getSidecarContainerIds().values()
                 .forEach(id -> assertTrue(id != null && !id.isBlank()));
     }
@@ -1113,6 +1233,40 @@ class CodeArtifactServiceTest {
                 "ALLOW", "ALLOW");
         service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
                 "widget");
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: the package-group PUBLISH check used to live only in
+     * {@code publishPackageVersionLocked} (the generic-format path), so a native publish — {@code
+     * mvn deploy}, {@code npm publish}, {@code twine upload}, {@code dotnet nuget push} — could
+     * publish straight past a group's BLOCK, allow-list, or weak-match restriction. Moving it
+     * into {@code requireDirectPublishAllowed} (the one method both the generic and every native
+     * path call) closes that for every format.
+     */
+    @Test
+    void containerBackedPackagePublishIsBlockedByAnAssociatedGroupsBlockMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/maven/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/maven/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                        "widget"));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void containerBackedPackagePublishIsBlockedByAWeakMatchRegardlessOfTheGroupsMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "npm", null,
+                        "asyncstorage"));
+        assertEquals("ConflictException", e.getErrorCode());
     }
 
     /**
@@ -1802,6 +1956,33 @@ class CodeArtifactServiceTest {
         order.verify(verdaccioClient).endUse(repoId);
     }
 
+    /**
+     * {@code getPackageVersionAssetStreamed}'s real HTTP caller (CodeArtifactController) only
+     * drains and closes the returned stream later, when JAX-RS writes the deferred response body:
+     * the lease must stay held until that real close happens, not just until this method itself
+     * returns, or a concurrent DeleteRepository could stop this npm sidecar mid-download.
+     */
+    @Test
+    void getPackageVersionAssetStreamedKeepsTheLeaseHeldUntilTheReturnedStreamIsClosed() throws Exception {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
+                eq("1.0.0"))).thenReturn(true);
+        byte[] tarball = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+        when(verdaccioClient.fetchPackageVersionAssetStreamed(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz")))
+                .thenReturn(Optional.of(new RepositorySidecarManager.StreamedAsset(
+                        new ByteArrayInputStream(tarball), tarball.length)));
+
+        CodeArtifactService.PackageVersionAssetStreamResult result = service.getPackageVersionAssetStreamed(REGION,
+                "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", null);
+
+        verify(verdaccioClient, never()).endUse(repoId);
+        result.content().close();
+        verify(verdaccioClient).endUse(repoId);
+    }
+
     @Test
     void describePackageBracketsVerdaccioExistenceCheckWithUse() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -2200,7 +2381,8 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
 
         assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
-                "widget"));
+                "widget",
+                "EXTERNAL_UPSTREAM"));
     }
 
     @Test
@@ -2211,7 +2393,8 @@ class CodeArtifactServiceTest {
                 "BLOCK");
 
         assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
-                "widget"));
+                "widget",
+                "EXTERNAL_UPSTREAM"));
     }
 
     /**
@@ -2236,10 +2419,11 @@ class CodeArtifactServiceTest {
         // Simulates tryImport's own claim for this version, still in flight (never finished): no
         // configuration is saved yet, but real content from this same in-progress import exists.
         service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
-                "public:maven-central", fence);
+                "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence);
 
         assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
-                "widget"));
+                "widget",
+                "EXTERNAL_UPSTREAM"));
     }
 
     /**
@@ -2257,7 +2441,8 @@ class CodeArtifactServiceTest {
         when(reposiliteClient.packageExists(repoId, "dom", "repo", "com.example", "widget")).thenReturn(true);
 
         assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
-                "widget"));
+                "widget",
+                "EXTERNAL_UPSTREAM"));
     }
 
     @Test
@@ -2347,12 +2532,12 @@ class CodeArtifactServiceTest {
         long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
                 "widget", "1.0.0");
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
-                "dom", null, "repo", "nuget", null, "widget", "1.0.0", "public:nuget-org", packageFence);
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", "public:nuget-org", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence);
         AtomicBoolean wroteOldAsset = new AtomicBoolean();
 
         CodeArtifactService.AssetRetentionAttemptResult retained = service.retainAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "nuget", null, "widget", "1.0.0", versionFence, packageFence,
-                claim.episodeId(), oldId, "widget.1.0.0.nupkg", new byte[] {1},
+                claim.episodeId(), oldId, "widget.1.0.0.nupkg", 1,
                 () -> wroteOldAsset.set(true));
         assertTrue(retained.fenceMatched());
         assertTrue(retained.wroteNewContent());
@@ -2399,17 +2584,17 @@ class CodeArtifactServiceTest {
                 "com.example", "widget", "1.0"));
 
         CodeArtifactService.MavenClaimOutcome first = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "repo", "com.example", "widget", "1.0", "public:maven-central", fence);
+                "repo", "com.example", "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence);
         assertTrue(first.claimed());
         // Same connection claiming again (an idempotent retry, or a concurrent request for the
         // same version and source) succeeds too, and shares the same episode.
         CodeArtifactService.MavenClaimOutcome second = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "repo", "com.example", "widget", "1.0", "public:maven-central", fence);
+                "repo", "com.example", "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence);
         assertTrue(second.claimed());
         assertEquals(first.episodeId(), second.episodeId());
         // A different connection trying to claim the same version loses: the origin never moves.
         assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
-                "1.0", "public:maven-clojars", fence).claimed());
+                "1.0", "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, fence).claimed());
         // Not reported as retained yet: two attempts are still in flight and neither has finished.
         assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "repo",
                 "com.example", "widget", "1.0"));
@@ -2418,6 +2603,182 @@ class CodeArtifactServiceTest {
                 first.episodeId(), true);
         assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
                 null, "repo", "com.example", "widget", "1.0"));
+    }
+
+    /**
+     * The widened claim store distinguishes a connection name from an upstream repository's name
+     * by kind, not just by the raw name string being different: a claim taken under {@code
+     * UPSTREAM_REPOSITORY} for a given name must reject a concurrent attempt under {@code
+     * EXTERNAL_CONNECTION} for that exact same name, the same way two different connection names
+     * already reject each other in {@link #claimMavenRetainedVersionOriginIsAtomicPerVersion}.
+     * {@code retainedUpstreamRepositoryOrigin}/{@code mavenRetainedVersionOriginConnection} only
+     * ever report a confirmed name under their own matching kind, never the other's.
+     */
+    @Test
+    void claimedOriginKindIsPartOfTheClaimsIdentityNotJustTheNameString() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "upstream-repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        CodeArtifactService.MavenClaimOutcome upstreamClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom",
+                null, "repo", "com.example", "widget", "1.0", "upstream-repo",
+                RetentionOriginKind.UPSTREAM_REPOSITORY, fence);
+        assertTrue(upstreamClaim.claimed());
+        // Same name, different kind: must not be treated as the same source.
+        assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "upstream-repo", RetentionOriginKind.EXTERNAL_CONNECTION, fence).claimed());
+
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                upstreamClaim.episodeId(), true);
+
+        assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "repo",
+                "com.example", "widget", "1.0"));
+        assertEquals(Optional.of("upstream-repo"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null,
+                "repo", "maven", "com.example", "widget", "1.0"));
+    }
+
+    /** Retains npm {@code widget@1.0} into {@code repository} from {@code origin}, a connection or a repository. */
+    private void retainNpmWidget(String repository, String origin, RetentionOriginKind kind) {
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, repository, "npm", null,
+                "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, repository, "npm", null, "widget", "1.0", origin, kind, fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, repository, "npm", null, "widget", "1.0",
+                claim.episodeId(), true);
+    }
+
+    private CodeArtifactService.PackageVersionSummary listedNpmWidget(String repository) {
+        when(verdaccioClient.listPackageVersions(anyString(), eq("dom"), eq(repository), isNull(), eq("widget")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0",
+                        Instant.ofEpochSecond(1000))));
+        return service.listPackageVersions(REGION, "dom", null, repository, "npm", null, "widget", null, null, null,
+                null, null).versions().get(0);
+    }
+
+    /**
+     * A version's origin names where it "originally entered" the domain: one retained through an
+     * upstream that had itself retained it from a repository further up names that repository, not
+     * the upstream it was read through.
+     */
+    @Test
+    void aVersionRetainedThroughAnIntermediateUpstreamNamesTheRepositoryItWasPublishedTo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("origin", "mid", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        retainNpmWidget("mid", "origin", RetentionOriginKind.UPSTREAM_REPOSITORY);
+        retainNpmWidget("repo", "mid", RetentionOriginKind.UPSTREAM_REPOSITORY);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("INTERNAL", summary.originType());
+        assertEquals("origin", summary.upstreamRepositoryName());
+        assertEquals(null, summary.externalConnectionName());
+        assertEquals("origin", listedNpmWidget("mid").upstreamRepositoryName());
+    }
+
+    /** One an upstream fetched through its external connection entered the domain there, so it is EXTERNAL. */
+    @Test
+    void aVersionRetainedThroughAnUpstreamThatFetchedItExternallyIsExternal() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        retainNpmWidget("up", "public:npmjs", RetentionOriginKind.EXTERNAL_CONNECTION);
+        retainNpmWidget("repo", "up", RetentionOriginKind.UPSTREAM_REPOSITORY);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("EXTERNAL", summary.originType());
+        assertEquals("public:npmjs", summary.externalConnectionName());
+        assertEquals(null, summary.upstreamRepositoryName());
+        assertEquals(Optional.of("up"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "repo", "npm",
+                null, "widget", "1.0"));
+    }
+
+    /**
+     * The upstream has written what it fetched through its connection but not yet confirmed it when
+     * the copy here is claimed and confirmed: the copy is still the one that entered the domain
+     * through that connection, and stays so once the upstream confirms.
+     */
+    @Test
+    void aVersionCopiedWhileTheUpstreamsExternalFetchIsUnconfirmedIsExternal() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        long upFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "up", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome upClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "up", "npm", null, "widget", "1.0", "public:npmjs",
+                RetentionOriginKind.EXTERNAL_CONNECTION, upFence);
+
+        retainNpmWidget("repo", "up", RetentionOriginKind.UPSTREAM_REPOSITORY);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "up", "npm", null, "widget", "1.0",
+                upClaim.episodeId(), true);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("EXTERNAL", summary.originType());
+        assertEquals("public:npmjs", summary.externalConnectionName());
+    }
+
+    /**
+     * The upstream's attempt gives its claim up after the copy here was claimed, the upstream's own
+     * copy having been published there: confirmed, the copy here names the upstream it came from.
+     */
+    @Test
+    void aCopyConfirmedAfterTheUpstreamGaveItsClaimUpNamesTheUpstream() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        for (String repository : List.of("up", "repo")) {
+            service.createRepository(REGION, "dom", null, repository, null, null, Map.of());
+        }
+        long upFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "up", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome upClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "up", "npm", null, "widget", "1.0", "public:npmjs",
+                RetentionOriginKind.EXTERNAL_CONNECTION, upFence);
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "npm", null, "widget", "1.0", "up", RetentionOriginKind.UPSTREAM_REPOSITORY,
+                fence);
+
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "up", "npm", null, "widget", "1.0",
+                upClaim.episodeId(), false);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "npm", null, "widget", "1.0",
+                claim.episodeId(), true);
+
+        CodeArtifactService.PackageVersionSummary summary = listedNpmWidget("repo");
+        assertEquals("INTERNAL", summary.originType());
+        assertEquals("up", summary.upstreamRepositoryName());
+    }
+
+    /**
+     * {@code originType} stays {@code "INTERNAL"} for a same-domain upstream-repository retention
+     * (real AWS's own {@code PackageVersionOrigin.originType} has no third value for this), with
+     * {@code domainEntryPoint.repositoryName} set to the actual upstream, not the requesting
+     * repository: the risk flagged when this was built was wiring it to {@code "EXTERNAL"} by
+     * analogy with the connection case, which this test exists to catch.
+     */
+    @Test
+    void listPackageVersionsReportsAnUpstreamRepositoryRetentionAsInternalWithTheUpstreamsName() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "upstream-repo", null, null, Map.of());
+        when(verdaccioClient.listPackageVersions(anyString(), eq("dom"), eq("repo"), isNull(), eq("widget")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0",
+                        Instant.ofEpochSecond(1000))));
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "widget");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "npm", null, "widget", "1.0", "upstream-repo",
+                RetentionOriginKind.UPSTREAM_REPOSITORY, fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "npm", null, "widget", "1.0",
+                claim.episodeId(), true);
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "npm", null, "widget", null, null, null, null, null);
+
+        CodeArtifactService.PackageVersionSummary summary = result.versions().get(0);
+        assertEquals("INTERNAL", summary.originType());
+        assertEquals(null, summary.externalConnectionName());
+        assertEquals("upstream-repo", summary.upstreamRepositoryName());
     }
 
     @Test
@@ -2431,7 +2792,7 @@ class CodeArtifactServiceTest {
         long staleFence = currentFence + 1;
 
         assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
-                "1.0", "public:maven-central", staleFence).claimed());
+                "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, staleFence).claimed());
         assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "repo",
                 "com.example", "widget", "1.0"));
     }
@@ -2444,9 +2805,9 @@ class CodeArtifactServiceTest {
                 "widget");
         // Two concurrent attempts under the same connection, both still in flight, same episode.
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", fence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence).episodeId();
         service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
-                "public:maven-central", fence);
+                "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence);
 
         // The first attempt finishes having retained nothing; the second is still mid-fetch.
         // A plain claim-or-reject check would let this exact finish remove the shared claim
@@ -2456,14 +2817,14 @@ class CodeArtifactServiceTest {
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 episodeId, false);
         assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
-                "1.0", "public:maven-clojars", fence).claimed());
+                "1.0", "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, fence).claimed());
 
         // The second attempt finishes, also empty: now nothing is left relying on the claim, and
         // nothing was ever confirmed, so it is finally free for a different connection.
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 episodeId, false);
         assertTrue(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
-                "1.0", "public:maven-clojars", fence).claimed());
+                "1.0", "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, fence).claimed());
     }
 
     @Test
@@ -2473,7 +2834,7 @@ class CodeArtifactServiceTest {
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
                 "widget");
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", fence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence).episodeId();
 
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 episodeId, true);
@@ -2483,7 +2844,7 @@ class CodeArtifactServiceTest {
         // A real retention happened under this connection: a different connection can never claim
         // this exact version afterward, no matter how long ago every attempt finished.
         assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
-                "1.0", "public:maven-clojars", fence).claimed());
+                "1.0", "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, fence).claimed());
     }
 
     @Test
@@ -2493,7 +2854,7 @@ class CodeArtifactServiceTest {
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
                 "widget");
         long realEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", fence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence).episodeId();
 
         // A finish call carrying an episodeId that never matched any claim (made up here to
         // stand in for one whose own episode was already torn down and replaced by this one)
@@ -2525,7 +2886,7 @@ class CodeArtifactServiceTest {
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
                 "widget");
         long staleEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", fence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, fence).episodeId();
 
         // The old episode is torn down entirely, not through a finish call: some real content
         // already exists for this package (however it got there), so DeletePackage finds
@@ -2540,7 +2901,7 @@ class CodeArtifactServiceTest {
         long freshFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long freshEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", freshFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, freshFence).episodeId();
         assertNotEquals(staleEpisodeId, freshEpisodeId);
 
         // The old attempt's finish call, arriving late and carrying its own stale episodeId, must
@@ -2549,7 +2910,7 @@ class CodeArtifactServiceTest {
                 staleEpisodeId, false);
 
         assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
-                "1.0", "public:maven-clojars", freshFence).claimed());
+                "1.0", "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, freshFence).claimed());
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 freshEpisodeId, true);
         assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
@@ -2571,7 +2932,7 @@ class CodeArtifactServiceTest {
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence).episodeId();
 
         CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "com.example", "widget", "1.0", versionFence, packageFence, episodeId,
@@ -2599,7 +2960,7 @@ class CodeArtifactServiceTest {
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence).episodeId();
 
         service.deployMavenAssetUnderVersionFence(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 versionFence, packageFence, episodeId, reposiliteClient, repoId, gav, content);
@@ -2620,14 +2981,14 @@ class CodeArtifactServiceTest {
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence).episodeId();
 
         CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "com.example", "widget", "1.0", staleVersionFence, packageFence, episodeId,
                 reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
 
         assertFalse(result.fenceMatched());
-        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any(byte[].class));
     }
 
     /**
@@ -2661,7 +3022,7 @@ class CodeArtifactServiceTest {
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence).episodeId();
         String gav = "com/example/widget/1.0/widget-1.0.jar";
 
         CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
@@ -2669,7 +3030,7 @@ class CodeArtifactServiceTest {
                 episodeId, reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
 
         assertFalse(result.fenceMatched());
-        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any(byte[].class));
     }
 
     /**
@@ -2696,7 +3057,7 @@ class CodeArtifactServiceTest {
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence).episodeId();
         service.deployMavenAssetUnderVersionFence(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 versionFence, packageFence, episodeId, reposiliteClient, repoId, gav, content);
         assertEquals(content.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
@@ -2707,6 +3068,8 @@ class CodeArtifactServiceTest {
                 .thenReturn(List.of("widget-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(repoId, "dom", "repo", "com.example", "widget", "1.0",
                 "widget-1.0.jar")).thenReturn(Optional.of(content));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(repoId, "dom", "repo", "com.example", "widget", "1.0",
+                "widget-1.0.jar")).thenReturn(Optional.of(digestOf(content)));
 
         service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "widget",
                 List.of("1.0"), null, null);
@@ -2744,7 +3107,7 @@ class CodeArtifactServiceTest {
         // until after it finishes empty-handed and a fresh claim follows below (simulating a
         // fetch still in flight for a real network write that arrives only after that).
         long staleEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
-                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+                "widget", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence).episodeId();
 
         // Finds nothing from the public repository: releases its own claim, touching neither fence.
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
@@ -2754,7 +3117,7 @@ class CodeArtifactServiceTest {
 
         // A fresh claim, under a different connection, succeeds because the old claim is gone.
         service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
-                "public:maven-clojars", packageFence);
+                "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence);
 
         // The stalled attempt's own late write finally arrives and tries to write under its own
         // stale episode: both fences still match (neither was ever bumped), so only the episode
@@ -2765,7 +3128,7 @@ class CodeArtifactServiceTest {
                 reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
 
         assertFalse(result.fenceMatched());
-        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any(byte[].class));
     }
 
     /**
@@ -2791,10 +3154,10 @@ class CodeArtifactServiceTest {
 
         boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
                 "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
-                        StandardCharsets.UTF_8), v -> true);
+                        StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
-        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -2807,14 +3170,14 @@ class CodeArtifactServiceTest {
                 "com.example", "widget");
         byte[] metadataBytes = "<metadata/>".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.mergeExternalConnectionReleaseVersions(eq(repoId), eq("com.example"), eq("widget"),
-                eq(metadataBytes), any())).thenReturn(true);
+                eq(metadataBytes), any(), anyBoolean())).thenReturn(true);
 
         boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
-                "widget", packageFenceSnapshot, reposiliteClient, repoId, metadataBytes, v -> true);
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, metadataBytes, v -> true, false);
 
         assertTrue(merged);
         verify(reposiliteClient).mergeExternalConnectionReleaseVersions(eq(repoId), eq("com.example"), eq("widget"),
-                eq(metadataBytes), any());
+                eq(metadataBytes), any(), anyBoolean());
     }
 
     /**
@@ -2847,10 +3210,10 @@ class CodeArtifactServiceTest {
 
         boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
                 "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
-                        StandardCharsets.UTF_8), v -> true);
+                        StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
-        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any(), anyBoolean());
     }
 
     /**
@@ -2874,10 +3237,10 @@ class CodeArtifactServiceTest {
 
         boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
                 "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
-                        StandardCharsets.UTF_8), v -> true);
+                        StandardCharsets.UTF_8), v -> true, false);
 
         assertFalse(merged);
-        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any(), anyBoolean());
     }
 
     /**
@@ -3311,6 +3674,10 @@ class CodeArtifactServiceTest {
                 eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my-pkg-1.0.0.tgz"));
         when(verdaccioClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), isNull(), eq("my-pkg"),
                 eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(tarball));
+        when(verdaccioClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(tarball), tarball.length)));
         recordReadme("dom", "src", "npm", null, "my-pkg", "1.0.0", "# Real Readme");
 
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "npm", null, "my-pkg", List.of("1.0.0"),
@@ -3338,6 +3705,10 @@ class CodeArtifactServiceTest {
                 eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my_pkg-1.0.0.tar.gz"));
         when(pypiserverClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), isNull(), eq("my-pkg"),
                 eq("1.0.0"), eq("my_pkg-1.0.0.tar.gz"))).thenReturn(Optional.of(sdist));
+        when(pypiserverClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my_pkg-1.0.0.tar.gz"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(sdist), sdist.length)));
         recordReadme("dom", "src", "pypi", null, "my-pkg", "1.0.0", "A pypi description");
 
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "pypi", null, "my-pkg", List.of("1.0.0"),
@@ -3367,6 +3738,18 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(pomBytes), pomBytes.length)));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.jar");
+        AtomicReference<byte[]> copiedPom = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.pom");
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
@@ -3374,10 +3757,8 @@ class CodeArtifactServiceTest {
         assertTrue(result.failedVersions().isEmpty());
         assertEquals("Published", result.successfulVersions().get("1.0").status());
         assertFalse(result.successfulVersions().get("1.0").revision().isBlank());
-        verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(jarBytes));
-        verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"), eq(pomBytes));
+        assertArrayEquals(jarBytes, copiedJar.get());
+        assertArrayEquals(pomBytes, copiedPom.get());
         verify(reposiliteClient, never()).deletePackageVersionAsset(any(), any(), any(), any(), any(), any(),
                 any());
     }
@@ -3404,10 +3785,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
         long srcPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "src", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome srcClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "src", "com.example", "a", "1.0", "public:maven-central", srcPackageFence);
+                "src", "com.example", "a", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, srcPackageFence);
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "src", "com.example", "a", "1.0",
                 srcClaim.episodeId(), true);
 
@@ -3451,21 +3836,29 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
         long srcPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "src", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome srcClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "src", "com.example", "a", "1.0", "public:maven-clojars", srcPackageFence);
+                "src", "com.example", "a", "1.0", "public:maven-clojars", RetentionOriginKind.EXTERNAL_CONNECTION, srcPackageFence);
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "src", "com.example", "a", "1.0",
                 srcClaim.episodeId(), true);
         long dstPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "dst", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome dstClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "dst", "com.example", "a", "1.0", "public:maven-central", dstPackageFence);
+                "dst", "com.example", "a", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, dstPackageFence);
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "dst", "com.example", "a", "1.0",
                 dstClaim.episodeId(), true);
 
@@ -3498,15 +3891,23 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
         long dstPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "dst", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome dstClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "dst", "com.example", "a", "1.0", "public:maven-central", dstPackageFence);
+                "dst", "com.example", "a", "1.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, dstPackageFence);
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "dst", "com.example", "a", "1.0",
                 dstClaim.episodeId(), true);
 
@@ -3571,6 +3972,102 @@ class CodeArtifactServiceTest {
         assertTrue(result.successfulVersions().isEmpty());
     }
 
+    /**
+     * {@code includeFromUpstream} for a container-backed format: the same mechanism as the
+     * generic branch (see {@link #copyPackageVersionsWithIncludeFromUpstreamResolvesFromADirectUpstreamRepository}),
+     * exercised here against Maven's own {@code copyContainerBackedPackageVersions} bridge
+     * instead of the generic path's {@code packageVersions} store.
+     */
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamResolvesFromAnUpstreamRepositoryForMaven() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository parent = service.createRepository(REGION, "dom", null, "parent", null, null,
+                Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String parentRepoId = parent.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(parentRepoId), eq("dom"), eq("parent"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(parentRepoId), eq("dom"), eq("parent"),
+                eq("com.example"), eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(parentRepoId), eq("dom"), eq("parent"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, parentRepoId, "parent",
+                dstRepoId, "dst", "com.example", "a", "1.0", "a-1.0.jar");
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, true);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertArrayEquals(jarBytes, copiedJar.get());
+        assertEquals(Optional.of("parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "maven", "com.example", "a", "1.0"));
+    }
+
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamStillFailsNotFoundForMavenWhenNoUpstreamHasItEither() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, true);
+
+        assertEquals("NOT_FOUND", result.failedVersions().get("1.0").errorCode());
+        assertTrue(result.successfulVersions().isEmpty());
+    }
+
+    /**
+     * Stricter than the direct-source check (which only ever excludes Disposed): an Archived
+     * version at the first candidate upstream must not be resolved, and the walk must continue to
+     * the next candidate in priority order, the same rule the generic branch's own equivalent
+     * test confirms.
+     */
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamSkipsAnArchivedMavenCandidateForTheNextOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository archivedParent = service.createRepository(REGION, "dom", null, "archived-parent",
+                null, null, Map.of());
+        CodeArtifactRepository healthyParent = service.createRepository(REGION, "dom", null, "healthy-parent", null,
+                null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null,
+                List.of("archived-parent", "healthy-parent"), Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String archivedParentRepoId = archivedParent.getSidecarContainerIds().get("maven");
+        String healthyParentRepoId = healthyParent.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(archivedParentRepoId), eq("dom"), eq("archived-parent"),
+                eq("com.example"), eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersions(eq(archivedParentRepoId), eq("dom"), eq("archived-parent"),
+                eq("com.example"), eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "archived-parent", "maven", "com.example", "a",
+                List.of("1.0"), null, null, "Archived");
+        when(reposiliteClient.packageVersionExists(eq(healthyParentRepoId), eq("dom"), eq("healthy-parent"),
+                eq("com.example"), eq("a"), eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(healthyParentRepoId), eq("dom"), eq("healthy-parent"),
+                eq("com.example"), eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(healthyParentRepoId), eq("dom"),
+                eq("healthy-parent"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(
+                        invocation -> Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        captureCopiedAssetContent(reposiliteClient, healthyParentRepoId, "healthy-parent", dstRepoId, "dst",
+                "com.example", "a", "1.0", "a-1.0.jar");
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, true);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.of("healthy-parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null,
+                "dst", "maven", "com.example", "a", "1.0"));
+    }
+
     @Test
     void copyPackageVersionsSkipsAMavenVersionThatWouldHaveSucceededWhenASiblingIsNotFound() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -3612,6 +4109,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes.clone()));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes.clone()), jarBytes.length)));
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
@@ -3637,12 +4142,20 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        byte[] sourceBytes = "source-bytes".getBytes(StandardCharsets.UTF_8);
+        byte[] differentBytes = "different-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("source-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(sourceBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("different-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(differentBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(sourceBytes), sourceBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(differentBytes), differentBytes.length)));
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
@@ -3666,11 +4179,21 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar", "stale-readme.txt"));
+        byte[] oldJarBytes = "old-jar-bytes".getBytes(StandardCharsets.UTF_8);
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar")))
-                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.jar");
 
         CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false);
@@ -3685,7 +4208,9 @@ class CodeArtifactServiceTest {
         order.verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"),
                 eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"));
         order.verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(newJarBytes));
+                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), any(Path.class),
+                eq((long) newJarBytes.length));
+        assertArrayEquals(newJarBytes, copiedJar.get());
         verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("stale-readme.txt"));
     }
@@ -3717,15 +4242,24 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(pomBytes), pomBytes.length)));
         doThrow(new IllegalStateException("sidecar unreachable")).when(reposiliteClient).copyPackageVersionAsset(
                 eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId), eq("dst"), eq("com.example"), eq("a"), eq("1.0"),
-                eq("a-1.0.pom"), eq(pomBytes));
+                eq("a-1.0.pom"), any(Path.class), eq((long) pomBytes.length));
+        AtomicReference<byte[]> copiedJar = captureCopiedAssetContent(reposiliteClient, srcRepoId, "src", dstRepoId,
+                "dst", "com.example", "a", "1.0", "a-1.0.jar");
 
         assertThrows(IllegalStateException.class, () -> service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false));
 
-        verify(reposiliteClient).copyPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId),
-                eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(jarBytes));
+        assertArrayEquals(jarBytes, copiedJar.get());
         verify(reposiliteClient).deletePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"));
     }
@@ -3759,15 +4293,28 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(newPomBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJarBytes), newJarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newPomBytes), newPomBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJarBytes), oldJarBytes.length)));
         doThrow(new IllegalStateException("sidecar unreachable")).when(reposiliteClient).copyPackageVersionAsset(
                 eq(srcRepoId), eq("dom"), eq("src"), eq(dstRepoId), eq("dst"), eq("com.example"), eq("a"), eq("1.0"),
-                eq("a-1.0.pom"), eq(newPomBytes));
+                eq("a-1.0.pom"), any(Path.class), eq((long) newPomBytes.length));
+        AtomicReference<byte[]> restoredJar = captureStoredAssetContent(reposiliteClient, dstRepoId, "dst",
+                "com.example", "a", "1.0", "a-1.0.jar");
 
         assertThrows(IllegalStateException.class, () -> service.copyPackageVersions(REGION, "dom", null,
                 "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false));
 
-        verify(reposiliteClient).storePackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
-                eq("a"), eq("1.0"), eq("a-1.0.jar"), eq(oldJarBytes));
+        assertArrayEquals(oldJarBytes, restoredJar.get());
     }
 
     @Test
@@ -3786,6 +4333,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
 
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "maven", "com.example", "a",
                 List.of("1.0"), null, false, false);
@@ -3813,6 +4364,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(pomBytes), pomBytes.length)));
 
         long before = service.describeDomain(REGION, "dom", null).assetSizeBytes();
         service.copyPackageVersions(REGION, "dom", null, "src", "dst", "maven", "com.example", "a",
@@ -3875,6 +4434,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(jarBytes), jarBytes.length)));
 
         String describedRevision = service.describePackageVersion(REGION, "dom", null, "src", "maven",
                 "com.example", "a", "1.0").getRevision();
@@ -3897,6 +4460,202 @@ class CodeArtifactServiceTest {
                 "src", "dst", "generic", "ns", "my-pkg", List.of("9.9.9"), null, false, false);
         assertTrue(result.successfulVersions().isEmpty());
         assertEquals("NOT_FOUND", result.failedVersions().get("9.9.9").errorCode());
+    }
+
+    /**
+     * {@code includeFromUpstream} (real AWS flag, default {@code false}): a miss against the
+     * literal source repository is NOT_FOUND unless this is set, even when a configured upstream
+     * genuinely has the version. Confirms today's default behavior is completely unchanged.
+     */
+    @Test
+    void copyPackageVersionsWithoutIncludeFromUpstreamNeverSearchesTheUpstreamChain() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("parent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, false, false);
+        assertTrue(result.successfulVersions().isEmpty());
+        assertEquals("NOT_FOUND", result.failedVersions().get("1.0.0").errorCode());
+    }
+
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamResolvesFromADirectUpstreamRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("parent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, false, true);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals("1.0.0", service.describePackageVersion(REGION, "dom", null, "dst", "generic", "ns", "my-pkg",
+                "1.0.0").getVersion());
+        assertEquals(Optional.of("parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+    }
+
+    /**
+     * {@code src -> parent -> grandparent}, the version only published at {@code grandparent}:
+     * confirms the resolution walk is genuinely transitive (see {@link UpstreamRepositoryResolver}
+     * and {@link #resolveUpstreamSearchOrder}), not limited to {@code src}'s own direct list, and
+     * that the claim records the real (deep) source, not an intermediate hop.
+     */
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamResolvesFromATransitiveUpstreamRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "grandparent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, List.of("grandparent"), Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("grandparent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, false, true);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.of("grandparent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+    }
+
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamStillFailsNotFoundWhenNoUpstreamHasItEither() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, false, true);
+        assertTrue(result.successfulVersions().isEmpty());
+        assertEquals("NOT_FOUND", result.failedVersions().get("1.0.0").errorCode());
+    }
+
+    /**
+     * Stricter than the direct-source check (which only ever excludes {@code Disposed}): an
+     * Archived version at the first candidate upstream must not be resolved, and the walk must
+     * continue on to the next candidate in priority order instead of stopping there.
+     */
+    @Test
+    void copyPackageVersionsWithIncludeFromUpstreamSkipsAnArchivedCandidateForTheNextOne() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "archived-parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "healthy-parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("archived-parent", "healthy-parent"),
+                Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("archived-parent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "archived-parent", "generic", "ns", "my-pkg",
+                List.of("1.0.0"), null, null, "Archived");
+        publishGeneric("healthy-parent", "my-pkg", "1.0.0", "y".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, false, true);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.of("healthy-parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null,
+                "dst", "generic", "ns", "my-pkg", "1.0.0"));
+    }
+
+    /**
+     * A version found directly at the literal source repository records no claim at all, even
+     * with {@code includeFromUpstream} set: this emulator never carries a source's own existing
+     * claim (if it had one) forward on a plain copy, matching {@code copyPackageVersions}'s own
+     * design choice (see its own javadoc on {@code copyMavenRetainedVersionOriginIfApplicable}'s
+     * container-backed-only counterpart).
+     */
+    @Test
+    void copyPackageVersionsFoundDirectlyAtTheSourceRecordsNoUpstreamClaimEvenWithIncludeFromUpstream() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("src", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, false, true);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.empty(), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+    }
+
+    /**
+     * A generic version retained via {@code includeFromUpstream} and then deleted and republished
+     * under the same coordinates must not keep reporting the old upstream repository: {@link
+     * #deletePackageVersions} must clear the claim, the same way it already does for every
+     * container-backed format.
+     */
+    @Test
+    void deletingAnUpstreamRetainedGenericVersionClearsItsOriginClaim() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("parent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+        service.copyPackageVersions(REGION, "dom", null, "src", "dst", "generic", "ns", "my-pkg",
+                List.of("1.0.0"), null, false, true);
+        assertEquals(Optional.of("parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+
+        service.deletePackageVersions(REGION, "dom", null, "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null);
+        publishGeneric("dst", "my-pkg", "1.0.0", "y".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(Optional.empty(), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+    }
+
+    /** {@link #deletePackage}'s own generic branch must clear the same claim, not just its
+     * per-version sibling above.
+     */
+    @Test
+    void deletingAnUpstreamRetainedGenericPackageClearsItsOriginClaim() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("parent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+        service.copyPackageVersions(REGION, "dom", null, "src", "dst", "generic", "ns", "my-pkg",
+                List.of("1.0.0"), null, false, true);
+        assertEquals(Optional.of("parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+
+        service.deletePackage(REGION, "dom", null, "dst", "generic", "ns", "my-pkg");
+        publishGeneric("dst", "my-pkg", "1.0.0", "y".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(Optional.empty(), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+    }
+
+    /**
+     * A direct {@code CopyPackageVersions} overwrite (resolved straight from the literal {@code
+     * sourceRepository}, not the upstream chain) must clear a stale claim an earlier {@code
+     * includeFromUpstream} overwrite left at this same destination coordinate, not just skip
+     * adding a new one.
+     */
+    @Test
+    void overwritingAnUpstreamRetainedGenericVersionWithADirectCopyClearsItsOriginClaim() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "parent", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "src", null, List.of("parent"), Map.of());
+        service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        publishGeneric("parent", "my-pkg", "1.0.0", "x".getBytes(StandardCharsets.UTF_8));
+        service.copyPackageVersions(REGION, "dom", null, "src", "dst", "generic", "ns", "my-pkg",
+                List.of("1.0.0"), null, false, true);
+        assertEquals(Optional.of("parent"), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
+        publishGeneric("src", "my-pkg", "1.0.0", "y".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "generic", "ns", "my-pkg", List.of("1.0.0"), null, true, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.empty(), service.retainedUpstreamRepositoryOrigin(REGION, "dom", null, "dst",
+                "generic", "ns", "my-pkg", "1.0.0"));
     }
 
     /**
@@ -4483,6 +5242,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(pomBytes));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(jarBytes)));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(digestOf(pomBytes)));
 
         CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
                 null, "repo", "maven", "com.example", "a", "1.0", null, null);
@@ -4675,7 +5438,7 @@ class CodeArtifactServiceTest {
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "a");
         CodeArtifactService.MavenClaimOutcome claim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
-                "repo", "com.example", "a", "2.0", "public:maven-central", packageFence);
+                "repo", "com.example", "a", "2.0", "public:maven-central", RetentionOriginKind.EXTERNAL_CONNECTION, packageFence);
         service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "a", "2.0",
                 claim.episodeId(), true);
 
@@ -4818,8 +5581,8 @@ class CodeArtifactServiceTest {
                 .thenReturn(true);
         when(verdaccioClient.listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
                 .thenReturn(List.of("my-pkg-1.0.0.tgz"));
-        when(verdaccioClient.fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
-                "my-pkg-1.0.0.tgz")).thenReturn(Optional.of(new byte[] {1, 2, 3}));
+        when(verdaccioClient.fetchPackageVersionAssetDigest(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz")).thenReturn(Optional.of(digestOf(new byte[] {1, 2, 3})));
 
         CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
                 null, "repo", "npm", null, "my-pkg", "1.0.0", null, null);
@@ -4829,7 +5592,7 @@ class CodeArtifactServiceTest {
         order.verify(verdaccioClient).beginUse(repoId);
         order.verify(verdaccioClient).packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
         order.verify(verdaccioClient).listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
-        order.verify(verdaccioClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+        order.verify(verdaccioClient).fetchPackageVersionAssetDigest(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
                 "my-pkg-1.0.0.tgz");
         order.verify(verdaccioClient).endUse(repoId);
     }
@@ -4977,7 +5740,7 @@ class CodeArtifactServiceTest {
         String repoId = created.getSidecarContainerIds().get("npm");
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "my-pkg");
         CodeArtifactService.RetainedVersionOriginClaimOutcome outcome = service.claimRetainedVersionOrigin(REGION,
-                "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", "public:npmjs", fence);
+                "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", "public:npmjs", RetentionOriginKind.EXTERNAL_CONNECTION, fence);
         service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0",
                 outcome.episodeId(), true);
         when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(),
@@ -5412,6 +6175,10 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(new byte[25]));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(new byte[40])));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.pom"))).thenReturn(Optional.of(digestOf(new byte[25])));
         doThrow(new IllegalStateException("sidecar unreachable"))
                 .when(reposiliteClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"),
                         eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"));
@@ -5633,6 +6400,8 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(new byte[40])));
 
         CodeArtifactService.PackageVersionStatusChangeResult result = service.deletePackageVersions(REGION, "dom",
                 null, "repo", "maven", "com.example", "a", List.of("1.0"), null);
@@ -5828,7 +6597,7 @@ class CodeArtifactServiceTest {
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
                 "my-pkg");
         CodeArtifactService.RetainedVersionOriginClaimOutcome outcome = service.claimRetainedVersionOrigin(REGION,
-                "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", "public:nuget-org", fence);
+                "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", "public:nuget-org", RetentionOriginKind.EXTERNAL_CONNECTION, fence);
         service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0",
                 outcome.episodeId(), true);
         assertEquals("public:nuget-org", service.retainedVersionOriginConnection(REGION, "dom", null, "repo",
@@ -5958,6 +6727,8 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
         when(reposiliteClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(new byte[40]));
+        when(reposiliteClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(digestOf(new byte[40])));
 
         service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"),
                 null, null);
@@ -5993,6 +6764,11 @@ class CodeArtifactServiceTest {
         when(pypiserverClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
                 eq("1.0"), eq("my_pkg-1.0-py3-none-any.whl"))).thenAnswer(invocation ->
                         sdistDeleted.get() ? Optional.empty() : Optional.of(new byte[25]));
+        when(pypiserverClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0"), eq("my-pkg-1.0.tar.gz"))).thenReturn(Optional.of(digestOf(new byte[40])));
+        when(pypiserverClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0"), eq("my_pkg-1.0-py3-none-any.whl"))).thenAnswer(invocation ->
+                        sdistDeleted.get() ? Optional.empty() : Optional.of(digestOf(new byte[25])));
         doAnswer(invocation -> {
             sdistDeleted.set(true);
             return null;
@@ -6027,6 +6803,9 @@ class CodeArtifactServiceTest {
         when(verdaccioClient.fetchPackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
                 eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of("tgz-bytes".getBytes(
                         StandardCharsets.UTF_8)));
+        when(verdaccioClient.fetchPackageVersionAssetDigest(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(digestOf(
+                        "tgz-bytes".getBytes(StandardCharsets.UTF_8))));
         recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "hello");
 
         CodeArtifactService.PackageVersionStatusChangeResult changed = service.updatePackageVersionsStatus(REGION,
@@ -6070,6 +6849,14 @@ class CodeArtifactServiceTest {
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJar));
         when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(oldJar));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(srcRepoId), eq("dom"), eq("src"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(newJar), newJar.length)));
+        when(reposiliteClient.fetchPackageVersionAssetStreamed(eq(dstRepoId), eq("dom"), eq("dst"),
+                eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenAnswer(invocation ->
+                        Optional.of(new RepositorySidecarManager.StreamedAsset(
+                                new ByteArrayInputStream(oldJar), oldJar.length)));
         when(reposiliteClient.listPackageVersions(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
                 eq("a"))).thenReturn(List.of(
                         new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
@@ -6525,7 +7312,8 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         CodeArtifactService listingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
-                origins, regionResolver, mock(EmulatorConfig.class), true, null,
+                origins, AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(EmulatorConfig.class), true, null,
                 new CodeArtifactSidecarRegistry(List.of(pypiserverClient, bagetterClient)));
         listingService.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository repository = listingService.createRepository(REGION, "dom", null, "repo",
@@ -7133,7 +7921,8 @@ class CodeArtifactServiceTest {
         String legacyKey = REGION + "::dom::repo::" + format + "::::" + original;
         packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyKey,
                 new PackageOriginConfig("BLOCK", "BLOCK", format, null, original));
-        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized,
+                "EXTERNAL_UPSTREAM"));
     }
 
     @Test
@@ -7150,7 +7939,8 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         service.putPackageOriginConfiguration(REGION, "dom", null, "repo", format, null, original, "BLOCK", "BLOCK");
-        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized,
+                "EXTERNAL_UPSTREAM"));
     }
     @Test
     void readingLegacyOriginConfigMigratesItBeforeRemovingTheOldKey() {
@@ -7177,7 +7967,8 @@ class CodeArtifactServiceTest {
                 "ALLOW", "ALLOW");
         assertEquals(List.of(REGION + "::dom::repo::pypi::::my-proj"),
                 packageOriginConfigStore.keysForAccount(ACCOUNT_ID).stream().sorted().toList());
-        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ",
+                "EXTERNAL_UPSTREAM"));
     }
 
     @Test
@@ -7188,7 +7979,8 @@ class CodeArtifactServiceTest {
         packageOriginConfigStore.putForAccount("999999999999", REGION + "::dom::repo::nuget::::Newtonsoft.Json", config);
         packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::other::nuget::::Newtonsoft.Json", config);
         packageOriginConfigStore.putForAccount(ACCOUNT_ID, OTHER_REGION + "::dom::repo::nuget::::Newtonsoft.Json", config);
-        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null, "newtonsoft.json"));
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null, "newtonsoft.json",
+                "EXTERNAL_UPSTREAM"));
         assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
                 REGION + "::dom::repo::nuget::::newtonsoft.json").isEmpty());
         assertEquals(2, packageOriginConfigStore.keysForAccount(ACCOUNT_ID).size());
@@ -7218,7 +8010,8 @@ class CodeArtifactServiceTest {
                 new PackageOriginConfig("ALLOW", "ALLOW", "pypi", null, "my-proj"));
         packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
                 new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
-        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ",
+                "EXTERNAL_UPSTREAM"));
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-proj");
         assertTrue(packageOriginConfigStore.keysForAccount(ACCOUNT_ID).isEmpty());
         assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
@@ -7230,8 +8023,8 @@ class CodeArtifactServiceTest {
         AccountAwareStorageBackend<PackageOriginConfig> store = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         CodeArtifactService failingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
-                store, regionResolver, mock(EmulatorConfig.class), true, null,
-                new CodeArtifactSidecarRegistry(List.of()));
+                store, AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(EmulatorConfig.class), true, null, new CodeArtifactSidecarRegistry(List.of()));
         failingService.createDomain(REGION, "dom", null, Map.of());
         failingService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         String legacyKey = REGION + "::dom::repo::nuget::::Newtonsoft.Json";
@@ -7241,13 +8034,15 @@ class CodeArtifactServiceTest {
         doThrow(new IllegalStateException("save failed")).when(store)
                 .putForAccount(eq(ACCOUNT_ID), eq(canonicalKey), any(PackageOriginConfig.class));
         assertThrows(IllegalStateException.class, () -> failingService.isUpstreamRetentionBlocked(REGION,
-                "dom", null, "repo", "nuget", null, "newtonsoft.json"));
+                "dom", null, "repo", "nuget", null, "newtonsoft.json",
+                "EXTERNAL_UPSTREAM"));
         assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isPresent());
         assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isEmpty());
         doAnswer(invocation -> invocation.callRealMethod()).when(store)
                 .putForAccount(eq(ACCOUNT_ID), eq(canonicalKey), any(PackageOriginConfig.class));
         assertTrue(failingService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null,
-                "newtonsoft.json"));
+                "newtonsoft.json",
+                "EXTERNAL_UPSTREAM"));
         assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isEmpty());
         assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isPresent());
     }
@@ -7263,7 +8058,8 @@ class CodeArtifactServiceTest {
 
         for (String name : List.of("first", "second")) {
             lookupService.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", format, null, name);
-            assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, name));
+            assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, name,
+                "EXTERNAL_UPSTREAM"));
             assertThrows(AwsException.class, () -> lookupService.describePackage(REGION, "dom", null, "repo",
                     format, null, name));
             lookupService.listPackages(REGION, "dom", null, "repo", format, null, null, null, null, null, null);
@@ -7285,11 +8081,13 @@ class CodeArtifactServiceTest {
         origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
         doThrow(new IllegalStateException("controlled delete failure")).when(origins).deleteForAccount(ACCOUNT_ID, legacy);
         assertThrows(IllegalStateException.class, () -> lookupService.isUpstreamRetentionBlocked(REGION,
-                "dom", null, "repo", "pypi", null, "my-proj"));
+                "dom", null, "repo", "pypi", null, "my-proj",
+                "EXTERNAL_UPSTREAM"));
         assertTrue(origins.getForAccount(ACCOUNT_ID, canonical).isPresent());
         assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isPresent());
         doAnswer(invocation -> invocation.callRealMethod()).when(origins).deleteForAccount(ACCOUNT_ID, legacy);
-        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj"));
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj",
+                "EXTERNAL_UPSTREAM"));
         assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isEmpty());
         lookupService.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "pypi", null, "new");
         verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
@@ -7299,13 +8097,15 @@ class CodeArtifactServiceTest {
     void clearingServiceResetsAccountMigration() {
         AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         CodeArtifactService lookupService = originLookupService(origins);
-        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "absent"));
+        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "absent",
+                "EXTERNAL_UPSTREAM"));
         lookupService.clear();
         lookupService.createDomain(REGION, "dom", null, Map.of());
         lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
                 new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
-        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj"));
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj",
+                "EXTERNAL_UPSTREAM"));
         verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
     }
 
@@ -7322,7 +8122,8 @@ class CodeArtifactServiceTest {
 
         assertEquals("BLOCK", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
                 "first").publishRestriction());
-        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "second"));
+        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "second",
+                "EXTERNAL_UPSTREAM"));
 
         verify(origins, never()).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
         verify(origins, never()).deleteForAccount(anyString(), anyString());
@@ -7340,7 +8141,8 @@ class CodeArtifactServiceTest {
         origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "ALLOW", format, null, "EXAMPLE"));
         clearInvocations(origins);
 
-        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "example"));
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "example",
+                "EXTERNAL_UPSTREAM"));
 
         PackageOriginConfig repaired = origins.getForAccount(ACCOUNT_ID, canonical).orElseThrow();
         assertEquals(format, repaired.getFormat());
@@ -7376,11 +8178,690 @@ class CodeArtifactServiceTest {
     private CodeArtifactService originLookupService(AccountAwareStorageBackend<PackageOriginConfig> origins) {
         CodeArtifactService lookupService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
-                origins, regionResolver, mock(EmulatorConfig.class), true, null,
-                new CodeArtifactSidecarRegistry(List.of()));
+                origins, AccountAwareStorageBackend.inMemory(ACCOUNT_ID), regionResolver,
+                mock(EmulatorConfig.class), true, null, new CodeArtifactSidecarRegistry(List.of()));
         lookupService.createDomain(REGION, "dom", null, Map.of());
         lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         return lookupService;
     }
 
+    @Test
+    void aRefusedUpdateRepositoryLeavesTheUpstreamsUnchanged() {
+        service.createDomain(REGION, "refused-update", null, Map.of());
+        service.createRepository(REGION, "refused-update", null, "consumer", null, null, Map.of());
+        service.createRepository(REGION, "refused-update", null, "upstream", null, null, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateRepository(
+                REGION, "refused-update", null, "consumer", "x".repeat(1001), List.of("upstream")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals(List.of(),
+                service.describeRepository(REGION, "refused-update", null, "consumer").getUpstreams());
+    }
+
+    // -------------------------------------------------------------- package groups
+
+    @Test
+    void createPackageGroupRequiresTheDomainToExist() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "missing", null, "/npm/*", null, null, Map.of()));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void createPackageGroupRejectsADuplicatePattern() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of()));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void createPackageGroupRejectsAPatternWithNoRecognizedSuffix() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/npm/space/anycompany", null, null, Map.of()));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void createPackageGroupStartsEveryRestrictionAtInheritResolvingToAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView view = service.createPackageGroup(REGION, "dom", null, "/npm/*", "contact",
+                "desc", Map.of());
+        assertEquals("/npm/*", view.pattern());
+        assertEquals("dom", view.domainName());
+        assertEquals("contact", view.contactInfo());
+        assertEquals("desc", view.description());
+        assertEquals("/*", view.parentPattern());
+        assertEquals("INHERIT", view.restrictions().get("PUBLISH").mode());
+        assertEquals("ALLOW", view.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/*", view.restrictions().get("PUBLISH").inheritedFromPattern());
+    }
+
+    @Test
+    void describePackageGroupReportsTheMostSpecificAncestorAsParent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/space/*");
+        assertEquals("/npm/*", child.parentPattern());
+        PackageGroupDescriptionView npm = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertEquals("/*", npm.parentPattern());
+        assertNull(service.describePackageGroup(REGION, "dom", null, "/*").parentPattern());
+    }
+
+    @Test
+    void describePackageGroupThrowsResourceNotFoundForAnUnknownPattern() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describePackageGroup(REGION, "dom", null, "/npm/*"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void updatePackageGroupOnlyChangesContactInfoAndDescription() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", "old-contact", "old-desc", Map.of());
+        PackageGroupDescriptionView updated = service.updatePackageGroup(REGION, "dom", null, "/npm/*",
+                "new-contact", "new-desc");
+        assertEquals("new-contact", updated.contactInfo());
+        assertEquals("new-desc", updated.description());
+        assertEquals("/npm/*", updated.pattern());
+    }
+
+    @Test
+    void deletingAParentReparentsItsChildrenOntoTheGrandparent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/anycompany-ui~", null, null, Map.of());
+
+        service.deletePackageGroup(REGION, "dom", null, "/npm/space/*");
+
+        PackageGroupDescriptionView grandchild = service.describePackageGroup(REGION, "dom", null,
+                "/npm/space/anycompany-ui~");
+        assertEquals("/npm/*", grandchild.parentPattern());
+    }
+
+    @Test
+    void deletePackageGroupThrowsResourceNotFoundForAnUnknownPattern() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.deletePackageGroup(REGION, "dom", null, "/npm/*"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void listPackageGroupsFiltersByPrefixAndPaginates() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/pypi/*", null, null, Map.of());
+
+        PackageGroupListResult all = service.listPackageGroups(REGION, "dom", null, null, null, null);
+        assertEquals(List.of("/*", "/npm/*", "/pypi/*"),
+                all.packageGroups().stream().map(PackageGroupDescriptionView::pattern).toList());
+
+        PackageGroupListResult npmOnly = service.listPackageGroups(REGION, "dom", null, "/npm", null, null);
+        assertEquals(1, npmOnly.packageGroups().size());
+        assertEquals("/npm/*", npmOnly.packageGroups().get(0).pattern());
+
+        PackageGroupListResult firstPage = service.listPackageGroups(REGION, "dom", null, null, 1, null);
+        assertEquals(1, firstPage.packageGroups().size());
+        assertNotNull(firstPage.nextToken());
+    }
+
+    @Test
+    void listSubPackageGroupsReturnsOnlyDirectChildrenNotGrandchildren() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/anycompany-ui~", null, null, Map.of());
+
+        PackageGroupListResult children = service.listSubPackageGroups(REGION, "dom", null, "/npm/*", null, null);
+        assertEquals(1, children.packageGroups().size());
+        assertEquals("/npm/space/*", children.packageGroups().get(0).pattern());
+    }
+
+    @Test
+    void updatePackageGroupOriginConfigurationSetsModeAndTracksAllowedRepositoryEdits() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+
+        UpdatePackageGroupOriginConfigurationResult result = service.updatePackageGroupOriginConfiguration(REGION,
+                "dom", null, "/npm/*", Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH"),
+                        new PackageGroupAllowedRepositoryEdit("repo-b", "PUBLISH")),
+                List.of());
+
+        assertEquals("ALLOW_SPECIFIC_REPOSITORIES", result.packageGroup().restrictions().get("PUBLISH").mode());
+        assertEquals("ALLOW_SPECIFIC_REPOSITORIES",
+                result.packageGroup().restrictions().get("PUBLISH").effectiveMode());
+        assertEquals(2, result.packageGroup().restrictions().get("PUBLISH").repositoriesCount());
+        assertEquals(List.of("repo-a", "repo-b"), result.allowedRepositoryUpdates().get("PUBLISH").get("ADDED"));
+
+        UpdatePackageGroupOriginConfigurationResult afterRemove = service.updatePackageGroupOriginConfiguration(
+                REGION, "dom", null, "/npm/*", Map.of(), List.of(),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")));
+        assertEquals(1, afterRemove.packageGroup().restrictions().get("PUBLISH").repositoriesCount());
+        assertEquals(List.of("repo-a"), afterRemove.allowedRepositoryUpdates().get("PUBLISH").get("REMOVED"));
+        // The mode itself is untouched by an allowed-repository-only edit.
+        assertEquals("ALLOW_SPECIFIC_REPOSITORIES", afterRemove.packageGroup().restrictions().get("PUBLISH").mode());
+    }
+
+    @Test
+    void effectiveModeWalksUpThroughInheritToTheNearestConcreteAncestor() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+
+        PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/space/*");
+        assertEquals("INHERIT", child.restrictions().get("PUBLISH").mode());
+        assertEquals("BLOCK", child.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/npm/*", child.restrictions().get("PUBLISH").inheritedFromPattern());
+    }
+
+    @Test
+    void listAllowedRepositoriesForGroupReturnsTheStoredList() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")), List.of());
+
+        ListAllowedRepositoriesForGroupResult result = service.listAllowedRepositoriesForGroup(REGION, "dom", null,
+                "/npm/*", "PUBLISH", null, null);
+        assertEquals(List.of("repo-a"), result.allowedRepositories());
+    }
+
+    @Test
+    void getAssociatedPackageGroupIsTheRootGroupWhenNoOtherGroupMatches() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        GetAssociatedPackageGroupResult result =
+                service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null, "react");
+        assertEquals("/*", result.packageGroup().pattern());
+        assertEquals("STRONG", result.associationType());
+    }
+
+    @Test
+    void aDomainIsCreatedWithItsRootPackageGroupAllowingEveryOrigin() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView root = service.describePackageGroup(REGION, "dom", null, "/*");
+        assertEquals("Default root package group", root.description());
+        assertNull(root.contactInfo());
+        assertNull(root.parentPattern());
+        for (String type : List.of("PUBLISH", "EXTERNAL_UPSTREAM", "INTERNAL_UPSTREAM")) {
+            assertEquals("ALLOW", root.restrictions().get(type).mode(), type);
+            assertEquals("ALLOW", root.restrictions().get(type).effectiveMode(), type);
+            assertNull(root.restrictions().get(type).inheritedFromPattern(), type);
+        }
+        assertEquals(List.of("/*"), service.listPackageGroups(REGION, "dom", null, null, null, null)
+                .packageGroups().stream().map(PackageGroupDescriptionView::pattern).toList());
+    }
+
+    @Test
+    void theRootPackageGroupCanBeChangedButNotCreatedAgainOrDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        AwsException created = assertThrows(AwsException.class,
+                () -> service.createPackageGroup(REGION, "dom", null, "/*", null, null, Map.of()));
+        assertEquals("ConflictException", created.getErrorCode());
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.deletePackageGroup(REGION, "dom", null, "/*"));
+        assertEquals("ValidationException", deleted.getErrorCode());
+        assertEquals("The root package group, '/*', cannot be deleted.", deleted.getMessage());
+
+        service.updatePackageGroup(REGION, "dom", null, "/*", "team@example.com", "everything");
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        PackageGroupDescriptionView npm = service.describePackageGroup(REGION, "dom", null, "/npm/*");
+        assertEquals("BLOCK", npm.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/*", npm.restrictions().get("PUBLISH").inheritedFromPattern());
+        assertEquals("everything", service.describePackageGroup(REGION, "dom", null, "/*").description());
+    }
+
+    @Test
+    void aDomainWhoseRootCannotBeStoredIsNotLeftBehindToRefuseTheRetry() {
+        doThrow(new IllegalStateException("storage unavailable")).when(packageGroupStore)
+                .putForAccount(anyString(), startsWith(REGION + "::dom::"), any());
+        assertThrows(IllegalStateException.class, () -> service.createDomain(REGION, "dom", null, Map.of()));
+        doCallRealMethod().when(packageGroupStore).putForAccount(anyString(), anyString(), any());
+
+        service.createDomain(REGION, "dom", null, Map.of());
+        assertEquals("Default root package group",
+                service.describePackageGroup(REGION, "dom", null, "/*").description());
+    }
+
+    @Test
+    void aStoredDomainWithoutARootPackageGroupGetsOneWhenSeeded() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        List.copyOf(packageGroupStore.keysForAccount(ACCOUNT_ID))
+                .forEach(key -> packageGroupStore.deleteForAccount(ACCOUNT_ID, key));
+        assertThrows(AwsException.class, () -> service.describePackageGroup(REGION, "dom", null, "/*"));
+
+        service.seedRootPackageGroups();
+        service.seedRootPackageGroups();
+
+        assertEquals("Default root package group",
+                service.describePackageGroup(REGION, "dom", null, "/*").description());
+        assertEquals(1, service.listPackageGroups(REGION, "dom", null, null, null, null).packageGroups().size());
+    }
+
+    @Test
+    void getAssociatedPackageGroupReportsTheMostSpecificMatchAndItsStrength() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        GetAssociatedPackageGroupResult strong = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "AsyncStorage");
+        assertEquals("/npm//AsyncStorage$", strong.packageGroup().pattern());
+        assertEquals("STRONG", strong.associationType());
+
+        GetAssociatedPackageGroupResult weak = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "asyncstorage");
+        assertEquals("/npm//AsyncStorage$", weak.packageGroup().pattern());
+        assertEquals("WEAK", weak.associationType());
+
+        GetAssociatedPackageGroupResult other = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "some-other-package");
+        assertEquals("/npm/*", other.packageGroup().pattern());
+        assertEquals("STRONG", other.associationType());
+    }
+
+    @Test
+    void listAssociatedPackagesReturnsOnlyPackagesTheGroupWinsForAcrossRepositories() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/space/*", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "space", "in-space", "1.0.0",
+                "a.txt", Digests.sha256Hex(content), "false", content);
+        service.publishPackageVersion(REGION, "dom", null, "repo-b", "generic", "other", "not-in-space", "1.0.0",
+                "a.txt", Digests.sha256Hex(content), "false", content);
+
+        ListAssociatedPackagesResult spaceGroup = service.listAssociatedPackages(REGION, "dom", null,
+                "/generic/space/*", null, null, false);
+        assertEquals(1, spaceGroup.packages().size());
+        assertEquals("in-space", spaceGroup.packages().get(0).packageName());
+
+        ListAssociatedPackagesResult rootGroup = service.listAssociatedPackages(REGION, "dom", null, "/generic/*",
+                null, null, false);
+        assertEquals(1, rootGroup.packages().size());
+        assertEquals("not-in-space", rootGroup.packages().get(0).packageName());
+    }
+
+    @Test
+    void listAssociatedPackagesPreviewWorksForAPatternThatDoesNotExistYet() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+        service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "space", "in-space", "1.0.0", "a.txt",
+                Digests.sha256Hex(content), "false", content);
+
+        ListAssociatedPackagesResult preview = service.listAssociatedPackages(REGION, "dom", null,
+                "/generic/space/*", null, null, true);
+        assertEquals(1, preview.packages().size());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listAssociatedPackages(REGION, "dom", null, "/generic/space/*", null, null, false));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionIsBlockedByAnAssociatedGroupsBlockMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/generic/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionAllowsOnlyTheRepositoryListedForAllowSpecificRepositories() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/generic/*",
+                Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")), List.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        assertDoesNotThrow(() -> service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "ns",
+                "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo-b", "generic", "ns", "other-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionIsBlockedByAWeakMatchRegardlessOfTheGroupsMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/ns/AsyncStorage$", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "asyncstorage", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void publishPackageVersionWithNoAssociatedGroupIsUnaffected() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        assertDoesNotThrow(() -> service.publishPackageVersion(REGION, "dom", null, "repo", "generic", "ns",
+                "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+    }
+
+    @Test
+    void packageLevelBlockWinsOverAGroupLevelAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "my-pkg", "BLOCK",
+                "BLOCK");
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo", "generic", "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedIsBlockedByAnAssociatedGroupsBlockMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("EXTERNAL_UPSTREAM", "BLOCK"), List.of(), List.of());
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg",
+                "EXTERNAL_UPSTREAM"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedAllowsOnlyTheRepositoryListedForAllowSpecificRepositories() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("EXTERNAL_UPSTREAM", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "EXTERNAL_UPSTREAM")), List.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo-a", "npm", null, "my-pkg",
+                "EXTERNAL_UPSTREAM"));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo-b", "npm", null, "other-pkg",
+                "EXTERNAL_UPSTREAM"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedIsBlockedByAWeakMatchRegardlessOfTheGroupsMode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "asyncstorage",
+                "EXTERNAL_UPSTREAM"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedWithNoAssociatedGroupIsUnaffected() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg",
+                "EXTERNAL_UPSTREAM"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedPackageLevelBlockWinsOverAGroupLevelAllow() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "npm", null, "my-pkg", "ALLOW", "BLOCK");
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg",
+                "EXTERNAL_UPSTREAM"));
+    }
+
+    /**
+     * {@code INTERNAL_UPSTREAM}'s own equivalent of {@link
+     * #isUpstreamRetentionBlockedIsBlockedByAnAssociatedGroupsBlockMode}: the one line that
+     * actually differs between the two restriction types ({@code groupAllowsRestriction}'s own
+     * restriction-type argument) is exercised here instead of {@code EXTERNAL_UPSTREAM}.
+     */
+    @Test
+    void isUpstreamRetentionBlockedIsBlockedByAnAssociatedGroupsBlockModeUnderInternalUpstreamToo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("INTERNAL_UPSTREAM", "BLOCK"), List.of(), List.of());
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg",
+                "INTERNAL_UPSTREAM"));
+    }
+
+    /**
+     * Confirms the two restriction types are genuinely independent, not just two names for the
+     * same stored mode: {@code EXTERNAL_UPSTREAM} allowed while {@code INTERNAL_UPSTREAM} is
+     * blocked on the exact same group/package, each restriction type's own call reflecting only
+     * its own mode.
+     */
+    @Test
+    void externalUpstreamAndInternalUpstreamAreCheckedIndependently() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("EXTERNAL_UPSTREAM", "ALLOW", "INTERNAL_UPSTREAM", "BLOCK"), List.of(), List.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg",
+                "EXTERNAL_UPSTREAM"));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "my-pkg",
+                "INTERNAL_UPSTREAM"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedAllowsOnlyTheRepositoryListedForAllowSpecificRepositoriesUnderInternalUpstream() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*",
+                Map.of("INTERNAL_UPSTREAM", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "INTERNAL_UPSTREAM")), List.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo-a", "npm", null, "my-pkg",
+                "INTERNAL_UPSTREAM"));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo-b", "npm", null, "other-pkg",
+                "INTERNAL_UPSTREAM"));
+    }
+
+    /**
+     * The weak-match-forces-BLOCK rule is documented generically ("preventing any new versions of
+     * the package from being pulled from upstreams or published"), not scoped to {@code
+     * EXTERNAL_UPSTREAM} by name: confirms it applies to {@code INTERNAL_UPSTREAM} too, the same
+     * way {@link #isUpstreamRetentionBlockedIsBlockedByAWeakMatchRegardlessOfTheGroupsMode}
+     * already confirms it for {@code EXTERNAL_UPSTREAM}.
+     */
+    @Test
+    void isUpstreamRetentionBlockedIsBlockedByAWeakMatchUnderInternalUpstreamToo() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//AsyncStorage$", null, null, Map.of());
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "npm", null, "asyncstorage",
+                "INTERNAL_UPSTREAM"));
+    }
+
+    @Test
+    void packageGroupArnCanBeTaggedAndUntagged() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        PackageGroupDescriptionView view = service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null,
+                null, Map.of("env", "prod"));
+
+        assertEquals(Map.of("env", "prod"), service.listTagsForResource(view.arn()));
+
+        service.tagResource(view.arn(), Map.of("team", "platform"));
+        assertEquals(Map.of("env", "prod", "team", "platform"), service.listTagsForResource(view.arn()));
+
+        service.untagResource(view.arn(), List.of("env"));
+        assertEquals(Map.of("team", "platform"), service.listTagsForResource(view.arn()));
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code PACKAGE_GROUP_RESTRICTION_TYPES} is an immutable
+     * {@code List.of(...)}, whose {@code contains(null)} throws {@code NullPointerException}
+     * rather than returning false. Omitting {@code originRestrictionType} on an allowed-repository
+     * edit must fail with a clean {@code ValidationException}, not an internal error.
+     */
+    @Test
+    void updatePackageGroupOriginConfigurationRejectsAnAllowedRepositoryEditWithNoRestrictionType() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updatePackageGroupOriginConfiguration(
+                REGION, "dom", null, "/npm/*", Map.of(),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", null)), List.of()));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    /** Same NPE risk, reached through the query parameter instead of a list entry. */
+    @Test
+    void listAllowedRepositoriesForGroupRejectsAMissingRestrictionType() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.listAllowedRepositoriesForGroup(REGION, "dom", null, "/npm/*", null, null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code groupAllowsRestriction}'s {@code
+     * ALLOW_SPECIFIC_REPOSITORIES} branch used to read the allow-list off {@code group} itself
+     * even when the effective mode came from an {@code INHERIT} walk up to an ancestor — so an
+     * {@code INHERIT} child with no restriction of its own rejected every repository its parent
+     * actually allowed.
+     */
+    @Test
+    void inheritedAllowSpecificRepositoriesUsesTheAncestorsOwnAllowList() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-a", null, null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo-b", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/*", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/generic/space/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/generic/*",
+                Map.of("PUBLISH", "ALLOW_SPECIFIC_REPOSITORIES"),
+                List.of(new PackageGroupAllowedRepositoryEdit("repo-a", "PUBLISH")), List.of());
+        byte[] content = "c".getBytes(StandardCharsets.UTF_8);
+
+        // /generic/space/* itself never configured PUBLISH (stays INHERIT), so the effective mode
+        // walks up to /generic/*'s ALLOW_SPECIFIC_REPOSITORIES, and that ancestor's own allow-list
+        // (repo-a) must be what's consulted, not the child's own (absent) one.
+        assertDoesNotThrow(() -> service.publishPackageVersion(REGION, "dom", null, "repo-a", "generic", "space",
+                "in-space", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content));
+        AwsException e = assertThrows(AwsException.class, () -> service.publishPackageVersion(REGION, "dom", null,
+                "repo-b", "generic", "space", "other", "1.0.0", "a.txt", Digests.sha256Hex(content), "false",
+                content));
+        assertEquals("ConflictException", e.getErrorCode());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code escapeKeySegment} only escaped {@code :} and
+     * {@code \}, so a pattern containing a literal {@code #} (legal in a package-group pattern,
+     * unlike in a namespace/package/version) could collide with another pattern's escaped {@code
+     * :}. {@code /npm//#c$} (literal {@code #} then {@code c}) and {@code /npm//:$} (a literal
+     * {@code :}) must be two independently creatable, independently describable groups.
+     */
+    @Test
+    void packageGroupPatternsContainingHashAndColonDoNotCollide() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//#c$", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//:$", null, null, Map.of());
+
+        assertEquals("/npm//#c$", service.describePackageGroup(REGION, "dom", null, "/npm//#c$").pattern());
+        assertEquals("/npm//:$", service.describePackageGroup(REGION, "dom", null, "/npm//:$").pattern());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code isStrictAncestor} compared pattern components
+     * literally, with no case/separator normalization, even though a package only weakly matching
+     * a pattern is itself documented as "associated with" that group. A child pattern that is only
+     * a case variant of its true ancestor must still find that ancestor and inherit its mode,
+     * rather than resolving INHERIT to the top-of-hierarchy ALLOW default.
+     */
+    @Test
+    void aCaseVariantChildPatternStillInheritsFromItsNormalizedAncestor() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/space/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/space/*",
+                Map.of("PUBLISH", "BLOCK"), List.of(), List.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/SPACE/foo$", null, null, Map.of());
+
+        PackageGroupDescriptionView child = service.describePackageGroup(REGION, "dom", null, "/npm/SPACE/foo$");
+        assertEquals("/npm/space/*", child.parentPattern());
+        assertEquals("INHERIT", child.restrictions().get("PUBLISH").mode());
+        assertEquals("BLOCK", child.restrictions().get("PUBLISH").effectiveMode());
+        assertEquals("/npm/space/*", child.restrictions().get("PUBLISH").inheritedFromPattern());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: when two patterns tie on specificity but differ only by
+     * case/separators, whichever happened to be scanned first used to win, regardless of which one
+     * the package actually strongly matches. A package that strongly matches one of two tied-rank
+     * patterns must resolve to that one, not to the one it only weakly matches.
+     */
+    @Test
+    void anEquallySpecificStrongMatchWinsOverAWeakMatchRegardlessOfCreationOrder() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//Foo$", null, null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm//foo$", null, null, Map.of());
+
+        GetAssociatedPackageGroupResult result = service.getAssociatedPackageGroup(REGION, "dom", null, "npm", null,
+                "foo");
+        assertEquals("/npm//foo$", result.packageGroup().pattern());
+        assertEquals("STRONG", result.associationType());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: package groups are domain-scoped but outlive
+     * {@code deleteRepository}'s own cleanup (which only ever runs once the domain already has no
+     * repositories left), so without this, a domain deleted and recreated under the same name
+     * would inherit the previous one's groups, including a PUBLISH:BLOCK a caller has no way to
+     * know about.
+     */
+    @Test
+    void deletingADomainRemovesItsPackageGroupsSoARecreatedDomainDoesNotInheritThem() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of());
+        service.updatePackageGroupOriginConfiguration(REGION, "dom", null, "/npm/*", Map.of("PUBLISH", "BLOCK"),
+                List.of(), List.of());
+
+        service.deleteDomain(REGION, "dom", null);
+        service.createDomain(REGION, "dom", null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.describePackageGroup(REGION, "dom", null, "/npm/*"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertDoesNotThrow(() -> service.createPackageGroup(REGION, "dom", null, "/npm/*", null, null, Map.of()));
+    }
 }

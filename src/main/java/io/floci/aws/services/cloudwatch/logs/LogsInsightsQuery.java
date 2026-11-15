@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.cloudwatch.logs.model.LogEvent;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -14,6 +15,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Minimal CloudWatch Logs Insights query engine.
@@ -22,6 +24,7 @@ import java.util.Set;
  * <ul>
  *   <li>{@code fields a, b, ...} — projection (defaults to {@code @timestamp, @message})</li>
  *   <li>{@code filter <field> = 'v'} / {@code filter <field> != 'v'} — equality / inequality</li>
+ *   <li>{@code filter a = 'x' or b = 'y'}: any comparison matches; {@code or} in any case, with parentheses</li>
  *   <li>{@code sort <field> [asc|desc]}</li>
  *   <li>{@code dedup <field, ...>} — keep the first row per unique tuple (applied after sort)</li>
  *   <li>{@code limit N}</li>
@@ -42,25 +45,29 @@ final class LogsInsightsQuery {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final DateTimeFormatter TS_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
+    private static final Pattern NUMBER = Pattern.compile("-?\\d+(\\.\\d+)?");
+    // Possessive, so a long dotted path is matched in a loop rather than one stack frame per segment.
+    private static final Pattern FIELD = Pattern.compile("[@A-Za-z_]\\w*(?:\\.\\w+)*+");
 
     private final List<String> fields = new ArrayList<>();
-    private final List<Filter> filters = new ArrayList<>();
+    private final List<List<Filter>> filters = new ArrayList<>();
     private String sortField;
     private boolean sortDesc;
     private List<String> dedupFields;
     private Integer limit;
     private String unsupportedReason;
 
-    private record Filter(String field, boolean negate, String value) {}
+    private record Filter(String field, boolean negate, String value, boolean numeric) {}
 
     private LogsInsightsQuery() {}
 
     static LogsInsightsQuery parse(String queryString) {
         LogsInsightsQuery q = new LogsInsightsQuery();
-        if (queryString != null && !queryString.isBlank()) {
+        if (queryString != null) {
             for (String rawStage : splitStages(queryString)) {
                 String stage = rawStage.trim();
                 if (stage.isEmpty()) {
+                    q.noteUnsupported("Empty query stage");
                     continue;
                 }
                 String[] parts = stage.split("\\s+", 2);
@@ -92,41 +99,43 @@ final class LogsInsightsQuery {
     }
 
     /**
-     * Split a query into pipeline stages on {@code |}, ignoring pipes inside single- or double-quoted
-     * values (so {@code filter x = 'a|b'} stays one stage). Escaped quotes are not interpreted.
+     * Split a query into pipeline stages on {@code |} outside quoted text (so {@code filter x = 'a|b'}
+     * stays one stage).
      */
     private static List<String> splitStages(String query) {
         List<String> stages = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        char quote = 0;
-        for (int i = 0; i < query.length(); i++) {
-            char c = query.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-                current.append(c);
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-                current.append(c);
-            } else if (c == '|') {
-                stages.add(current.toString());
-                current.setLength(0);
-            } else {
-                current.append(c);
+        int start = 0;
+        for (int i = unquoted(query, 0); i < query.length(); i = unquoted(query, i + 1)) {
+            if (query.charAt(i) == '|') {
+                stages.add(query.substring(start, i));
+                start = i + 1;
             }
         }
-        stages.add(current.toString());
+        stages.add(query.substring(start));
         return stages;
+    }
+
+    /**
+     * The first index at or after {@code from} (itself outside quoted text) that is outside single- or
+     * double-quoted text and is not a quote itself, or {@code s.length()}. Escaped quotes are not
+     * interpreted; an unclosed quote runs to the end.
+     */
+    private static int unquoted(String s, int from) {
+        int i = from;
+        while (i < s.length() && (s.charAt(i) == '\'' || s.charAt(i) == '"')) {
+            int close = s.indexOf(s.charAt(i), i + 1);
+            i = close < 0 ? s.length() : close + 1;
+        }
+        return i;
     }
 
     private void applyStage(String cmd, String args) {
         switch (cmd) {
             case "fields", "display" -> splitCsv(args, fields);
             case "filter", "where" -> {
-                Filter f = parseFilter(args);
-                if (f != null) {
-                    filters.add(f);
+                List<Filter> anyOf = args.indexOf('\\') < 0 ? parseDisjunction(args) : null;
+                if (anyOf != null) {
+                    filters.add(anyOf);
                 } else {
                     noteUnsupported("Unsupported filter expression: " + args);
                 }
@@ -179,20 +188,83 @@ final class LogsInsightsQuery {
         }
     }
 
+    /**
+     * Parse comparisons joined with {@code or} (any case), optionally grouped in parentheses.
+     * Returns {@code null} when any term is not a single supported comparison.
+     */
+    private static List<Filter> parseDisjunction(String expr) {
+        String body = stripGroup(expr.trim());
+        List<String> terms = splitOr(body);
+        if (terms.size() == 1) {
+            Filter f = parseFilter(body);
+            return f != null ? List.of(f) : null;
+        }
+        List<Filter> anyOf = new ArrayList<>();
+        for (String term : terms) {
+            List<Filter> part = parseDisjunction(term);
+            if (part == null) {
+                return null;
+            }
+            anyOf.addAll(part);
+        }
+        return anyOf;
+    }
+
+    /** Remove parentheses that enclose the whole expression. */
+    private static String stripGroup(String expr) {
+        String s = expr;
+        while (s.startsWith("(") && closingParen(s) == s.length() - 1) {
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        return s;
+    }
+
+    /** Index of the parenthesis closing the one at index 0, ignoring quoted text, or -1. */
+    private static int closingParen(String s) {
+        int depth = 0;
+        for (int i = unquoted(s, 0); i < s.length(); i = unquoted(s, i + 1)) {
+            char c = s.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')' && --depth == 0) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Split on the word {@code or} (any case) outside quotes and parentheses. */
+    private static List<String> splitOr(String s) {
+        List<String> terms = new ArrayList<>();
+        int depth = 0;
+        int start = 0;
+        for (int i = unquoted(s, 0); i < s.length(); i = unquoted(s, i + 1)) {
+            char c = s.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            } else if (depth == 0 && s.regionMatches(true, i, "or", 0, 2)
+                    && (i == 0 || isDelimiter(s.charAt(i - 1)))
+                    && (i + 2 == s.length() || isDelimiter(s.charAt(i + 2)))) {
+                terms.add(s.substring(start, i));
+                start = i + 2;
+            }
+        }
+        terms.add(s.substring(start));
+        return terms;
+    }
+
+    private static boolean isDelimiter(char c) {
+        return Character.isWhitespace(c) || c == '\'' || c == '"' || c == '(' || c == ')';
+    }
+
     private static Filter parseFilter(String expr) {
-        // Scan for the operator OUTSIDE any quoted value, taking the leftmost one and checking
-        // '!=' / '==' before '='. This avoids mistaking an operator inside a quoted literal
-        // (e.g. filter x = 'a==b') for the real one.
-        char quote = 0;
-        for (int i = 0; i < expr.length(); i++) {
+        // Take the leftmost operator outside quoted text, checking '!=' / '==' before '=', so an
+        // operator inside a quoted literal (e.g. filter x = 'a==b') is not mistaken for the real one.
+        for (int i = unquoted(expr, 0); i < expr.length(); i = unquoted(expr, i + 1)) {
             char c = expr.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-            } else if (expr.startsWith(">=", i) || expr.startsWith("<=", i) || expr.startsWith("=~", i)) {
+            if (expr.startsWith(">=", i) || expr.startsWith("<=", i) || expr.startsWith("=~", i)) {
                 // The '=' in >=, <= and =~ would be read as equality below, mangling the field
                 // (>=, <=) or the value (=~) into a dead match; stop so they warn instead.
                 break;
@@ -203,23 +275,28 @@ final class LogsInsightsQuery {
                         : null;
                 if (op != null) {
                     String field = expr.substring(0, i).trim();
-                    String value = unquote(expr.substring(i + op.length()).trim());
-                    return new Filter(field, op.equals("!="), value);
+                    String raw = expr.substring(i + op.length()).trim();
+                    String value = literal(raw);
+                    if (value == null || !FIELD.matcher(field).matches()) {
+                        return null;
+                    }
+                    return new Filter(field, op.equals("!="), value, NUMBER.matcher(raw).matches());
                 }
             }
         }
         return null;
     }
 
-    private static String unquote(String s) {
-        if (s.length() >= 2) {
-            char first = s.charAt(0);
-            char last = s.charAt(s.length() - 1);
-            if ((first == '\'' && last == '\'') || (first == '"' && last == '"')) {
-                return s.substring(1, s.length() - 1);
-            }
+    /**
+     * The text of a quoted literal, or a bare number; {@code null} for anything else. AWS evaluates
+     * other unquoted values (a word, {@code 1+1}) as expressions, which this engine does not support.
+     */
+    private static String literal(String s) {
+        if (!s.isEmpty() && (s.charAt(0) == '\'' || s.charAt(0) == '"')) {
+            int close = s.indexOf(s.charAt(0), 1);
+            return close == s.length() - 1 ? s.substring(1, close) : null;
         }
-        return s;
+        return NUMBER.matcher(s).matches() ? s : null;
     }
 
     /**
@@ -234,7 +311,7 @@ final class LogsInsightsQuery {
             rows.add(new Row(e, tryParse(e.getMessage())));
         }
 
-        // filter (logical AND across all filter stages)
+        // filter (logical AND across filter stages, OR within one)
         List<Row> matched = new ArrayList<>();
         for (Row row : rows) {
             if (passesFilters(row)) {
@@ -291,15 +368,28 @@ final class LogsInsightsQuery {
     }
 
     private boolean passesFilters(Row row) {
-        for (Filter f : filters) {
-            String actual = resolve(row, f.field());
-            boolean equals = actual != null && actual.equals(f.value());
-            boolean fails = f.negate() ? equals : !equals;
-            if (fails) {
+        for (List<Filter> anyOf : filters) {
+            if (anyOf.stream().noneMatch(f -> matches(row, f))) {
                 return false;
             }
         }
         return true;
+    }
+
+    private boolean matches(Row row, Filter f) {
+        String actual = resolve(row, f.field());
+        boolean equal = actual != null && (f.numeric() ? sameNumber(actual, f.value()) : actual.equals(f.value()));
+        return f.negate() != equal;
+    }
+
+    /** A bare number compares by value on AWS, so {@code n = 2} matches 2, 2.0 and 02. */
+    private static boolean sameNumber(String actual, String expected) {
+        try {
+            return new BigDecimal(actual).compareTo(new BigDecimal(expected)) == 0;
+        } catch (NumberFormatException ignored) {
+            // A non-numeric field value is simply not equal to a number.
+            return false;
+        }
     }
 
     private Comparator<Row> comparatorFor(String field) {

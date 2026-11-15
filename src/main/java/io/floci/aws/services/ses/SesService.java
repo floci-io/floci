@@ -769,6 +769,15 @@ public class SesService {
         return targets;
     }
 
+    public void setIdentityNotificationTopic(String identityValue, String notificationType,
+                                             String snsTopic, String region) {
+        String accountId = callerAccountId();
+        identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region,
+                topicArn -> eventPublisher == null || eventPublisher.mayNotifyIdentityTopic(topicArn,
+                        AwsArnUtils.Arn.of("ses", region, accountId, "identity/" + identityValue).toString(),
+                        accountId, region));
+    }
+
     private static String notificationTopicFor(Identity identity, String type) {
         if (identity == null) {
             return null;

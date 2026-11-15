@@ -49,6 +49,8 @@ class SesIdentityServiceTest {
     private static final String REGION = "us-east-1";
     private static final String TOPIC = "arn:aws:sns:us-east-1:000000000000:feedback";
     private static final String OTHER_TOPIC = "arn:aws:sns:us-east-1:000000000000:other-feedback";
+    private static final Predicate<String> ANY_TOPIC = topic -> true;
+    private static final Predicate<String> NO_TOPIC = topic -> false;
     private SesIdentityService service;
 
     @BeforeEach
@@ -344,10 +346,104 @@ class SesIdentityServiceTest {
     }
 
     @Test
+    void setIdentityNotificationTopic_refusesATopicSesCannotPublishToAndKeepsTheStoredOne() {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION, ANY_TOPIC);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                "alice@example.com", "Bounce", OTHER_TOPIC, REGION, NO_TOPIC));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("SNS topic " + OTHER_TOPIC + " is invalid.", e.getMessage());
+        assertEquals(400, e.getHttpStatus());
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertEquals(TOPIC, identity.getNotificationAttributes().get("BounceTopic"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("emptyTopics")
+    void setIdentityNotificationTopic_refusesAnEmptyTopicInsteadOfClearing(String empty) {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION, ANY_TOPIC);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                "alice@example.com", "Bounce", empty, REGION, ANY_TOPIC));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("SNS topic cannot be empty.", e.getMessage());
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertEquals(TOPIC, identity.getNotificationAttributes().get("BounceTopic"));
+    }
+
+    static Stream<String> emptyTopics() {
+        return Stream.of("", "   ");
+    }
+
+    @Test
+    void setIdentityNotificationTopic_clearsWhenTheTopicIsAbsent() {
+        service.verifyEmailIdentity("alice@example.com", REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION, ANY_TOPIC);
+
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", null, REGION, NO_TOPIC);
+
+        Identity identity = service.find("alice@example.com", REGION).orElseThrow();
+        assertFalse(identity.getNotificationAttributes().containsKey("BounceTopic"));
+    }
+
+    @Test
+    void setIdentityNotificationTopic_reportsTheMissingMembersTogether() {
+        AwsException both = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                null, null, TOPIC, REGION, NO_TOPIC));
+        assertEquals("ValidationError", both.getErrorCode());
+        assertEquals("2 validation errors detected: Value at 'identity' failed to satisfy constraint: "
+                + "Member must not be null; Value at 'notificationType' failed to satisfy constraint: "
+                + "Member must not be null", both.getMessage());
+
+        AwsException emptyType = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                "alice@example.com", "", TOPIC, REGION, NO_TOPIC));
+        assertEquals("1 validation error detected: Value at 'notificationType' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [Bounce, Complaint, Delivery]", emptyType.getMessage());
+    }
+
+    @ParameterizedTest
+    @MethodSource("malformedIdentities")
+    void setIdentityNotificationTopic_refusesAMalformedIdentityBeforeTheTopic(String malformed) {
+        AwsException e = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                malformed, "Bounce", TOPIC, REGION, NO_TOPIC));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("Identity " + malformed
+                + " is invalid. Must be a valid email address or domain or identity ARN.", e.getMessage());
+    }
+
+    static Stream<String> malformedIdentities() {
+        return Stream.of("", " alice@example.com", "alice@example.com ");
+    }
+
+    @Test
+    void setIdentityNotificationTopic_checksTheTypeThenTheTopicThenTheIdentity() {
+        AwsException type = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                "nobody@example.com", "Bogus", TOPIC, REGION, NO_TOPIC));
+        assertEquals("ValidationError", type.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'notificationType' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [Bounce, Complaint, Delivery]", type.getMessage());
+
+        AwsException topic = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                "nobody@example.com", "Bounce", TOPIC, REGION, NO_TOPIC));
+        assertEquals("SNS topic " + TOPIC + " is invalid.", topic.getMessage());
+
+        AwsException identity = assertThrows(AwsException.class, () -> service.setIdentityNotificationTopic(
+                "nobody@example.com", "Bounce", TOPIC, REGION, ANY_TOPIC));
+        assertEquals("InvalidParameterValue", identity.getErrorCode());
+        assertEquals("Identity nobody@example.com is invalid. Must be a verified email address or domain.",
+                identity.getMessage());
+    }
+
+    @Test
     void aRefusedTopicIsTakenOutOfEveryBounceAndComplaintSettingThatNamesIt() {
         service.verifyEmailIdentity("alice@example.com", REGION);
         for (String type : List.of("Bounce", "Complaint", "Delivery")) {
-            service.setIdentityNotificationTopic("alice@example.com", type, TOPIC, REGION);
+            service.setIdentityNotificationTopic("alice@example.com", type, TOPIC, REGION, ANY_TOPIC);
         }
         service.setFeedbackForwardingEnabled("alice@example.com", false, REGION);
 
@@ -363,8 +459,8 @@ class SesIdentityServiceTest {
     @Test
     void aSettingNamingAnotherTopicIsKept() {
         service.verifyEmailIdentity("alice@example.com", REGION);
-        service.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION);
-        service.setIdentityNotificationTopic("alice@example.com", "Complaint", OTHER_TOPIC, REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION, ANY_TOPIC);
+        service.setIdentityNotificationTopic("alice@example.com", "Complaint", OTHER_TOPIC, REGION, ANY_TOPIC);
 
         service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
 
@@ -376,7 +472,7 @@ class SesIdentityServiceTest {
     @Test
     void aTopicNamedOnlyForDeliveriesStaysConfigured() {
         service.verifyEmailIdentity("alice@example.com", REGION);
-        service.setIdentityNotificationTopic("alice@example.com", "Delivery", TOPIC, REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Delivery", TOPIC, REGION, ANY_TOPIC);
         service.setFeedbackForwardingEnabled("alice@example.com", false, REGION);
 
         service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
@@ -389,7 +485,7 @@ class SesIdentityServiceTest {
     @Test
     void aTopicSetAgainSinceTheRefusalIsKept() {
         service.verifyEmailIdentity("alice@example.com", REGION);
-        service.setIdentityNotificationTopic("alice@example.com", "Bounce", OTHER_TOPIC, REGION);
+        service.setIdentityNotificationTopic("alice@example.com", "Bounce", OTHER_TOPIC, REGION, ANY_TOPIC);
         service.setFeedbackForwardingEnabled("alice@example.com", false, REGION);
 
         service.dropRefusedNotificationTopic("alice@example.com", TOPIC, REGION);
@@ -403,7 +499,7 @@ class SesIdentityServiceTest {
         return Stream.of(
                 Arguments.of("a topic",
                         (Consumer<SesIdentityService>) identities -> identities.setIdentityNotificationTopic(
-                                "alice@example.com", "Bounce", OTHER_TOPIC, REGION),
+                                "alice@example.com", "Bounce", OTHER_TOPIC, REGION, ANY_TOPIC),
                         (Predicate<Identity>) identity ->
                                 OTHER_TOPIC.equals(identity.getNotificationAttributes().get("BounceTopic"))),
                 Arguments.of("feedback forwarding",
@@ -424,7 +520,7 @@ class SesIdentityServiceTest {
         InMemoryStorage<String, Identity> store = Mockito.spy(new InMemoryStorage<String, Identity>());
         SesIdentityService parked = new SesIdentityService(store, null, Clock.systemUTC());
         parked.verifyEmailIdentity("alice@example.com", REGION);
-        parked.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION);
+        parked.setIdentityNotificationTopic("alice@example.com", "Bounce", TOPIC, REGION, ANY_TOPIC);
         CountDownLatch read = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         // The removal parks right after reading the identity, before writing it back.

@@ -162,6 +162,37 @@ class S3LeadingSlashKeyAuthEnforcementIntegrationTest {
 
     @Test
     @Order(7)
+    void aKeyOfOnlySlashesIsThatObjectPathStyleAndVirtualHosted() throws Exception {
+        // "/bucket//" names the key "/", and "///" on a bucket's host the key "//": collapsed, each read as the bucket.
+        URI pathStyle = URI.create(base() + "/" + BUCKET + "//");
+        byte[] body = "one slash".getBytes(StandardCharsets.UTF_8);
+        HttpResponse<String> put = send("PUT", pathStyle, body, LOCAL_SIGNER);
+        assertEquals(200, put.statusCode(), put.body());
+        assertEquals("one slash", send("GET", pathStyle, new byte[0], LOCAL_SIGNER).body());
+
+        URI virtualHosted = URI.create("http://" + BUCKET + ".localhost:" + RestAssured.port + "///");
+        byte[] vhostBody = "two slashes".getBytes(StandardCharsets.UTF_8);
+        RawResponse vhostPut = sendRaw("PUT", virtualHosted, vhostBody,
+                LOCAL_SIGNER.headersFor("PUT", virtualHosted, vhostBody));
+        assertEquals(200, vhostPut.status(), vhostPut.body());
+        RawResponse vhostGet = sendRaw("GET", virtualHosted, new byte[0],
+                LOCAL_SIGNER.headersFor("GET", virtualHosted, new byte[0]));
+        assertEquals("two slashes", vhostGet.body());
+
+        given()
+            .filter(LOCAL_SIGNER)
+        .when()
+            .get("/" + BUCKET + "?list-type=2")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Key>/</Key>"), containsString("<Key>//</Key>"));
+        assertEquals(204, send("DELETE", pathStyle, new byte[0], LOCAL_SIGNER).statusCode());
+        assertEquals(204, send("DELETE", URI.create(base() + "/" + BUCKET + "///"), new byte[0], LOCAL_SIGNER)
+                .statusCode());
+    }
+
+    @Test
+    @Order(8)
     void cleanup() throws Exception {
         HttpResponse<String> delete = send("DELETE", URI.create(base() + "/" + BUCKET + "/" + KEY),
                 new byte[0], LOCAL_SIGNER);

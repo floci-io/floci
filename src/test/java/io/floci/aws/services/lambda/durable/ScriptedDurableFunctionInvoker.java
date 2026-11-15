@@ -21,7 +21,7 @@ import java.util.concurrent.TimeoutException;
 @ApplicationScoped
 public class ScriptedDurableFunctionInvoker implements DurableFunctionInvoker {
 
-    public record Invocation(ResolvedDurableTarget target, byte[] payload,
+    public record Invocation(ResolvedDurableTarget target, byte[] payload, String traceId,
                              CompletableFuture<DurableInvocationResult> response) {
     }
 
@@ -39,8 +39,9 @@ public class ScriptedDurableFunctionInvoker implements DurableFunctionInvoker {
     }
 
     @Override
-    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
-        Invocation invocation = new Invocation(target, payload, new CompletableFuture<>());
+    public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                             String traceId) {
+        Invocation invocation = new Invocation(target, payload, traceId, new CompletableFuture<>());
         invocations.add(invocation);
         try {
             return invocation.response().get(30, TimeUnit.SECONDS);

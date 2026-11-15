@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -68,6 +69,7 @@ class S3ControlUrlEncodedArnIntegrationTest {
         String tagBody = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
                 "<Tagging><TagSet>" +
                 "<Tag><Key>Env</Key><Value>dev</Value></Tag>" +
+                "<Tag><Key>Project</Key><Value>infra</Value></Tag>" +
                 "</TagSet></Tagging>";
 
         given().contentType("application/xml").body(tagBody)
@@ -106,11 +108,12 @@ class S3ControlUrlEncodedArnIntegrationTest {
 
     @Test
     @Order(4)
-    @DisplayName("TagResource accepts URL-encoded ARN from Go AWS SDK v2 (#435)")
+    @DisplayName("TagResource merges tags through a URL-encoded ARN")
     void tagResourceWithUrlEncodedArn() {
         String body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
                 "<Tagging xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">" +
                 "<Tags>" +
+                "<Tag><Key>Env</Key><Value>prod</Value></Tag>" +
                 "<Tag><Key>Owner</Key><Value>team-a</Value></Tag>" +
                 "<Tag><Key>CostCenter</Key><Value>cc-42</Value></Tag>" +
                 "</Tags></Tagging>";
@@ -124,14 +127,16 @@ class S3ControlUrlEncodedArnIntegrationTest {
         .then()
             .statusCode(204);
 
-        given()
+        String response = given()
             .header("x-amz-account-id", ACCOUNT)
         .when()
             .get("/v20180820/tags/" + ENCODED_ARN)
         .then()
             .statusCode(200)
-            .body(containsString("<Key>Owner</Key>"))
-            .body(containsString("<Key>CostCenter</Key>"));
+            .extract().asString();
+
+        assertEquals(Map.of("Env", "prod", "Project", "infra", "Owner", "team-a", "CostCenter", "cc-42"),
+                XmlParser.extractPairs(response, "Tag", "Key", "Value"));
     }
 
     @Test

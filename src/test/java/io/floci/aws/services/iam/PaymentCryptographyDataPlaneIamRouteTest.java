@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.SignedServiceRoute;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
@@ -16,10 +17,10 @@ import static org.mockito.Mockito.when;
  *
  * <p>The key of a data-plane request may be named by its identifier or by its ARN, and an ARN
  * carries a slash that a client sends encoded. The router rewrites the request onto the
- * internal prefix, and the IAM rules are matched on the rewritten path, which is decoded. So
- * the ARN arrives as a path that holds a real slash, and a rule that stops at the first slash
- * would not match it: the request would resolve to no action, and a policy that denies the
- * action would not be enforced.
+ * internal prefix, and the vendored routes, at the model's paths, are matched on the rewritten
+ * path without it, which is decoded. So the ARN arrives as a path that holds a real slash, and
+ * a route whose label stops at the first slash would not match it: the request would resolve to
+ * no action, and a policy that denies the action would not be enforced.
  *
  * <p>The rest of the repository holds a request to its standard: a request is refused however
  * it is sent. This is that standard for the data plane.
@@ -122,6 +123,8 @@ class PaymentCryptographyDataPlaneIamRouteTest {
         when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
         when(ctx.getUriInfo()).thenReturn(uriInfo);
         when(ctx.getMethod()).thenReturn("POST");
+        // The data plane's route filter records the prefix it moves the request under.
+        when(ctx.getProperty(SignedServiceRoute.INTERNAL_PREFIX_PROPERTY)).thenReturn("/_paymentcryptography");
         return registry.resolveRoute(scope, ctx);
     }
 }

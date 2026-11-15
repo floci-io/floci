@@ -6,6 +6,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.codedeploy.model.Deployment;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.Reservation;
+import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.lambda.LambdaService;
@@ -20,6 +23,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -29,6 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -45,12 +51,14 @@ class CodeDeployServiceTest {
 
     private LambdaService lambdaService;
     private SsmCommandService ssmCommandService;
+    private Ec2Service ec2Service;
     private CodeDeployService service;
 
     @BeforeEach
     void setUp() {
         lambdaService = mock(LambdaService.class);
         ssmCommandService = mock(SsmCommandService.class);
+        ec2Service = mock(Ec2Service.class);
         service = newService(Duration.ofHours(1));
     }
 
@@ -60,10 +68,140 @@ class CodeDeployServiceTest {
 
     private CodeDeployService newService(Duration hookCallbackTimeout, Clock clock) {
         CodeDeployService svc = new CodeDeployService(lambdaService, mock(EcsService.class),
-                mock(ElbV2Service.class), ssmCommandService, mock(Ec2Service.class), new ObjectMapper(),
+                mock(ElbV2Service.class), ssmCommandService, ec2Service, new ObjectMapper(),
                 new RegionResolver(REGION, ACCOUNT_ID), null, hookCallbackTimeout, clock);
         svc.initializeStorage();
         return svc;
+    }
+
+    @Test
+    void onPremisesTagFilterTypesMatchOnlyRequestedTags() {
+        for (String name : List.of("red-team", "blue-team", "red-env", "untagged")) {
+            service.registerOnPremisesInstance(REGION, name, null, null);
+        }
+        service.addTagsToOnPremisesInstances(REGION, List.of("red-team"),
+                List.of(Map.of("Key", "team", "Value", "red")));
+        service.addTagsToOnPremisesInstances(REGION, List.of("blue-team"),
+                List.of(Map.of("Key", "team", "Value", "blue")));
+        service.addTagsToOnPremisesInstances(REGION, List.of("red-env"),
+                List.of(Map.of("Key", "env", "Value", "red")));
+
+        assertEquals(Set.of("red-team", "red-env"), Set.copyOf(service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Value", "red", "Type", "VALUE_ONLY")))));
+        assertEquals(Set.of("red-team", "red-env"), Set.copyOf(service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Key", "ignored", "Value", "red", "Type", "VALUE_ONLY")))));
+        assertEquals(Set.of("red-team", "blue-team"), Set.copyOf(service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Key", "team", "Value", "ignored", "Type", "KEY_ONLY")))));
+        assertEquals(List.of("red-team"), service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Key", "team", "Value", "red", "Type", "KEY_AND_VALUE"))));
+        assertEquals(List.of(), service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Key", "team", "Type", "KEY_AND_VALUE"))));
+        assertEquals(List.of(), service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Value", "red", "Type", "KEY_AND_VALUE"))));
+        assertEquals(List.of("red-team"), service.listOnPremisesInstances(REGION, null,
+                List.of(Map.of("Key", "team", "Value", "red"))));
+    }
+
+    @Test
+    void keylessUntypedOnPremisesFilterStillSelectsRegisteredDeploymentTargets() {
+        service.registerOnPremisesInstance(REGION, "matching-onprem", null, null);
+        service.registerOnPremisesInstance(REGION, "untagged-onprem", null, null);
+        service.addTagsToOnPremisesInstances(REGION, List.of("matching-onprem"),
+                List.of(Map.of("Key", "team", "Value", "red")));
+        service.createApplication(REGION, "keyless-filter-app", "Server", null);
+        service.createDeploymentGroup(REGION, "keyless-filter-app", "group", null, ROLE_ARN,
+                Map.of("onPremisesInstanceTagFilters", List.of(Map.of("Value", "red"))), null);
+
+        String deploymentId = service.createDeployment(REGION, "keyless-filter-app", "group", null,
+                Map.of("appSpecContent", Map.of("content", "os: linux")), null);
+
+        assertEquals(Set.of("matching-onprem", "untagged-onprem"),
+                Set.copyOf(service.listDeploymentTargets(REGION, deploymentId)));
+    }
+
+    @Test
+    void deploymentGroupMatchesAnyOnPremisesTagFilterWithoutChangingListFiltering() {
+        for (String name : List.of("team-only", "role-only", "both", "neither")) {
+            service.registerOnPremisesInstance(REGION, name, null, null);
+        }
+        service.addTagsToOnPremisesInstances(REGION, List.of("team-only", "both"),
+                List.of(Map.of("Key", "team", "Value", "red")));
+        service.addTagsToOnPremisesInstances(REGION, List.of("role-only", "both"),
+                List.of(Map.of("Key", "role", "Value", "web")));
+        List<Map<String, String>> filters = List.of(
+                Map.of("Key", "team", "Value", "red", "Type", "KEY_AND_VALUE"),
+                Map.of("Key", "role", "Value", "web", "Type", "KEY_AND_VALUE"));
+
+        assertEquals(Set.of("both"), Set.copyOf(service.listOnPremisesInstances(REGION, null, filters)));
+        service.createApplication(REGION, "any-filter-app", "Server", null);
+        service.createDeploymentGroup(REGION, "any-filter-app", "group", null, ROLE_ARN,
+                Map.of("onPremisesInstanceTagFilters", filters), null);
+
+        String deploymentId = service.createDeployment(REGION, "any-filter-app", "group", null,
+                Map.of("appSpecContent", Map.of("content", "os: linux")), null);
+
+        assertEquals(Set.of("team-only", "role-only", "both"),
+                Set.copyOf(service.listDeploymentTargets(REGION, deploymentId)));
+    }
+
+    @Test
+    void ec2DeploymentGroupMatchesAnyKeyAndValueFilter() {
+        stubEc2Instances();
+
+        assertEquals(Set.of("i-team", "i-role", "i-both"), ec2DeploymentTargets("ec2-any-app", List.of(
+                Map.of("Key", "team", "Value", "red", "Type", "KEY_AND_VALUE"),
+                Map.of("Key", "role", "Value", "web", "Type", "KEY_AND_VALUE"))));
+    }
+
+    @Test
+    void ec2DeploymentGroupHonorsKeyOnlyAndValueOnlyFilters() {
+        stubEc2Instances();
+
+        assertEquals(Set.of("i-team", "i-both", "i-team-blue"),
+                ec2DeploymentTargets("ec2-key-only-app", List.of(
+                        Map.of("Key", "team", "Value", "ignored", "Type", "KEY_ONLY"))));
+        assertEquals(Set.of("i-role", "i-both", "i-env-web"),
+                ec2DeploymentTargets("ec2-value-only-app", List.of(
+                        Map.of("Key", "ignored", "Value", "web", "Type", "VALUE_ONLY"))));
+        assertEquals(Set.of("i-role", "i-both"),
+                ec2DeploymentTargets("ec2-default-type-app", List.of(Map.of("Key", "role", "Value", "web"))));
+    }
+
+    @Test
+    void ec2DeploymentGroupDoesNotPassNullInstanceIdsToDescribeInstances() {
+        stubEc2Instances();
+        ec2DeploymentTargets("ec2-lookup-app", List.of(Map.of("Key", "team", "Value", "red")));
+
+        verify(ec2Service).describeInstances(eq(REGION), eq(List.of()), eq(Map.of()));
+    }
+
+    private Set<String> ec2DeploymentTargets(String appName, List<Map<String, String>> filters) {
+        service.createApplication(REGION, appName, "Server", null);
+        service.createDeploymentGroup(REGION, appName, "group", null, ROLE_ARN,
+                Map.of("ec2TagFilters", filters), null);
+        String deploymentId = service.createDeployment(REGION, appName, "group", null,
+                Map.of("appSpecContent", Map.of("content", "os: linux")), null);
+        return Set.copyOf(service.listDeploymentTargets(REGION, deploymentId));
+    }
+
+    private void stubEc2Instances() {
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(
+                ec2Instance("i-team", new Tag("team", "red")),
+                ec2Instance("i-role", new Tag("role", "web")),
+                ec2Instance("i-both", new Tag("team", "red"), new Tag("role", "web")),
+                ec2Instance("i-team-blue", new Tag("team", "blue")),
+                ec2Instance("i-env-web", new Tag("env", "web")),
+                ec2Instance("i-neither", new Tag("env", "qa"))));
+        when(ec2Service.describeInstances(eq(REGION), anyList(), anyMap()))
+                .thenReturn(List.of(reservation));
+    }
+
+    private Instance ec2Instance(String id, Tag... tags) {
+        Instance instance = new Instance();
+        instance.setInstanceId(id);
+        instance.setTags(List.of(tags));
+        return instance;
     }
 
     // ---- Server platform (SSM) hooks ---------------------------------------------------
@@ -223,7 +361,7 @@ class CodeDeployServiceTest {
         CodeDeployService shortTimeoutService = newService(Duration.ofSeconds(1));
         shortTimeoutService.createApplication(REGION, "app-hook-timeout", "Lambda", null);
         shortTimeoutService.createDeploymentGroup(REGION, "app-hook-timeout", "group-hook-timeout",
-                "CodeDeployDefault.LambdaAllAtOnce", ROLE_ARN, null);
+                "CodeDeployDefault.LambdaAllAtOnce", ROLE_ARN, null, null);
         InvokeResult cleanInvoke = new InvokeResult(200, null, new byte[0], null, "req-3");
         when(lambdaService.invoke(eq(REGION), eq("beforeHook"), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(cleanInvoke);
@@ -328,7 +466,7 @@ class CodeDeployServiceTest {
     private String createServerDeployment(CodeDeployService target, String appName, String groupName,
                                           int timeoutSeconds) {
         target.createApplication(REGION, appName, "Server", null);
-        target.createDeploymentGroup(REGION, appName, groupName, "CodeDeployDefault.AllAtOnce", ROLE_ARN, null);
+        target.createDeploymentGroup(REGION, appName, groupName, "CodeDeployDefault.AllAtOnce", ROLE_ARN, null, null);
         String appSpec = """
                 os: linux
                 hooks:
@@ -344,7 +482,7 @@ class CodeDeployServiceTest {
     private void createLambdaAppAndGroup(String appName, String groupName) {
         service.createApplication(REGION, appName, "Lambda", null);
         service.createDeploymentGroup(REGION, appName, groupName,
-                "CodeDeployDefault.LambdaAllAtOnce", ROLE_ARN, null);
+                "CodeDeployDefault.LambdaAllAtOnce", ROLE_ARN, null, null);
     }
 
     private String createLambdaDeployment(String appName, String groupName, String beforeHook, String afterHook) {

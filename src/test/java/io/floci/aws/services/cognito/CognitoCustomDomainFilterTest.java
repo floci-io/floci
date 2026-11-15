@@ -78,6 +78,7 @@ class CognitoCustomDomainFilterTest {
 
             verify(request, never()).setRequestUri(any());
             verify(request, never()).setProperty(any(), any());
+            verify(request.getUriInfo(), never()).getRequestUri();
         }
         verifyNoInteractions(cognitoService);
     }
@@ -116,7 +117,7 @@ class CognitoCustomDomainFilterTest {
         when(cognitoService.findCustomDomain(DOMAIN)).thenReturn(Optional.of(domain("us-east-1_abc")));
         for (String route : new String[] {"POST /oauth2/token", "POST /oauth2/revoke", "GET /oauth2/authorize",
                 "GET /oauth2/idpresponse", "GET /oauth2/userInfo", "POST /oauth2/userInfo", "GET /login",
-                "POST /login", "GET /logout"}) {
+                "POST /login", "GET /logout", "GET /confirmUser"}) {
             String[] parts = route.split(" ");
             ContainerRequestContext request = request(parts[0], "https://" + DOMAIN + parts[1], DOMAIN);
 
@@ -162,7 +163,8 @@ class CognitoCustomDomainFilterTest {
         for (String route : new String[] {"GET /oauth2/token POST", "GET /oauth2/revoke POST",
                 "HEAD /oauth2/revoke POST", "DELETE /oauth2/token POST", "POST /oauth2/authorize GET, HEAD",
                 "POST /oauth2/idpresponse GET, HEAD", "DELETE /oauth2/userInfo GET, HEAD, POST",
-                "PUT /login GET, HEAD, POST", "POST /logout GET", "HEAD /logout GET"}) {
+                "PUT /login GET, HEAD, POST", "POST /logout GET", "HEAD /logout GET",
+                "POST /confirmUser GET, HEAD"}) {
             String[] parts = route.split(" ", 3);
             ContainerRequestContext request = request(parts[0], "https://" + DOMAIN + parts[1], DOMAIN);
 
@@ -177,11 +179,24 @@ class CognitoCustomDomainFilterTest {
         }
     }
 
+    @Test
+    void rewritesConfirmUserWithATrailingSlashOntoTheSameHandler() {
+        when(cognitoService.findCustomDomain(DOMAIN)).thenReturn(Optional.of(domain("us-east-1_abc")));
+        String query = "?client_id=c&user_name=a%40b.com&confirmation_code=123456";
+        ContainerRequestContext request = request("GET", "https://" + DOMAIN + "/confirmUser/" + query, DOMAIN);
+
+        filter.filter(request);
+
+        verify(request).setRequestUri(URI.create("https://" + DOMAIN + "/cognito-idp/confirmUser" + query));
+        verify(request, never()).abortWith(any());
+    }
+
     /** AWS answers HEAD as GET on these paths, so the filter serves it with the GET handler. */
     @Test
     void servesAHeadWithTheGetHandler() {
         when(cognitoService.findCustomDomain(DOMAIN)).thenReturn(Optional.of(domain("us-east-1_abc")));
-        for (String path : new String[] {"/oauth2/authorize", "/oauth2/idpresponse", "/oauth2/userInfo", "/login"}) {
+        for (String path : new String[] {"/oauth2/authorize", "/oauth2/idpresponse", "/oauth2/userInfo", "/login",
+                "/confirmUser"}) {
             ContainerRequestContext request = request("HEAD", "https://" + DOMAIN + path, DOMAIN);
 
             filter.filter(request);
@@ -203,6 +218,7 @@ class CognitoCustomDomainFilterTest {
         when(request.getMethod()).thenReturn(method);
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getRequestUri()).thenReturn(URI.create(uri));
+        when(uriInfo.getPath()).thenReturn(URI.create(uri).getPath());
         when(request.getUriInfo()).thenReturn(uriInfo);
         when(request.getHeaderString("Host")).thenReturn(hostHeader);
         return request;

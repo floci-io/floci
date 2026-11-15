@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -39,6 +40,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
@@ -108,7 +110,17 @@ public class EventBridgeInvoker {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
                 serviceRegistry, regionResolver, objectMapper, config,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), appSyncTargetInvoker);
+                apiDestinationClient(ContainerCaBundle.sslContext(config).orElse(null)), appSyncTargetInvoker);
+    }
+
+    // The client API destinations are delivered with: sslContext, when given, adds the extra CAs in
+    // floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the JVM's roots
+    private static HttpClient apiDestinationClient(SSLContext sslContext) {
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
+        return builder.build();
     }
 
     public EventBridgeInvoker(LambdaService lambdaService,
@@ -128,7 +140,7 @@ public class EventBridgeInvoker {
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config, (AppSyncTargetInvoker) null);
+                serviceRegistry, regionResolver, objectMapper, config, apiDestinationClient(null), null);
     }
 
     EventBridgeInvoker(LambdaService lambdaService,

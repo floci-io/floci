@@ -103,6 +103,9 @@ public class Environment {
     @JsonIgnore
     private String dbPassword;
 
+    @JsonIgnore
+    private String airflowAdminPassword;
+
     public Environment() {}
 
     public String getName() { return name; }
@@ -191,6 +194,9 @@ public class Environment {
 
     public String getDbPassword() { return dbPassword; }
     public void setDbPassword(String dbPassword) { this.dbPassword = dbPassword; }
+
+    public String getAirflowAdminPassword() { return airflowAdminPassword; }
+    public void setAirflowAdminPassword(String airflowAdminPassword) { this.airflowAdminPassword = airflowAdminPassword; }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

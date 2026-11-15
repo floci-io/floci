@@ -20,7 +20,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 
 /**
  * AWS CUR (Cost and Usage Report) management plane.
@@ -42,11 +41,7 @@ public class CurService {
 
     /** AWS hard limit per account: 5 report definitions. */
     private static final int MAX_REPORTS_PER_ACCOUNT = 5;
-    /** AWS allows the report name to contain alphanumerics, hyphens, and underscores. */
-    private static final Pattern REPORT_NAME_PATTERN =
-            Pattern.compile("[A-Za-z0-9_-]+");
-
-    private static final Set<String> ALLOWED_TIME_UNITS = Set.of("HOURLY", "DAILY", "MONTHLY");
+    private static final int MAX_TAGS_PER_REPORT = 50;
     /**
      * Floci only emits Parquet at the moment. Real CUR also accepts
      * {@code textORcsv} but Floci's emission engine writes Parquet
@@ -56,9 +51,6 @@ public class CurService {
      */
     private static final Set<String> ALLOWED_FORMATS = Set.of("Parquet");
     private static final Set<String> ALLOWED_COMPRESSIONS = Set.of("Parquet");
-    private static final Set<String> ALLOWED_VERSIONING = Set.of("CREATE_NEW_REPORT", "OVERWRITE_REPORT");
-    private static final Set<String> ALLOWED_ARTIFACTS = Set.of("REDSHIFT", "QUICKSIGHT", "ATHENA");
-    private static final Set<String> ALLOWED_SCHEMA_ELEMENTS = Set.of("RESOURCES", "SPLIT_COST_ALLOCATION_DATA", "MANUAL_DISCOUNT_COMPATIBILITY");
 
     private final StorageBackend<String, ReportDefinition> store;
     private final RegionResolver regionResolver;
@@ -76,8 +68,9 @@ public class CurService {
     }
 
     /** {@code PutReportDefinition} — creates a new report. Fails if one already exists. */
-    public ReportDefinition putReportDefinition(ReportDefinition definition, String region) {
+    public synchronized ReportDefinition putReportDefinition(ReportDefinition definition, String region) {
         validateReportDefinition(definition);
+        requireTagLimit(definition.getTags());
         String key = compositeKey(region, definition.getReportName());
 
         if (store.get(key).isPresent()) {
@@ -101,8 +94,8 @@ public class CurService {
         return definition;
     }
 
-    /** {@code ModifyReportDefinition} — replaces an existing report's definition. */
-    public ReportDefinition modifyReportDefinition(String reportName, ReportDefinition incoming, String region) {
+    /** {@code ModifyReportDefinition}: replaces an existing report's definition, keeping its tags. */
+    public synchronized ReportDefinition modifyReportDefinition(String reportName, ReportDefinition incoming, String region) {
         requireNonEmpty(reportName, "ReportName");
         if (!reportName.equals(incoming.getReportName())) {
             throw new AwsException("ValidationException",
@@ -116,6 +109,7 @@ public class CurService {
                 "Report " + reportName + " not found.", 400));
 
         incoming.setCreatedDate(existing.getCreatedDate());
+        incoming.setTags(existing.getTags());
         incoming.setLastUpdatedDate(Instant.now());
         incoming.setReportStatus(existing.getReportStatus() == null ? "PENDING" : existing.getReportStatus());
         incoming.setOwnerAccountId(existing.getOwnerAccountId() != null
@@ -179,7 +173,7 @@ public class CurService {
      * success/error to {@code DescribeReportDefinitions} consumers. Silent
      * no-op if the report has been deleted in the meantime.
      */
-    public void markReportStatus(String reportName, String region, String status) {
+    public synchronized void markReportStatus(String reportName, String region, String status) {
         if (reportName == null || region == null || status == null) {
             return;
         }
@@ -197,7 +191,7 @@ public class CurService {
      * directly under {@code accountId} rather than relying on the request
      * context.
      */
-    public void markReportStatusForAccount(String accountId, String reportName, String region, String status) {
+    public synchronized void markReportStatusForAccount(String accountId, String reportName, String region, String status) {
         if (accountId == null || reportName == null || region == null || status == null) {
             return;
         }
@@ -216,8 +210,46 @@ public class CurService {
         });
     }
 
+    /** {@code ListTagsForResource}: the tags of the named report definition. */
+    public Map<String, String> listTags(String reportName, String region) {
+        return existingReport(reportName, region).getTags();
+    }
+
+    /** {@code TagResource}: adds the tags, replacing the value of a key the report already has. */
+    public synchronized void tagResource(String reportName, Map<String, String> tags, String region) {
+        ReportDefinition report = existingReport(reportName, region);
+        Map<String, String> merged = new LinkedHashMap<>(report.getTags());
+        merged.putAll(tags);
+        requireTagLimit(merged);
+        report.setTags(merged);
+        store.put(compositeKey(region, reportName), report);
+    }
+
+    /** {@code UntagResource}: removes the keys; a key the report does not have is ignored. */
+    public synchronized void untagResource(String reportName, List<String> tagKeys, String region) {
+        ReportDefinition report = existingReport(reportName, region);
+        Map<String, String> remaining = new LinkedHashMap<>(report.getTags());
+        tagKeys.forEach(remaining::remove);
+        report.setTags(remaining);
+        store.put(compositeKey(region, reportName), report);
+    }
+
+    private static void requireTagLimit(Map<String, String> tags) {
+        if (tags.size() > MAX_TAGS_PER_REPORT) {
+            throw new AwsException("ValidationException",
+                    "A report definition can have up to " + MAX_TAGS_PER_REPORT + " tags.", 400);
+        }
+    }
+
+    private ReportDefinition existingReport(String reportName, String region) {
+        requireNonEmpty(reportName, "ReportName");
+        return store.get(compositeKey(region, reportName)).orElseThrow(() -> new AwsException(
+                "ResourceNotFoundException",
+                "The specified report (" + reportName + ") in the request doesn't exist.", 400));
+    }
+
     /** {@code DeleteReportDefinition} — removes a report; idempotent (returns null when absent). */
-    public ReportDefinition deleteReportDefinition(String reportName, String region) {
+    public synchronized ReportDefinition deleteReportDefinition(String reportName, String region) {
         requireNonEmpty(reportName, "ReportName");
         String key = compositeKey(region, reportName);
         ReportDefinition existing = store.get(key).orElse(null);
@@ -232,51 +264,17 @@ public class CurService {
         return store.keys().size();
     }
 
+    /**
+     * The checks the model leaves to Floci: its types, required members, patterns, lengths and enums are checked in
+     * {@link CurJsonHandler#handle} from {@code cur-request-shapes.json}.
+     */
     private void validateReportDefinition(ReportDefinition d) {
-        if (d == null) {
-            throw new AwsException("ValidationException", "ReportDefinition is required.", 400);
-        }
-        requireNonEmpty(d.getReportName(), "ReportName");
-        if (!REPORT_NAME_PATTERN.matcher(d.getReportName()).matches()) {
-            throw new AwsException("ValidationException",
-                    "ReportName may only contain alphanumeric characters, hyphens, and underscores.", 400);
-        }
-        if (d.getReportName().length() > 256) {
-            throw new AwsException("ValidationException",
-                    "ReportName must be at most 256 characters long.", 400);
-        }
-        requireOneOf(d.getTimeUnit(), ALLOWED_TIME_UNITS, "TimeUnit");
         requireOneOf(d.getFormat(), ALLOWED_FORMATS, "Format");
         requireOneOf(d.getCompression(), ALLOWED_COMPRESSIONS, "Compression");
-        requireNonEmpty(d.getS3Bucket(), "S3Bucket");
+        // The report name is a segment of the key ParquetEmitter writes, which takes fewer characters than the model.
+        S3DestinationValidation.requireSafeKeySegment(d.getReportName(), "ReportName");
         S3DestinationValidation.requireValidBucketName(d.getS3Bucket(), "S3Bucket");
-        if (d.getS3Prefix() != null) {
-            S3DestinationValidation.requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
-        }
-        if (d.getS3Prefix() == null) {
-            d.setS3Prefix("");
-        }
-        requireNonEmpty(d.getS3Region(), "S3Region");
-        if (d.getReportVersioning() != null && !ALLOWED_VERSIONING.contains(d.getReportVersioning())) {
-            throw new AwsException("ValidationException",
-                    "ReportVersioning must be one of " + ALLOWED_VERSIONING, 400);
-        }
-        if (d.getAdditionalArtifacts() != null) {
-            for (String artifact : d.getAdditionalArtifacts()) {
-                if (!ALLOWED_ARTIFACTS.contains(artifact)) {
-                    throw new AwsException("ValidationException",
-                            "AdditionalArtifacts must be one of " + ALLOWED_ARTIFACTS, 400);
-                }
-            }
-        }
-        if (d.getAdditionalSchemaElements() != null) {
-            for (String element : d.getAdditionalSchemaElements()) {
-                if (!ALLOWED_SCHEMA_ELEMENTS.contains(element)) {
-                    throw new AwsException("ValidationException",
-                            "AdditionalSchemaElements must be one of " + ALLOWED_SCHEMA_ELEMENTS, 400);
-                }
-            }
-        }
+        S3DestinationValidation.requireSafeKeySegment(d.getS3Prefix(), "S3Prefix");
     }
 
     private static String compositeKey(String region, String reportName) {
@@ -291,7 +289,6 @@ public class CurService {
     }
 
     private static void requireOneOf(String value, Set<String> allowed, String field) {
-        requireNonEmpty(value, field);
         if (!allowed.contains(value)) {
             throw new AwsException("ValidationException",
                     field + " must be one of " + allowed, 400);

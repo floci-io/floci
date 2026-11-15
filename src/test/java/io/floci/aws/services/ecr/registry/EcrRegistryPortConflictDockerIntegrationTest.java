@@ -11,6 +11,7 @@ import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.HostBlindPortAllocator;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.core.common.docker.SidecarHealthHelper;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -63,7 +64,7 @@ class EcrRegistryPortConflictDockerIntegrationTest {
     }
 
     @Test
-    void registriesCompetingForOneRangeStartOnDifferentPortsUntilItIsExhausted() throws InterruptedException {
+    void registriesCompetingForOneRangeStartOnDifferentPortsUntilItIsExhausted() {
         int port = freePortPair();
         EmulatorConfig configA = config(port);
         EmulatorConfig configB = config(port);
@@ -79,7 +80,9 @@ class EcrRegistryPortConflictDockerIntegrationTest {
 
             assertEquals(port, a.effectivePort());
             assertEquals(port + 1, b.effectivePort());
-            assertTrue(isReachable(a) && isReachable(b), "both registries must answer on their own port");
+            assertTrue(SidecarHealthHelper.probeHealth(a.httpClient().baseUrl(), "/v2/")
+                    && SidecarHealthHelper.probeHealth(b.httpClient().baseUrl(), "/v2/"),
+                    "both registries must answer on their own port");
             assertEquals(port, allocatorB.allocate(port, port + 1), "the refused port must be released");
 
             RuntimeException ex = assertThrows(RuntimeException.class, c::ensureStarted);
@@ -125,16 +128,6 @@ class EcrRegistryPortConflictDockerIntegrationTest {
             port = next;
         }
         return port;
-    }
-
-    private static boolean isReachable(EcrRegistryManager manager) throws InterruptedException {
-        for (int attempt = 0; attempt < 50; attempt++) {
-            if (manager.httpClient().ping()) {
-                return true;
-            }
-            Thread.sleep(200);
-        }
-        return false;
     }
 
     private boolean isDockerAvailable() {

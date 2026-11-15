@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -55,7 +56,7 @@ import java.util.regex.Pattern;
  * never-created ARN gets.
  */
 @ApplicationScoped
-public class RamService {
+public class RamService implements StoredResourceArns {
 
     private static final String ORGANIZATION_SHARING_KEY = "sharing-with-organization-enabled";
     /** The modeled ResourceShareStatus enum. */
@@ -339,6 +340,39 @@ public class RamService {
             return;
         }
         invitations.put(invitation.resourceShareInvitationArn(), invitation);
+    }
+
+    @Override
+    public String namespace() {
+        return "ram";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * An invitation another account sent the caller, which it accepts or rejects there, or a share another account
+     * owns, which RAM finds by its ARN in that account and never as the caller's: whether the caller may see it is
+     * for the handler to answer after the check. Each is read by its key alone, nothing scanned.
+     */
+    @Override
+    public boolean reachedInItsAccount(String arn, String accountId) {
+        String owner = AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).accountId() : "";
+        if (owner.isEmpty()) {
+            return false;
+        }
+        // An invitation is stored under the account it was sent to, a share under the one that owns it.
+        Optional<ResourceShareInvitation> invitation =
+                invitations instanceof AccountAwareStorageBackend<ResourceShareInvitation> accountAware
+                        ? accountAware.getForAccount(accountId, arn) : invitations.get(arn);
+        if (invitation.filter(sent -> accountId.equals(sent.receiverAccountId())).isPresent()) {
+            return true;
+        }
+        Optional<ResourceShare> share = shares instanceof AccountAwareStorageBackend<ResourceShare> accountAware
+                ? accountAware.getForAccount(owner, arn) : shares.get(arn);
+        return share.filter(shared -> !"DELETED".equals(shared.getStatus())).isPresent();
     }
 
     private List<ResourceShareInvitation> allInvitations() {

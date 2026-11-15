@@ -4,12 +4,15 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.EcsTaskHandle;
+import io.floci.aws.services.ecs.exec.EcsExecSessionRegistry;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
+import io.floci.aws.services.ecs.model.EcsLoadBalancer;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -61,6 +64,8 @@ class EcsGracefulStopConcurrencyServiceTest {
 
     private final EcsContainerManager containerManager = mock(EcsContainerManager.class);
     private final EcsEventPublisher eventPublisher = mock(EcsEventPublisher.class);
+    private final EcsLoadBalancerRegistrar lbRegistrar = mock(EcsLoadBalancerRegistrar.class);
+    private final MutableClock clock = new MutableClock();
     private final List<EcsService> services = new ArrayList<>();
     /** The task whose stop blocks until {@link #releaseSlowStop}; every other task stops at once. */
     private final AtomicReference<String> slowTaskArn = new AtomicReference<>();
@@ -335,6 +340,63 @@ class EcsGracefulStopConcurrencyServiceTest {
         assertEquals(2, stops.get());
     }
 
+    @Test
+    void aTaskBehindALoadBalancerStaysDeactivatingUntilItsTargetsHaveDrained() throws Exception {
+        Duration deregistrationDelay = Duration.ofSeconds(300);
+        when(lbRegistrar.deregisterTask(any(), any(), anyString())).thenReturn(deregistrationDelay);
+        when(lbRegistrar.targetsHealthy(any())).thenReturn(true);
+        EcsService service = newService();
+        createService(service, "drained", 1, List.of(loadBalancer("drained")));
+        tick(service);
+        EcsTask old = onlyRunningTask(service, "drained");
+
+        service.updateService(CLUSTER, "drained", null, null, null, null, true, REGION);
+        tick(service);
+        tick(service);
+        verify(lbRegistrar).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())), any(),
+                eq(REGION));
+        assertEquals("DEACTIVATING", lastStatus(service, old));
+
+        clock.advance(deregistrationDelay.minusSeconds(1));
+        tick(service);
+        assertEquals("DEACTIVATING", lastStatus(service, old));
+        verify(containerManager, never()).stopTaskAndCollectExitCodes(handleOf(old));
+
+        clock.advance(Duration.ofSeconds(1));
+        tick(service);
+        await().atMost(TICK_BUDGET).until(() -> "STOPPED".equals(lastStatus(service, old)));
+        verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handleOf(old));
+    }
+
+    @Test
+    void aRollingDeploymentStopsTheOldTaskOnlyOnceItsReplacementsTargetsAreHealthy() throws Exception {
+        AtomicReference<String> healthyTaskArn = new AtomicReference<>();
+        when(lbRegistrar.targetsHealthy(any())).thenAnswer(invocation ->
+                invocation.<EcsTask>getArgument(0).getTaskArn().equals(healthyTaskArn.get()));
+        EcsService service = newService();
+        createService(service, "checked", 1, List.of(loadBalancer("checked")));
+        tick(service);
+        EcsTask old = onlyRunningTask(service, "checked");
+
+        service.updateService(CLUSTER, "checked", null, null, null, null, true, REGION);
+        tick(service);
+        EcsTask replacement = runningTasks(service, "checked").stream()
+                .filter(task -> !task.getTaskArn().equals(old.getTaskArn()))
+                .findFirst().orElseThrow();
+        tick(service);
+        tick(service);
+        assertEquals("RUNNING", lastStatus(service, old), "the replacement's targets are still in initial health");
+        verify(lbRegistrar, never()).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())),
+                any(), anyString());
+
+        healthyTaskArn.set(replacement.getTaskArn());
+        tick(service);
+        verify(lbRegistrar).deregisterTask(argThat(task -> old.getTaskArn().equals(task.getTaskArn())), any(),
+                eq(REGION));
+        await().atMost(TICK_BUDGET).until(() -> "STOPPED".equals(lastStatus(service, old)));
+        assertEquals("RUNNING", lastStatus(service, replacement));
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     /** One full reconcile tick, on a thread of its own, so a tick stuck behind a stop fails rather than hangs. */
@@ -360,7 +422,8 @@ class EcsGracefulStopConcurrencyServiceTest {
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), containerManager,
-                config, mock(EcsLoadBalancerRegistrar.class), new InMemoryStorageFactory("000000000000"), eventPublisher);
+                config, lbRegistrar, new InMemoryStorageFactory("000000000000"), eventPublisher,
+                new EcsExecSessionRegistry(), null, null, clock);
         service.initializeStorage();
         service.createCluster(CLUSTER, REGION);
         services.add(service);
@@ -368,12 +431,26 @@ class EcsGracefulStopConcurrencyServiceTest {
     }
 
     private static void createService(EcsService service, String name, int desiredCount) {
+        createService(service, name, desiredCount, List.of());
+    }
+
+    private static void createService(EcsService service, String name, int desiredCount,
+                                      List<EcsLoadBalancer> loadBalancers) {
         ContainerDefinition container = new ContainerDefinition();
         container.setName("app");
         container.setImage(name + ":1");
         service.registerTaskDefinition(name, List.of(container), null, null, null,
                 null, null, List.of(), REGION);
-        service.createService(CLUSTER, name, name, desiredCount, LaunchType.FARGATE, List.of(), null, REGION);
+        service.createService(CLUSTER, name, name, desiredCount, LaunchType.FARGATE, loadBalancers, null, REGION);
+    }
+
+    private static EcsLoadBalancer loadBalancer(String targetGroupName) {
+        EcsLoadBalancer loadBalancer = new EcsLoadBalancer();
+        loadBalancer.setTargetGroupArn("arn:aws:elasticloadbalancing:" + REGION
+                + ":000000000000:targetgroup/" + targetGroupName + "/0123456789abcdef");
+        loadBalancer.setContainerName("app");
+        loadBalancer.setContainerPort(8080);
+        return loadBalancer;
     }
 
     private static EcsTaskHandle handleOf(EcsTask task) {
