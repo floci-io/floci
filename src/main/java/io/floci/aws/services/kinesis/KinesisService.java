@@ -40,6 +40,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
+
 @ApplicationScoped
 public class KinesisService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(KinesisService.class);
@@ -1030,16 +1032,8 @@ public class KinesisService implements ResourceProvider {
             putRecordAppendHook.run();
             KinesisRecord record = new KinesisRecord(data, partitionKey, sequenceNumber, clock.instant());
             shard.addRecord(record);
-            persistStream(accountId, key, current);
+            putInAccount(store, accountId, key, current);
             return new PutRecordResult(sequenceNumber, shard.getShardId());
-        }
-    }
-
-    private void persistStream(String accountId, String key, KinesisStream stream) {
-        if (accountId != null && store instanceof AccountAwareStorageBackend<KinesisStream> aware) {
-            aware.putForAccount(accountId, key, stream);
-        } else {
-            store.put(key, stream);
         }
     }
 
