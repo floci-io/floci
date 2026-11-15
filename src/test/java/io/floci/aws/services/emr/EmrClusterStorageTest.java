@@ -256,6 +256,26 @@ class EmrClusterStorageTest {
     }
 
     @Test
+    void aNodeWithAnImageOfItsOwnRunsFromItAndStartsAgainWhereItRunsAnother() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", "sha256:core-node", CORE_HOST, true),
+                node(taskName, "running", IMAGE, TASK_HOST, false));
+        // Each from the image its own bootstrap left: the task node's is new, as a resize added it again.
+        ClusterStorage.Yarn ownImages = new ClusterStorage.Yarn(4096, 4).onNodes(List.of(
+                new ClusterStorage.Node("1-1", CORE_HOST, true, "sha256:core-node"),
+                new ClusterStorage.Node("2-1", TASK_HOST, false, "sha256:task-node")), 1, "s3://logs/j-1/containers/");
+        when(containerBuilder.newContainer("sha256:task-node")).thenReturn(spec);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> ownImages,
+                NOT_STOPPED);
+
+        verify(spec, never()).withName(coreName);
+        verify(spec).withName(taskName);
+        verify(containerBuilder).newContainer("sha256:task-node");
+        verify(containerBuilder, never()).newContainer("sha256:core-node");
+    }
+
+    @Test
     void aNodeInAnotherImageOrStoppedStartsAgainOnItsData() {
         nodesStart(coreName, taskName);
         runningNodes(node(coreName, "running", "sha256:older", CORE_HOST, true),
@@ -655,6 +675,30 @@ class EmrClusterStorageTest {
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).createAndStart(any());
         order.verify(lifecycle).removeVolume(coreName);
+    }
+
+    @Test
+    void aCoreNodeThatStopsWhileItLeavesStartsAgainFromTheImageItRan() {
+        AtomicLong clock = new AtomicLong();
+        EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials,
+                currentContainer, config, s3, Duration.ofSeconds(120),
+                () -> clock.getAndAdd(Duration.ofMinutes(30).toNanos()), Runnable::run, Duration.ZERO);
+        nodesStart(coreName, taskName);
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        // It ran from the image its own bootstrap left.
+        runningNodes(node(coreName, "running", "sha256:core-node", CORE_HOST, true),
+                node(taskName, "running", IMAGE, TASK_HOST, false));
+        when(containerBuilder.newContainer("sha256:core-node")).thenReturn(spec);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 1L, "", "");
+        when(lifecycle.probeContainer(coreName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
+        clearInvocations(spec, lifecycle, containerBuilder);
+        ClusterStorage.Yarn taskOnly = new ClusterStorage.Yarn(4096, 4).onNodes(List.of(TASK_NODE), 1, null);
+
+        assertTimeoutPreemptively(Duration.ofSeconds(20), () -> ticking.resize("j-1", () -> taskOnly));
+
+        verify(containerBuilder).newContainer("sha256:core-node");
+        verify(spec).withName(coreName);
     }
 
     @Test

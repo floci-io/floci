@@ -768,18 +768,18 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             changed |= leaving.remove(name) != null;
             Container container = present.get(name);
             if (container == null || !"running".equals(container.getState())
-                    || !request.imageId().equals(container.getImageId())
+                    || !imageOf(request, node).equals(container.getImageId())
                     || !joins(container.getNetworkSettings() != null ? container.getNetworkSettings().getNetworks()
                             : null, clusterSubnet(clusterId) != null ? request.joinedNetwork() : null)
                     || !metadataKnown(clusterId, name)) {
-                startNode(request, node.host(), node.core(), name, teardown);
+                startNode(request, node.host(), node.core(), imageOf(request, node), name, teardown);
             } else {
                 runningNodes.add(name);
             }
         }
         for (Map.Entry<String, Container> node : present.entrySet()) {
             if (!wanted.contains(node.getKey()) && !leaving.containsKey(node.getKey())) {
-                leaving.put(node.getKey(), draining(node.getValue().getLabels()));
+                leaving.put(node.getKey(), draining(node.getValue().getLabels(), node.getValue().getImageId()));
                 runningNodes.add(node.getKey());
                 changed = true;
             }
@@ -789,9 +789,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (wanted.contains(name) || present.containsKey(name) || leaving.containsKey(name)) {
                 continue;
             }
-            Draining node = draining(volume.getValue());
+            // Its container, and the image it ran, gone with a shutdown: it starts from the steps' image, which holds
+            // HDFS too, and runs only until HDFS has moved its blocks.
+            Draining node = draining(volume.getValue(), null);
             if (node.core()) {
-                startNode(request, node.host(), true, name, teardown);
+                startNode(request, node.host(), true, request.imageId(), name, teardown);
                 leaving.put(name, node);
                 changed = true;
             } else {
@@ -807,16 +809,23 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         return wanted;
     }
 
-    // A node being decommissioned, as its container's or its volume's labels say, with an hour and a minute to go in.
-    private Draining draining(Map<String, String> labels) {
+    // A node being decommissioned, as its container's or its volume's labels say, with an hour and a minute to go in,
+    // and the image its container ran, null where it has none.
+    private Draining draining(Map<String, String> labels, String imageId) {
         Map<String, String> known = labels != null ? labels : Map.of();
         return new Draining(known.get(NODE_HOST_LABEL), Boolean.parseBoolean(known.get(NODE_CORE_LABEL)),
-                nanoTime.getAsLong() + GRACEFUL_DECOMMISSION.plus(DECOMMISSION_MARGIN).toNanos());
+                nanoTime.getAsLong() + GRACEFUL_DECOMMISSION.plus(DECOMMISSION_MARGIN).toNanos(), imageId);
     }
 
-    // A node's container, started on the data its volume keeps; one whose start a teardown passed goes, as the teardown's
-    // sweep may have looked before it was there.
-    private void startNode(NodeRequest request, String host, boolean core, String name, long teardown) {
+    // The image a node runs from: the one its own bootstrap left, else the steps'.
+    private static String imageOf(NodeRequest request, Node node) {
+        return node.image() != null ? node.image() : request.imageId();
+    }
+
+    // A node's container, started on the data its volume keeps, from imageId; one whose start a teardown passed goes,
+    // as the teardown's sweep may have looked before it was there.
+    private void startNode(NodeRequest request, String host, boolean core, String imageId, String name,
+                           long teardown) {
         String clusterId = request.clusterId();
         Yarn yarn = request.yarn();
         // Known before it starts, so a teardown while it starts removes it.
@@ -830,7 +839,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         Map<String, String> labels = labels(clusterId, request.accountId(), request.region(), NODE_COMPONENT);
         labels.put(NODE_HOST_LABEL, host);
         labels.put(NODE_CORE_LABEL, String.valueOf(core));
-        ContainerBuilder.Builder spec = containerBuilder.newContainer(request.imageId())
+        ContainerBuilder.Builder spec = containerBuilder.newContainer(imageId)
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", NODE_SCRIPT))
@@ -1055,7 +1064,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
             LOG.infov("The core node {0} of EMR cluster {1} stopped before HDFS moved its blocks, and starts again on"
                     + " its data", node.host(), request.clusterId());
-            startNode(request, node.host(), true, name, teardown);
+            startNode(request, node.host(), true, node.imageId() != null ? node.imageId() : request.imageId(), name,
+                    teardown);
             return false;
         }
         return node.hdfsDone() && onPrimary(request.clusterId(), "curl -sf -m 5 \"" + RESOURCE_MANAGER_NODES
@@ -1117,13 +1127,15 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // A node being decommissioned, which goes anyway at the nanoTime deadline, its own, so one a later resize adds has
     // the whole time too. A core node goes to YARN's decommission only once HDFS has moved its blocks: a decommissioned
     // NodeManager exits, which ends its container, the DataNode with it.
-    private record Draining(String host, boolean core, boolean hdfsDone, long deadline) {
-        Draining(String host, boolean core, long deadline) {
-            this(host, core, !core, deadline);
+    // It starts again, where it must, from imageId, the image it ran, its own bootstrap's say, or the steps' where it
+    // is not known.
+    private record Draining(String host, boolean core, boolean hdfsDone, long deadline, String imageId) {
+        Draining(String host, boolean core, long deadline, String imageId) {
+            this(host, core, !core, deadline, imageId);
         }
 
         Draining hdfsDecommissioned() {
-            return new Draining(host, core, true, deadline);
+            return new Draining(host, core, true, deadline, imageId);
         }
     }
 

@@ -141,7 +141,10 @@ final class EmrClusterLifecycle {
      * "When a job flow is shut down, any step not yet completed is canceled".
      */
     void terminate(EmrCluster cluster, String code, String message, Instant now, String region) {
-        if (BOOTSTRAPPING.equals(cluster.getState()) && !bootstrapTimed(cluster)) {
+        // Its bootstraps stop: the primary node's and its nodes', or, past BOOTSTRAPPING, those of the nodes a resize
+        // added, which run where its own ran in a container.
+        if (BOOTSTRAPPING.equals(cluster.getState()) ? !bootstrapTimed(cluster)
+                : bootstrapping != null && cluster.getBootstrapImage() != null) {
             bootstrapping.stop(cluster);
         }
         cluster.setState(TERMINATING);
