@@ -62,6 +62,10 @@ If configured, the script is fetched from S3 at environment-creation time and in
 
 The Airflow container is pointed back at Floci itself (`AWS_ENDPOINT_URL`, placeholder credentials, region) using the same mechanism Lambda and ECS containers already use to reach the emulator — so a DAG's own `boto3.client("s3")`/`boto3.client("secretsmanager")` calls resolve against Floci instead of attempting to reach real AWS.
 
+### VPC (`NetworkConfiguration`)
+
+Amazon MWAA runs an environment's workers in the subnets its `NetworkConfiguration` names. Floci puts the Airflow container on that VPC's Docker network, at an address leased from the first subnet, the way it places EC2 instances and VPC-configured Lambda functions, so a DAG reaches an EC2 instance, or anything else in the VPC, by its private IP. The container keeps the network it was created on, where its metadata database is. A subnet EC2 does not know, or `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=false`, leaves it there alone. Security groups are not enforced, as for EC2. As on AWS, `DeleteSubnet` refuses a subnet an environment uses (`DependencyViolation`), and `UpdateEnvironment` changes only the security groups: an environment's subnets, and so its VPC, are fixed at creation.
+
 !!! note "Docker socket required"
     Real mode starts privileged Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other.
 
