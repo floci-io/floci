@@ -116,6 +116,12 @@ class LakeFormationAuthorizerTest {
         assertFalse(authorizer.canSelect(ACCOUNT, ROLE, "lake", "events"));
     }
 
+    @Test
+    void databaseAndTableNamesMatchIgnoringCase() {
+        grant(ROLE, tableResource("salesdb", "orders"), "SELECT");
+        assertTrue(authorizer.canSelect(ACCOUNT, ROLE, "SalesDB", "Orders"));
+    }
+
     private void grant(String principalId, Resource resource, String permission) {
         DataLakePrincipal principal = new DataLakePrincipal();
         principal.setDataLakePrincipalIdentifier(principalId);

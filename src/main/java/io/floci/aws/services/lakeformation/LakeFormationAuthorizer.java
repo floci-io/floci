@@ -11,7 +11,6 @@ import io.floci.aws.services.lakeformation.model.TableWithColumnsResource;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
  * Decides whether a principal may read a table, from the grants Lake Formation stores.
@@ -72,8 +71,8 @@ public class LakeFormationAuthorizer {
         TableResource table = resource.getTable();
         if (table != null) {
             return sameCatalog(table.getCatalogId(), catalogId)
-                    && Objects.equals(table.getDatabaseName(), databaseName)
-                    && (table.getTableWildcard() != null || Objects.equals(table.getName(), tableName));
+                    && sameName(table.getDatabaseName(), databaseName)
+                    && (table.getTableWildcard() != null || sameName(table.getName(), tableName));
         }
         TableWithColumnsResource columns = resource.getTableWithColumns();
         if (columns != null) {
@@ -81,10 +80,14 @@ public class LakeFormationAuthorizer {
             boolean wholeTable = wildcard != null
                     && (wildcard.getExcludedColumnNames() == null || wildcard.getExcludedColumnNames().isEmpty());
             return wholeTable && sameCatalog(columns.getCatalogId(), catalogId)
-                    && Objects.equals(columns.getDatabaseName(), databaseName)
-                    && Objects.equals(columns.getName(), tableName);
+                    && sameName(columns.getDatabaseName(), databaseName)
+                    && sameName(columns.getName(), tableName);
         }
         return false;
+    }
+
+    private static boolean sameName(String left, String right) {
+        return left != null && left.equalsIgnoreCase(right);
     }
 
     private static boolean sameCatalog(String grantCatalogId, String catalogId) {
