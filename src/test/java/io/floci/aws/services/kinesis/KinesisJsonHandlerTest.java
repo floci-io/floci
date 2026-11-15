@@ -2306,6 +2306,27 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void listShardsCapsPageAt1000EvenWhenMaxResultsIsLarger() {
+        createStream("test-stream", 1001);
+
+        ObjectNode first = MAPPER.createObjectNode();
+        first.put("StreamName", "test-stream");
+        first.put("MaxResults", 10000);
+        ObjectNode firstPage = responseEntity(handler.handle("ListShards", first, REGION));
+
+        assertEquals(1000, firstPage.get("Shards").size());
+        assertTrue(firstPage.hasNonNull("NextToken"), "a token is returned for the remaining shard");
+
+        ObjectNode second = MAPPER.createObjectNode();
+        second.put("NextToken", firstPage.get("NextToken").asText());
+        second.put("MaxResults", 10000);
+        ObjectNode secondPage = responseEntity(handler.handle("ListShards", second, REGION));
+
+        assertEquals(1, secondPage.get("Shards").size());
+        assertFalse(secondPage.hasNonNull("NextToken"));
+    }
+
+    @Test
     void listShardsRejectsStreamNameTogetherWithNextToken() {
         createStream("test-stream", 3);
 
