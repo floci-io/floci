@@ -36,6 +36,7 @@ was stored with, which ends in its name.
 |---|---|
 | Table buckets | CreateTableBucket, GetTableBucket, ListTableBuckets, DeleteTableBucket |
 | Bucket policy | PutTableBucketPolicy, GetTableBucketPolicy, DeleteTableBucketPolicy |
+| Bucket storage class | GetTableBucketStorageClass |
 | Bucket maintenance | PutTableBucketMaintenanceConfiguration, GetTableBucketMaintenanceConfiguration |
 | Namespaces | CreateNamespace, GetNamespace, ListNamespaces, DeleteNamespace |
 | Tables | CreateTable, GetTable, ListTables, DeleteTable, RenameTable |
@@ -63,6 +64,13 @@ aws s3tables create-table \
   --name events \
   --format ICEBERG
 ```
+
+`GetTableBucketStorageClass` returns the storage-class configuration supplied to
+`CreateTableBucket`. An omitted configuration, including in older snapshots,
+reports `STANDARD`; an explicit `INTELLIGENT_TIERING` setting is preserved.
+This is bucket configuration readback only. Storage-class updates, per-table
+storage-class reads and inheritance, and physical tier transitions are not
+implemented.
 
 ## Configuration
 
