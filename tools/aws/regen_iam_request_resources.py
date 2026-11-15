@@ -270,9 +270,9 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
-              "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
-              "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty",
-              "secretsmanager", "scheduler", "lambda", "cloudformation")
+              "rekognition", "resource-explorer-2", "route53", "s3tables", "servicediscovery", "servicequotas", "ssm",
+              "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub",
+              "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
@@ -427,7 +427,6 @@ NOT_COVERED: dict[str, str] = {
     "rds-data": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
-    "s3tables": _REST,
     "s3vectors": _REST,
     "sagemaker": _LATER,
     "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
@@ -850,6 +849,17 @@ def uri_labels(models: dict[str, dict], operation: str) -> list[str]:
     return []
 
 
+def query_members(models: dict[str, dict], operation: str) -> list[str]:
+    """The members a REST request's query string carries, in the order its model gives them."""
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or "http" not in spec:
+            continue
+        return [name for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items()
+                if member.get("location") == "querystring"]
+    return []
+
+
 def created_aliases(models: dict[str, dict]) -> dict[str, str]:
     """The id a create answers beside the ARN of another type, by their stems: `RunJobFlow` answers `JobFlowId` and
     `ClusterArn`, so a job flow's id is a cluster's."""
@@ -1043,6 +1053,38 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
         # The labels before the member's own scope it; those after it name something inside it (a group's member).
         scope = labels[:labels.index(member)] if member in labels else labels
         resources.append({"type": kind, "fill": {}, "find": [label for label in scope if label != member] + [member]})
+    # A type whose format ends in an id its service mints, which no member fills, in a REST request whose path labels
+    # (or, with none, query string members) end in a member naming the type by its name, documented so or holding a
+    # botocore shape named so (`TableName`, documented as "The table name."), is found by its service by those
+    # members: an S3 Tables table by its table bucket's ARN, its namespace and its name, in
+    # `/tables/{tableBucketARN}/{namespace}/{name}`. A member among them holding an ARN holds another type's, which
+    # scopes this one; an optional member holding this type's own ARN names it instead when the request gives it
+    # (`GetTable`'s `tableArn`).
+    located = labels or query_members(models, name)
+    held_shapes = member_shapes(models, name)
+    for kind in kinds:
+        variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+        if creating or len(variables) < 2 or kind_of(variables[-1]) != "id" or not located:
+            continue
+        if any(resource.get("type") == kind and "find" in resource for resource in resources):
+            continue
+        named = [member for member in located if member in facts and not facts[member]["nested"] and (
+            (doc_kind(facts[member]["lead"]) == "name" and doc_names(facts[member]["lead"], kind, formats))
+            or (kind_of(held_shapes.get(member, "")) == "name" and stem(held_shapes[member]) == stem(kind)))]
+        if len(named) != 1:
+            continue
+        scope = located[:located.index(named[0]) + 1]
+        own = [resource["arn"] for resource in resources if "arn" in resource and resource["arn"] not in scope
+               and kind in resource["types"] and related(stem(resource["arn"]), stem(kind))]
+        optional = optional_members(models, name)
+        if own and not all(member in optional for member in own):
+            continue
+        resources = [resource for resource in resources if resource.get("type") != kind
+                     and not ("arn" in resource and resource["arn"] in scope)]
+        found = {"type": kind, "fill": {}, "find": scope}
+        if own:
+            found["when"] = {member: [None] for member in own}
+        resources.append(found)
     # A `ResourceId` a non-create's request gives names whatever the action acts on, which its service finds it as
     # (an EMR cluster or Studio its tag calls name), and another member then scopes the call rather than names one.
     one = [kind for kind in kinds if len([v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]) == 1]
@@ -1760,11 +1802,14 @@ def with_documented_creation(resources: list[dict], operation: str, types: list[
 
 def child_id(child: str, parent: str) -> str | None:
     """The variable a child type's ARN format adds to its parent's: the parent's with its leading resource type word
-    replaced and one id appended (`listener/app/.../${ListenerId}` for `loadbalancer/app/...`); None for any other."""
+    replaced and one id appended (`listener/app/.../${ListenerId}` for `loadbalancer/app/...`), or the parent's whole
+    with a word of its own and one id appended (`bucket/${TableBucketName}/table/${TableID}` for
+    `bucket/${TableBucketName}`); None for any other."""
     child_match, parent_match = RESOURCE_PART_RE.match(child), RESOURCE_PART_RE.match(parent)
-    if child_match is None or parent_match is None or child_match.group(1) == parent_match.group(1):
+    if child_match is None or parent_match is None:
         return None
-    appended = re.fullmatch(re.escape(parent_match.group(2)) + r"[/:]\$\{(\w+)}", child_match.group(2))
+    nested = r"[/:][A-Za-z][A-Za-z0-9-]*" if child_match.group(1) == parent_match.group(1) else ""
+    appended = re.fullmatch(re.escape(parent_match.group(2)) + nested + r"[/:]\$\{(\w+)}", child_match.group(2))
     return appended.group(1) if appended else None
 
 

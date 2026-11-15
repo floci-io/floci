@@ -21,12 +21,14 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
 public class S3TablesService {
     private static final Logger LOG = Logger.getLogger(S3TablesService.class);
     private static final String BUCKET_PREFIX = "bucket/";
+    private static final String TABLE_INFIX = "/table/";
     private static final int LIST_PAGE_SIZE = 1000;
 
     private final StorageBackend<String, TableBucket> store;
@@ -124,7 +126,9 @@ public class S3TablesService {
         if (namespace.getTables().containsKey(name)) {
             throw conflict("The table already exists.");
         }
-        S3Table table = new S3Table(name, bucket.getArn() + "/table/" + name, namespaceName, format,
+        // AWS ends a table's ARN in an id it mints, not the table's name, so tables of one name in two namespaces
+        // differ, and a rename keeps it.
+        S3Table table = new S3Table(name, bucket.getArn() + TABLE_INFIX + UUID.randomUUID(), namespaceName, format,
                 versionToken(), metadataLocation(metadata), now(), regionResolver.getAccountId(), metadata,
                 encryptionConfiguration, storageClassConfiguration, tags);
         table.setWarehouseLocation(createWarehouse(region));
@@ -144,6 +148,43 @@ public class S3TablesService {
         S3Table table = getTable(bucket, namespaceName, name);
         withWarehouses(bucket, List.of(table), region);
         return table;
+    }
+
+    /**
+     * The table {@code tableArn} names, as {@code GetTable} reads it when given one: in the table bucket the ARN's
+     * resource starts with, whichever namespace holds it. A table persisted before ARNs ended in a minted id keeps
+     * the name-based ARN it was stored with, and is found by it.
+     */
+    public synchronized S3Table getTableByArn(String tableArn, String region) {
+        int infix = tableArn == null ? -1 : tableArn.lastIndexOf(TABLE_INFIX);
+        if (infix < 0) {
+            throw notFound("The table does not exist.");
+        }
+        TableBucket bucket = getTableBucket(tableArn.substring(0, infix), region);
+        S3Table table = bucket.getNamespaces().values().stream()
+                .flatMap(namespace -> namespace.getTables().values().stream())
+                .filter(candidate -> tableArn.equals(candidate.getArn()))
+                .findFirst()
+                .orElseThrow(() -> notFound("The table does not exist."));
+        withWarehouses(bucket, List.of(table), region);
+        return table;
+    }
+
+    /**
+     * The ARN of the table a request names by its table bucket's ARN, its namespace and its name, as IAM asks for it
+     * before the handler runs; empty when there is no such table. Reads only: a table without a warehouse yet keeps
+     * it so.
+     */
+    public synchronized Optional<String> tableArn(String tableBucketArn, String namespaceName, String name,
+                                                  String region) {
+        try {
+            return Optional.of(getTable(getTableBucket(tableBucketArn, region), namespaceName, name).getArn());
+        } catch (AwsException e) {
+            if (!"NotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return Optional.empty();
+        }
     }
 
     public synchronized List<S3Table> listTables(String tableBucketArn, String namespaceName, String prefix, String region) {
@@ -261,7 +302,6 @@ public class S3TablesService {
         sourceNamespace.getTables().remove(name);
         table.setNamespace(targetNamespaceName);
         table.setName(targetName);
-        table.setArn(bucket.getArn() + "/table/" + targetName);
         touch(table);
         targetNamespace.getTables().put(targetName, table);
         persist(bucket, region);

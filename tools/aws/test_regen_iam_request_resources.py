@@ -383,6 +383,86 @@ def write_models(root, models: dict[str, dict]):
         (directory / "service-2.json").write_text(json.dumps(value), encoding="utf-8")
 
 
+def tables_model() -> dict:
+    """A rest-json model naming a table by its table bucket's ARN, its namespace and its name, as S3 Tables does: in its
+    path, documented as the table's name or holding a `TableName`, and in `GetTable`'s query string beside an optional
+    `tableArn`."""
+    def table_members(location: str, name_doc: str) -> dict:
+        return {"tableBucketARN": {"shape": "TableBucketARN", "location": location, "locationName": "tableBucketARN",
+                                   "documentation": "<p>The Amazon Resource Name (ARN) of the table bucket that "
+                                                    "contains the table.</p>"},
+                "namespace": {"shape": "NamespaceName", "location": location, "locationName": "namespace",
+                              "documentation": "<p>The namespace associated with the table.</p>"},
+                "name": {"shape": "TableName", "location": location, "locationName": "name",
+                         "documentation": name_doc}}
+    get = table_members("querystring", "<p>The name of the table.</p>")
+    get["tableArn"] = {"shape": "TableARN", "location": "querystring", "locationName": "tableArn",
+                       "documentation": "<p>The Amazon Resource Name (ARN) of the table.</p>"}
+    return {"metadata": {"protocol": "rest-json"},
+            "operations": {
+                "DeleteTable": {"http": {"method": "DELETE",
+                                         "requestUri": "/tables/{tableBucketARN}/{namespace}/{name}"},
+                                "input": {"shape": "DeleteIn"}},
+                "GetTablePolicy": {"http": {"method": "GET",
+                                            "requestUri": "/tables/{tableBucketARN}/{namespace}/{name}/policy"},
+                                   "input": {"shape": "PolicyIn"}},
+                "GetTable": {"http": {"method": "GET", "requestUri": "/get-table"}, "input": {"shape": "GetIn"}},
+                "GetTableBucket": {"http": {"method": "GET", "requestUri": "/buckets/{tableBucketARN}"},
+                                   "input": {"shape": "BucketIn"}}},
+            "shapes": {
+                "DeleteIn": {"type": "structure", "required": ["tableBucketARN", "namespace", "name"],
+                             "members": table_members("uri", "<p>The name of the table.</p>")},
+                "PolicyIn": {"type": "structure", "required": ["tableBucketARN", "namespace", "name"],
+                             "members": table_members("uri", "<p>The table name.</p>")},
+                "GetIn": {"type": "structure", "members": get},
+                "BucketIn": {"type": "structure", "required": ["tableBucketARN"],
+                             "members": {"tableBucketARN": table_members("uri", "")["tableBucketARN"]}},
+                "TableBucketARN": {"type": "string", "pattern": "(arn:aws[-a-z0-9]*:[a-z0-9]+:[-a-z0-9]*:[0-9]{12}"
+                                                                ":bucket/[a-z0-9_-]{3,63})"},
+                "TableARN": {"type": "string", "pattern": "(arn:aws[-a-z0-9]*:[a-z0-9]+:[-a-z0-9]*:[0-9]{12}"
+                                                          ":bucket/[a-z0-9_-]{3,63}/table/[0-9a-f_-]{36})"},
+                "NamespaceName": {"type": "string"},
+                "TableName": {"type": "string"}}}
+
+
+def test_a_type_ending_in_a_minted_id_is_found_by_the_path_members_naming_it():
+    formats = {"Table": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}/table/${TableID}",
+               "TableBucket": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}"}
+    models = {"s3tables": tables_model()}
+    found = {"type": "Table", "fill": {}, "find": ["tableBucketARN", "namespace", "name"]}
+
+    def resources(operation: str, types: list[str]) -> list[dict]:
+        return r.entry_for(f"s3tables:{operation}", {"action": f"s3tables:{operation}", "types": types},
+                           formats, models)["resources"]
+
+    # Its table bucket's ARN scopes the table rather than holding the table's ARN, and the table's name fills no
+    # variable of the bucket: the table is found by all three, documented as its name or holding a `TableName`.
+    assert resources("DeleteTable", ["Table"]) == [found]
+    assert resources("GetTablePolicy", ["Table"]) == [found]
+    # The same from a query string, unless the request gives the table's own ARN.
+    assert resources("GetTable", ["Table"]) == [{"types": ["Table"], "arn": "tableArn"},
+                                                dict(found, when={"tableArn": [None]})]
+    # A type its ARN member holds, of one variable, is read as before.
+    assert resources("GetTableBucket", ["TableBucket"]) == [{"types": ["TableBucket"], "arn": "tableBucketARN"}]
+
+
+def test_a_create_making_a_type_nested_under_its_parent_names_it_from_the_parents_arn():
+    formats = {"Table": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}/table/${TableID}",
+               "TableBucket": "arn:${Partition}:s3tables:${Region}:${Account}:bucket/${TableBucketName}"}
+    # The table's format is the bucket's whole with a word of its own and the table's id, so a create acting on the
+    # bucket makes a table under it, whose tags are checked there.
+    assert r.child_id(formats["Table"], formats["TableBucket"]) == "TableID"
+    assert r.creates_for("s3tables:CreateTable", ["TableBucket"], formats,
+                         members("tableBucketARN", "namespace", "name")) == [
+        {"type": "Table", "parent": "TableBucket", "arn": "tableBucketARN"}]
+    # A namespace is no type of its own here, so creating one makes nothing.
+    assert r.creates_for("s3tables:CreateNamespace", ["TableBucket"], formats,
+                         members("tableBucketARN", "namespace")) == []
+    # The same word with no word of the child's own between is no child.
+    assert r.child_id("arn:${Partition}:svc:${Region}:${Account}:thing/${ThingName}/${PartId}",
+                      "arn:${Partition}:svc:${Region}:${Account}:thing/${ThingName}") is None
+
+
 def test_rest_arn_alternatives_and_integer_shapes_fill_versioned_resources(isolated, tmp_path):
     formats = {
         "product": "arn:${Partition}:svc:${Region}:${Account}:product:${ProductName}",

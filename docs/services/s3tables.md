@@ -23,6 +23,13 @@ table's storage, not a general purpose bucket, so `ListBuckets` leaves it out. F
 snapshot expiry, replication, encryption management, and metrics are outside
 this implementation.
 
+A table's ARN ends in an id Floci mints when it creates the table
+(`arn:aws:s3tables:<region>:<account>:bucket/<bucket>/table/<id>`), as AWS's
+do, so two tables of one name in different namespaces have their own ARNs, and
+a rename keeps it. `GetTable` takes either `tableArn` or the table bucket's
+ARN, namespace and name. A table created by an earlier Floci keeps the ARN it
+was stored with, which ends in its name.
+
 ## Supported operations
 
 | Area | Operations |

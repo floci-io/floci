@@ -367,7 +367,7 @@ public final class RequestResources {
                 AwsArnUtils.Arn parent = AwsArnUtils.parse(parentFormat.checked(named));
                 String under = parent.resource().substring(created.parentWord().length());
                 addNamed(arns, new AwsArnUtils.Arn(parent.partition(), parent.service(), parent.region(),
-                        parent.accountId(), created.childWord() + under + created.separator() + "*").toString(),
+                        parent.accountId(), created.childWord() + under + created.infix() + "*").toString(),
                         false, partition, region, accountId, null);
             }
         }

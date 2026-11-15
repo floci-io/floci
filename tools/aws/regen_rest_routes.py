@@ -80,6 +80,7 @@ MODELS: dict[str, str] = {
     "route53": "route53",
     "s3": "s3",
     "s3control": "s3",
+    "s3tables": "s3tables",
     "scheduler": "scheduler",
     "securityhub": "securityhub",
     "signer": "signer",

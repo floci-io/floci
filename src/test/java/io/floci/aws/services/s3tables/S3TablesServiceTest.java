@@ -15,11 +15,13 @@ import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -131,18 +133,35 @@ class S3TablesServiceTest {
     }
 
     @Test
+    void tablesOfOneNameInTwoNamespacesHaveTheirOwnArnsEndingInAMintedId() {
+        String arn = createBucketWithNamespace("analytics");
+        service.createNamespace(arn, List.of("staging"), REGION);
+
+        S3Table analytics = createTable(arn, "analytics", "events");
+        S3Table staging = createTable(arn, "staging", "events");
+
+        assertTrue(analytics.getArn().matches(Pattern.quote(arn) + "/table/[0-9a-f-]{36}"), analytics.getArn());
+        assertNotEquals(analytics.getArn(), staging.getArn());
+        assertEquals("staging", service.getTableByArn(staging.getArn(), REGION).getNamespace());
+        assertEquals(Optional.of(analytics.getArn()), service.tableArn(arn, "analytics", "events", REGION));
+        assertEquals(Optional.empty(), service.tableArn(arn, "analytics", "missing", REGION));
+        assertError("NotFoundException", () -> service.getTableByArn(arn + "/table/unknown", REGION));
+    }
+
+    @Test
     void renameMovesTableAndRotatesItsVersionToken() {
         String arn = createBucketWithNamespace("analytics");
         service.createNamespace(arn, List.of("reporting"), REGION);
         S3Table created = createTable(arn, "analytics", "events");
         String originalToken = created.getVersionToken();
+        String tableArn = created.getArn();
 
         S3Table renamed = service.renameTable(arn, "analytics", "events", "reporting", "daily_events",
                 originalToken, REGION);
 
         assertEquals("reporting", renamed.getNamespace());
         assertEquals("daily_events", renamed.getName());
-        assertEquals(arn + "/table/daily_events", renamed.getArn());
+        assertEquals(tableArn, renamed.getArn(), "a rename keeps the table's id, so its ARN");
         assertNotEquals(originalToken, renamed.getVersionToken());
         assertError("NotFoundException", () -> service.getTable(arn, "analytics", "events", REGION));
         assertEquals(renamed, service.getTable(arn, "reporting", "daily_events", REGION));
