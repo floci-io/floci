@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The members that name a key, checked against the vendored constraints in every published region.
@@ -58,5 +59,25 @@ class PaymentCryptographyDataRequestShapesTest {
                         "EncryptData", request(KEY_ID)));
 
         assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void theCardOperationsAreCheckedAgainstTheModelToo() {
+        // The card operations' constraints are vendored, so a request that names a key by
+        // its identifier on its own is refused the way the other operations' is.
+        ObjectNode attributes = MAPPER.createObjectNode();
+        ObjectNode value = attributes.putObject("CardVerificationValue1");
+        value.put("CardExpiryDate", "3003");
+        value.put("ServiceCode", "201");
+        ObjectNode card = MAPPER.createObjectNode();
+        card.put("KeyIdentifier", KEY_ID);
+        card.put("PrimaryAccountNumber", "4111111111111111");
+        card.set("GenerationAttributes", attributes);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> PaymentCryptographyDataRequestShapes.check("GenerateCardValidationData", card));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("KeyIdentifier"), refused.getMessage());
     }
 }

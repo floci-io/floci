@@ -8,6 +8,7 @@ import io.floci.aws.services.dynamodb.ExpressionEvaluator.PathOperand;
 import io.floci.aws.services.dynamodb.ExpressionEvaluator.PlaceholderOperand;
 import io.floci.aws.services.dynamodb.ExpressionEvaluator.TokenType;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -49,8 +50,7 @@ final class DynamoDbKeyConditionParser {
         if (root == null) {
             return null;
         }
-        List<Expr> conditions = root instanceof AndExpr and ? and.operands() : List.of(root);
-        for (Expr condition : conditions) {
+        for (Expr condition : conditions(root)) {
             if (!(condition instanceof CompareExpr compare) || compare.op() != TokenType.EQ) {
                 continue;
             }
@@ -64,6 +64,21 @@ final class DynamoDbKeyConditionParser {
             }
         }
         return null;
+    }
+
+    // DynamoDB reads AND groups in parentheses as one list of key conditions.
+    static List<Expr> conditions(Expr root) {
+        List<Expr> conditions = new ArrayList<>();
+        addConditions(root, conditions);
+        return conditions;
+    }
+
+    private static void addConditions(Expr expression, List<Expr> conditions) {
+        if (expression instanceof AndExpr and) {
+            and.operands().forEach(operand -> addConditions(operand, conditions));
+        } else {
+            conditions.add(expression);
+        }
     }
 
     /** Resolves a single-segment path operand, following a {@code #alias} when one is used. */

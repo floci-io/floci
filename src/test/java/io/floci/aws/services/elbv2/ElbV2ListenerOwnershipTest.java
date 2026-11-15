@@ -80,7 +80,7 @@ class ElbV2ListenerOwnershipTest {
         CertificateMaterial broken = new CertificateMaterial(CERTIFICATE, valid.certificateBody(), other.privateKeyPem(), null);
         when(fixture.plane.certificateResolver.publishedMaterial(anyString(), eq(REGION), eq(CERTIFICATE))).thenReturn(broken);
         if (emptyDefault) {
-            listener.setCertificates(List.of());
+            listener.setDefaultCertificate(null);
         }
         AtomicInteger publications = new AtomicInteger();
         try {
@@ -89,7 +89,7 @@ class ElbV2ListenerOwnershipTest {
             assertEquals(0, publications.get());
             assertTrue(registry.isEmpty());
             assertEquals(0, fixture.creations(8443));
-            listener.setCertificates(List.of(CERTIFICATE));
+            listener.setDefaultCertificate(CERTIFICATE);
             when(fixture.plane.certificateResolver.publishedMaterial(anyString(), eq(REGION), eq(CERTIFICATE))).thenReturn(valid);
             assertTrue(fixture.plane.publishListener(listener, REGION, 8443,
                     () -> { publications.incrementAndGet(); return true; }, () -> List.of(rule("retry")), admitted -> admitted.get()));
@@ -718,7 +718,7 @@ class ElbV2ListenerOwnershipTest {
         listener.setLoadBalancerArn("arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/shared/1");
         listener.setPort(port);
         listener.setProtocol(secure ? "HTTPS" : "HTTP");
-        listener.setCertificates(secure ? List.of(CERTIFICATE) : List.of());
+        listener.setDefaultCertificate(secure ? CERTIFICATE : null);
         return listener;
     }
 

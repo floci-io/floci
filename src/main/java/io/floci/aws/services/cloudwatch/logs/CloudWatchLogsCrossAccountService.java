@@ -15,6 +15,7 @@ import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -62,7 +63,7 @@ public class CloudWatchLogsCrossAccountService {
     }
 
     public synchronized LogDestination putDestination(String destinationName, String targetArn,
-                                                       String roleArn, String region) {
+                                                       String roleArn, Map<String, String> tags, String region) {
         validateDestinationName(destinationName);
         requireArn(targetArn, "targetArn");
         requireArn(roleArn, "roleArn");
@@ -74,9 +75,53 @@ public class CloudWatchLogsCrossAccountService {
         destination.setArn(AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "destination:" + destinationName).toString());
         if (destination.getCreationTime() == 0) {
             destination.setCreationTime(System.currentTimeMillis());
+            destination.setTags(tags);
         }
         destinations.put(key, destination);
         return destination;
+    }
+
+    public static boolean isCrossAccountDestinationArn(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "logs".equals(parsed.service()) && parsed.resource().startsWith("destination:");
+    }
+
+    public synchronized Map<String, String> listDestinationTags(String arn, String region) {
+        return new LinkedHashMap<>(destinationByArn(arn, region).getTags());
+    }
+
+    public synchronized void tagDestination(String arn, Map<String, String> tags, String region) {
+        LogDestination destination = destinationByArn(arn, region);
+        destination.getTags().putAll(tags);
+        destinations.put(destinationKey(region, destination.getDestinationName()), destination);
+    }
+
+    public synchronized void untagDestination(String arn, List<String> tagKeys, String region) {
+        LogDestination destination = destinationByArn(arn, region);
+        tagKeys.forEach(destination.getTags()::remove);
+        destinations.put(destinationKey(region, destination.getDestinationName()), destination);
+    }
+
+    private LogDestination destinationByArn(String arn, String region) {
+        if (!isCrossAccountDestinationArn(arn)) {
+            throw destinationNotFound();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!region.equals(parsed.region()) || !regionResolver.getAccountId().equals(parsed.accountId())
+                || !regionResolver.partitionForRegion(region).equals(parsed.partition())) {
+            throw destinationNotFound();
+        }
+        String name = parsed.resource().substring("destination:".length());
+        return destinations.get(destinationKey(region, name))
+                .filter(destination -> arn.equals(destination.getArn()))
+                .orElseThrow(CloudWatchLogsCrossAccountService::destinationNotFound);
+    }
+
+    private static AwsException destinationNotFound() {
+        return new AwsException("ResourceNotFoundException", "The specified destination does not exist.", 400);
     }
 
     public synchronized void putDestinationPolicy(String destinationName, String accessPolicy, String region) {

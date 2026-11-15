@@ -22,7 +22,6 @@ import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
-import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.ssm.SsmCommandService;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
@@ -140,6 +139,11 @@ public class AutoScalingReconciler {
     }
 
     public void reconcile(AutoScalingGroup asg) {
+        // EKS owns the capacity of a managed node group's group. Its instance is the cluster's node, which
+        // Auto Scaling never launches, terminates or replaces.
+        if (asg.isEksManaged()) {
+            return;
+        }
         asgService.reconcileIfPresent(asg, () -> {
             settleStandbyMoves(asg);
             removeTerminatingInstances(asg);
@@ -295,7 +299,8 @@ public class AutoScalingReconciler {
                 if ("running".equals(ec2State)) {
                     String standbyActivityId = asgInst.getStandbyActivityId();
                     boolean returningFromStandby = standbyActivityId != null;
-                    registerWithTargetGroups(asg, asgInst, returningFromStandby);
+                    AutoScalingService.registerWithTargetGroups(elbV2Service, asg, asg.getTargetGroupARNs(),
+                            asgInst.getInstanceId(), returningFromStandby);
                     registerWithClassicLoadBalancers(asg, asgInst, returningFromStandby);
                     asgInst.setLifecycleState("InService");
                     changed = true;
@@ -905,26 +910,6 @@ public class AutoScalingReconciler {
         }
     }
 
-    private void registerWithTargetGroups(AutoScalingGroup asg, AsgInstance asgInst,
-                                          boolean returningFromStandby) {
-        for (String tgArn : asg.getTargetGroupARNs()) {
-            try {
-                TargetDescription td = new TargetDescription();
-                td.setId(asgInst.getInstanceId());
-                elbV2Service.registerTargets(asg.getRegion(), tgArn, List.of(td));
-                LOG.debugv("ASG {0}: registered {1} with TG {2}",
-                        asg.getAutoScalingGroupName(), asgInst.getInstanceId(), tgArn);
-            } catch (Exception e) {
-                LOG.warnv(e, "ASG {0}: could not register {1} with TG {2}: {3}",
-                        asg.getAutoScalingGroupName(), asgInst.getInstanceId(), tgArn, e.getMessage());
-                if (returningFromStandby && !(e instanceof AwsException aws
-                        && "TargetGroupNotFound".equals(aws.getErrorCode()))) {
-                    throw e;
-                }
-            }
-        }
-    }
-
     private LaunchSource resolveLaunchSource(AutoScalingGroup asg) {
         LaunchConfiguration lc = resolveLaunchConfiguration(asg);
         if (lc != null) {
@@ -964,7 +949,7 @@ public class AutoScalingReconciler {
                     asg.getRegion(),
                     launchTemplate.getLaunchTemplateId(),
                     null,
-                    asg.getLaunchTemplateVersion() == null ? List.of() : List.of(asg.getLaunchTemplateVersion()))
+                    AutoScalingService.launchTemplateVersionSelector(asg.getLaunchTemplateVersion()))
                     .getFirst();
             String resolvedVersion = version.getLatestVersionNumber() != null
                     ? version.getLatestVersionNumber()
@@ -997,7 +982,7 @@ public class AutoScalingReconciler {
                         asg.getRegion(),
                         mixedLaunchTemplate.getLaunchTemplateId(),
                         null,
-                        specification.getVersion() == null ? List.of() : List.of(specification.getVersion()))
+                        AutoScalingService.launchTemplateVersionSelector(specification.getVersion()))
                         .getFirst();
                 String resolvedVersion = version.getLatestVersionNumber() != null
                         ? version.getLatestVersionNumber()

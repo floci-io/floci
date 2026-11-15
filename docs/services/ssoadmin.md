@@ -93,9 +93,53 @@ Floci supports the SSO Admin operations used to manage IAM Identity Center permi
 
 State is isolated by caller account through Floci storage.
 
+## Provisioned IAM roles
+
+`ProvisionPermissionSet` and `CreateAccountAssignment` create a real IAM role in the target
+account, named `AWSReservedSSO_<permission-set-name>_<unique-suffix>`. Its path is
+`/aws-reserved/sso.amazonaws.com/<instance-region>/`, with the region omitted for `us-east-1`.
+The role carries the permission set's AWS managed policies, customer managed policies,
+inline policy, permissions boundary and session duration. Customer managed policies and
+customer managed boundaries must already exist in the target account with the referenced
+path and name; policy names are matched without regard to case. They are never copied
+from the administering account.
+
+Editing a permission set marks its provisioned copies stale. Explicit reprovisioning updates
+the role without changing its ARN or role ID, removes policies no longer configured, and
+preserves the previous role configuration if that account's desired policies cannot be
+validated. A missing policy or invalid inline document reports a `FAILED` provisioning or
+assignment operation with a failure reason. What makes an inline document invalid is the reading IAM
+gives it, the role being where it lands: `PutInlinePolicyToPermissionSet` holds the document to its
+size and its non-whitespace quota, as AWS documents a syntax error there, and the policy language's
+own values are read when the document is applied, so one naming an action that no vendor prefaces, a
+resource that is neither an ARN nor `*`, an effect the language does not define or a version it does
+not publish is attached and then reported in that failure reason. See
+[IAM](iam.md#inline-policies) for the sentences each clause is refused with. A permission set keeps
+whatever document it was attached, so one stored before a clause was read reports that failure
+reason on its next provisioning, refresh or assignment rather than when it was attached, and
+provisions again once the document is replaced. Failed assignment creation leaves no assignment.
+`ALL_PROVISIONED_ACCOUNTS` refreshes the permission set's currently provisioned accounts;
+an operation can fail after an earlier account was refreshed.
+
+Removing the final assignment for a permission set in an account deletes its generated role.
+Deleting a permission set or its Identity Center instance also removes its tracked roles.
+A later assignment creates a role with a new suffix. Roles are tracked by both ARN and IAM
+role ID, so cleanup leaves a manually recreated role with the same name untouched while
+removing the Identity Center assignment or permission set.
+
+The local access portal issues credentials for this role after checking the user's assignments.
+The generated trust policy permits the SSO service principal; provisioning an AWS SAML identity
+provider and direct SAML federation are not implemented by this flow. Manually changing these
+service-managed roles is not an alternative to updating and reprovisioning the permission set.
+State saved before role provisioning was supported must be explicitly reprovisioned before
+the portal can issue credentials for it.
+
+See [AWS permission-set role names and lifecycle](https://docs.aws.amazon.com/singlesignon/latest/userguide/referencingpermissionsets.html)
+and [AWS customer managed policy requirements](https://docs.aws.amazon.com/singlesignon/latest/userguide/howtocmp.html).
+
 ## AWS-compatible failures and state
 
-Permission-set names, ARNs, session durations, managed-policy ARNs, inline policies, account IDs, principal types, pagination, and duplicate assignments are validated before state is changed. Missing resources return `ResourceNotFoundException`; duplicate or incompatible state returns `ConflictException`; invalid input returns `ValidationException`; enforced local limits return `ServiceQuotaExceededException`.
+Permission-set names, ARNs, session durations, managed-policy ARNs, inline-policy sizes, account IDs, principal types, pagination, and duplicate assignments are validated before state is changed. Missing resources return `ResourceNotFoundException`; duplicate or incompatible state returns `ConflictException`; invalid input returns `ValidationException`; enforced local limits return `ServiceQuotaExceededException`.
 
 Account-assignment creation returns an operation record that can be read with `DescribeAccountAssignmentCreationStatus`. Provider-side `InternalServerException` and `ThrottlingException` are part of the AWS model but are not injected artificially by Floci.
 

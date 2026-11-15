@@ -121,6 +121,53 @@ class RedshiftAutomatedSnapshotServiceTest {
     }
 
     @Test
+    void modifiedManualSnapshotExpiresOnceItsRetentionHasPassed() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", "us-east-1", null);
+        Snapshot manual = fixture.service().createSnapshot("manual-backup", "warehouse");
+        fixture.service().modifyClusterSnapshot("manual-backup", 5);
+
+        fixture.service().runSnapshotSchedules(Instant.now().plus(Duration.ofDays(4)));
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isPresent());
+        assertTrue(Files.exists(Path.of(manual.getSqlDump())));
+
+        fixture.service().runSnapshotSchedules(Instant.now().plus(Duration.ofDays(6)));
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isEmpty());
+        assertFalse(Files.exists(Path.of(manual.getSqlDump())));
+    }
+
+    @Test
+    void manualSnapshotsWithoutAFiniteRetentionAreNeverExpired() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", null, null);
+        Snapshot manual = fixture.service().createSnapshot("manual-backup", "warehouse");
+
+        fixture.service().runSnapshotSchedules(Instant.now().plus(Duration.ofDays(4000)));
+
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isPresent());
+        assertTrue(Files.exists(Path.of(manual.getSqlDump())));
+    }
+
+    @Test
+    void modifyClusterSnapshotRejectsAnElapsedRetentionUnlessForced() {
+        Fixture fixture = fixture();
+        seed(fixture, ACCOUNT, "warehouse", null, null);
+        Snapshot manual = fixture.service().createSnapshot("manual-backup", "warehouse");
+        manual.setSnapshotCreateTime(Instant.now().minus(Duration.ofDays(10)));
+        fixture.snapshots().putForAccount(ACCOUNT, "manual-backup", manual);
+
+        AwsException rejected = assertThrows(AwsException.class,
+                () -> fixture.service().modifyClusterSnapshot("manual-backup", 5, false));
+        assertEquals("InvalidRetentionPeriodFault", rejected.getErrorCode());
+        assertEquals(-1, fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").orElseThrow()
+                .getManualSnapshotRetentionPeriod());
+
+        fixture.service().modifyClusterSnapshot("manual-backup", 5, true);
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "manual-backup").isEmpty());
+        assertFalse(Files.exists(Path.of(manual.getSqlDump())));
+    }
+
+    @Test
     void missingClustersLoseAutomatedSnapshotsButKeepManualBackups() {
         Fixture fixture = fixture();
         seed(fixture, ACCOUNT, "warehouse", "us-east-1", "rate(1 hour)");

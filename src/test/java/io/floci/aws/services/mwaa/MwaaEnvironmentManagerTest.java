@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -30,6 +31,8 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -96,8 +99,13 @@ class MwaaEnvironmentManagerTest {
         return startAirflowAndCaptureSpec(runningInContainer, null);
     }
 
-    @SuppressWarnings("unchecked")
     private ContainerSpec startAirflowAndCaptureSpec(boolean runningInContainer, byte[] startupScriptContent) {
+        return startAirflowAndCaptureSpec(runningInContainer, startupScriptContent, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private ContainerSpec startAirflowAndCaptureSpec(boolean runningInContainer, byte[] startupScriptContent,
+                                                     byte[] requirementsContent) {
         when(containerDetector.isRunningInContainer()).thenReturn(runningInContainer);
         when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
         ContainerInfo info = new ContainerInfo("airflow-container-id",
@@ -107,7 +115,8 @@ class MwaaEnvironmentManagerTest {
         Environment environment = new Environment();
         environment.setName("my-env");
 
-        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", startupScriptContent);
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", startupScriptContent,
+                requirementsContent);
 
         ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
         Mockito.verify(lifecycleManager).create(captor.capture());
@@ -198,7 +207,7 @@ class MwaaEnvironmentManagerTest {
                 "core.dags_are_paused_at_creation", "false",
                 "core.executor", "CeleryExecutor"));
 
-        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null);
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
 
         ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(captor.capture());
@@ -206,6 +215,37 @@ class MwaaEnvironmentManagerTest {
         // The colliding entry must not have replaced Floci's own required executor setting.
         assertTrue(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=LocalExecutor"));
         assertFalse(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=CeleryExecutor"));
+    }
+
+    @Test
+    void theGeneratedAdminPasswordIsKeptOnTheEnvironmentForWebLogins() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+        when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(new ContainerInfo(
+                "airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+        Environment environment = new Environment();
+        environment.setName("my-env");
+
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
+
+        ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(captor.capture());
+        assertNotNull(environment.getAirflowAdminPassword());
+        assertTrue(captor.getValue().env().contains("_AIRFLOW_WWW_USER_PASSWORD=" + environment.getAirflowAdminPassword()));
+        assertTrue(captor.getValue().env().contains("_AIRFLOW_WWW_USER_USERNAME=admin"));
+        assertTrue(captor.getValue().env().contains("AIRFLOW__FAB__AUTH_RATE_LIMITED=False"));
+    }
+
+    @Test
+    void theSignInRateLimitIsOffInTheSectionEachVersionReadsUnlessAnOptionSetsIt() {
+        assertEquals(List.of("AIRFLOW__WEBSERVER__AUTH_RATE_LIMITED=False"),
+                MwaaEnvironmentManager.signInRateLimitEnv("2.8.4", null));
+        assertEquals(List.of("AIRFLOW__FAB__AUTH_RATE_LIMITED=False"),
+                MwaaEnvironmentManager.signInRateLimitEnv("2.9.2", Map.of()));
+        assertEquals(List.of(), MwaaEnvironmentManager.signInRateLimitEnv("2.10.5",
+                Map.of("fab.auth_rate_limited", "True")));
+        assertEquals(List.of(), MwaaEnvironmentManager.signInRateLimitEnv("2.10.5",
+                Map.of("webserver.auth_rate_limited", "True")));
     }
 
     @Test
@@ -242,7 +282,7 @@ class MwaaEnvironmentManagerTest {
         environment.setName("my-env");
         environment.setArn("arn:aws:airflow:eu-west-1:111111111111:environment/my-env");
 
-        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null);
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
 
         ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
         verify(lifecycleManager).create(captor.capture());
@@ -258,10 +298,84 @@ class MwaaEnvironmentManagerTest {
         String script = spec.cmd().get(0);
         assertTrue(script.contains("airflow db migrate"));
         assertTrue(script.contains("airflow users create"));
+        assertTrue(script.contains("(while true; do airflow triggerer; "));
         assertTrue(script.contains("airflow scheduler &"));
         assertTrue(script.contains("exec airflow webserver"));
-        // migrate/user-create must precede the background scheduler, not run inside its background chain.
+        // migrate/user-create must precede the background triggerer and scheduler, not run inside
+        // their background chain.
+        assertTrue(script.indexOf("airflow db migrate") < script.indexOf("airflow triggerer"));
         assertTrue(script.indexOf("airflow db migrate") < script.indexOf("airflow scheduler &"));
+    }
+
+    @Test
+    void bootstrapScriptInstallsRequirementsAfterTheStartupScriptAndBeforeAirflowStarts() {
+        String script = MwaaEnvironmentManager.airflowBootstrapScript();
+
+        int startupIdx = script.indexOf("/startup.sh");
+        int saveEnvIdx = script.indexOf("(umask 077; export -p > /tmp/mwaa-startup.env)");
+        int installIdx = script.indexOf("if [ -f /tmp/mwaa-requirements.txt ]; then sh /tmp/mwaa-install-requirements.sh"
+                + " || ");
+        int migrateIdx = script.indexOf("airflow db migrate");
+
+        assertTrue(saveEnvIdx >= 0 && installIdx >= 0);
+        assertTrue(startupIdx < saveEnvIdx && saveEnvIdx < installIdx && installIdx < migrateIdx,
+                "real MWAA runs the startup script, then installs requirements, then starts Airflow");
+    }
+
+    @Test
+    void requirementsInstallScriptKeepsTheStartupExportsLimitsPipAndRecordsItsExitCode() {
+        String script = MwaaEnvironmentManager.requirementsInstallScript();
+
+        assertTrue(script.startsWith("if [ -f /tmp/mwaa-startup.env ]; then . /tmp/mwaa-startup.env; fi\n"));
+        assertTrue(script.contains("timeout 900 python -m pip install --no-cache-dir -r /tmp/mwaa-requirements.txt\n"));
+        assertTrue(script.contains("echo \"$code\" > /tmp/mwaa-requirements.exit\n"));
+        assertTrue(script.endsWith("exit \"$code\"\n"));
+    }
+
+    @Test
+    void requirementsReinstallCopiesTheFileAndRunsTheInstallScript() throws Exception {
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        when(dockerClient.copyArchiveToContainerCmd(anyString())).thenReturn(copyCmd);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "airflow-container-id", 0,
+                "", "");
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAirflowContainerId("airflow-container-id");
+
+        manager.installRequirements(environment, "boto3\n".getBytes(StandardCharsets.UTF_8));
+
+        verify(copyCmd, times(2)).withRemotePath("/tmp");
+        assertEquals(List.of(List.of("sh", "/tmp/mwaa-install-requirements.sh")), commands);
+    }
+
+    @Test
+    void lastRequirementsInstallExitCodeReadsWhatTheInstallScriptRecorded() {
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAirflowContainerId("airflow-container-id");
+
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "airflow-container-id", 0,
+                "1\n", "");
+
+        assertEquals(1, manager.lastRequirementsInstallExitCode(environment));
+        assertEquals(List.of(List.of("cat", "/tmp/mwaa-requirements.exit")), commands);
+    }
+
+    @Test
+    void lastRequirementsInstallExitCodeIsUnknownWhenNothingWasRecorded() {
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        Environment environment = new Environment();
+        environment.setName("my-env");
+        environment.setAirflowContainerId("airflow-container-id");
+        ContainerExecStubs.completeEveryExec(dockerClient, "airflow-container-id", 1, "",
+                "cat: /tmp/mwaa-requirements.exit: No such file or directory\n");
+
+        assertNull(manager.lastRequirementsInstallExitCode(environment));
     }
 
     @Test
@@ -363,6 +477,17 @@ class MwaaEnvironmentManagerTest {
     }
 
     @Test
+    void healthCheckRequiresMetadatabaseSchedulerAndTriggererHealthy() {
+        String allHealthy = "{\"metadatabase\": {\"status\": \"healthy\"}, \"scheduler\": {\"status\": \"healthy\"}, "
+                + "\"triggerer\": {\"latest_triggerer_heartbeat\": \"2026-11-15T00:40:57+00:00\", \"status\": \"healthy\"}}";
+        String noTriggerer = "{\"metadatabase\": {\"status\": \"healthy\"}, \"scheduler\": {\"status\": \"healthy\"}, "
+                + "\"triggerer\": {\"latest_triggerer_heartbeat\": null, \"status\": null}}";
+
+        assertTrue(MwaaEnvironmentManager.isHealthy(allHealthy));
+        assertFalse(MwaaEnvironmentManager.isHealthy(noTriggerer));
+    }
+
+    @Test
     void healthCheckRequiresBothMetadatabaseAndSchedulerHealthy() {
         String bothHealthy = "{\"metadatabase\":{\"status\":\"healthy\"},\"scheduler\":{\"status\":\"healthy\"}}";
         assertTrue(MwaaEnvironmentManager.healthySection(bothHealthy, "metadatabase"));
@@ -426,6 +551,31 @@ class MwaaEnvironmentManagerTest {
         }
 
         @Test
+        void requirementsAreInjectedBeforeTheContainerStartsWhenProvided() {
+            startAirflowAndCaptureSpec(false, null, "boto3\n".getBytes(StandardCharsets.UTF_8));
+
+            verify(copyCmd).withRemotePath("/etc/sudoers.d");
+            verify(copyCmd, times(2)).withRemotePath("/tmp");
+            verify(copyCmd, times(3)).exec();
+        }
+
+        @Test
+        void requirementsInjectionFailurePreventsTheContainerFromStarting() {
+            when(copyCmd.exec()).thenThrow(new RuntimeException("docker cp failed"));
+            when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+
+            Environment environment = new Environment();
+            environment.setName("my-env");
+
+            assertThrows(IllegalStateException.class, () -> manager.startAirflowContainer(
+                    environment, "2.10.5", "172.18.0.9", "db-secret-pw", null,
+                    "boto3\n".getBytes(StandardCharsets.UTF_8)));
+
+            verify(lifecycleManager).removeIfExists("airflow-container-id");
+            verify(lifecycleManager, never()).startCreated(anyString(), any());
+        }
+
+        @Test
         void startupScriptInjectionFailurePreventsTheContainerFromStarting() {
             // Shared copyCmd mock, so this also makes the (best-effort) sudoers-grant copy fail —
             // that alone must not abort anything; only the configured-startup-script failure should.
@@ -436,7 +586,7 @@ class MwaaEnvironmentManagerTest {
             environment.setName("my-env");
 
             assertThrows(IllegalStateException.class, () -> manager.startAirflowContainer(
-                    environment, "2.10.5", "172.18.0.9", "db-secret-pw", "export FOO=bar\n".getBytes()));
+                    environment, "2.10.5", "172.18.0.9", "db-secret-pw", "export FOO=bar\n".getBytes(), null));
 
             verify(lifecycleManager).removeIfExists("airflow-container-id");
             verify(lifecycleManager, never()).startCreated(anyString(), any());
@@ -553,7 +703,7 @@ class MwaaEnvironmentManagerTest {
         List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, "airflow-container-id", 2,
                 "dag1\n", "warning\n");
 
-        ContainerExec.Result result = manager.runAirflowCli("airflow-container-id", "dags list");
+        ContainerExec.Result result = manager.runAirflowCli("airflow-container-id", "2.10.5", "dags list");
 
         assertEquals(List.of(List.of("airflow", "dags", "list")), commands);
         assertEquals(2, result.exitCode());
@@ -577,7 +727,7 @@ class MwaaEnvironmentManagerTest {
         void shellSyntaxInACliCommandReachesAirflowAsPlainArguments() throws Exception {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 
-            manager.runAirflowCli(AIRFLOW_ID, "dags list ; touch /tmp/pwned $(id) `id` | cat > /tmp/out");
+            manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "dags list ; touch /tmp/pwned $(id) `id` | cat > /tmp/out");
 
             assertEquals(List.of(List.of("airflow", "dags", "list", ";", "touch", "/tmp/pwned", "$(id)", "`id`",
                     "|", "cat", ">", "/tmp/out")), commands);
@@ -589,7 +739,7 @@ class MwaaEnvironmentManagerTest {
 
             for (String command : List.of("users list", "users create", "db shell", "config get-value",
                     "webserver", "scheduler", "celery worker", "dags unknown", "dags", "")) {
-                ContainerExec.Result result = manager.runAirflowCli(AIRFLOW_ID, command);
+                ContainerExec.Result result = manager.runAirflowCli(AIRFLOW_ID, "2.10.5", command);
                 assertEquals(1, result.exitCode(), command);
                 assertTrue(result.stderr().contains("not supported"), command);
             }
@@ -610,17 +760,31 @@ class MwaaEnvironmentManagerTest {
                     "roles list", "tasks clear", "tasks failed-deps", "tasks list", "tasks render",
                     "tasks run", "tasks state", "tasks states-for-dag-run", "tasks test",
                     "variables delete", "variables get", "variables list", "variables set")) {
-                assertTrue(MwaaEnvironmentManager.isSupportedCliCommand(List.of(command.split(" "))), command);
+                assertTrue(MwaaEnvironmentManager.isSupportedCliCommand(List.of(command.split(" ")), "2.8.1"), command);
             }
+        }
+
+        @Test
+        void providersNotificationsNeedsAirflow28() throws Exception {
+            List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
+
+            ContainerExec.Result refused = manager.runAirflowCli(AIRFLOW_ID, "2.7.2", "providers notifications");
+            manager.runAirflowCli(AIRFLOW_ID, "2.7.2", "providers triggerer");
+            manager.runAirflowCli(AIRFLOW_ID, "2.8.1", "providers notifications");
+
+            assertEquals(1, refused.exitCode());
+            assertTrue(refused.stderr().contains("not supported"));
+            assertEquals(List.of(List.of("airflow", "providers", "triggerer"),
+                    List.of("airflow", "providers", "notifications")), commands);
         }
 
         @Test
         void quotedCliArgumentsReachAirflowWhole() throws Exception {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 
-            manager.runAirflowCli(AIRFLOW_ID, "dags trigger -c '{\"key\": \"a b\"}' my_dag");
-            manager.runAirflowCli(AIRFLOW_ID, "variables set greeting \"say \\\"hi\\\" to $USER\" ''");
-            manager.runAirflowCli(AIRFLOW_ID, "variables get two\\ words");
+            manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "dags trigger -c '{\"key\": \"a b\"}' my_dag");
+            manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "variables set greeting \"say \\\"hi\\\" to $USER\" ''");
+            manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "variables get two\\ words");
 
             assertEquals(List.of(
                     List.of("airflow", "dags", "trigger", "-c", "{\"key\": \"a b\"}", "my_dag"),
@@ -632,7 +796,7 @@ class MwaaEnvironmentManagerTest {
         void backslashNewlineJoinsTheTextOnEitherSide() throws Exception {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 
-            manager.runAirflowCli(AIRFLOW_ID, "variables set greeting hel\\\nlo \"wor\\\nld\"");
+            manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "variables set greeting hel\\\nlo \"wor\\\nld\"");
 
             assertEquals(List.of(List.of("airflow", "variables", "set", "greeting", "hello", "world")), commands);
         }
@@ -641,7 +805,7 @@ class MwaaEnvironmentManagerTest {
         void onlySpacesTabsAndNewlinesSeparateArguments() throws Exception {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 
-            manager.runAirflowCli(AIRFLOW_ID, "variables\tset\ngreeting hello\u2003world");
+            manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "variables\tset\ngreeting hello\u2003world");
 
             assertEquals(List.of(List.of("airflow", "variables", "set", "greeting", "hello\u2003world")), commands);
         }
@@ -651,7 +815,7 @@ class MwaaEnvironmentManagerTest {
             List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, AIRFLOW_ID, 0, "", "");
 
             assertThrows(IllegalArgumentException.class,
-                    () -> manager.runAirflowCli(AIRFLOW_ID, "dags trigger -c '{\"key\": 1}"));
+                    () -> manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "dags trigger -c '{\"key\": 1}"));
             assertEquals(List.of(), commands);
         }
     }

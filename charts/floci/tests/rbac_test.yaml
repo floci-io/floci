@@ -1,0 +1,165 @@
+suite: rbac and service account
+templates:
+  - templates/rbac.yaml
+  - templates/serviceaccount.yaml
+release:
+  name: floci
+  namespace: aws
+tests:
+  - it: grants only the pod calls the kubernetes Lambda executor makes
+    template: templates/rbac.yaml
+    documentSelector:
+      path: kind
+      value: Role
+    set:
+      cleanup.enabled: false
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: aws
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["create", "get", "list", "delete"]
+            - apiGroups: [""]
+              resources: ["pods/log"]
+              verbs: ["get"]
+
+  - it: lets the cleanup hook delete a CA ConfigMap left from TLS, by name, with TLS off
+    template: templates/rbac.yaml
+    documentSelector:
+      path: kind
+      value: Role
+    asserts:
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["create", "get", "list", "delete"]
+            - apiGroups: [""]
+              resources: ["pods/log"]
+              verbs: ["get"]
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["floci-lambda-ca"]
+              verbs: ["delete"]
+
+  - it: binds the Role to the chart's ServiceAccount
+    template: templates/rbac.yaml
+    documentSelector:
+      path: kind
+      value: RoleBinding
+    asserts:
+      - equal:
+          path: roleRef.name
+          value: floci-lambda
+      - equal:
+          path: subjects
+          value:
+            - kind: ServiceAccount
+              name: floci
+              namespace: aws
+
+  - it: adds the CA ConfigMap rules, scoped by name, with TLS
+    template: templates/rbac.yaml
+    documentSelector:
+      path: kind
+      value: Role
+    set:
+      floci.tls.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            verbs: ["create"]
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            resourceNames: ["floci-lambda-ca"]
+            verbs: ["get", "update", "delete"]
+
+  - it: leaves out delete on the CA ConfigMap without the cleanup hook
+    template: templates/rbac.yaml
+    documentSelector:
+      path: kind
+      value: Role
+    set:
+      floci.tls.enabled: true
+      cleanup.enabled: false
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["configmaps"]
+            resourceNames: ["floci-lambda-ca"]
+            verbs: ["get", "update"]
+
+  - it: creates the Role and binding in a separate Lambda namespace
+    template: templates/rbac.yaml
+    set:
+      floci.lambda.kubernetes.namespace: lambdas
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: lambdas
+      - equal:
+          path: subjects[0].namespace
+          value: aws
+        documentSelector:
+          path: kind
+          value: RoleBinding
+
+  - it: creates no RBAC for the docker executor or when disabled
+    template: templates/rbac.yaml
+    set:
+      floci.lambda.executor: docker
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: creates no RBAC when rbac.create is false
+    template: templates/rbac.yaml
+    set:
+      rbac.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: creates a ServiceAccount that does not mount its token by itself
+    template: templates/serviceaccount.yaml
+    set:
+      serviceAccount.annotations:
+        eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/floci
+    asserts:
+      - isKind:
+          of: ServiceAccount
+      - equal:
+          path: automountServiceAccountToken
+          value: false
+      - equal:
+          path: metadata.annotations["eks.amazonaws.com/role-arn"]
+          value: arn:aws:iam::123456789012:role/floci
+
+  - it: uses an existing ServiceAccount when create is false
+    set:
+      serviceAccount.create: false
+      serviceAccount.name: shared
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/serviceaccount.yaml
+      - equal:
+          path: subjects[0].name
+          value: shared
+        template: templates/rbac.yaml
+        documentSelector:
+          path: kind
+          value: RoleBinding

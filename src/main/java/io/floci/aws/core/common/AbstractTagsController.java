@@ -35,7 +35,8 @@ public abstract class AbstractTagsController {
 
     @GET
     @Path("/{arn: .+}")
-    public Response listTags(@Context HttpHeaders headers, @PathParam("arn") String arn) {
+    public Response listTags(@Context HttpHeaders headers, @Context UriInfo uriInfo, @PathParam("arn") String arn) {
+        dispatcher.resolveHandler(arn, uriInfo);
         return dispatcher.listTagsForArn(headers, arn);
     }
 
@@ -43,9 +44,10 @@ public abstract class AbstractTagsController {
     @Path("/{arn: .+}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response tagResourcePost(@Context HttpHeaders headers,
+                                    @Context UriInfo uriInfo,
                                     @PathParam("arn") String arn,
                                     String body) {
-        TagHandler handler = dispatcher.resolveHandler(arn);
+        TagHandler handler = dispatcher.resolveHandler(arn, uriInfo);
         return dispatcher.tagResourcePost(headers, arn, body,
                 Response.status(handler.tagResourceSuccessStatus()).build());
     }
@@ -54,9 +56,10 @@ public abstract class AbstractTagsController {
     @Path("/{arn: .+}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response tagResourcePut(@Context HttpHeaders headers,
+                                   @Context UriInfo uriInfo,
                                    @PathParam("arn") String arn,
                                    String body) {
-        TagHandler handler = dispatcher.resolveHandler(arn);
+        TagHandler handler = dispatcher.resolveHandler(arn, uriInfo);
         return dispatcher.tagResourcePut(headers, arn, body,
                 Response.status(handler.tagResourceSuccessStatus()).build());
     }
@@ -66,7 +69,7 @@ public abstract class AbstractTagsController {
     public Response untagResource(@Context HttpHeaders headers,
                                   @Context UriInfo uriInfo,
                                   @PathParam("arn") String arn) {
-        TagHandler handler = dispatcher.resolveHandler(arn);
+        TagHandler handler = dispatcher.resolveHandler(arn, uriInfo);
         return dispatcher.untagResourceForArn(headers, uriInfo, arn,
                 Response.status(handler.untagResourceSuccessStatus()).build(), handler);
     }

@@ -8,10 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.io.ByteArrayOutputStream;
 import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -31,20 +28,10 @@ class LambdaPermissionTagLayerIntegrationTest {
 
     // ── setup ─────────────────────────────────────────────────────────────────
 
-    private static byte[] minimalZip() throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write("exports.handler = async () => ({});".getBytes());
-            zos.closeEntry();
-        }
-        return baos.toByteArray();
-    }
-
     @Test
     @Order(1)
     void createFunction() throws Exception {
-        byte[] zip = minimalZip();
+        byte[] zip = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({});");
         String zipBase64 = Base64.getEncoder().encodeToString(zip);
 
         given()

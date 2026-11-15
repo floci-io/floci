@@ -5,6 +5,8 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -44,12 +46,22 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
         String version = output(stack, "ProfileVersion");
         String cscArn = output(stack, "CscArn");
         String function = output(stack, "Name");
+        String profileName = output(stack, "ProfileName");
 
         assertEquals(profileArn, output(stack, "ProfileRef"));
         assertThat(output(stack, "ProfileName"), matchesPattern("Profile_[A-Za-z0-9]{12}"));
         assertEquals("arn:aws:signer:us-east-1:000000000000:/signing-profiles/" + output(stack, "ProfileName"),
                 profileArn);
         assertThat(version, matchesPattern("[A-Za-z0-9]{10}"));
+        Response profileFromApi = signerApi()
+        .when()
+            .get("/signing-profiles/" + output(stack, "ProfileName"))
+        .then()
+                .statusCode(200)
+                .extract().response();
+        assertEquals(profileArn, profileFromApi.path("arn"));
+        assertEquals(version, profileFromApi.path("profileVersion"));
+        assertEquals("AWSLambda-SHA384-ECDSA", profileFromApi.path("platformId"));
         assertEquals(profileArn + "/" + version, output(stack, "ProfileVersionArn"));
         assertEquals(cscArn, output(stack, "CscRef"));
         assertEquals(cscArn, "arn:aws:lambda:us-east-1:000000000000:code-signing-config:" + output(stack, "CscId"));
@@ -89,6 +101,19 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
             .get("/2020-04-22/code-signing-configs/" + cscArn)
         .then()
             .statusCode(404);
+
+        // A stack delete cancels the profile, which AWS keeps visible with the same ARN.
+        signerApi()
+        .when()
+            .get("/signing-profiles/" + profileName)
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("Canceled"));
+    }
+
+    private static RequestSpecification signerApi() {
+        return given().header("Authorization",
+                "AWS4-HMAC-SHA256 Credential=000000000000/20260101/us-east-1/signer/aws4_request");
     }
 
     private static String template(String functionProperty) {

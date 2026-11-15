@@ -68,6 +68,7 @@ import io.floci.aws.services.cloudformation.provisioners.Ec2VpcGatewayAttachment
 import io.floci.aws.services.cloudformation.provisioners.EcrCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EcsCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EfsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
@@ -139,6 +140,7 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.FlowLogService;
 import io.floci.aws.services.ecr.EcrService;
 import io.floci.aws.services.ecs.EcsService;
+import io.floci.aws.services.efs.EfsService;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
@@ -172,6 +174,7 @@ import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.services.ses.SesService;
+import io.floci.aws.services.signer.SignerService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.ssm.SsmService;
@@ -182,6 +185,8 @@ import io.floci.aws.services.wafv2.WafV2Service;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Builds {@link CfnResourceDispatcher} for tests without a wall of positional nulls.
@@ -202,12 +207,20 @@ final class CfnProvisionerFixture {
     private CfnProvisionerFixture() {
     }
 
+    /** The template engine a provisioner test hands to {@code provision}: fixed account and stack, no outputs. */
+    static CloudFormationTemplateEngine engine(ObjectMapper mapper, String region, Map<String, Boolean> conditions) {
+        return new CloudFormationTemplateEngine("000000000000", region, "test-stack", "stack/id",
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                (Function<String, String>) name -> null);
+    }
+
     static Builder builder() {
         return new Builder();
     }
 
     static final class Builder {
 
+        private SignerService signerService;
         private S3Service s3Service;
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
@@ -235,6 +248,7 @@ final class CfnProvisionerFixture {
         private CustomResourceResponseStore customResourceResponseStore;
         private ContainerReachableEndpoint reachableEndpoint;
         private EcsService ecsService;
+        private EfsService efsService;
         private ElbV2Service elbV2Service;
         private StepFunctionsService stepFunctionsService;
         private BatchService batchService;
@@ -319,7 +333,9 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
-            discovered.add(new SignerCfnProvisioner());
+            if (signerService != null) {
+                discovered.add(new SignerCfnProvisioner(signerService));
+            }
             if (stepFunctionsService != null) {
                 discovered.add(new StepFunctionsCfnProvisioner(stepFunctionsService, s3Service, objectMapper));
             }
@@ -410,6 +426,9 @@ final class CfnProvisionerFixture {
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
                 discovered.add(new EcsCfnProvisioner(ecsService));
+            }
+            if (efsService != null) {
+                discovered.add(new EfsCfnProvisioner(efsService));
             }
             if (apiGatewayService != null) {
                 discovered.add(new ApiGatewayAccountCfnProvisioner(apiGatewayService));
@@ -562,6 +581,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder signer(SignerService v) {
+            this.signerService = v;
+            return this;
+        }
+
         public Builder s3(S3Service v) {
             this.s3Service = v;
             return this;
@@ -689,6 +713,11 @@ final class CfnProvisionerFixture {
 
         public Builder ecs(EcsService v) {
             this.ecsService = v;
+            return this;
+        }
+
+        public Builder efs(EfsService v) {
+            this.efsService = v;
             return this;
         }
 

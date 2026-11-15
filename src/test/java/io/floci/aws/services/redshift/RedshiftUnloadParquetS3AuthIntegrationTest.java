@@ -35,8 +35,9 @@ class RedshiftUnloadParquetS3AuthIntegrationTest {
     IamService iam;
 
     @BeforeAll
-    static void requireDocker() {
+    static void requireDocker() throws ClassNotFoundException {
         SidecarContainersProfile.requireDocker();
+        Class.forName("org.postgresql.Driver");
     }
 
     @Test

@@ -61,6 +61,11 @@ public class EcsTask {
     private Instant pullStoppedAt;
     private Instant executionStoppedAt;
     private Instant stoppingAt;
+    /**
+     * When the load balancer targets of this DEACTIVATING task finish draining, the earliest the
+     * service scheduler stops its containers. Internal: never serialized.
+     */
+    private Instant targetsDrainedAt;
     private EphemeralStorage ephemeralStorage;
     private boolean enableExecuteCommand;
     private TaskOverride overrides;
@@ -72,10 +77,9 @@ public class EcsTask {
     }
 
     /**
-     * Shallow copy, used to synthesize a phase ladder of lifecycle events without mutating the
-     * shared task instance held in the live task map — that instance stays visible to concurrent
-     * DescribeTasks/ListTasks calls for the whole synthesis, so events must be built from a
-     * snapshot instead of toggling {@link #lastStatus} back and forth on the original.
+     * Shallow copy, used where a task must be shown as it was at one moment without mutating the
+     * shared task instance held in the live task map: the phases of a lifecycle event ladder, and
+     * the RunTask response, which the launch would otherwise move on while it is written.
      */
     public EcsTask(EcsTask other) {
         this.taskArn = other.taskArn;
@@ -119,6 +123,7 @@ public class EcsTask {
         this.pullStoppedAt = other.pullStoppedAt;
         this.executionStoppedAt = other.executionStoppedAt;
         this.stoppingAt = other.stoppingAt;
+        this.targetsDrainedAt = other.targetsDrainedAt;
         this.ephemeralStorage = other.ephemeralStorage;
         this.enableExecuteCommand = other.enableExecuteCommand;
         this.overrides = other.overrides;
@@ -257,6 +262,9 @@ public class EcsTask {
     /** When the task left RUNNING for STOPPING, which AWS reports alongside {@code stoppedAt}. */
     public Instant getStoppingAt() { return stoppingAt; }
     public void setStoppingAt(Instant stoppingAt) { this.stoppingAt = stoppingAt; }
+
+    public Instant getTargetsDrainedAt() { return targetsDrainedAt; }
+    public void setTargetsDrainedAt(Instant targetsDrainedAt) { this.targetsDrainedAt = targetsDrainedAt; }
 
     public EphemeralStorage getEphemeralStorage() { return ephemeralStorage; }
     public void setEphemeralStorage(EphemeralStorage ephemeralStorage) { this.ephemeralStorage = ephemeralStorage; }

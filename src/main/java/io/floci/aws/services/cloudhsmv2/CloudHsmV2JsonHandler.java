@@ -429,7 +429,8 @@ public class CloudHsmV2JsonHandler {
                     "DestinationRegion is required when copying a backup.", 400);
         }
         String backupId = text(request, "BackupId");
-        Backup backup = service.copyBackupToRegion(destRegion, backupId, region);
+        Map<String, String> tags = parseTagList(request.path("TagList"));
+        Backup backup = service.copyBackupToRegion(destRegion, backupId, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode destBackup = objectMapper.createObjectNode();
         destBackup.put("CreateTimestamp", EpochSeconds.fromInstant(backup.getCreateTimestamp()));

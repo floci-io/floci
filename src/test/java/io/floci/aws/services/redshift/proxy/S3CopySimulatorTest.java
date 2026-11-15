@@ -1796,7 +1796,7 @@ class S3CopySimulatorTest {
         S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
         when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
 
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         S3CopySimulator.streamCopyInput(input, out);
 
@@ -1829,7 +1829,7 @@ class S3CopySimulatorTest {
                 "1|  \n2||x\n".getBytes(StandardCharsets.UTF_8), "text/plain");
         when(s3.getObject("wh", "p.txt")).thenReturn(dataObj);
 
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         S3CopySimulator.streamCopyInput(input, out);
 
@@ -1845,7 +1845,7 @@ class S3CopySimulatorTest {
         when(s3.getObject("wh", "p/b.txt")).thenReturn(new S3Object("wh", "p/b.txt",
                 "id|name\n2|b\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
         S3CopySimulator.CopyInput input =
-                new S3CopySimulator.CopyInput(spec, List.of("p/a.txt", "p/b.txt"), s3, null, null);
+                new S3CopySimulator.CopyInput(spec, List.of("p/a.txt", "p/b.txt"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         S3CopySimulator.streamCopyInput(input, out);
@@ -1866,7 +1866,7 @@ class S3CopySimulatorTest {
         }
         when(s3.getObject("wh", "p.gz")).thenReturn(new S3Object("wh", "p.gz", gz.toByteArray(), "application/gzip"));
 
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.gz"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.gz"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         S3CopySimulator.streamCopyInput(input, out);
 
@@ -1978,7 +1978,7 @@ class S3CopySimulatorTest {
                 false, false, false, transforms);
         when(s3.getObject("wh", "p.txt")).thenReturn(new S3Object("wh", "p.txt",
                 "1|03/31/2003\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         S3CopySimulator.streamCopyInput(input, null, null,
@@ -1996,7 +1996,7 @@ class S3CopySimulatorTest {
                 false, false, false, transforms);
         when(s3.getObject("wh", "p.txt")).thenReturn(new S3Object("wh", "p.txt",
                 "1|\n|03/31/2003\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         S3CopySimulator.streamCopyInput(input, null, null,
@@ -2014,7 +2014,7 @@ class S3CopySimulatorTest {
                 false, false, false, transforms);
         when(s3.getObject("wh", "p.txt")).thenReturn(new S3Object("wh", "p.txt",
                 "1\n2|b|7\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
 
         S3CopySimulator.streamCopyInput(input, null, null, List.of(CopyRecordTransformer.ColumnKind.OTHER,
@@ -2029,7 +2029,7 @@ class S3CopySimulatorTest {
                 false, false, false, false, null, null, null, false, true);
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null, null, null);
 
         S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
@@ -2042,7 +2042,7 @@ class S3CopySimulatorTest {
                 false, false, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null, null, null);
 
         S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
@@ -2055,7 +2055,7 @@ class S3CopySimulatorTest {
                 new CopyStatementParser.CopyTransforms(false, false, false, true, null);
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null, null, null);
 
         S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
@@ -2070,7 +2070,7 @@ class S3CopySimulatorTest {
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "1||x\n1||x\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null, null, null);
 
         long saved = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
         int availableBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
@@ -2093,7 +2093,7 @@ class S3CopySimulatorTest {
                 "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", "1\n2\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null, null, null);
 
         long saved = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
         int availableBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
@@ -2124,7 +2124,7 @@ class S3CopySimulatorTest {
         String inputData = "1\n".repeat(2000);
         when(s3.getObject("wh", "k")).thenReturn(
                 new S3Object("wh", "k", inputData.getBytes(StandardCharsets.UTF_8), "text/plain"));
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null, null, null);
 
         List<CopyRecordTransformer.ColumnKind> kinds = new ArrayList<>();
         for (int i = 0; i < 300; i++) {
@@ -2178,7 +2178,7 @@ class S3CopySimulatorTest {
         S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
         when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
 
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         S3CopySimulator.streamCopyInput(input, out);
 
@@ -2203,7 +2203,7 @@ class S3CopySimulatorTest {
         S3Object dataObj = new S3Object("wh", "users.json.gz", gzippedOut.toByteArray(), "application/gzip");
         when(s3.getObject("wh", "users.json.gz")).thenReturn(dataObj);
 
-        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json.gz"), s3, null, null);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("users.json.gz"), s3, null, null, null, null);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         S3CopySimulator.streamCopyInput(input, out);
 

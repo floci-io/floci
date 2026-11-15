@@ -38,8 +38,11 @@ eight documented counts split by launch type (`runningEC2TasksCount`, `runningFa
 `pendingEC2TasksCount`, `pendingFargateTasksCount`, `activeEC2ServiceCount`,
 `activeFargateServiceCount`, `drainingEC2ServiceCount`, `drainingFargateServiceCount`) as
 name/value strings. The API reference spells one of those names `RunningFargateTasksCount`; Floci
-follows the wire, which is lower camel case like the other seven. `ATTACHMENTS` is always an empty
-list, because Floci creates no managed scaling policies to attach.
+follows the wire, which is lower camel case like the other seven. The reference also describes
+`pendingTasksCount` as tasks in the `PENDING` state, but ECS counts a task as pending from
+`RunTask` until it runs, so Floci's count and the two pending statistics include a `PROVISIONING`
+task too. `ATTACHMENTS` is always an empty list, because Floci creates no managed scaling policies
+to attach.
 
 `DescribeClusters` reports a cluster it cannot resolve as a `MISSING` entry in `failures` rather
 than dropping it, as `DescribeServices` and `DescribeTasks` do. `ListClusters` pages with
@@ -125,9 +128,10 @@ default) keeps both. It pages with `maxResults` and `nextToken` the same way.
 At launch, a container's `dependsOn` decides the start order, and a `COMPLETE`, `SUCCESS` or
 `HEALTHY` condition holds the dependent container until the dependency gets there. The wait is
 bounded by the dependent container's `startTimeout`, defaulting to 60 seconds rather than AWS's
-longer agent default, because `RunTask` here answers synchronously. A container's `cpu` becomes its
-CPU shares, its `memory` its hard limit, and a container without a `memory` of its own is capped at
-the task's; the task's `cpu` becomes a CPU quota. `stopTimeout` is the grace period the container gets
+longer agent default, because the service scheduler starts a service's tasks on its own thread,
+which a long wait holds up. A container's `cpu` becomes its CPU shares, its `memory` its hard
+limit, and a container without a `memory` of its own is capped at the task's; the task's `cpu`
+becomes a CPU quota. `stopTimeout` is the grace period the container gets
 on teardown; a container that does not ask for one gets 5 seconds rather than AWS's 30, because
 `StopTask` here answers synchronously and most containers ignore SIGTERM as PID 1. A container
 still running when its grace period is up is killed, so its exit code is always reported.
@@ -298,6 +302,13 @@ A created service reports the documented defaults: `propagateTags` is `NONE` and
 a load-balanced service whose task definition does not use `awsvpc`, which is the only case AWS
 permits it in.
 
+A Fargate service retains its requested `platformVersion`, defaulting to `LATEST` when omitted.
+`CreateService`, `UpdateService` and `DescribeServices` return that setting, while its tasks,
+deployments and service revisions report the resolved version (`1.4.0` for `LATEST`). Updating
+between `LATEST` and that concrete version changes the service setting without rolling the
+deployment. Rollback restores the requested version from the successful revision. Older persisted
+revisions without that setting restore their stored platform version. EC2 services omit the platform members.
+
 A described service always carries `events` and `taskSets`, empty list and all, so a client can
 tell an empty answer from a member Floci never wrote. `taskSets` holds the service's task sets, the
 same ones `DescribeTaskSets` returns, which is where a blue/green deploy tool reads them from.
@@ -311,6 +322,14 @@ converging reports none. Each `deployments` entry carries the placement it runs 
 `RunTask` places at most 10 tasks per call and rejects `propagateTags: SERVICE`, which is a
 service-only option; `TASK_DEFINITION` copies the task definition's tags onto each task.
 `StartTask` requires the `containerInstances` it places onto, at most 10 of them.
+
+`RunTask` and `StartTask` answer before the task's images are pulled, as AWS does. An `awsvpc` task
+comes back `PROVISIONING` with its ENI attachment `PRECREATED`, and any other task `PENDING`, each
+with its containers `PENDING`. The task then moves to `RUNNING` in the background. A launch that
+fails, on an image that cannot be pulled for example, shows in `DescribeTasks` as `STOPPED` with
+`stopCode` `TaskFailedToStart`. A `StopTask` on a task still launching answers with the task's status
+unchanged and `desiredStatus` `STOPPED`; the task then stops without its containers ever starting,
+or as soon as they have.
 
 `ListTasks` filters by `cluster`, `family`, `desiredStatus`, `launchType`, `containerInstance`,
 `serviceName` and `startedBy`, and pages with `maxResults` and `nextToken` (100 per page by
@@ -336,6 +355,15 @@ is `STOPPED`. A failed Docker removal is retried on later reconciliation ticks, 
 reported as `STOPPED` while its container may still be serving. `StopTask` answers once its stop
 has landed, and on a task the scheduler is already stopping it waits for that stop rather than
 starting a second one.
+
+In Docker mode, an essential container exiting stops the other containers in its task,
+including when it exits successfully. An omitted `essential` flag defaults to true. Floci reports
+`EssentialContainerExited` and `Essential container in task exited`, retaining each container's
+exit code. A nonessential container's exit updates that container to `STOPPED` without stopping
+its still-running siblings. Remaining containers are stopped through the same background stop
+and retry path described above. When an essential exit initiates the stop, Floci deregisters its
+load-balancer targets but stops the siblings without waiting for the service-replacement drain
+period. Graceful service replacements retain their configured drain delay.
 
 Every `awsvpc` task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
 and reports it as an `attachments` entry with its `networkInterfaceId`, `privateIPv4Address` and
@@ -522,6 +550,13 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
+- A rolling deployment of a service with `loadBalancers` stops a stale task only once every
+  replacement's targets report `healthy`. A replacement that never turns healthy holds the
+  deployment.
+- A stale or scaled-in task of a service with `loadBalancers` stays `DEACTIVATING`, its
+  containers still running, for the longest `deregistration_delay.timeout_seconds` of its target
+  groups (300 seconds by default), then turns `STOPPING` on the next reconciler tick. A `StopTask`
+  call does not wait. The target leaves its target group at once rather than reporting `draining`.
 - `updatedAt` starts at `createdAt` and advances when the deployment status changes.
 - `deploymentConfiguration` is stored and reported as given. The deployment circuit breaker
   counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,
@@ -709,10 +744,14 @@ The task set round-trips `networkConfiguration` (defaulting to the service's), `
 scale percentage, always rounded up: 3 desired at 50 percent is 2 tasks, not 1. `UpdateTaskSet`
 recomputes it.
 
-Floci places no tasks for a task set, so `runningCount` and `pendingCount` stay at 0 and
-`stabilityStatus` is always `STEADY_STATE`. On AWS the status reaches `STEADY_STATE` once the
-running count matches the computed one; reporting `STABILIZING` here would hang anything that
-waits for the set to stabilise, since no count ever moves.
+Creating a service with the `CODE_DEPLOY` controller creates an initial `PRIMARY` task set
+at 100 percent scale. Its running and pending counts track the tasks launched by the service
+scheduler. The set reaches `STEADY_STATE` when the running count matches its computed desired
+count and no tasks are pending. `CreateService` and `DescribeServices` return the task set and an
+empty `deployments` list for this controller.
+
+Sets added through `CreateTaskSet` have simulated scheduling. Their running and pending counts
+stay at zero, and they report `STEADY_STATE` so deployment tools can continue.
 
 `DeleteTaskSet` refuses a task set that has not been scaled down to zero unless `force` is set.
 `DescribeTaskSets` returns tags only for `include: ["TAGS"]` and reports a reference naming no
@@ -872,6 +911,22 @@ with `maxResults` (1 to 100) and `nextToken`.
 | `SubmitAttachmentStateChanges` | Agent callback stub |
 | `DiscoverPollEndpoint` | Returns the agent polling endpoint |
 
+## IAM Enforcement
+
+With IAM enforcement on, each ECS request is checked on the resources it names, from the generated request
+resources: a cluster, service, task, container instance, task set or capacity provider by its name or its ARN; a
+service, task or container instance in the request's `cluster`, given by name or ARN, or in the `default` cluster
+when the request names none, as ECS does; an attribute on the container instance its `targetId` names; a service
+deployment or revision by its ARN, which Floci mints under its service as AWS does
+(`service-deployment/<cluster>/<service>/<id>`); and a task definition as the revision ECS resolves its reference to, a
+family alone being its latest revision, so `web`, `web:3` and the revision's ARN are the same resource. A service or
+task given by its ARN is checked on that ARN and, when the request's cluster is another, on the one of its name in
+that cluster too, which `UpdateService` acts on. A task definition ECS does not have is checked on any revision,
+`task-definition/*:*`. An operation whose action has no
+resource type in the Service Authorization Reference (`ListClusters`, `ListServices`, `DescribeTaskDefinition`,
+`DeregisterTaskDefinition`, the account settings) is checked on `*`. The roles a request passes are checked as
+`iam:PassRole` and the tags it sets as `ecs:TagResource`.
+
 ## Configuration
 
 Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, a Docker-backed task's containers additionally share one protected network namespace built around that ENI, and packets are filtered against its security groups. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state, including the ENI, and does not enforce packet filtering.
@@ -879,7 +934,7 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable or disable the ECS service |
-| `FLOCI_SERVICES_ECS_MOCK` | `false` | Skip Docker; tasks go straight to `RUNNING` (useful for CI) |
+| `FLOCI_SERVICES_ECS_MOCK` | `false` | Skip Docker; tasks reach `RUNNING` with nothing running behind them (useful for CI) |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | *(unset)* | Docker network for task containers |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
@@ -1045,7 +1100,7 @@ Unlike [real EFS user enforcement](https://docs.aws.amazon.com/efs/latest/ug/enf
 
 ### Mock mode
 
-Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers `TargetNotConnectedException` and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
+Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and reach `RUNNING` right after `RunTask` answers, then `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers `TargetNotConnectedException` and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
 
 ```yaml
 # docker-compose.yml — CI / test environment

@@ -1547,6 +1547,35 @@ class SqsServiceTest {
     }
 
     @Test
+    void messageAttributeSize_countsUtf8BytesOfNameTypeAndStringValue() {
+        assertEquals(6 + 6 + 6, SqsService.messageAttributeSize("na\u00efve", "String", "\u20acuro", null));
+    }
+
+    @Test
+    void messageAttributeSize_countsDecodedBinaryLength() {
+        assertEquals(3 + 6 + 6, SqsService.messageAttributeSize("bin", "Binary", null, "AAECAwQF"));
+    }
+
+    @Test
+    void messageAttributeSize_countsInvalidBase64AsItsUtf8Length() {
+        assertEquals(3 + 6 + 11, SqsService.messageAttributeSize("bin", "Binary", null, "not base64!"));
+    }
+
+    @Test
+    void messageAttributeSize_countsAnAttributeWithNoDataType() {
+        assertEquals(3 + 5, SqsService.messageAttributeSize("big", null, "value", null));
+    }
+
+    @Test
+    void computeMessageSize_countsEachAttributeLikeItsWireFields() {
+        Map<String, MessageAttributeValue> attrs = Map.of(
+                "na\u00efve", new MessageAttributeValue("\u20acuro", "String"),
+                "bin", new MessageAttributeValue(new byte[] {0, 1, 2, 3, 4, 5}, "Binary"));
+
+        assertEquals(4 + 18 + 15, SqsService.computeMessageSize("body", attrs));
+    }
+
+    @Test
     void addPermission_appendsLabelledStatementToPolicy() {
         Queue queue = sqsService.createQueue("perm-queue", null, "us-east-1");
         sqsService.addPermission(queue.getQueueUrl(), "share",

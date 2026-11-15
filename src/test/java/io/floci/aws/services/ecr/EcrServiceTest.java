@@ -46,10 +46,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -2347,25 +2347,14 @@ class EcrServiceTest {
     void creationTemplate_aSecondCreateOfThePrefixWaitsAndIsRefused() throws Exception {
         ParkingStore<RepositoryCreationTemplate> store = new ParkingStore<>();
         EcrService templates = templateService(store);
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            store.parkNextRead();
-            Future<?> first = pool.submit(() -> templates.createRepositoryCreationTemplate(
-                    template("prod", "REPLICATION"), REGION));
-            assertTrue(store.awaitParked());
-            Future<?> second = pool.submit(() -> templates.createRepositoryCreationTemplate(
-                    template("prod", "REPLICATION"), REGION));
-            assertThrows(TimeoutException.class, () -> second.get(200, TimeUnit.MILLISECONDS),
-                    "the second create must wait for the first");
-
-            store.release();
-            first.get(5, TimeUnit.SECONDS);
-            ExecutionException refused = assertThrows(ExecutionException.class, () -> second.get(5, TimeUnit.SECONDS));
-            assertEquals("TemplateAlreadyExistsException", ((AwsException) refused.getCause()).getErrorCode());
-        } finally {
-            store.release();
-            pool.shutdownNow();
-        }
+        store.parkNextRead();
+        assertOperationWaitsForParkedStore(store,
+                () -> templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION),
+                () -> {
+                    AwsException failure = assertThrows(AwsException.class,
+                            () -> templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION));
+                    assertEquals("TemplateAlreadyExistsException", failure.getErrorCode());
+                });
     }
 
     @Test
@@ -2375,22 +2364,10 @@ class EcrServiceTest {
         templates.createRepositoryCreationTemplate(template("prod", "REPLICATION"), REGION);
         RepositoryCreationTemplate change = template("prod");
         change.setDescription("changed");
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            store.parkNextRead();
-            Future<?> update = pool.submit(() -> templates.updateRepositoryCreationTemplate(change, REGION));
-            assertTrue(store.awaitParked());
-            Future<?> delete = pool.submit(() -> templates.deleteRepositoryCreationTemplate("prod", REGION));
-            assertThrows(TimeoutException.class, () -> delete.get(200, TimeUnit.MILLISECONDS),
-                    "the delete must wait for the update");
-
-            store.release();
-            update.get(5, TimeUnit.SECONDS);
-            delete.get(5, TimeUnit.SECONDS);
-        } finally {
-            store.release();
-            pool.shutdownNow();
-        }
+        store.parkNextRead();
+        assertOperationWaitsForParkedStore(store,
+                () -> templates.updateRepositoryCreationTemplate(change, REGION),
+                () -> templates.deleteRepositoryCreationTemplate("prod", REGION));
 
         assertTrue(templates.describeRepositoryCreationTemplates(null, null, null, REGION).items().isEmpty());
     }

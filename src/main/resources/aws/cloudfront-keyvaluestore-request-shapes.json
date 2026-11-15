@@ -1,0 +1,140 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_cloudfront_keyvaluestore_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "DeleteKey": "DeleteKeyRequest",
+    "DescribeKeyValueStore": "DescribeKeyValueStoreRequest",
+    "GetKey": "GetKeyRequest",
+    "ListKeys": "ListKeysRequest",
+    "PutKey": "PutKeyRequest",
+    "UpdateKeys": "UpdateKeysRequest"
+  },
+  "shapes": {
+    "DeleteKeyRequest": {
+      "type": "structure",
+      "required": [
+        "KvsARN",
+        "Key",
+        "IfMatch"
+      ],
+      "members": {
+        "KvsARN": "KvsARN",
+        "Key": "Key",
+        "IfMatch": "Etag"
+      }
+    },
+    "DeleteKeyRequestListItem": {
+      "type": "structure",
+      "required": [
+        "Key"
+      ],
+      "members": {
+        "Key": "Key"
+      }
+    },
+    "DeleteKeyRequestsList": {
+      "type": "list",
+      "member": "DeleteKeyRequestListItem"
+    },
+    "DescribeKeyValueStoreRequest": {
+      "type": "structure",
+      "required": [
+        "KvsARN"
+      ],
+      "members": {
+        "KvsARN": "KvsARN"
+      }
+    },
+    "Etag": {
+      "type": "string"
+    },
+    "GetKeyRequest": {
+      "type": "structure",
+      "required": [
+        "KvsARN",
+        "Key"
+      ],
+      "members": {
+        "KvsARN": "KvsARN",
+        "Key": "Key"
+      }
+    },
+    "Key": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "KvsARN": {
+      "type": "string",
+      "min": 1,
+      "max": 2048
+    },
+    "ListKeysRequest": {
+      "type": "structure",
+      "required": [
+        "KvsARN"
+      ],
+      "members": {
+        "KvsARN": "KvsARN",
+        "NextToken": "String",
+        "MaxResults": "ListKeysRequestMaxResultsInteger"
+      }
+    },
+    "ListKeysRequestMaxResultsInteger": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "PutKeyRequest": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value",
+        "KvsARN",
+        "IfMatch"
+      ],
+      "members": {
+        "Key": "Key",
+        "Value": "Value",
+        "KvsARN": "KvsARN",
+        "IfMatch": "Etag"
+      }
+    },
+    "PutKeyRequestListItem": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value"
+      ],
+      "members": {
+        "Key": "Key",
+        "Value": "Value"
+      }
+    },
+    "PutKeyRequestsList": {
+      "type": "list",
+      "member": "PutKeyRequestListItem"
+    },
+    "String": {
+      "type": "string"
+    },
+    "UpdateKeysRequest": {
+      "type": "structure",
+      "required": [
+        "KvsARN",
+        "IfMatch"
+      ],
+      "members": {
+        "KvsARN": "KvsARN",
+        "IfMatch": "Etag",
+        "Puts": "PutKeyRequestsList",
+        "Deletes": "DeleteKeyRequestsList"
+      }
+    },
+    "Value": {
+      "type": "string"
+    }
+  }
+}

@@ -324,6 +324,65 @@ class PaymentCryptographyCryptoHandlerTest {
     }
 
     @Test
+    void aPaddingTypeIsRefused() {
+        // The padding type belongs to RSA, and the symmetric cipher does not pad, so a
+        // request that names one is refused rather than answered with a cipher that
+        // ignored it.
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+
+        ObjectNode symmetric = mapper.createObjectNode();
+        symmetric.put("Mode", "CBC");
+        symmetric.put("PaddingType", "OAEP_SHA1");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.set("Symmetric", symmetric);
+
+        AwsException refused = assertThrows(AwsException.class, () -> handler.encryptData(request(Map.of(
+                "KeyIdentifier", key.getArn(), "PlainText", hex("hello, world!!!!".getBytes()),
+                "EncryptionAttributes", attributes)), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("PaddingType"), refused.getMessage());
+    }
+
+    @Test
+    void aWrappedKeyIsRefused() {
+        // The wrapped-key form is the key exchange, and the unwrapping is part of it, so a
+        // request that carries one is refused rather than answered as if the key were a
+        // fixed one.
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+
+        AwsException refused = assertThrows(AwsException.class, () -> handler.encryptData(request(Map.of(
+                "KeyIdentifier", key.getArn(), "PlainText", hex("hello, world!!!!".getBytes()),
+                "EncryptionAttributes", cbc(),
+                "WrappedKey", wrappedKey())), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("WrappedKey"), refused.getMessage());
+    }
+
+    @Test
+    void aWrappedKeyIsRefusedOnDecryptionToo() {
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+
+        AwsException refused = assertThrows(AwsException.class, () -> handler.decryptData(request(Map.of(
+                "KeyIdentifier", key.getArn(), "CipherText", "00".repeat(16),
+                "DecryptionAttributes", cbc(),
+                "WrappedKey", wrappedKey())), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("WrappedKey"), refused.getMessage());
+    }
+
+    /** The wrapped key the model carries, which the service refuses. */
+    private JsonNode wrappedKey() {
+        ObjectNode material = mapper.createObjectNode();
+        material.put("Tr31KeyBlock", "A".repeat(56));
+        ObjectNode wrapped = mapper.createObjectNode();
+        wrapped.set("WrappedKeyMaterial", material);
+        return wrapped;
+    }
+
+    @Test
     void aCipherTextIsAsLongAsThePlainTextItHolds() {
         // The cipher pads no data, so a ciphertext is as long as its plaintext.
         PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");

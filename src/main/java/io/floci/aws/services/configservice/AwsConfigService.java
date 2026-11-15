@@ -26,7 +26,6 @@ import io.floci.aws.services.configservice.model.EvaluationResult;
 import io.floci.aws.services.configservice.model.EvaluationResultIdentifier;
 import io.floci.aws.services.configservice.model.EvaluationResultQualifier;
 import io.floci.aws.services.configservice.model.RetentionConfiguration;
-import io.floci.aws.services.configservice.model.SourceDetail;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,46 +37,20 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AwsConfigService {
 
-    private static final Set<String> VALID_COMPLIANCE_TYPES =
-            Set.of("COMPLIANT", "NON_COMPLIANT", "NOT_APPLICABLE", "INSUFFICIENT_DATA");
     private static final String NO_SUCH_CONFIG_RULE_MESSAGE =
             "The ConfigRule provided in the request is invalid. Please check the configRule name.";
     private static final String INVALID_NEXT_TOKEN_MESSAGE =
             "The specified next token is not valid. Specify the nextToken string that was returned "
                     + "in the previous response to get the next page of results.";
-    /** Enum shapes from the Config model (config/2014-11-12/service-2.json). */
-    private static final Set<String> VALID_RULE_OWNERS =
-            Set.of("CUSTOM_LAMBDA", "AWS", "CUSTOM_POLICY");
-    private static final Set<String> VALID_EXECUTION_FREQUENCIES =
-            Set.of("One_Hour", "Three_Hours", "Six_Hours", "Twelve_Hours", "TwentyFour_Hours");
-    private static final Set<String> VALID_RULE_STATES =
-            Set.of("ACTIVE", "DELETING", "DELETING_RESULTS", "EVALUATING");
-    private static final Set<String> VALID_EVALUATION_MODES = Set.of("DETECTIVE", "PROACTIVE");
-    private static final Set<String> VALID_EVENT_SOURCES = Set.of("aws.config");
-    private static final Set<String> VALID_MESSAGE_TYPES = Set.of(
-            "ConfigurationItemChangeNotification", "ConfigurationSnapshotDeliveryCompleted",
-            "ScheduledNotification", "OversizedConfigurationItemChangeNotification");
-    /** {@code ComplianceTypes} is a list of ComplianceType with {@code max: 3}. */
-    private static final int MAX_COMPLIANCE_TYPE_FILTERS = 3;
-    /** {@code Scope.ComplianceResourceTypes} is {@code max: 100}. */
-    private static final int MAX_COMPLIANCE_RESOURCE_TYPES = 100;
-    /** {@code DescribeConfigRulesRequest.ConfigRuleNames} is {@code max: 25}. */
-    private static final int MAX_DESCRIBE_CONFIG_RULE_NAMES = 25;
-    /** {@code DescribeAggregationAuthorizationsRequest.Limit} is {@code max: 100}. */
-    private static final int MAX_AGGREGATION_AUTHORIZATIONS_LIMIT = 100;
-    /** {@code AuthorizedAccountId} is modeled with {@code pattern: \d{12}}. */
-    private static final Pattern AUTHORIZED_ACCOUNT_ID_PATTERN = Pattern.compile("\\d{12}");
     private static final int RULE_CONTRIBUTOR_CAP = 25;
     private static final int RESOURCE_CONTRIBUTOR_CAP = 100;
 
@@ -204,44 +177,11 @@ public class AwsConfigService {
      *  the tags alone, which TagResource/UntagResource change instead. The get-then-put runs under
      *  the lock delete takes, so a delete cannot land between them and orphan the creation tags. */
     public ConfigRule putConfigRule(String region, ConfigRule requested, List<Map<String, String>> tagList) {
-        if (requested == null || isBlank(requested.configRuleName())) {
+        String ruleName = requested.configRuleName();
+        if (ruleName == null) {
             throw new AwsException("InvalidParameterValueException",
                     "ConfigRuleName must be specified.", 400);
         }
-        if (requested.source() == null || isBlank(requested.source().owner())) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Source with Owner must be specified.", 400);
-        }
-        // The whole modeled ConfigRule is stored and echoed back, so every enum-typed member
-        // it keeps is checked here rather than accepted verbatim.
-        requireEnum(requested.source().owner(), VALID_RULE_OWNERS, "Source.Owner");
-        requireEnum(requested.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
-                "MaximumExecutionFrequency");
-        requireEnum(requested.configRuleState(), VALID_RULE_STATES, "ConfigRuleState");
-        if (requested.source().sourceDetails() != null) {
-            for (SourceDetail detail : requested.source().sourceDetails()) {
-                if (detail == null) {
-                    continue;
-                }
-                requireEnum(detail.eventSource(), VALID_EVENT_SOURCES, "SourceDetails.EventSource");
-                requireEnum(detail.messageType(), VALID_MESSAGE_TYPES, "SourceDetails.MessageType");
-                requireEnum(detail.maximumExecutionFrequency(), VALID_EXECUTION_FREQUENCIES,
-                        "SourceDetails.MaximumExecutionFrequency");
-            }
-        }
-        if (requested.scope() != null && requested.scope().complianceResourceTypes() != null
-                && requested.scope().complianceResourceTypes().size() > MAX_COMPLIANCE_RESOURCE_TYPES) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Scope.ComplianceResourceTypes accepts at most "
-                            + MAX_COMPLIANCE_RESOURCE_TYPES + " values.", 400);
-        }
-        if (requested.evaluationModes() != null) {
-            for (EvaluationModeConfiguration mode : requested.evaluationModes()) {
-                requireEnum(mode == null ? null : mode.mode(), VALID_EVALUATION_MODES,
-                        "EvaluationModes.Mode");
-            }
-        }
-        String ruleName = requested.configRuleName();
         synchronized (lockFor(ruleKey(region, ruleName))) {
             return storeConfigRule(region, requested, ruleName, tagList);
         }
@@ -305,10 +245,6 @@ public class AwsConfigService {
     }
 
     public List<ConfigRule> describeConfigRules(String region, List<String> ruleNames) {
-        if (ruleNames != null && ruleNames.size() > MAX_DESCRIBE_CONFIG_RULE_NAMES) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ConfigRuleNames accepts at most " + MAX_DESCRIBE_CONFIG_RULE_NAMES + " values.", 400);
-        }
         Map<String, ConfigRule> store = rulesFor(region);
         List<ConfigRule> result = new ArrayList<>();
         if (ruleNames == null || ruleNames.isEmpty()) {
@@ -327,8 +263,7 @@ public class AwsConfigService {
     }
 
     public Paged<ConfigRule> describeConfigRulesPaged(String region, List<String> ruleNames, String nextToken) {
-        return paginate(describeConfigRules(region, ruleNames), null, nextToken,
-                25, 25, "InvalidParameterValueException");
+        return paginate(describeConfigRules(region, ruleNames), null, nextToken, 25);
     }
 
     public Paged<ConfigRuleEvaluationStatus> describeConfigRuleEvaluationStatus(String region,
@@ -349,7 +284,7 @@ public class AwsConfigService {
                     evaluationStarted, ruleFirstActivatedTime.get(key),
                     lastEvaluationTime, lastEvaluationTime));
         }
-        return paginate(statuses, limit, nextToken, 150, 150, "InvalidParameterValueException");
+        return paginate(statuses, limit, nextToken, 150);
     }
 
     public void startConfigRulesEvaluation(String region, List<String> ruleNames) {
@@ -371,10 +306,6 @@ public class AwsConfigService {
         if (isBlank(resultToken)) {
             throw new AwsException("InvalidResultTokenException",
                     "The specified ResultToken is not valid.", 400);
-        }
-        if (newEvaluations.size() > 100) {
-            throw new AwsException("InvalidParameterValueException",
-                    "The Evaluations list cannot contain more than 100 items.", 400);
         }
         newEvaluations.forEach(this::validateEvaluation);
         if (testMode) {
@@ -413,11 +344,6 @@ public class AwsConfigService {
             throw new AwsException("InvalidParameterValueException",
                     "Each evaluation must specify ComplianceResourceType, ComplianceResourceId, "
                             + "ComplianceType and OrderingTimestamp.", 400);
-        }
-        if (!VALID_COMPLIANCE_TYPES.contains(evaluation.complianceType())) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ComplianceType must be one of COMPLIANT, NON_COMPLIANT, NOT_APPLICABLE, "
-                            + "INSUFFICIENT_DATA.", 400);
         }
     }
 
@@ -470,7 +396,6 @@ public class AwsConfigService {
 
     public Paged<ComplianceByConfigRule> describeComplianceByConfigRule(String region, List<String> ruleNames,
             List<String> complianceTypes, String nextToken) {
-        validateComplianceTypeFilter(complianceTypes);
         List<ComplianceByConfigRule> entries = new ArrayList<>();
         for (ConfigRule rule : describeConfigRules(region, ruleNames)) {
             Compliance compliance = complianceForRule(region, rule.configRuleName());
@@ -478,12 +403,11 @@ public class AwsConfigService {
                 entries.add(new ComplianceByConfigRule(rule.configRuleName(), compliance));
             }
         }
-        return paginate(entries, null, nextToken, 25, 25, "InvalidParameterValueException");
+        return paginate(entries, null, nextToken, 25);
     }
 
     public Paged<ComplianceByResource> describeComplianceByResource(String region, String resourceType,
             String resourceId, List<String> complianceTypes, Integer limit, String nextToken) {
-        validateComplianceTypeFilter(complianceTypes);
         if (!isBlank(resourceId) && isBlank(resourceType)) {
             throw new AwsException("InvalidParameterValueException",
                     "ResourceType must be specified when ResourceId is provided.", 400);
@@ -500,12 +424,11 @@ public class AwsConfigService {
         }
         entries.sort(Comparator.comparing(ComplianceByResource::resourceType)
                 .thenComparing(ComplianceByResource::resourceId));
-        return paginate(entries, limit, nextToken, 10, 100, "InvalidParameterValueException");
+        return paginate(entries, limit, nextToken, 10);
     }
 
     public Paged<EvaluationResult> getComplianceDetailsByConfigRule(String region, String ruleName,
             List<String> complianceTypes, Integer limit, String nextToken) {
-        validateComplianceTypeFilter(complianceTypes);
         requireRule(region, ruleName);
         List<EvaluationResult> results = evaluationsFor(region)
                 .getOrDefault(ruleName, Map.of()).values().stream()
@@ -514,12 +437,11 @@ public class AwsConfigService {
                         .thenComparing(ConfigEvaluation::complianceResourceId))
                 .map(e -> toEvaluationResult(ruleName, e))
                 .collect(Collectors.toList());
-        return paginate(results, limit, nextToken, 10, 100, "InvalidParameterValueException");
+        return paginate(results, limit, nextToken, 10);
     }
 
     public Paged<EvaluationResult> getComplianceDetailsByResource(String region, String resourceType,
             String resourceId, List<String> complianceTypes, String nextToken) {
-        validateComplianceTypeFilter(complianceTypes);
         if (isBlank(resourceType) || isBlank(resourceId)) {
             throw new AwsException("InvalidParameterValueException",
                     "ResourceType and ResourceId must be specified.", 400);
@@ -534,7 +456,7 @@ public class AwsConfigService {
         });
         results.sort(Comparator.comparing(r ->
                 r.evaluationResultIdentifier().evaluationResultQualifier().configRuleName()));
-        return paginate(results, null, nextToken, 10, 10, "InvalidParameterValueException");
+        return paginate(results, null, nextToken, 10);
     }
 
     public ComplianceSummary getComplianceSummaryByConfigRule(String region) {
@@ -554,10 +476,6 @@ public class AwsConfigService {
 
     public List<ComplianceSummaryByResourceType> getComplianceSummaryByResourceType(String region,
             List<String> resourceTypes) {
-        if (resourceTypes != null && resourceTypes.size() > 20) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ResourceTypes cannot contain more than 20 items.", 400);
-        }
         Map<String, long[]> countsByType = new HashMap<>();
         for (List<ConfigEvaluation> resourceEvaluations
                 : groupEvaluationsByResource(region, null, null).values()) {
@@ -640,36 +558,6 @@ public class AwsConfigService {
         return complianceTypes == null || complianceTypes.isEmpty() || complianceTypes.contains(complianceType);
     }
 
-    /**
-     * A {@code ComplianceTypes} filter outside the modeled enum (or longer than the list's
-     * {@code max: 3}) would otherwise match nothing and read to the caller as "no results"
-     * instead of the rejection AWS answers.
-     */
-    private static void validateComplianceTypeFilter(List<String> complianceTypes) {
-        if (complianceTypes == null || complianceTypes.isEmpty()) {
-            return;
-        }
-        if (complianceTypes.size() > MAX_COMPLIANCE_TYPE_FILTERS) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ComplianceTypes accepts at most " + MAX_COMPLIANCE_TYPE_FILTERS + " values.", 400);
-        }
-        for (String complianceType : complianceTypes) {
-            requireEnum(complianceType, VALID_COMPLIANCE_TYPES, "ComplianceTypes");
-        }
-    }
-
-    /** Rejects a non-blank value that is not a member of the shape's enum; a null/blank value is left alone. */
-    private static void requireEnum(String value, Set<String> allowed, String memberName) {
-        if (isBlank(value) || allowed.contains(value)) {
-            return;
-        }
-        throw new AwsException("InvalidParameterValueException",
-                "Value '" + value + "' at '" + memberName + "' failed to satisfy constraint: "
-                        + "Member must satisfy enum value set: ["
-                        + allowed.stream().sorted().collect(Collectors.joining(", ")) + "]",
-                400);
-    }
-
     private ComplianceContributorCount contributorCount(long count, int cap) {
         return new ComplianceContributorCount((int) Math.min(count, cap), count > cap);
     }
@@ -684,15 +572,37 @@ public class AwsConfigService {
 
     // --- Configuration Recorder ---
 
-    public void putConfigurationRecorder(String region, ConfigurationRecorder recorder) {
+    /** Put is an upsert, and request tags are applied at creation only, as for config rules: the
+     *  PutConfigurationRecorder model says a later Put with different Tags leaves them unchanged.
+     *  A Put under another name replaces the recorder, so it gets a new ARN and the old one's tags
+     *  go. A recorder saved before recorders had an ARN gets one on its next Put. */
+    public void putConfigurationRecorder(String region, ConfigurationRecorder recorder,
+                                         List<Map<String, String>> tagList) {
         String name = (recorder.name() == null || recorder.name().isEmpty()) ? "default" : recorder.name();
-        ConfigurationRecorder stored = new ConfigurationRecorder(name, recorder.roleARN(), recorder.recordingGroup(),
-                recorder.recordingMode());
-        configurationRecorders.put(region, stored);
+        synchronized (lockFor(recorderLockKey(region))) {
+            ConfigurationRecorder existing = configurationRecorders.get(region);
+            boolean created = existing == null || !existing.name().equals(name);
+            String arn = created || existing.arn() == null
+                    ? AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                            "configuration-recorder/" + name + "/" + shortId()).toString()
+                    : existing.arn();
+            // Tags before the recorder, as storeConfigRule does: a retry after a failed tag write
+            // finds no recorder and creates both.
+            if (created && tagList != null && !tagList.isEmpty()) {
+                applyTags(arn, tagList);
+            }
+            configurationRecorders.put(region, new ConfigurationRecorder(arn, name, recorder.roleARN(),
+                    recorder.recordingGroup(), recorder.recordingMode()));
+            if (created && existing != null) {
+                tags.remove(existing.arn());
+            }
+        }
     }
 
-    public List<ConfigurationRecorder> describeConfigurationRecorders(String region, List<String> names) {
+    public List<ConfigurationRecorder> describeConfigurationRecorders(String region, List<String> names, String arn) {
+        validateConfigurationRecorderNames(names);
         ConfigurationRecorder recorder = configurationRecorders.get(region);
+        requireRecorderArn(arn, recorder);
         if (recorder == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
@@ -711,16 +621,37 @@ public class AwsConfigService {
         return List.of(recorder);
     }
 
-    public void deleteConfigurationRecorder(String region, String name) {
-        ConfigurationRecorder recorder = configurationRecorders.get(region);
-        if (recorder == null || !recorder.name().equals(name)) {
-            throw new AwsException("NoSuchConfigurationRecorderException",
-                    "Cannot find configuration recorder with the specified name.", 400);
+    private static void validateConfigurationRecorderNames(List<String> names) {
+        if (names != null && names.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "You have specified more than one configuration recorder.", 400);
         }
-        configurationRecorders.remove(region);
-        recorderRunning.remove(runtimeKey(region));
-        recorderLastStartTime.remove(runtimeKey(region));
-        recorderLastStopTime.remove(runtimeKey(region));
+    }
+
+    private static void requireRecorderArn(String arn, ConfigurationRecorder recorder) {
+        if (arn != null && (recorder == null || !arn.equals(recorder.arn()))) {
+            throw new AwsException("NoSuchConfigurationRecorderException",
+                    "Cannot find configuration recorder with the specified ARN.", 400);
+        }
+    }
+
+    public void deleteConfigurationRecorder(String region, String name) {
+        synchronized (lockFor(recorderLockKey(region))) {
+            ConfigurationRecorder recorder = configurationRecorders.get(region);
+            if (recorder == null || !recorder.name().equals(name)) {
+                throw new AwsException("NoSuchConfigurationRecorderException",
+                        "Cannot find configuration recorder with the specified name.", 400);
+            }
+            configurationRecorders.remove(region);
+            tags.remove(recorder.arn());
+            recorderRunning.remove(runtimeKey(region));
+            recorderLastStartTime.remove(runtimeKey(region));
+            recorderLastStopTime.remove(runtimeKey(region));
+        }
+    }
+
+    private String recorderLockKey(String region) {
+        return "configuration-recorder|" + runtimeKey(region);
     }
 
     public void startConfigurationRecorder(String region, String name) {
@@ -743,8 +674,11 @@ public class AwsConfigService {
         recorderLastStopTime.put(runtimeKey(region), now());
     }
 
-    public List<ConfigurationRecorderStatus> describeConfigurationRecorderStatus(String region, List<String> names) {
+    public List<ConfigurationRecorderStatus> describeConfigurationRecorderStatus(String region, List<String> names,
+                                                                                 String arn) {
+        validateConfigurationRecorderNames(names);
         ConfigurationRecorder recorder = configurationRecorders.get(region);
+        requireRecorderArn(arn, recorder);
         if (recorder == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
@@ -761,6 +695,7 @@ public class AwsConfigService {
             }
         }
         ConfigurationRecorderStatus status = new ConfigurationRecorderStatus(
+                recorder.arn(),
                 recorder.name(),
                 recorderRunning.getOrDefault(runtimeKey(region), false),
                 recorderLastStartTime.containsKey(runtimeKey(region)) ? "SUCCESS" : "Pending",
@@ -819,10 +754,6 @@ public class AwsConfigService {
     // --- Retention Configuration ---
 
     public RetentionConfiguration putRetentionConfiguration(String region, Integer retentionPeriodInDays) {
-        if (retentionPeriodInDays == null || retentionPeriodInDays < 30 || retentionPeriodInDays > 2557) {
-            throw new AwsException("InvalidParameterValueException",
-                    "RetentionPeriodInDays must be between 30 and 2557.", 400);
-        }
         RetentionConfiguration configuration = new RetentionConfiguration("default", retentionPeriodInDays);
         retentionConfigurations.put(region, configuration);
         return configuration;
@@ -842,10 +773,6 @@ public class AwsConfigService {
     }
 
     public void deleteRetentionConfiguration(String region, String name) {
-        if (isBlank(name)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "RetentionConfigurationName must be specified.", 400);
-        }
         RetentionConfiguration configuration = retentionConfigurations.get(region);
         if (configuration == null || !configuration.name().equals(name)) {
             throw new AwsException("NoSuchRetentionConfigurationException",
@@ -920,8 +847,7 @@ public class AwsConfigService {
 
     public Paged<ConformancePack> describeConformancePacksPaged(String region, List<String> names,
             Integer limit, String nextToken) {
-        return paginate(describeConformancePacks(region, names), limit, nextToken,
-                20, 20, "InvalidLimitException");
+        return paginate(describeConformancePacks(region, names), limit, nextToken, 20);
     }
 
     public Paged<ConformancePackStatusDetail> describeConformancePackStatus(String region, List<String> names,
@@ -935,7 +861,7 @@ public class AwsConfigService {
                     "CREATE_SUCCESSFUL",
                     now()));
         }
-        return paginate(result, limit, nextToken, 20, 20, "InvalidLimitException");
+        return paginate(result, limit, nextToken, 20);
     }
 
     // --- Aggregation Authorizations ---
@@ -950,7 +876,7 @@ public class AwsConfigService {
      *  CreationTime and re-apply creation tags over a set TagResource may already have changed. */
     public AggregationAuthorization putAggregationAuthorization(String region, String authorizedAccountId,
             String authorizedAwsRegion, List<Map<String, String>> tagList) {
-        requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
+        requireAuthorizedAwsRegion(authorizedAwsRegion);
         synchronized (lockFor(authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion))) {
             Map<String, AggregationAuthorization> store = authorizationsFor(region);
             String key = authorizationKey(authorizedAccountId, authorizedAwsRegion);
@@ -977,8 +903,7 @@ public class AwsConfigService {
                         .thenComparing(AggregationAuthorization::authorizedAwsRegion);
         List<AggregationAuthorization> result = new ArrayList<>(authorizationsFor(region).values());
         result.sort(byAuthorizedTarget);
-        return paginate(result, limit, nextToken, MAX_AGGREGATION_AUTHORIZATIONS_LIMIT,
-                MAX_AGGREGATION_AUTHORIZATIONS_LIMIT, "InvalidLimitException");
+        return paginate(result, limit, nextToken, 100);
     }
 
     /** The Config model declares no "not found" error for this operation, so deleting an
@@ -991,7 +916,7 @@ public class AwsConfigService {
      *  authorization already gone. */
     public void deleteAggregationAuthorization(String region, String authorizedAccountId,
             String authorizedAwsRegion) {
-        requireAuthorizationKey(authorizedAccountId, authorizedAwsRegion);
+        requireAuthorizedAwsRegion(authorizedAwsRegion);
         synchronized (lockFor(authorizationLockKey(region, authorizedAccountId, authorizedAwsRegion))) {
             Map<String, AggregationAuthorization> store = authorizationsFor(region);
             AggregationAuthorization removed =
@@ -1009,11 +934,7 @@ public class AwsConfigService {
                 "aggregation-authorization/" + authorizedAccountId + "/" + authorizedAwsRegion).toString();
     }
 
-    private void requireAuthorizationKey(String authorizedAccountId, String authorizedAwsRegion) {
-        if (isBlank(authorizedAccountId) || !AUTHORIZED_ACCOUNT_ID_PATTERN.matcher(authorizedAccountId).matches()) {
-            throw new AwsException("InvalidParameterValueException",
-                    "AuthorizedAccountId must be a 12 digit AWS account ID.", 400);
-        }
+    private static void requireAuthorizedAwsRegion(String authorizedAwsRegion) {
         if (isBlank(authorizedAwsRegion)) {
             throw new AwsException("InvalidParameterValueException",
                     "AuthorizedAwsRegion must be specified.", 400);
@@ -1023,12 +944,13 @@ public class AwsConfigService {
     // --- Tagging ---
 
     /** TagResource, UntagResource and ListTagsForResource each model ResourceNotFoundException.
-     *  For the kinds Floci stores (config rules, conformance packs, aggregation authorizations)
-     *  the ARN must name a resource that exists in the caller's account and the request Region,
-     *  so a deleted resource, or one in another account, Region or partition, is not found. The
-     *  check and the tag write run under the lock that resource's delete takes, so a delete cannot
-     *  land between them and leave an orphan tag entry for a resource that is gone. ARNs of kinds
-     *  Floci does not model are passed through unchecked, as before. */
+     *  For the kinds Floci stores (config rules, conformance packs, aggregation authorizations,
+     *  configuration recorders) the ARN must name a resource that exists in the caller's account
+     *  and the request Region, so a deleted resource, or one in another account, Region or
+     *  partition, is not found. The check and the tag write run under the lock that resource's
+     *  delete takes, so a delete cannot land between them and leave an orphan tag entry for a
+     *  resource that is gone. ARNs of kinds Floci does not model are passed through unchecked,
+     *  as before. */
     public void tagResource(String region, String arn, List<Map<String, String>> tagList) {
         onTaggableResource(region, arn, () -> {
             applyTags(arn, tagList);
@@ -1104,6 +1026,13 @@ public class AwsConfigService {
                     return rule != null && arn.equals(rule.configRuleArn());
                 };
             }
+            case "configuration-recorder" -> {
+                lockKey = recorderLockKey(region);
+                exists = () -> {
+                    ConfigurationRecorder recorder = configurationRecorders.get(region);
+                    return recorder != null && arn.equals(recorder.arn());
+                };
+            }
             default -> {
                 return action.get();
             }
@@ -1122,17 +1051,9 @@ public class AwsConfigService {
     public record Paged<T>(List<T> items, String nextToken) {}
 
     /** Offset-as-NextToken pagination over a pre-sorted list. A null or zero limit falls back to
-     *  the default page size; limits outside [1, maxLimit] fail with the op-specific error code. */
-    private <T> Paged<T> paginate(List<T> items, Integer limit, String nextToken,
-            int defaultPageSize, int maxLimit, String limitErrorCode) {
-        int pageSize = defaultPageSize;
-        if (limit != null && limit != 0) {
-            if (limit < 0 || limit > maxLimit) {
-                throw new AwsException(limitErrorCode,
-                        "Limit must be between 0 and " + maxLimit + ".", 400);
-            }
-            pageSize = limit;
-        }
+     *  the default page size; ConfigRequestShapes has already checked the limit's modeled range. */
+    private <T> Paged<T> paginate(List<T> items, Integer limit, String nextToken, int defaultPageSize) {
+        int pageSize = limit == null || limit == 0 ? defaultPageSize : limit;
         int offset = 0;
         if (nextToken != null && !nextToken.isEmpty()) {
             try {

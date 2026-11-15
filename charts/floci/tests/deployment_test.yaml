@@ -1,0 +1,401 @@
+suite: deployment
+templates:
+  - templates/deployment.yaml
+  - templates/init-hooks-configmap.yaml
+release:
+  name: floci
+  namespace: aws
+chart:
+  appVersion: 9.9.9
+tests:
+  - it: runs one replica of the pinned image with the Recreate strategy
+    template: templates/deployment.yaml
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: floci/floci:9.9.9
+      - equal:
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: http
+              containerPort: 4566
+              protocol: TCP
+
+  - it: disables service links, which would inject FLOCI_PORT for a Service named floci
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
+
+  - it: satisfies the restricted Pod Security Standard by default
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+  - it: mounts writable emptyDirs for /app/data and /tmp under the read-only root filesystem
+    template: templates/deployment.yaml
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: data
+            mountPath: /app/data
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: tmp
+            mountPath: /tmp
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            emptyDir: {}
+
+  - it: derives the Floci environment from the values, sorted by name
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: FLOCI_BASE_URL
+              value: http://floci.aws.svc.cluster.local:4566
+            - name: FLOCI_PORT
+              value: "4566"
+            - name: FLOCI_SERVICES_LAMBDA_EXECUTOR
+              value: kubernetes
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
+              value: aws
+            - name: FLOCI_STORAGE_MODE
+              value: memory
+            - name: FLOCI_STORAGE_PERSISTENT_PATH
+              value: /app/data
+
+  - it: passes other floci.env settings through as strings, integers kept whole
+    template: templates/deployment.yaml
+    set:
+      floci.env:
+        FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS: 300
+        FLOCI_SERVICES_S3_MAX_OBJECT_BYTES: 1000000
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS
+            value: "300"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_SERVICES_S3_MAX_OBJECT_BYTES
+            value: "1000000"
+
+  - it: maps the Lambda, TLS and identity settings to their FLOCI_* variables
+    template: templates/deployment.yaml
+    set:
+      floci.baseUrl: https://floci.example.test
+      floci.hostname: floci.example.test
+      floci.defaultRegion: eu-central-1
+      floci.defaultAccountId: "123456789012"
+      floci.tls.enabled: true
+      floci.lambda.kubernetes.namespace: lambdas
+      floci.lambda.kubernetes.initImage: busybox:1.37
+      floci.lambda.kubernetes.labels: [team=platform, env=ci]
+      floci.lambda.kubernetes.flociAddress: 10.0.0.7
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].env
+          value:
+            - name: FLOCI_BASE_URL
+              value: https://floci.example.test
+            - name: FLOCI_DEFAULT_ACCOUNT_ID
+              value: "123456789012"
+            - name: FLOCI_DEFAULT_REGION
+              value: eu-central-1
+            - name: FLOCI_HOSTNAME
+              value: floci.example.test
+            - name: FLOCI_PORT
+              value: "4566"
+            - name: FLOCI_SERVICES_LAMBDA_EXECUTOR
+              value: kubernetes
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS
+              value: 10.0.0.7
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE
+              value: busybox:1.37
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS
+              value: team=platform,env=ci
+            - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
+              value: lambdas
+            - name: FLOCI_STORAGE_MODE
+              value: memory
+            - name: FLOCI_STORAGE_PERSISTENT_PATH
+              value: /app/data
+            - name: FLOCI_TLS_ENABLED
+              value: "true"
+
+  - it: rejects a floci.env entry for a variable the chart sets, naming the value to use
+    template: templates/deployment.yaml
+    set:
+      floci.env:
+        FLOCI_TLS_ENABLED: true
+    asserts:
+      - failedTemplate:
+          errorMessage: "floci.env.FLOCI_TLS_ENABLED: the chart sets this variable; use floci.tls.enabled instead"
+
+  - it: rejects FLOCI_PORT, since the container port and the probes stay on 4566
+    template: templates/deployment.yaml
+    set:
+      floci.env:
+        FLOCI_PORT: 4567
+    asserts:
+      - failedTemplate:
+          errorMessage: "floci.env.FLOCI_PORT: the chart sets this variable; use service.port (the container always listens on 4566) instead"
+
+  - it: rejects an executor setting the chart derives, even when the chart does not set it
+    template: templates/deployment.yaml
+    set:
+      floci.lambda.executor: docker
+      floci.env:
+        FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE: lambdas
+    asserts:
+      - failedTemplate:
+          errorMessage: "floci.env.FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE: the chart sets this variable; use floci.lambda.kubernetes.namespace instead"
+
+  - it: rejects the same variables in extraEnv
+    template: templates/deployment.yaml
+    set:
+      extraEnv:
+        - name: FLOCI_SERVICES_LAMBDA_EXECUTOR
+          valueFrom:
+            configMapKeyRef:
+              name: floci-settings
+              key: executor
+    asserts:
+      - failedTemplate:
+          errorMessage: "extraEnv FLOCI_SERVICES_LAMBDA_EXECUTOR: the chart sets this variable; use floci.lambda.executor instead"
+
+  - it: passes other extraEnv entries through
+    template: templates/deployment.yaml
+    set:
+      extraEnv:
+        - name: FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: registry
+              key: password
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: registry
+                key: password
+
+  - it: mounts the ServiceAccount token only for the kubernetes executor
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: true
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: floci
+
+  - it: drops the token and the Lambda pod settings for the docker executor
+    template: templates/deployment.yaml
+    set:
+      floci.lambda.executor: docker
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_SERVICES_LAMBDA_EXECUTOR
+            value: docker
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE
+            value: aws
+
+  - it: puts /app/data on the chart's claim and switches to persistent storage
+    template: templates/deployment.yaml
+    set:
+      persistence.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            persistentVolumeClaim:
+              claimName: floci-data
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_STORAGE_MODE
+            value: persistent
+
+  - it: uses an existing claim and keeps an explicit storage mode
+    template: templates/deployment.yaml
+    set:
+      persistence.enabled: true
+      persistence.existingClaim: shared-data
+      floci.storage.mode: wal
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            persistentVolumeClaim:
+              claimName: shared-data
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FLOCI_STORAGE_MODE
+            value: wal
+
+  - it: caps the data emptyDir when dataSizeLimit is set
+    template: templates/deployment.yaml
+    set:
+      dataSizeLimit: 2Gi
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            emptyDir:
+              sizeLimit: 2Gi
+
+  - it: appends the variant to the tag and prefers a digest
+    template: templates/deployment.yaml
+    set:
+      image.variant: compat
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: floci/floci:9.9.9-compat
+      - equal:
+          path: metadata.labels["app.kubernetes.io/version"]
+          value: 9.9.9-compat
+
+  - it: pins the image by digest
+    template: templates/deployment.yaml
+    set:
+      image.digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: floci/floci@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+  - it: probes the health endpoint and gates readiness on the ready hooks
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          value: /_floci/health
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /_floci/health
+      - matchRegex:
+          path: spec.template.spec.containers[0].readinessProbe.exec.command[2]
+          pattern: GET /_floci/init HTTP/1.0.*"ready":true
+
+  - it: mounts init hooks per phase and rolls the pod when they change
+    template: templates/deployment.yaml
+    set:
+      initHooks:
+        ready:
+          01-seed.sh: "echo seed"
+        boot:
+          00-check.py: "print('boot')"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: init-hooks
+            mountPath: /etc/floci/init
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: init-hooks
+            configMap:
+              name: floci-init-hooks
+              defaultMode: 0555
+              items:
+                - key: boot-00-check.py
+                  path: boot.d/00-check.py
+                - key: ready-01-seed.sh
+                  path: ready.d/01-seed.sh
+      - exists:
+          path: spec.template.metadata.annotations["checksum/init-hooks"]
+
+  - it: renders the hook scripts into the ConfigMap
+    template: templates/init-hooks-configmap.yaml
+    set:
+      initHooks:
+        ready:
+          01-seed.sh: "#!/bin/sh\necho seed\n"
+    asserts:
+      - equal:
+          path: data["ready-01-seed.sh"]
+          value: "#!/bin/sh\necho seed"
+
+  - it: renders no hook ConfigMap, mount or checksum without hooks
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/init-hooks-configmap.yaml
+      - notExists:
+          path: spec.template.metadata.annotations
+        template: templates/deployment.yaml
+
+  - it: rejects an unknown hook phase
+    set:
+      initHooks:
+        readyy:
+          01-seed.sh: "echo"
+    asserts:
+      - failedTemplate:
+          errorPattern: "additional properties 'readyy' not allowed"
+
+  - it: rejects a hook Floci would ignore
+    template: templates/init-hooks-configmap.yaml
+    set:
+      initHooks:
+        ready:
+          seed.txt: "echo"
+    asserts:
+      - failedTemplate:
+          errorMessage: "initHooks.ready.seed.txt: hook file names must end in .sh or .py and use only letters, digits, '.', '_' and '-'"
+
+  - it: rejects an unknown executor
+    set:
+      floci.lambda.executor: k8s
+    asserts:
+      - failedTemplate:
+          errorPattern: "value must be one of 'docker', 'kubernetes'"

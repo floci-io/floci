@@ -549,7 +549,7 @@ public class SesConfigurationSetController {
             }
             EventDestination dest = parseEventDestination(edNode);
             configSetService.createEventDestination(configurationSetName, edName, dest,
-                    regionResolver.getAccountId(), region);
+                    regionResolver.getAccountId(), region, true);
             LOG.infov("SES V2 CreateConfigurationSetEventDestination: {0} on {1}", edName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
@@ -594,7 +594,7 @@ public class SesConfigurationSetController {
             }
             EventDestination dest = parseEventDestination(edNode);
             configSetService.updateEventDestination(configurationSetName, eventDestinationName,
-                    dest, regionResolver.getAccountId(), region);
+                    dest, regionResolver.getAccountId(), region, true);
             LOG.infov("SES V2 UpdateConfigurationSetEventDestination: {0} on {1}",
                     eventDestinationName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();

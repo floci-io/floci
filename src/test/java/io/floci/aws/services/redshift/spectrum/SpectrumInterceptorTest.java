@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.spectrum;
 
+import io.floci.aws.config.EmulatorConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -10,9 +11,12 @@ import java.util.Optional;
 import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -72,5 +76,26 @@ class SpectrumInterceptorTest {
                 "spectrum_tmp_x", List.of());
         interceptor.cleanup(backend, materialization);
         verify(materializer).cleanup(backend, materialization);
+    }
+
+    @Test
+    void aLegacyCatalogTableIsRefusedWhileLakeFormationIsEnforced() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().redshift().spectrumLakeFormationEnforcement()).thenReturn(true);
+        SpectrumInterceptor enforcing = new SpectrumInterceptor(catalog, new SpectrumStatementParser(),
+                new SpectrumQueryClassifier(), null, inlineMock(SpectrumS3Reader.class), materializer, null, config);
+        SpectrumExternalTable table = new SpectrumExternalTable("000000000000", "dev", "analytics", "events",
+                List.of(new SpectrumColumn("id", SpectrumColumn.Type.INTEGER)), "s3://b/events/", ',', '"', '\\', "\\N", 0);
+        SpectrumExternalSchema schema = new SpectrumExternalSchema("000000000000", "dev", "analytics",
+                "s3://b/root/", null);
+        when(catalog.table("000000000000", "dev", "analytics", "events")).thenReturn(Optional.of(table));
+        when(catalog.schema("000000000000", "dev", "analytics")).thenReturn(Optional.of(schema));
+        when(materializer.nextIdentifier()).thenReturn("spectrum_tmp_x");
+
+        SpectrumSqlException refused = assertThrows(SpectrumSqlException.class,
+                () -> enforcing.intercept("SELECT * FROM analytics.events", "000000000000", "dev", null));
+
+        assertEquals("42501", refused.sqlState());
+        verify(materializer, never()).materialize(any(), any(), any(), any(), any());
     }
 }

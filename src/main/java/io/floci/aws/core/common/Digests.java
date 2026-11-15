@@ -9,16 +9,32 @@ import java.util.HexFormat;
 public final class Digests {
 
     private static final MessageDigest MD5 = newDigest("MD5");
+    private static final MessageDigest SHA1 = newDigest("SHA-1");
+    private static final MessageDigest SHA512 = newDigest("SHA-512");
 
     private Digests() {
     }
 
     /** A fresh MD5 digest. Cloning the prototype costs far less than MessageDigest.getInstance. */
     public static MessageDigest md5Digest() {
+        return cloneOrFresh(MD5, "MD5");
+    }
+
+    /** A fresh SHA-1 digest. Cloning the prototype costs far less than MessageDigest.getInstance. */
+    public static MessageDigest sha1Digest() {
+        return cloneOrFresh(SHA1, "SHA-1");
+    }
+
+    /** A fresh SHA-512 digest. Cloning the prototype costs far less than MessageDigest.getInstance. */
+    public static MessageDigest sha512Digest() {
+        return cloneOrFresh(SHA512, "SHA-512");
+    }
+
+    private static MessageDigest cloneOrFresh(MessageDigest prototype, String algorithm) {
         try {
-            return (MessageDigest) MD5.clone();
+            return (MessageDigest) prototype.clone();
         } catch (CloneNotSupportedException e) {
-            return newDigest("MD5");
+            return newDigest(algorithm);
         }
     }
 
@@ -40,11 +56,7 @@ public final class Digests {
     }
 
     public static byte[] sha1(byte[] data) {
-        try {
-            return MessageDigest.getInstance("SHA-1").digest(data);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-1 is not available", e);
-        }
+        return sha1Digest().digest(data);
     }
 
     /** The SHA-1 digest of {@code data} as lowercase hex. */

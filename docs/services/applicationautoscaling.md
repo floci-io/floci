@@ -19,6 +19,9 @@ Auto Scaling groups over the Query protocol under the `autoscaling` signing name
 | `RegisterScalableTarget` | Registers or updates a scalable target and returns its ARN |
 | `DescribeScalableTargets` | Lists scalable targets in a namespace, optionally filtered |
 | `DeregisterScalableTarget` | Deregisters a target and deletes its policies and alarms |
+| `PutScheduledAction` | Creates or updates a one-off UTC scheduled action for ECS |
+| `DescribeScheduledActions` | Lists scheduled actions with filters and pagination |
+| `DeleteScheduledAction` | Deletes a scheduled action and cancels its pending occurrence |
 | `PutScalingPolicy` | Creates or updates a scaling policy and its CloudWatch alarms |
 | `DescribeScalingPolicies` | Lists scaling policies in a namespace, optionally filtered |
 | `DeleteScalingPolicy` | Deletes a scaling policy and its CloudWatch alarms |
@@ -32,6 +35,8 @@ Auto Scaling groups over the Query protocol under the `autoscaling` signing name
 
 `DescribeScalableTargets` accepts `MaxResults` from 1 to 50 and defaults to 50.
 `DescribeScalingPolicies` accepts `MaxResults` from 1 to 10 and defaults to 10.
+`DescribeScheduledActions` accepts `MaxResults` from 1 to 50 and defaults to 50.
+It filters by resource, dimension, and up to 50 action names. A dimension requires a resource ID.
 When more results remain, pass the returned `NextToken` with the same operation,
 region, and filters to retrieve the next page. An invalid token returns
 `InvalidNextTokenException`; an out-of-range page size returns `ValidationException`.
@@ -40,7 +45,7 @@ Tokens expire when the emulator restarts.
 ## Identity
 
 A scalable target is keyed by the triple **(ServiceNamespace, ResourceId,
-ScalableDimension)** — there is no separate identifier. `RegisterScalableTarget` is an
+ScalableDimension)**. There is no separate identifier. `RegisterScalableTarget` is an
 upsert on that triple: parameters you omit are left unchanged, matching AWS.
 
 A scaling policy is keyed by that same triple plus `PolicyName`.
@@ -103,12 +108,12 @@ evaluates against.
 ## Control loop (ECS only)
 
 A background evaluator (ticking every ~10s) evaluates every CloudWatch alarm with
-metric-math configuration — the two alarms above, and any hand-created alarm behind a
-`StepScaling` policy, since AWS does not auto-create alarms for those — against the
+metric-math configuration, the two alarms above, and any hand-created alarm behind a
+`StepScaling` policy, since AWS does not auto-create alarms for those, against the
 metric data pushed via `PutMetricData`, transitioning `StateValue` the same way real
 CloudWatch does, over the last `EvaluationPeriods` **complete** periods (the still-forming
 current period is never counted, matching real CloudWatch). While an alarm is in `ALARM`,
-its policy fires on every tick, not only the first transition — a scale-out blocked by
+its policy fires on every tick, not only the first transition. A scale-out blocked by
 cooldown on one tick is retried on a later one instead of being dropped. For
 `ScalableDimension=ecs:service:DesiredCount`, Floci calls the ECS `UpdateService` action
 to actually change `desiredCount`, respecting `MinCapacity`/`MaxCapacity` and
@@ -124,8 +129,8 @@ to actually change `desiredCount`, respecting `MinCapacity`/`MaxCapacity` and
 - **Cooldown** (`ScaleInCooldown`/`ScaleOutCooldown` for target tracking, `Cooldown` for
   step scaling) defaults to AWS's documented 300s ECS default when unset, not `0`. Per
   AWS's own cooldown semantics, a scale-out blocked by cooldown still proceeds immediately
-  if the newly computed capacity is *larger* than what the last scale-out already applied
-  — cooldown exists to stop flapping on small repeated moves, not to cap a sustained
+  if the newly computed capacity is *larger* than what the last scale-out already applied.
+  Cooldown exists to stop flapping on small repeated moves, not to cap a sustained
   breach's climb toward `MaxCapacity`. Scale-in has no such carve-out and is simply
   blocked for the full cooldown window, same as AWS.
 - When `TreatMissingData=breaching` reaches `ALARM` with no populated datapoint actually
@@ -134,16 +139,53 @@ to actually change `desiredCount`, respecting `MinCapacity`/`MaxCapacity` and
   that's guaranteed not to reverse direction), and step scaling resolves the step at
   `delta=0` (right at the alarm's own threshold).
 - `TreatMissingData=ignore` keeps the alarm's current state rather than transitioning it,
-  but if that current state is already `ALARM`, a deferred action still retries — "ignore"
+  but if that current state is already `ALARM`, a deferred action still retries. "ignore"
   only means "don't let this gap change my state," not "stop trying to act."
 - Every capacity change is recorded and visible through `DescribeScalingActivities`.
-- No metric data pushed for the alarm's window means `INSUFFICIENT_DATA` and no action —
+- No metric data pushed for the alarm's window means `INSUFFICIENT_DATA` and no action.
   Floci does not synthesize ECS CPU/memory metrics itself, so an operator (or a compat
   test) has to push them to exercise the loop, the same way a real CloudWatch agent
   would against real AWS.
 - Scalable dimensions other than `ecs:service:DesiredCount` (MSK broker storage,
   DynamoDB capacity, Lambda provisioned concurrency, ...) remain stored but inert, as
   described below.
+
+## Scheduled scaling (ECS only)
+
+`PutScheduledAction` accepts `at(yyyy-MM-ddTHH:mm:ss)` in UTC for
+`ecs:service:DesiredCount`. A new action requires a schedule and a nonempty
+`ScalableTargetAction` with `MinCapacity`, `MaxCapacity`, or both. Updating an action
+preserves omitted whole fields. Supplying `ScalableTargetAction` replaces its configured
+bounds, so a minimum-only update removes any previously configured maximum.
+
+When due, an action changes its configured bounds and preserves the target's other bound.
+Desired count is clamped into the resulting range. An in-range count stays unchanged.
+Every successful occurrence records a `Successful` scaling activity, including unchanged
+bounds. Failed attempts record a `Failed` activity with the error message.
+A conflicting effective range fails without changing the target.
+
+Completed actions remain visible. An explicit future schedule rearms an action while
+preserving its ARN and creation time. A capacity-only update does not rearm it.
+Deleting an action cancels it. Deregistering a target removes its actions.
+`ScheduledScalingSuspended` skips due occurrences independently of dynamic suspension
+and cooldowns. Resuming does not replay missed actions.
+
+The worker runs every `floci.services.applicationautoscaling.scheduled-action-interval-seconds`
+seconds, default `1`. The environment variable is
+`FLOCI_SERVICES_APPLICATIONAUTOSCALING_SCHEDULED_ACTION_INTERVAL_SECONDS`.
+Past schedules are accepted and retained inactive. Floci compares the deadline with the
+current whole second: the current second is eligible, earlier seconds are inactive.
+This cutoff approximates AWS timing. It does not model an AWS scheduling grace period.
+
+Pending future actions survive restart in persistent, hybrid, and WAL modes. On startup,
+overdue pending actions are skipped. Claimed and terminal occurrences are never replayed.
+Execution claims are stored before effects. If ECS fails after bounds are stored, the new
+bounds remain and that occurrence fails without retry. Stores do not share a transaction,
+so execution has no exactly-once guarantee across crashes. Hybrid durability depends on
+flush. The scheduler drains before lifecycle storage flush and reset.
+
+Scheduled action ARNs use the `autoscaling` service and this resource path:
+`scheduledAction:<uuid>:resource/ecs/service/<cluster>/<service>:scheduledActionName/<name>`.
 
 ## Service-linked roles
 
@@ -162,8 +204,7 @@ arn:aws:iam::<account>:role/aws-service-role/<namespace>.application-autoscaling
   evaluates its policies or adjusts its capacity. This matches the existing behavior of
   EC2 Auto Scaling's `PutScalingPolicy` in Floci for those dimensions. The control plane
   is faithful for all dimensions; the control loop is only emulated for ECS.
-- `PutScheduledAction`, `DescribeScheduledActions`, and `DeleteScheduledAction` are not
-  implemented.
+- Scheduled scaling supports only one-off UTC schedules for ECS desired count. `Timezone` accepts `UTC` or omission. Recurring schedules, other timezones, `StartTime`, and `EndTime` return `ValidationException`.
 - `PredictiveScalingPolicyConfiguration` is accepted only insofar as `PolicyType` is
   validated; the configuration block is not stored.
 - **The evaluation range's exact width is an approximation.** Alarm evaluation follows
@@ -180,7 +221,7 @@ arn:aws:iam::<account>:role/aws-service-role/<namespace>.application-autoscaling
 - **Scale-out cooldown rarely blocks a repeated scale-out in practice.** Its "proceed if
   larger than the last applied capacity" carve-out (see above) is almost always satisfied
   when nothing external has changed capacity, because both capacity formulas grow
-  monotonically with `current` — this matches AWS's documented intent for scale-out to add
+  monotonically with `current`. This matches AWS's documented intent for scale-out to add
   capacity "as fast as it can," so cooldown's practical effect for this control loop is
   mostly to gate scale-*in*, and to eventually halt scale-out once `MaxCapacity` is
   reached (via the ordinary no-op-when-unchanged check, not the cooldown check itself).

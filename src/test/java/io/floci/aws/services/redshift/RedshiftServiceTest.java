@@ -42,6 +42,7 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -382,6 +383,107 @@ class RedshiftServiceTest {
         cluster.setEndpoint(new Endpoint("localhost", 7107));
         when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
         return cluster;
+    }
+
+    /**
+     * A cluster is Regional: it is listed and found only in the Region it was created in, and every call
+     * naming it from another Region of the account answers ClusterNotFound.
+     */
+    @Test
+    void aClusterIsListedAndFoundOnlyInTheRegionItWasCreatedIn() {
+        Cluster cluster = storedCluster("analytics", "us-east-1");
+        cluster.setTags(Map.of("team", "data"));
+        when(clusterBackend.scan(any())).thenReturn(List.of(cluster));
+        RedshiftService west = serviceIn("eu-west-1");
+
+        assertEquals(List.of(cluster), service.describeClusters(null));
+        assertEquals(List.of(cluster), service.describeClusters("analytics"));
+        assertEquals(List.of(new RedshiftService.TaggedResource(
+                        "arn:aws:redshift:us-east-1:111111111111:cluster:analytics", "cluster", "team", "data")),
+                service.describeTags(null, "cluster", null));
+        assertEquals(List.of(), west.describeClusters(null));
+        assertEquals(List.of(), west.describeTags(null, "cluster", null));
+        assertEquals(Optional.empty(), west.findClusterByArn("arn:aws:redshift:eu-west-1:111111111111:cluster:analytics"));
+        for (Executable call : List.<Executable>of(
+                () -> west.describeClusters("analytics"),
+                () -> west.modifyCluster("analytics", null, null, null, null, List.of()),
+                () -> west.modifyClusterIamRoles("analytics", List.of(), List.of()),
+                () -> west.describeLoggingStatus("analytics"),
+                () -> west.enableLogging("analytics", null, null, "cloudwatch", List.of("connectionlog")),
+                () -> west.disableLogging("analytics"),
+                () -> west.pauseCluster("analytics"),
+                () -> west.resumeCluster("analytics"),
+                () -> west.rebootCluster("analytics"),
+                () -> west.createSnapshot("nightly", "analytics"),
+                () -> west.enableSnapshotCopy("analytics", "us-west-2", null, null, null),
+                () -> west.modifyClusterSnapshotSchedule("analytics", null, true),
+                () -> west.createTags("arn:aws:redshift:eu-west-1:111111111111:cluster:analytics", Map.of("k", "v")),
+                () -> west.deleteCluster("analytics"))) {
+            assertEquals("ClusterNotFound", assertThrows(AwsException.class, call).getErrorCode());
+        }
+        verify(clusterBackend, never()).put(any(), any());
+        verify(clusterBackend, never()).delete(any());
+    }
+
+    /**
+     * Work done outside a request on a cluster's behalf learns its Region: the one it was created in, and the
+     * default Region for a cluster stored before clusters kept one.
+     */
+    @Test
+    void aClustersRegionIsTheOneItWasCreatedIn() {
+        storedCluster("analytics", "eu-west-1");
+        storedCluster("legacy", null);
+        RedshiftService west = serviceIn("eu-west-1");
+
+        assertEquals(Optional.of("eu-west-1"), service.clusterRegion("111111111111", "analytics"));
+        assertEquals(Optional.of("us-east-1"), west.clusterRegion("111111111111", "legacy"));
+        assertEquals(Optional.empty(), service.clusterRegion("111111111111", "missing"));
+    }
+
+    /**
+     * A managed master password rotation refuses changes to its cluster in the cluster's Region only: from another
+     * Region the cluster is not found, as for any change there, so its rotation is not seen.
+     */
+    @Test
+    void aRotatingClusterIsNotFoundFromAnotherRegion() {
+        Cluster cluster = storedCluster("managed-cluster", "us-east-1");
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "managed-cluster", cluster)));
+        RedshiftService west = serviceIn("eu-west-1");
+
+        for (RedshiftService rotating : List.of(service, west)) {
+            rotating.reserve(cluster.getMasterPasswordSecretArn(), "us-east-1");
+            String expected = rotating == service ? "InvalidRequestException" : "ClusterNotFound";
+            try {
+                assertEquals(expected, assertThrows(AwsException.class,
+                        () -> rotating.deleteCluster("managed-cluster")).getErrorCode());
+                assertEquals(expected, assertThrows(AwsException.class,
+                        () -> rotating.rebootCluster("managed-cluster")).getErrorCode());
+            } finally {
+                rotating.release(cluster.getMasterPasswordSecretArn(), "us-east-1");
+            }
+        }
+        verify(cm, never()).stop("111111111111", "managed-cluster");
+    }
+
+    /** An available cluster stored in account 111111111111, created in {@code region}; null for none recorded. */
+    private Cluster storedCluster(String identifier, String region) {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier(identifier);
+        cluster.setClusterStatus("available");
+        cluster.setSnapshotRegion(region);
+        when(clusterBackend.get(identifier)).thenReturn(Optional.of(cluster));
+        when(clusterBackend.getForAccount("111111111111", identifier)).thenReturn(Optional.of(cluster));
+        return cluster;
+    }
+
+    /** A service whose calls run in {@code region}, the default Region staying us-east-1. */
+    private RedshiftService serviceIn(String region) {
+        RegionResolver resolver = spy(new RegionResolver("us-east-1", "111111111111"));
+        doReturn(region).when(resolver).getRegion();
+        return new RedshiftService(sf, cm, config, resolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, new ObjectMapper(), null, null);
     }
 
     @ParameterizedTest
@@ -898,6 +1000,7 @@ class RedshiftServiceTest {
     private RedshiftServerlessService zeroEtlServerless;
     private EmulatorConfig config;
     private S3Service zeroEtlS3;
+    private RedshiftS3AutoCopyConsumer autoCopyConsumer;
     private RedshiftService service;
 
     @BeforeEach
@@ -971,10 +1074,12 @@ class RedshiftServiceTest {
         zeroEtlServerless = mock(RedshiftServerlessService.class);
         zeroEtlS3 = mock(S3Service.class);
         when(zeroEtlS3.ownsBucket(any())).thenReturn(true);
+        autoCopyConsumer = mock(RedshiftS3AutoCopyConsumer.class);
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
                 new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents,
-                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver));
+                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver),
+                autoCopyConsumer);
     }
 
     private static final String ORDERS_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111111111111:table/orders";
@@ -1320,6 +1425,25 @@ class RedshiftServiceTest {
 
         verify(integrationBackend).delete("s3-one");
         verify(integrationEvents, never()).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    void deletingAnS3IntegrationDisablesJobsBeforeRemovingItsMetadata() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        when(integrationBackend.keys()).thenReturn(Set.of("s3-one"));
+        when(integrationBackend.get("s3-one")).thenReturn(Optional.of(stored));
+        doThrow(new AwsException("InvalidClusterState", "Paused", 400)).when(autoCopyConsumer).disable(stored);
+
+        assertThrows(AwsException.class, () -> service.deleteIntegration(stored.getIntegrationArn()));
+        verify(integrationBackend, never()).delete(any());
+        clearInvocations(autoCopyConsumer, integrationBackend);
+        doNothing().when(autoCopyConsumer).disable(stored);
+        service.deleteIntegration(stored.getIntegrationArn());
+        InOrder order = inOrder(autoCopyConsumer, integrationBackend);
+        order.verify(autoCopyConsumer).disable(stored);
+        order.verify(integrationBackend).delete("s3-one");
     }
 
     @Test
@@ -2032,6 +2156,105 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void tableRestoreSourceRefusesASnapshotOfAnotherRegion() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setClusterStatus("available");
+        Snapshot snapshot = snapshotOf("snap-1", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotArn("arn:aws:redshift:eu-west-1:111111111111:snapshot:c1/snap-1");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.tableRestoreSource("c1", "snap-1"));
+
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+    }
+
+    @Test
+    void authorizeSnapshotAccessRecordsTheAccountOnceAndRevokeRemovesIt() {
+        Snapshot snapshot = snapshotOf("snap-1", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotType("manual");
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        assertTrue(service.authorizeSnapshotAccess("snap-1", null, "222222222222")
+                .getAccountsWithRestoreAccess().contains("222222222222"));
+        assertEquals("AuthorizationAlreadyExists", assertThrows(AwsException.class,
+                () -> service.authorizeSnapshotAccess("snap-1", null, "222222222222")).getErrorCode());
+        assertTrue(service.revokeSnapshotAccess("snap-1", null, "222222222222")
+                .getAccountsWithRestoreAccess().isEmpty());
+        assertEquals("AuthorizationNotFound", assertThrows(AwsException.class,
+                () -> service.revokeSnapshotAccess("snap-1", null, "222222222222")).getErrorCode());
+    }
+
+    @Test
+    void anAutomatedSnapshotCannotBeShared() {
+        Snapshot snapshot = snapshotOf("snap-auto", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotType("automated");
+        when(snapshotBackend.get("snap-auto")).thenReturn(Optional.of(snapshot));
+
+        assertEquals("InvalidClusterSnapshotState", assertThrows(AwsException.class,
+                () -> service.authorizeSnapshotAccess("snap-auto", null, "222222222222")).getErrorCode());
+    }
+
+    @Test
+    void anAccountIdThatIsNotTwelveDigitsIsRefused() {
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.authorizeSnapshotAccess("snap-1", null, "not-an-account")).getErrorCode());
+    }
+
+    @Test
+    void describeSharedSnapshotsListsOnlyWhatTheOwnerAuthorizedTheCallerToRestore() {
+        Snapshot shared = snapshotOf("shared", "c1");
+        shared.getAccountsWithRestoreAccess().add("111111111111");
+        Snapshot hidden = snapshotOf("hidden", "c1");
+        when(snapshotBackend.scanForAccount(eq("999999999999"), any())).thenReturn(List.of(shared, hidden));
+
+        assertEquals(List.of(shared), service.describeSharedSnapshots("999999999999", null, null));
+        assertEquals(List.of(shared), service.describeSharedSnapshots("999999999999", "shared", "c1"));
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.describeSharedSnapshots("999999999999", "hidden", null)).getErrorCode());
+    }
+
+    @Test
+    void restoreOfASnapshotTheOwnerHasNotSharedIsDenied() {
+        when(snapshotBackend.getForAccount("999999999999", "snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "c1")));
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "999999999999"));
+        assertEquals("AccessToSnapshotDenied", ex.getErrorCode());
+        verifyNoInteractions(cm);
+    }
+
+    @Test
+    void describeSharedSnapshotsAndRestoreDenyCrossRegionSnapshotByName() {
+        Snapshot foreignRegionSnap = snapshotOf("shared-foreign", "c1");
+        foreignRegionSnap.setSnapshotArn("arn:aws:redshift:eu-west-1:999999999999:snapshot:c1/shared-foreign");
+        foreignRegionSnap.getAccountsWithRestoreAccess().add("111111111111");
+
+        when(snapshotBackend.scanForAccount(eq("999999999999"), any())).thenReturn(List.of(foreignRegionSnap));
+        assertTrue(service.describeSharedSnapshots("999999999999", null, null).isEmpty());
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.describeSharedSnapshots("999999999999", "shared-foreign", null)).getErrorCode());
+
+        when(snapshotBackend.getForAccount("999999999999", "shared-foreign")).thenReturn(Optional.of(foreignRegionSnap));
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "shared-foreign", null, null, "999999999999")).getErrorCode());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotWithInvalidOwnerAccountThrowsInvalidParameterValue() {
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "not-an-account")).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "12345")).getErrorCode());
+    }
+
+    @Test
     void deleteSnapshotOfAnotherClusterIsNotFoundAndKept() {
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "protected")));
 
@@ -2428,6 +2651,7 @@ class RedshiftServiceTest {
         source.setKmsKeyId("orig-key");
         source.setTags(Map.of("Env", "Test"));
         source.setCopiedToRegions(new HashSet<>(Set.of("us-west-2")));
+        source.getAccountsWithRestoreAccess().add("222222222222");
         targetSnapshotIsFree("manual-copy-1");
 
         Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 30);
@@ -2441,6 +2665,7 @@ class RedshiftServiceTest {
         assertEquals("orig-key", copy.getKmsKeyId());
         assertEquals(Map.of("Env", "Test"), copy.getTags());
         assertTrue(copy.getCopiedToRegions().isEmpty());
+        assertTrue(copy.getAccountsWithRestoreAccess().isEmpty());
         verify(snapshotBackend).putAllAtomically(any());
         verify(snapshotBackend).flush();
     }
@@ -2537,6 +2762,87 @@ class RedshiftServiceTest {
             Files.deleteIfExists(sourceDump);
             Files.deleteIfExists(copiedDump);
         }
+    }
+
+    @Test
+    void modifyClusterSnapshotSuccess() {
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
+        manualSnap.setStatus("available");
+        manualSnap.setManualSnapshotRetentionPeriod(-1);
+
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", 45);
+
+        assertNotNull(modified);
+        assertEquals(45, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend).putAllAtomically(any());
+        verify(snapshotBackend).flush();
+    }
+
+    @Test
+    void modifyClusterSnapshotNotFound() {
+        when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("missing-snap", 30));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotAutomatedSnapshotRejected() {
+        automatedSnapshot("auto-snap-1");
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("auto-snap-1", 30));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotNotAvailableRejected() {
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
+        manualSnap.setStatus("creating");
+
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 30));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotInvalidRetentionPeriod() {
+        AwsException ex1 = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 0));
+        assertEquals("InvalidRetentionPeriodFault", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        AwsException ex2 = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 3654));
+        assertEquals("InvalidRetentionPeriodFault", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotWithoutRetentionPreservesExistingSettings() {
+        Snapshot snapshot = snapshotOf("snap-1", "my-cluster");
+        snapshot.setStatus("available");
+        snapshot.setManualSnapshotRetentionPeriod(7);
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", null, true);
+
+        assertSame(snapshot, modified);
+        assertEquals(7, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend, never()).putAllAtomically(any());
+        verify(snapshotBackend, never()).deleteAllAtomically(any());
     }
 
     @Test
@@ -3832,6 +4138,52 @@ class RedshiftServiceTest {
         when(subnetGroupBackend.get("missing")).thenReturn(Optional.empty());
 
         assertThrows(AwsException.class, () -> service.deleteClusterSubnetGroup("missing"));
+    }
+
+    /**
+     * A snapshot ARN of the caller's names the copy kept in its Region before the snapshot itself, a cluster left open
+     * matching any, and what it records as its {@code KmsKeyId} is the key a restore decrypts with. One of another
+     * account names that account's snapshot itself alone, taken in the ARN's Region, as a shared restore reads it.
+     */
+    @Test
+    void aSnapshotArnNamesTheCopyInItsRegionFirstAndItsKeyIsWhatItRecords() {
+        Snapshot copy = snapshot("c1", "snap", "arn:aws:redshift:eu-west-1:111111111111:snapshot:c1/snap");
+        copy.setKmsKeyId("key-copy");
+        Snapshot original = snapshot("c1", "snap", "arn:aws:redshift:us-east-1:111111111111:snapshot:c1/snap");
+        when(snapshotCopyBackend.getForAccount("111111111111", "eu-west-1::snap")).thenReturn(Optional.of(copy));
+        when(snapshotBackend.getForAccount("111111111111", "snap")).thenReturn(Optional.of(original));
+        String prefix = "arn:aws:redshift:eu-west-1:111111111111:snapshot:";
+
+        assertEquals(Optional.of(copy), service.findSnapshotAt(prefix + "c1/snap"));
+        assertEquals(Optional.of(copy), service.findSnapshotAt(prefix + "*/snap"));
+        assertEquals(Optional.of(original), service.findSnapshotAt("arn:aws:redshift:us-east-1:111111111111:snapshot:c1/snap"));
+        assertEquals(Optional.empty(), service.findSnapshotAt(prefix + "c2/snap"));
+        assertEquals(Optional.empty(), service.findSnapshotAt("arn:aws:redshift:eu-west-1:111111111111:cluster:c1"));
+        assertEquals(Optional.empty(), service.findSnapshotAt("arn:aws:redshift-serverless:eu-west-1:111111111111:snapshot/x"));
+
+        RedshiftStoredResourceArns stored = new RedshiftStoredResourceArns(service);
+        assertEquals("redshift", stored.namespace());
+        assertEquals(Optional.of("key-copy"), stored.recorded(prefix + "*/snap", "KmsKeyId"));
+        assertEquals(Optional.empty(), stored.recorded("arn:aws:redshift:us-east-1:111111111111:snapshot:c1/snap", "KmsKeyId"));
+        assertEquals(Optional.empty(), stored.recorded(prefix + "c1/snap", "kmsKeyId"));
+
+        // Another account's: its snapshot in the ARN's Region, never the copy it keeps there.
+        Snapshot theirs = snapshot("c1", "snap", "arn:aws:redshift:us-east-1:222222222222:snapshot:c1/snap");
+        Snapshot theirCopy = snapshot("c1", "snap", "arn:aws:redshift:eu-west-1:222222222222:snapshot:c1/snap");
+        theirCopy.setKmsKeyId("key-their-copy");
+        when(snapshotCopyBackend.getForAccount("222222222222", "eu-west-1::snap")).thenReturn(Optional.of(theirCopy));
+        when(snapshotBackend.getForAccount("222222222222", "snap")).thenReturn(Optional.of(theirs));
+        assertEquals(Optional.of(theirs), service.findSnapshotAt("arn:aws:redshift:us-east-1:222222222222:snapshot:c1/snap"));
+        assertEquals(Optional.empty(), service.findSnapshotAt("arn:aws:redshift:eu-west-1:222222222222:snapshot:c1/snap"));
+        assertEquals(Optional.empty(), stored.recorded("arn:aws:redshift:eu-west-1:222222222222:snapshot:*/snap", "KmsKeyId"));
+    }
+
+    private static Snapshot snapshot(String cluster, String identifier, String arn) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setClusterIdentifier(cluster);
+        snapshot.setSnapshotIdentifier(identifier);
+        snapshot.setSnapshotArn(arn);
+        return snapshot;
     }
 
     @Test

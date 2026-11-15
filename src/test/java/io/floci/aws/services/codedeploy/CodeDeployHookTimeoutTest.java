@@ -86,7 +86,7 @@ class CodeDeployHookTimeoutTest {
                 ssm, mock(Ec2Service.class), new ObjectMapper(),
                 new RegionResolver(region, "000000000000"), null);
         service.createApplication(region, "app", "Server", null);
-        service.createDeploymentGroup(region, "app", "group", null, "role", null);
+        service.createDeploymentGroup(region, "app", "group", null, "role", null, null);
         return service;
     }
 }

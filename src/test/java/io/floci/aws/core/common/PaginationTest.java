@@ -220,6 +220,22 @@ class PaginationTest {
     }
 
     @Test
+    void boundedNamespacedPaging_refusesEmptyAndLongTokensWhenTokenMustBeNonEmpty() {
+        String longToken = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(("ns:" + "a".repeat(100)).getBytes(StandardCharsets.UTF_8));
+        AwsException empty = assertInvalid(() -> Pagination.paginate(ITEMS, Function.identity(), 1, "",
+                2, 3, 32, "InvalidInput", "ns", true));
+        assertEquals("Pagination token must be between 1 and 32 characters.", empty.getMessage());
+        AwsException tooLong = assertInvalid(() -> Pagination.paginate(ITEMS, Function.identity(), 1, longToken,
+                2, 3, 32, "InvalidInput", "ns", true));
+        assertEquals("Pagination token must not exceed 32 characters.", tooLong.getMessage());
+        PaginatedResult<String> first = Pagination.paginate(ITEMS, Function.identity(), 1, null,
+                2, 3, 32, "InvalidInput", "ns", true);
+        assertThat(Pagination.paginate(ITEMS, Function.identity(), 1, first.nextToken(),
+                2, 3, 32, "InvalidInput", "ns", true).items(), contains("b"));
+    }
+
+    @Test
     void boundedNamespacedPaging_refusesMalformedAndForeignTokens() {
         assertInvalid(() -> bounded(1, "!!!"));
         assertInvalid(() -> bounded(1, page(1, null, "other").nextToken()));

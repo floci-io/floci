@@ -1,0 +1,14 @@
+# chart-testing (ct) configuration for .github/workflows/helm-chart.yml.
+# `ct lint` checks every chart under charts/ with helm lint, yamllint and the Chart.yaml
+# schema, and fails a change that does not bump the chart version. `ct install` installs
+# the chart once per ci/*-values.yaml file in a fresh namespace and runs `helm test`.
+remote: origin
+target-branch: main
+chart-dirs:
+  - charts
+# Chart.yaml lists the project, not individual GitHub accounts.
+validate-maintainers: false
+check-version-increment: true
+# The Lambda test pulls public.ecr.aws/lambda/python:3.12 (about 770 MB unpacked) on its
+# first run, so allow more than Helm's default five minutes.
+helm-extra-args: --timeout 600s

@@ -18,7 +18,7 @@ final class PaymentCryptographyDataRequestShapes {
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.load(
             "aws/payment-cryptography-data-request-shapes.json",
             "Payment Cryptography data plane request shapes",
-            PaymentCryptographyShapeErrors.MESSAGES);
+            RequestConstraintCheck.standardMessages("ValidationException"));
 
     private PaymentCryptographyDataRequestShapes() {
     }

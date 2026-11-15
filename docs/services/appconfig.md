@@ -117,10 +117,13 @@ An update that changes only mutable properties keeps the ID and changes the reso
 description of an application, environment or configuration profile, an environment's `Monitors`, an application's
 `Tags`, and a deployment strategy's description, duration, final bake time, growth factor and growth type. A property
 the template drops is cleared, or set back to its default (`FinalBakeTimeInMinutes` 0, `GrowthType` `LINEAR`). A
-change to a createOnly property (`ApplicationId` on an environment or configuration profile, `LocationUri` or `Type`
-on a configuration profile, `Name` or `ReplicateTo` on a deployment strategy) replaces the resource: the new one is
+change to a createOnly property (`ApplicationId` on an environment or configuration profile, `LocationUri` on a
+configuration profile, `Name` or `ReplicateTo` on a deployment strategy) replaces the resource: the new one is
 created and the old one is deleted once the stack update completes. A failed stack update puts back what it changed in
 place and deletes what it created.
+
+A change to a configuration profile's `Type` is accepted on update and not applied: the profile keeps its ID and the
+type it was created with, as `UpdateConfigurationProfile` has no `Type` member.
 
 Deleting an environment deletes its deployments, and deleting a configuration profile deletes its hosted configuration
 versions. Floci keeps tags on applications only, so `Tags` on the other three types are accepted and not stored, as

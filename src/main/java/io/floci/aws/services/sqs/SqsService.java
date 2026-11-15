@@ -42,6 +42,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -1371,6 +1372,83 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
+     * Builds a message (user) attribute from its wire fields. A BinaryValue takes precedence over a StringValue.
+     *
+     * @throws AwsException InvalidParameterValue when the DataType is missing or empty, when its base type (the part
+     *                      before the first period) is not String, Number or Binary, when the attribute has no
+     *                      value or an empty one, or when the BinaryValue is not valid base64
+     */
+    public static MessageAttributeValue messageAttributeValue(String name, String dataType, String stringValue,
+                                                              String binaryValueBase64) {
+        if (dataType == null || dataType.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Missing required parameter DataType", 400);
+        }
+        String baseDataType = baseDataType(dataType);
+        if (!"String".equals(baseDataType) && !"Number".equals(baseDataType) && !"Binary".equals(baseDataType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Type for parameter MessageAttributes.Attribute_name.DataType must be prefixed with "
+                            + "\"String\", \"Binary\", or \"Number\", but was: " + dataType, 400);
+        }
+        if (binaryValueBase64 != null) {
+            byte[] binaryValue;
+            try {
+                binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "Message (user) attribute '" + name + "' has an invalid binary value.", 400);
+            }
+            if (binaryValue.length == 0) {
+                throw emptyAttributeValue(name, baseDataType);
+            }
+            return new MessageAttributeValue(binaryValue, dataType);
+        }
+        if (stringValue == null || stringValue.isEmpty()) {
+            throw emptyAttributeValue(name, baseDataType);
+        }
+        return new MessageAttributeValue(stringValue, dataType);
+    }
+
+    private static AwsException emptyAttributeValue(String name, String baseDataType) {
+        return new AwsException("InvalidParameterValue", "Message (user) attribute '" + name
+                + "' must contain a non-empty value of type '" + baseDataType + "'.", 400);
+    }
+
+    private static String baseDataType(String dataType) {
+        int dot = dataType.indexOf('.');
+        return dot < 0 ? dataType : dataType.substring(0, dot);
+    }
+
+    /**
+     * Wire-level size, in bytes, of one message (user) attribute as sent, whether or not it is valid: name UTF-8 +
+     * type UTF-8 + value bytes. A BinaryValue counts its decoded length, or its UTF-8 length when it is not base64.
+     */
+    public static int messageAttributeSize(String name, String dataType, String stringValue,
+                                           String binaryValueBase64) {
+        byte[] binaryValue = null;
+        if (binaryValueBase64 != null) {
+            try {
+                binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+            } catch (IllegalArgumentException e) {
+                binaryValue = binaryValueBase64.getBytes(StandardCharsets.UTF_8);
+            }
+        }
+        return messageAttributeSize(name, dataType, stringValue, binaryValue);
+    }
+
+    private static int messageAttributeSize(String name, String dataType, String stringValue, byte[] binaryValue) {
+        int total = name.getBytes(StandardCharsets.UTF_8).length;
+        if (dataType != null) {
+            total += dataType.getBytes(StandardCharsets.UTF_8).length;
+        }
+        if (binaryValue != null) {
+            total += binaryValue.length;
+        } else if (stringValue != null) {
+            total += stringValue.getBytes(StandardCharsets.UTF_8).length;
+        }
+        return total;
+    }
+
+    /**
      * Total wire-level message size, in bytes, matching AWS SQS accounting:
      * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
      */
@@ -1380,16 +1458,9 @@ public class SqsService implements Resettable, ResourceProvider {
             return total;
         }
         for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
-            total += entry.getKey().getBytes(StandardCharsets.UTF_8).length;
             MessageAttributeValue value = entry.getValue();
-            if (value.getDataType() != null) {
-                total += value.getDataType().getBytes(StandardCharsets.UTF_8).length;
-            }
-            if (value.getBinaryValue() != null) {
-                total += value.getBinaryValue().length;
-            } else if (value.getStringValue() != null) {
-                total += value.getStringValue().getBytes(StandardCharsets.UTF_8).length;
-            }
+            total += messageAttributeSize(entry.getKey(), value.getDataType(), value.getStringValue(),
+                    value.getBinaryValue());
         }
         return total;
     }

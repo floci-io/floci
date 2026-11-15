@@ -12,9 +12,11 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ListContainerInstancesRequest;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -88,8 +90,11 @@ class EcsContainerInstanceFilterIntegrationTest {
         Response started = call("StartTask", "{\"cluster\":\"" + cluster + "\","
                 + "\"containerInstances\":[\"" + excluded + "\"],"
                 + "\"taskDefinition\":\"query-filter-task\"}");
-        started.then().body("tasks[0].lastStatus", equalTo("RUNNING"));
         String task = started.jsonPath().getString("tasks[0].taskArn");
+        awaitLastStatus(
+                () -> call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + task + "\"]}"),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING")
+                .then().body("tasks[0].lastStatus", equalTo("RUNNING"));
         call("DescribeContainerInstances", "{\"cluster\":\"" + cluster
                 + "\",\"containerInstances\":[\"" + excluded + "\"]}")
                 .then().body("containerInstances[0].runningTasksCount", equalTo(1));

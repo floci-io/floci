@@ -170,12 +170,8 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             LOG.debugv("Custom resource {0} has no stored ServiceToken; skipping Delete", r.getLogicalId());
             return;
         }
-        // A resource stashed before the stack id was recorded has none, and delete() has no stack.
-        String stackId = stackIdOrMinted(r.getAttributes().get(CR_STACK_ID_ATTR), region,
-                accountFromArn(serviceToken), "");
         try {
-            JsonNode response = invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
-                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region, stackId);
+            JsonNode response = invokeDelete(r, r.getPhysicalId(), resourceProperties, region);
             if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
                 LOG.warnv("Custom resource {0} Delete reported FAILED: {1}",
                         r.getLogicalId(), response.path("Reason").asText("(no reason given)"));
@@ -184,6 +180,65 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
             // Best-effort, consistent with the rest of the delete path.
             LOG.debugv("Custom resource {0} Delete invocation failed: {1}", r.getLogicalId(), e.getMessage());
         }
+    }
+
+    private JsonNode invokeDelete(StackResource r, String physicalId, ObjectNode resourceProperties, String region) {
+        String serviceToken = r.getAttributes().get(CR_SERVICE_TOKEN_ATTR);
+        // A resource stashed before the stack id was recorded has none, and delete() has no stack.
+        String stackId = stackIdOrMinted(r.getAttributes().get(CR_STACK_ID_ATTR), region,
+                accountFromArn(serviceToken), "");
+        return invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(), r.getResourceType(),
+                physicalId, resourceProperties, null, region, stackId);
+    }
+
+    /** An update whose handler answered a new PhysicalResourceId replaced the resource. */
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return replacedPhysicalId(resource) != null;
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return "Retain".equals(resource.getUpdateReplacePolicy()) ? null : replacedPhysicalId(resource);
+    }
+
+    /**
+     * Sends the id a committed update replaced a Delete with the properties it had, as CloudFormation
+     * does in UPDATE_COMPLETE_CLEANUP_IN_PROGRESS. One attempt per call: the count lives on the
+     * snapshot, and a handler that keeps failing leaves the update committed.
+     */
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
+            return UpdateCleanupResult.notApplicable();
+        }
+        String replacedId = updateCleanupPhysicalId(resource);
+        if (replacedId == null) {
+            return new UpdateCleanupResult(true, true, null, 0, null);
+        }
+        try {
+            requireSuccess(invokeDelete(resource, replacedId, (ObjectNode) snapshot.get("properties"),
+                    snapshot.path("region").asText()));
+            return new UpdateCleanupResult(true, true, replacedId, 0, null);
+        } catch (AwsException e) {
+            int attempts = snapshot.path("cleanupAttempts").asInt() + 1;
+            ((ObjectNode) snapshot).put("cleanupAttempts", attempts);
+            resource.getAttributes().put(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+            return new UpdateCleanupResult(true, false, replacedId, attempts, e.getMessage());
+        }
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /** The physical id the update replaced, or null when there is no update or it kept its id. */
+    private static String replacedPhysicalId(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR);
+        String priorPhysicalId = snapshot == null ? null : CfnRollback.snapshotText(snapshot, "physicalId");
+        return priorPhysicalId == null || priorPhysicalId.equals(resource.getPhysicalId()) ? null : priorPhysicalId;
     }
 
     @Override

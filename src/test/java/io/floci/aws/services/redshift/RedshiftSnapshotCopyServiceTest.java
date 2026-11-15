@@ -211,9 +211,10 @@ class RedshiftSnapshotCopyServiceTest {
         fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
         fixture.service(SOURCE).runSnapshotCopies(Instant.now());
         fixture.service(SOURCE).deleteSnapshot("nightly");
+        seedCluster(fixture, "replica", DESTINATION, null, null);
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> fixture.service(DESTINATION).createSnapshot("nightly", "warehouse"));
+                () -> fixture.service(DESTINATION).createSnapshot("nightly", "replica"));
         assertEquals("ClusterSnapshotAlreadyExists", refused.getErrorCode());
     }
 
@@ -286,6 +287,31 @@ class RedshiftSnapshotCopyServiceTest {
         assertEquals(List.of(new RedshiftService.TaggedResource(copyArn, "snapshot", "env", "test")), tags);
     }
 
+    @Test
+    void regionalCopyDoesNotInheritRestoreAccessGrants() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).authorizeSnapshotAccess("nightly", "warehouse", "222222222222");
+
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        Snapshot copy = fixture.copies().getForAccount(ACCOUNT, DESTINATION + "::nightly").orElseThrow();
+        assertTrue(copy.getAccountsWithRestoreAccess().isEmpty());
+    }
+
+    @Test
+    void authorizingAccessToACopyIsRefused() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> fixture.service(DESTINATION).authorizeSnapshotAccess("nightly", "warehouse", "222222222222"));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+    }
+
     private long dumpFilesUnderCopies() {
         Path root = directory.resolve("redshift-dumps").resolve(ACCOUNT).resolve("copies");
         if (!Files.isDirectory(root)) {
@@ -322,14 +348,20 @@ class RedshiftSnapshotCopyServiceTest {
     }
 
     private static Cluster seedCluster(Fixture fixture, String id, Instant copyEnabledAt) {
+        return seedCluster(fixture, id, SOURCE, DESTINATION, copyEnabledAt);
+    }
+
+    /** An available cluster of {@code region}, copying its snapshots to {@code copyDestination} when not null. */
+    private static Cluster seedCluster(Fixture fixture, String id, String region, String copyDestination,
+                                       Instant copyEnabledAt) {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(id);
         cluster.setNodeType("dc2.large");
         cluster.setMasterUsername("admin");
         cluster.setMasterPassword("Secret123!");
         cluster.setClusterStatus("available");
-        cluster.setSnapshotRegion(SOURCE);
-        cluster.setSnapshotCopyDestinationRegion(DESTINATION);
+        cluster.setSnapshotRegion(region);
+        cluster.setSnapshotCopyDestinationRegion(copyDestination);
         cluster.setSnapshotCopyRetentionPeriod(7);
         cluster.setSnapshotCopyManualRetentionPeriod(-1);
         cluster.setSnapshotCopyEnabledAt(copyEnabledAt);

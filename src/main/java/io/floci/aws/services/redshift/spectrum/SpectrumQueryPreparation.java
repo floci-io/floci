@@ -7,7 +7,9 @@ import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Partition;
 import io.floci.aws.services.glue.model.Table;
+import io.floci.aws.services.redshift.RedshiftService;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -20,6 +22,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiFunction;
 
 @ApplicationScoped
 public class SpectrumQueryPreparation {
@@ -30,6 +33,8 @@ public class SpectrumQueryPreparation {
     private final GlueService glue;
     private final ExternalMetadataWriter metadata;
     private final ExternalCatalogLocks catalogLocks;
+    /** The Region of an account's cluster, by its identifier; null when it isn't known. */
+    private final BiFunction<String, String, String> clusterRegion;
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
@@ -37,10 +42,24 @@ public class SpectrumQueryPreparation {
         this(registry, materializer, parser, glue, metadata, new ExternalCatalogLocks());
     }
 
-    @Inject
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks) {
+        this(registry, materializer, parser, glue, metadata, catalogLocks, (accountId, clusterIdentifier) -> null);
+    }
+
+    @Inject
+    public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
+                                    ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
+                                    ExternalCatalogLocks catalogLocks, Instance<RedshiftService> redshift) {
+        this(registry, materializer, parser, glue, metadata, catalogLocks,
+                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
+                             ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
+                             ExternalCatalogLocks catalogLocks, BiFunction<String, String, String> clusterRegion) {
+        this.clusterRegion = clusterRegion;
         this.registry = registry;
         this.materializer = materializer;
         this.parser = parser;
@@ -49,9 +68,28 @@ public class SpectrumQueryPreparation {
         this.catalogLocks = catalogLocks;
     }
 
+    /**
+     * The Region whose Glue catalog the session's cluster reads: the cluster's own, as on AWS. Null when the
+     * cluster isn't a provisioned one Floci knows, which leaves the Region the call already runs in, such as a
+     * Data API request's.
+     */
+    private String catalogRegion(SpectrumSession session) {
+        String clusterIdentifier = session.clusterIdentifier();
+        return clusterIdentifier == null ? null : clusterRegion.apply(session.accountId(), clusterIdentifier);
+    }
+
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend) {
+        return prepare(sql, session, backend, List.of());
+    }
+
+    /**
+     * Prepares a statement that has bind parameters. {@code parameters} is the text of each bound value, a null
+     * where it is unusable; null {@code parameters} means the statement is only being parsed, with no values yet.
+     */
+    public boolean prepare(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
         try {
-            return RequestScopes.callAs(session.accountId(), () -> prepareInScope(sql, session, backend));
+            return RequestScopes.callAs(session.accountId(), catalogRegion(session),
+                    () -> prepareInScope(sql, session, backend, parameters));
         } catch (AwsException exception) {
             String state = switch (exception.getErrorCode()) {
                 case "AlreadyExistsException" -> "42P07";
@@ -91,7 +129,7 @@ public class SpectrumQueryPreparation {
         };
     }
 
-    private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend) {
+    private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
         Optional<ExternalStatement> statement = parser.parse(sql);
         if (statement.orElse(null) instanceof ExternalStatement.CreateSchema schema) {
             return createSchema(schema, session, backend);
@@ -139,7 +177,7 @@ public class SpectrumQueryPreparation {
             try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                     session.inTransaction() || !backend.permitsCachePublication())) {
                 requireCurrentBinding(session, binding);
-                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table(), sql);
+                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table(), sql, parameters);
                 if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
                     throw new SpectrumSqlException("42P01", "external relation \"" + reference.schema()
                             + "." + reference.table() + "\" does not exist");

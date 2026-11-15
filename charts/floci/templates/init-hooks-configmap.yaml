@@ -1,0 +1,15 @@
+{{- $hooks := include "floci.initHookEntries" . | fromJsonArray }}
+{{- if $hooks }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "floci.fullname" . }}-init-hooks
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+data:
+  {{- range $hooks }}
+  {{ .key }}: |-
+    {{- .content | nindent 4 }}
+  {{- end }}
+{{- end }}

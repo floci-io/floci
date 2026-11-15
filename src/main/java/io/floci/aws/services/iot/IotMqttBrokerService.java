@@ -379,7 +379,7 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     void publish(String topic, byte[] payload, int qos) {
-        fanOut(topic, payload, qos);
+        fanOut(topic, payload, qos, MqttProperties.NO_PROPERTIES);
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {
@@ -735,7 +735,14 @@ public class IotMqttBrokerService implements Resettable {
 
         iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null,
                 session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
-        fanOut(topic, payload, message.qosLevel().value());
+        fanOut(topic, payload, message.qosLevel().value(), userProperties(message.properties()));
+    }
+
+    /** A publish's user properties in the order sent, which AWS IoT forwards unchanged to an MQTT 5 subscriber. */
+    private static MqttProperties userProperties(MqttProperties received) {
+        MqttProperties forwarded = new MqttProperties();
+        received.getProperties(MqttProperties.MqttPropertyType.USER_PROPERTY.value()).forEach(forwarded::add);
+        return forwarded;
     }
 
     /**
@@ -795,9 +802,10 @@ public class IotMqttBrokerService implements Resettable {
 
     /**
      * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription, at the
-     * lower of {@code qos} and the highest QoS among its matching subscriptions.
+     * lower of {@code qos} and the highest QoS among its matching subscriptions. Netty encodes
+     * {@code properties} only for an MQTT 5 subscriber.
      */
-    private void fanOut(String topic, byte[] payload, int qos) {
+    private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
         for (ClientSession session : sessionsByClient.values()) {
             Map<String, Subscription> subscriptions = subscriptionsByClient.get(session.clientId());
@@ -807,7 +815,8 @@ public class IotMqttBrokerService implements Resettable {
             }
             MqttQoS delivered = MqttQoS.valueOf(Math.min(qos, granted));
             try {
-                session.endpoint().publish(topic, Buffer.buffer(safePayload), delivered, false, false, session.packetId(delivered));
+                session.endpoint().publish(topic, Buffer.buffer(safePayload), delivered, false, false, session.packetId(delivered),
+                        properties);
             } catch (IllegalStateException e) {
                 LOG.debugv("IoT MQTT client {0} closed before the publish on {1} reached it", session.clientId(), topic);
             }
@@ -901,7 +910,7 @@ public class IotMqttBrokerService implements Resettable {
         vertx.runOnContext(ignored -> {
             iotService.get().publish(topic, payload, false, 0, null, session.clientId(),
                     rules -> evaluateRulesOnWorker(topic, rules, admitted));
-            fanOut(topic, payload, 0);
+            fanOut(topic, payload, 0, MqttProperties.NO_PROPERTIES);
         });
     }
 

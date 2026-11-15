@@ -1,0 +1,66 @@
+Floci {{ include "floci.imageTag" . }} is starting in namespace {{ .Release.Namespace }}.
+
+In-cluster endpoint (for pods in any namespace):
+
+  {{ include "floci.serviceUrl" . }}
+{{- if .Values.floci.tls.enabled }}
+
+TLS is on: the same port also serves HTTPS with Floci's self-signed certificate
+(CA at {{ include "floci.serviceUrl" . }}/_floci/ca.pem).
+{{- end }}
+
+URLs in responses (SQS QueueUrl, pre-signed URLs) start with {{ include "floci.effectiveBaseUrl" . }}
+
+Point the AWS CLI or an SDK at it with any credentials, for example from a pod:
+
+  export AWS_ENDPOINT_URL={{ include "floci.serviceUrl" . }}
+  export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION={{ .Values.floci.defaultRegion | default "us-east-1" }}
+  aws s3 mb s3://my-bucket && aws s3 ls
+
+{{- if .Values.ingress.enabled }}
+
+Through the Ingress:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (first .paths).path }}
+{{- end }}
+{{- else if eq .Values.service.type "LoadBalancer" }}
+
+Through the LoadBalancer (the address can take a minute to appear):
+
+  kubectl get svc --namespace {{ .Release.Namespace }} {{ include "floci.fullname" . }}
+{{- else if eq .Values.service.type "NodePort" }}
+
+Through the NodePort:
+
+  kubectl get svc --namespace {{ .Release.Namespace }} {{ include "floci.fullname" . }} -o jsonpath='{.spec.ports[0].nodePort}'
+{{- else }}
+
+From your machine:
+
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "floci.fullname" . }} 4566:{{ .Values.service.port }}
+  aws --endpoint-url http://localhost:4566 s3 ls
+{{- end }}
+
+Check the installation with:
+
+  helm test {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+
+{{- if include "floci.kubernetesExecutor" . }}
+
+Lambda functions run as pods in namespace {{ include "floci.lambdaNamespace" . }} (label app.kubernetes.io/managed-by=floci).
+Floci deletes every Floci Lambda pod there that it did not create, so keep other releases' Lambda pods out of it.
+{{- if not .Values.rbac.create }}
+rbac.create is false: give ServiceAccount {{ include "floci.serviceAccountName" . }} the pods and pods/log permissions
+listed in templates/rbac.yaml in that namespace, or Lambda invocations will fail.
+{{- end }}
+{{- else }}
+
+floci.lambda.executor is "docker": Lambda, RDS, ElastiCache and the other container-backed
+services need a Docker daemon reachable from the pod (FLOCI_DOCKER_DOCKER_HOST in floci.env).
+{{- end }}
+
+{{- if and (ne (include "floci.storageMode" .) "memory") (not .Values.persistence.enabled) }}
+
+WARNING: storage mode is {{ include "floci.storageMode" . }} but persistence.enabled is false, so /app/data is an
+emptyDir and the state is lost whenever the pod is replaced.
+{{- end }}

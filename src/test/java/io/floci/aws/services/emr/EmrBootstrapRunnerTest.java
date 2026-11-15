@@ -11,6 +11,7 @@ import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.s3.S3Service;
@@ -260,7 +261,7 @@ class EmrBootstrapRunnerTest {
     @Test
     void sudoDropsItsOptionsAndRunsItsCommandAsItIs(@TempDir Path directory) throws Exception {
         Path sudo = directory.resolve("sudo");
-        Files.writeString(sudo, EmrBootstrapRunner.SUDO + "\n");
+        Files.writeString(sudo, EmrServerlessSparkRunner.SUDO + "\n");
 
         BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder("bash", sudo.toString(), "-E", "-u",
                 "root", "--", "GREETING=hello", "sh", "-c", "printf '%s %s|' \"$GREETING\" \"$1\"", "sh", "two words"));

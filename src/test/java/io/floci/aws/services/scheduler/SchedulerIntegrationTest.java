@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -221,13 +223,21 @@ class SchedulerIntegrationTest {
     private static final String TAGGED_GROUP_ARN =
             "arn:aws:scheduler:us-east-1:000000000000:schedule-group/tagged-group";
 
+    /**
+     * The modeled {@code /tags/{ResourceArn}} for an ARN, encoded as one path segment as an SDK sends it. Send it with
+     * {@code urlEncodingEnabled(false)}, or it is encoded twice.
+     */
+    private static String tagsPath(String arn) {
+        return "/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+    }
+
     @Test
     @Order(13)
     void listTagsReturnsTagsFromCreate() {
         // tagged-group was created at @Order(2) with env=test and team=platform.
-        given()
+        given().urlEncodingEnabled(false)
         .when()
-            .get("/tags/" + TAGGED_GROUP_ARN)
+            .get(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(200)
             .body("Tags.find { it.Key == 'env' }.Value", equalTo("test"))
@@ -243,7 +253,7 @@ class SchedulerIntegrationTest {
         // a system whose clock granularity collides with the test class's startup speed.
         Thread.sleep(2);
 
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("""
                 {
@@ -254,13 +264,13 @@ class SchedulerIntegrationTest {
                 }
                 """)
         .when()
-            .post("/tags/" + TAGGED_GROUP_ARN)
+            .post(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(204);
 
-        given()
+        given().urlEncodingEnabled(false)
         .when()
-            .get("/tags/" + TAGGED_GROUP_ARN)
+            .get(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(200)
             .body("Tags.find { it.Key == 'owner' }.Value", equalTo("Alice"))
@@ -291,17 +301,17 @@ class SchedulerIntegrationTest {
     @Test
     @Order(15)
     void untagResourceRemovesKeys() {
-        given()
+        given().urlEncodingEnabled(false)
             .queryParam("TagKeys", "owner")
             .queryParam("TagKeys", "env")
         .when()
-            .delete("/tags/" + TAGGED_GROUP_ARN)
+            .delete(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(204);
 
-        given()
+        given().urlEncodingEnabled(false)
         .when()
-            .get("/tags/" + TAGGED_GROUP_ARN)
+            .get(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(200)
             .body("Tags.find { it.Key == 'owner' }", nullValue())
@@ -311,15 +321,51 @@ class SchedulerIntegrationTest {
 
     @Test
     @Order(16)
+    void taggingOnARouteSchedulerDoesNotHaveIsRefusedAndTagsNothing() {
+        // AWS serves Scheduler's tagging on /tags/{ResourceArn} alone: the bare /tags the shared controller serves
+        // other services on, and a path whose ARN's slash is not encoded, are no route of Scheduler's.
+        given()
+            .contentType("application/json")
+            .body("{\"resourceArn\":\"" + TAGGED_GROUP_ARN + "\",\"tags\":[{\"key\":\"refused\",\"value\":\"x\"}]}")
+        .when()
+            .post("/tags")
+        .then()
+            .statusCode(400)
+            .body(containsString("Invalid resource ARN"));
+        given()
+            .contentType("application/json")
+            .body("{\"Tags\":[{\"Key\":\"refused\",\"Value\":\"x\"}]}")
+        .when()
+            .post("/tags/" + TAGGED_GROUP_ARN)
+        .then()
+            .statusCode(400)
+            .body(containsString("Invalid resource ARN"));
+        given()
+            .queryParam("resourceArn", TAGGED_GROUP_ARN)
+        .when()
+            .get("/tags")
+        .then()
+            .statusCode(400);
+
+        given().urlEncodingEnabled(false)
+        .when()
+            .get(tagsPath(TAGGED_GROUP_ARN))
+        .then()
+            .statusCode(200)
+            .body("Tags.find { it.Key == 'refused' }", nullValue());
+    }
+
+    @Test
+    @Order(16)
     void tagResourceOnMissingGroupReturns404() {
         String arn = "arn:aws:scheduler:us-east-1:000000000000:schedule-group/no-such-group";
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("""
                 {"Tags": [{"Key": "k", "Value": "v"}]}
                 """)
         .when()
-            .post("/tags/" + arn)
+            .post(tagsPath(arn))
         .then()
             .statusCode(404);
     }
@@ -329,10 +375,10 @@ class SchedulerIntegrationTest {
     void tagResourceWithEmptyBodyReturns400() {
         // Null/blank request body must surface as the structured AWS validation error
         // ("Value null at 'Tags' ...") rather than leaking a Jackson parser message.
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
         .when()
-            .post("/tags/" + TAGGED_GROUP_ARN)
+            .post(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(400);
     }
@@ -342,11 +388,11 @@ class SchedulerIntegrationTest {
     void tagResourceWithNonObjectBodyReturns400() {
         // A syntactically valid JSON array at the root must be rejected as a wire-shape
         // error, not silently treated as "missing 'Tags'".
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("[1,2,3]")
         .when()
-            .post("/tags/" + TAGGED_GROUP_ARN)
+            .post(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(400);
     }
@@ -356,13 +402,13 @@ class SchedulerIntegrationTest {
     void tagResourceOnScheduleArnReturns400() {
         // AWS only allows tagging schedule groups, not individual schedules.
         String arn = "arn:aws:scheduler:us-east-1:000000000000:schedule/default/some-schedule";
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("""
                 {"Tags": [{"Key": "k", "Value": "v"}]}
                 """)
         .when()
-            .post("/tags/" + arn)
+            .post(tagsPath(arn))
         .then()
             .statusCode(400);
     }
@@ -372,11 +418,11 @@ class SchedulerIntegrationTest {
     void tagResourceWithoutTagsReturns400() {
         // AWS spec: Tags is required on TagResource. Empty body must surface as
         // ValidationException rather than silently succeed.
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("{}")
         .when()
-            .post("/tags/" + TAGGED_GROUP_ARN)
+            .post(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(400);
     }
@@ -385,9 +431,9 @@ class SchedulerIntegrationTest {
     @Order(19)
     void untagResourceWithoutTagKeysReturns400() {
         // AWS spec: TagKeys is required on UntagResource.
-        given()
+        given().urlEncodingEnabled(false)
         .when()
-            .delete("/tags/" + TAGGED_GROUP_ARN)
+            .delete(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(400);
     }
@@ -1028,13 +1074,13 @@ class SchedulerIntegrationTest {
     void tagResourceEntryMissingKeyOrValueReturns400() {
         // AWS Tag shape requires both Key and Value; entries with either missing
         // must surface as ValidationException, not be silently dropped.
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("""
                 {"Tags": [{"Key": "k"}]}
                 """)
         .when()
-            .post("/tags/" + TAGGED_GROUP_ARN)
+            .post(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(400);
     }
@@ -1044,13 +1090,13 @@ class SchedulerIntegrationTest {
     void tagResourceTagsWrongTypeReturns400() {
         // Tags must be a list. An object or string in its place is a wire-format
         // error, not a missing value, so the message should differ from "Value null".
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("""
                 {"Tags": "not-a-list"}
                 """)
         .when()
-            .post("/tags/" + TAGGED_GROUP_ARN)
+            .post(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(400);
     }
@@ -1060,13 +1106,13 @@ class SchedulerIntegrationTest {
     void tagResourceWithPutMethodReturns405() {
         // AWS Scheduler only defines POST for TagResource. PUT is not in the spec
         // and must be rejected so floci does not expose a non-AWS mutation route.
-        given()
+        given().urlEncodingEnabled(false)
             .contentType("application/json")
             .body("""
                 {"Tags": [{"Key": "k", "Value": "v"}]}
                 """)
         .when()
-            .put("/tags/" + TAGGED_GROUP_ARN)
+            .put(tagsPath(TAGGED_GROUP_ARN))
         .then()
             .statusCode(405);
     }
@@ -1193,6 +1239,79 @@ class SchedulerIntegrationTest {
             .then()
                 .statusCode(400)
                 .body("__type", containsString("SerializationException"));
+        }
+    }
+
+    @Test
+    @Order(45)
+    void listScheduleGroupsPagesWithMaxResultsAndNextToken() {
+        for (String name : List.of("paging-group-a", "paging-group-b")) {
+            given().contentType("application/json").body("{}")
+                    .when().post("/schedule-groups/" + name)
+                    .then().statusCode(200);
+        }
+
+        String token = given().queryParam("NamePrefix", "paging-group-").queryParam("MaxResults", 1)
+                .when().get("/schedule-groups")
+                .then().statusCode(200)
+                .body("ScheduleGroups.Name", contains("paging-group-a"))
+                .body("NextToken", notNullValue())
+                .extract().path("NextToken");
+
+        given().queryParam("NamePrefix", "paging-group-").queryParam("MaxResults", 1)
+                .queryParam("NextToken", token)
+                .when().get("/schedule-groups")
+                .then().statusCode(200)
+                .body("ScheduleGroups.Name", contains("paging-group-b"))
+                .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    @Order(46)
+    void listSchedulesPagesWithMaxResultsAndNextToken() {
+        String body = """
+                {"ScheduleExpression":"rate(1 hour)","FlexibleTimeWindow":{"Mode":"OFF"},
+                 "GroupName":"paging-group-a",
+                 "Target":{"Arn":"arn:aws:sqs:us-east-1:000000000000:queue",
+                           "RoleArn":"arn:aws:iam::000000000000:role/scheduler-role"}}
+                """;
+        for (String name : List.of("paging-1", "paging-2")) {
+            given().contentType("application/json").body(body)
+                    .when().post("/schedules/" + name)
+                    .then().statusCode(200);
+        }
+
+        String token = given().queryParam("ScheduleGroup", "paging-group-a").queryParam("MaxResults", 1)
+                .when().get("/schedules")
+                .then().statusCode(200)
+                .body("Schedules.Name", contains("paging-1"))
+                .body("NextToken", notNullValue())
+                .extract().path("NextToken");
+
+        given().queryParam("ScheduleGroup", "paging-group-a").queryParam("MaxResults", 1)
+                .queryParam("NextToken", token)
+                .when().get("/schedules")
+                .then().statusCode(200)
+                .body("Schedules.Name", contains("paging-2"))
+                .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    @Order(47)
+    void listOperationsRejectInvalidMaxResultsAndNextToken() {
+        for (String path : List.of("/schedule-groups", "/schedules")) {
+            for (String maxResults : List.of("0", "101", "abc")) {
+                given().queryParam("MaxResults", maxResults)
+                        .when().get(path)
+                        .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"));
+            }
+            for (String nextToken : List.of("bogus-token", "")) {
+                given().queryParam("NextToken", nextToken)
+                        .when().get(path)
+                        .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"));
+            }
         }
     }
 }

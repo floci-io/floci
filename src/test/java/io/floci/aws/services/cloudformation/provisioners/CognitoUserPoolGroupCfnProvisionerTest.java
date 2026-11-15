@@ -1,14 +1,19 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cognito.CognitoService;
+import io.floci.aws.services.cognito.model.CognitoGroup;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
@@ -20,8 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -47,12 +54,8 @@ class CognitoUserPoolGroupCfnProvisionerTest {
      * has to be modelled there and not only on the resource.
      */
     private ProvisionContext ctx(String priorPhysicalId) {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
-        });
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(),
+                "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
     private ObjectNode props(String userPoolId, String groupName) {
@@ -420,5 +423,111 @@ class CognitoUserPoolGroupCfnProvisionerTest {
         AwsException thrown = assertThrows(AwsException.class, () -> provisioner.delete(r, "us-east-1"));
 
         assertEquals("InternalFailure", thrown.getErrorCode());
+    }
+
+    // --- dropped Description, against a real in-memory CognitoService ---
+
+    private static final String ROLE = "arn:aws:iam::000000000000:role/admins";
+    private static final String WITH_DESCRIPTION = """
+            {"UserPoolId":"%s","GroupName":"admin","Description":"orig","Precedence":7,"RoleArn":"%s"}
+            """;
+    private static final String WITHOUT_DESCRIPTION = """
+            {"UserPoolId":"%s","GroupName":"admin","Precedence":7,"RoleArn":"%s"}
+            """;
+
+    private CognitoService realCognito() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        return new CognitoService(storageFactory, config, new RegionResolver("us-east-1", "000000000000"),
+                null, mock(AcmService.class), null, null, null, Clock.systemUTC(), null);
+    }
+
+    private static String declared(String template, String poolId) {
+        return template.formatted(poolId, ROLE);
+    }
+
+    private StackResource deployGroup(CognitoService real, String properties) throws Exception {
+        StackResource r = resource(null);
+        new CognitoUserPoolGroupCfnProvisioner(real).provision(r, mapper.readTree(properties), ctx(null));
+        return r;
+    }
+
+    private void updateGroup(CognitoService real, StackResource r, String previous, String current)
+            throws Exception {
+        new CognitoUserPoolGroupCfnProvisioner(real).provision(r, mapper.readTree(current),
+                ProvisionContexts.update("us-east-1", "000000000000", "my-stack",
+                        r.getPhysicalId(), previous));
+    }
+
+    @Test
+    void groupDescriptionDroppedFromTheTemplateIsClearedOnUpdate() throws Exception {
+        CognitoService real = realCognito();
+        String poolId = real.createUserPool(Map.of("PoolName", "drop-pool"), "us-east-1").getId();
+        String before = declared(WITH_DESCRIPTION, poolId);
+        StackResource r = deployGroup(real, before);
+        assertEquals("orig", real.getGroup(poolId, "admin").getDescription());
+
+        updateGroup(real, r, before, declared(WITHOUT_DESCRIPTION, poolId));
+
+        assertNull(real.getGroup(poolId, "admin").getDescription());
+    }
+
+    @Test
+    void changedGroupDescriptionStillApplies() throws Exception {
+        CognitoService real = realCognito();
+        String poolId = real.createUserPool(Map.of("PoolName", "change-pool"), "us-east-1").getId();
+        String before = declared(WITH_DESCRIPTION, poolId);
+        StackResource r = deployGroup(real, before);
+
+        updateGroup(real, r, before, before.replace("orig", "changed"));
+
+        assertEquals("changed", real.getGroup(poolId, "admin").getDescription());
+    }
+
+    @Test
+    void emptyGroupDescriptionIsStoredAsGivenAndALaterDropClearsIt() throws Exception {
+        CognitoService real = realCognito();
+        String poolId = real.createUserPool(Map.of("PoolName", "empty-pool"), "us-east-1").getId();
+        String before = declared(WITH_DESCRIPTION, poolId);
+        StackResource r = deployGroup(real, before);
+        String empty = before.replace("\"orig\"", "\"\"");
+
+        updateGroup(real, r, before, empty);
+        assertEquals("", real.getGroup(poolId, "admin").getDescription());
+
+        updateGroup(real, r, empty, declared(WITHOUT_DESCRIPTION, poolId));
+        assertNull(real.getGroup(poolId, "admin").getDescription());
+    }
+
+    @Test
+    void groupDescriptionSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() throws Exception {
+        CognitoService real = realCognito();
+        String poolId = real.createUserPool(Map.of("PoolName", "outside-pool"), "us-east-1").getId();
+        String before = declared(WITHOUT_DESCRIPTION, poolId);
+        StackResource r = deployGroup(real, before);
+        real.updateGroup(poolId, "admin", "outside", null, null);
+
+        updateGroup(real, r, before, before.replace("\"Precedence\":7", "\"Precedence\":9"));
+
+        CognitoGroup stored = real.getGroup(poolId, "admin");
+        assertEquals("outside", stored.getDescription());
+        assertEquals(Integer.valueOf(9), stored.getPrecedence());
+    }
+
+    @Test
+    void droppingTheGroupDescriptionKeepsThePrecedenceAndTheRoleArn() throws Exception {
+        CognitoService real = realCognito();
+        String poolId = real.createUserPool(Map.of("PoolName", "others-pool"), "us-east-1").getId();
+        String before = declared(WITH_DESCRIPTION, poolId);
+        StackResource r = deployGroup(real, before);
+
+        updateGroup(real, r, before, declared(WITHOUT_DESCRIPTION, poolId));
+
+        CognitoGroup stored = real.getGroup(poolId, "admin");
+        assertEquals(Integer.valueOf(7), stored.getPrecedence());
+        assertEquals(ROLE, stored.getRoleArn());
     }
 }

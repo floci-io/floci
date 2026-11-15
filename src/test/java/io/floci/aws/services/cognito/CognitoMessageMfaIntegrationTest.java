@@ -6,12 +6,16 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Locale;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.latestSms;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
@@ -35,6 +39,44 @@ class CognitoMessageMfaIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "true", "default"})
+    void smsChallengeRespectsUsernameCaseSensitivity(String setting) throws Exception {
+        String configuration = "default".equals(setting) ? ""
+                : ",\"UsernameConfiguration\":{\"CaseSensitive\":" + setting + "}";
+        String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"MfaCasePool\"" + configuration + "}")
+                .path("UserPool").path("Id").asText();
+        try {
+            cognitoJson("SetUserPoolMfaConfig", """
+                    {"UserPoolId":"%s","MfaConfiguration":"ON",%s}
+                    """.formatted(poolId, SMS_CONFIG));
+            String clientId = createClient(poolId);
+            User user = createUser(poolId);
+            User variant = new User(user.username().toUpperCase(Locale.ROOT), user.phone(), user.email());
+            JsonNode challenge = passwordLogin(clientId, "false".equals(setting) ? variant : user);
+            assertEquals("SMS_MFA", challenge.path("ChallengeName").asText());
+            String code = CognitoCodes.sixDigitCode(latestSms(user.phone()));
+            cognitoAction("RespondToAuthChallenge", """
+                    {"ClientId":"%s","ChallengeName":"SMS_MFA","Session":"%s",
+                     "ChallengeResponses":{"SMS_MFA_CODE":"%s"}}
+                    """.formatted(clientId, challenge.path("Session").asText(), code))
+                    .then().statusCode(400).body("__type", equalTo("NotAuthorizedException"));
+            cognitoAction("RespondToAuthChallenge", respond(clientId, "SMS_MFA", challenge,
+                    new User("other", user.phone(), user.email()), "SMS_MFA_CODE", code))
+                    .then().statusCode(400).body("__type", equalTo("NotAuthorizedException"));
+            if (!"false".equals(setting)) {
+                cognitoAction("RespondToAuthChallenge", respond(clientId, "SMS_MFA", challenge, variant,
+                        "SMS_MFA_CODE", code)).then().statusCode(400)
+                        .body("__type", equalTo("NotAuthorizedException"));
+            }
+            JsonNode result = cognitoJson("RespondToAuthChallenge", respond(clientId, "SMS_MFA", challenge,
+                    "false".equals(setting) ? variant : user, "SMS_MFA_CODE", code));
+            assertFalse(result.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+        } finally {
+            cognitoAction("DeleteUserPool", "{\"UserPoolId\":\"" + poolId + "\"}").then().statusCode(200);
+        }
     }
 
     @Test
@@ -410,13 +452,6 @@ class CognitoMessageMfaIntegrationTest {
                  "ChallengeResponses":{"USERNAME":"%s","%s":"%s"}}
                 """.formatted(clientId, challengeName, challenge.path("Session").asText(), user.username(), key,
                 value);
-    }
-
-    private static String latestSms(String phone) throws Exception {
-        JsonNode messages = JSON.readTree(given().queryParam("phone", phone).get("/_aws/sns")
-                .then().statusCode(200).extract().asString()).path("messages");
-        assertTrue(messages.isArray() && !messages.isEmpty(), "an SMS should have been sent to " + phone);
-        return messages.get(messages.size() - 1).path("Message").asText();
     }
 
     /** The newest message to {@code recipient}: {@code /_aws/ses?email=} filters by sender, so match the recipient here. */

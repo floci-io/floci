@@ -9,8 +9,8 @@ class BedrockAgentCoreArnsTest {
 
     @Test
     void resourceDropsTheQualifier() {
-        assertEquals("agent/abc",
-                BedrockAgentCoreArns.resource("arn:aws:bedrock-agentcore:us-east-1:123456789012:agent/abc:7"));
+        assertEquals("runtime/test-AbCdEfGhIj",
+                BedrockAgentCoreArns.resource("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test-AbCdEfGhIj:7"));
     }
 
     @Test
@@ -22,7 +22,7 @@ class BedrockAgentCoreArnsTest {
     @Test
     void resourceIsNullForAnythingThatIsNotAnArn() {
         assertNull(BedrockAgentCoreArns.resource(null));
-        assertNull(BedrockAgentCoreArns.resource("agent/abc"));
+        assertNull(BedrockAgentCoreArns.resource("runtime/test-AbCdEfGhIj"));
         assertNull(BedrockAgentCoreArns.resource("arn:aws:bedrock-agentcore:us-east-1"));
     }
 }

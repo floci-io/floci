@@ -3,6 +3,7 @@ package io.floci.aws.services.glue;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.services.glue.model.SecurityConfiguration;
+import io.floci.aws.testing.GlueRequests;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.PersistentStorageProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -117,20 +118,12 @@ class GlueSecurityConfigurationIntegrationTest {
         create(NAME, "us-east-1", "000000000001");
         cleanup.register(() -> delete(NAME, "us-east-1", "000000000001"));
 
-        given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue.GetSecurityConfiguration")
-                .header("Authorization", authorization("000000000002", "us-east-1"))
-                .body("{\"Name\":\"" + NAME + "\"}")
-        .when().post("/")
-        .then().statusCode(400)
+        GlueRequests.call("GetSecurityConfiguration", "000000000002", "us-east-1", "{\"Name\":\"" + NAME + "\"}")
+                .statusCode(400)
                 .body("__type", containsString("EntityNotFoundException"));
 
-        given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue.GetSecurityConfiguration")
-                .header("Authorization", authorization("000000000001", "us-west-2"))
-                .body("{\"Name\":\"" + NAME + "\"}")
-        .when().post("/")
-        .then().statusCode(400)
+        GlueRequests.call("GetSecurityConfiguration", "000000000001", "us-west-2", "{\"Name\":\"" + NAME + "\"}")
+                .statusCode(400)
                 .body("__type", containsString("EntityNotFoundException"));
 
         PersistentStorage<String, SecurityConfiguration> store = new PersistentStorage<>(
@@ -141,37 +134,21 @@ class GlueSecurityConfigurationIntegrationTest {
     }
 
     private static void create(String name, String region, String account) {
-        given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue.CreateSecurityConfiguration")
-                .header("Authorization", authorization(account, region))
-                .body("{\"Name\":\"" + name + "\",\"EncryptionConfiguration\":" + ENCRYPTION + "}")
-        .when().post("/")
-        .then().statusCode(200)
+        GlueRequests.call("CreateSecurityConfiguration", account, region,
+                        "{\"Name\":\"" + name + "\",\"EncryptionConfiguration\":" + ENCRYPTION + "}")
+                .statusCode(200)
                 .body("Name", equalTo(name))
                 .body("CreatedTimestamp", instanceOf(Number.class));
     }
 
     private static void delete(String name, String region, String account) {
-        given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue.DeleteSecurityConfiguration")
-                .header("Authorization", authorization(account, region))
-                .body("{\"Name\":\"" + name + "\"}")
-        .when().post("/")
-        .then().statusCode(200);
+        GlueRequests.call("DeleteSecurityConfiguration", account, region, "{\"Name\":\"" + name + "\"}")
+                .statusCode(200);
     }
 
     /** For cleanup: each test deletes its configuration itself, unless an assertion stops it. */
     private static void deleteIfPresent(String name, String region, String account) {
-        given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue.DeleteSecurityConfiguration")
-                .header("Authorization", authorization(account, region))
-                .body("{\"Name\":\"" + name + "\"}")
-        .when().post("/")
-        .then().statusCode(anyOf(equalTo(200), equalTo(400)));
-    }
-
-    private static String authorization(String account, String region) {
-        return "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20260918/" + region + "/glue/aws4_request, SignedHeaders=host, Signature=abc";
+        GlueRequests.call("DeleteSecurityConfiguration", account, region, "{\"Name\":\"" + name + "\"}")
+                .statusCode(anyOf(equalTo(200), equalTo(400)));
     }
 }

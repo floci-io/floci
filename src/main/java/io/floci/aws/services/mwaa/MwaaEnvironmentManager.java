@@ -61,6 +61,17 @@ public class MwaaEnvironmentManager {
     /** The OS user the stock apache/airflow image runs its process as (uid 50000) — distinct from
      *  the Airflow web-UI admin login username configured via {@code _AIRFLOW_WWW_USER_USERNAME}. */
     private static final String CONTAINER_OS_USER = "airflow";
+    private static final String REQUIREMENTS_DIR = "/tmp";
+    private static final String REQUIREMENTS_FILE = "mwaa-requirements.txt";
+    private static final String REQUIREMENTS_PATH = REQUIREMENTS_DIR + "/" + REQUIREMENTS_FILE;
+    private static final String INSTALL_SCRIPT_FILE = "mwaa-install-requirements.sh";
+    private static final String INSTALL_SCRIPT_PATH = REQUIREMENTS_DIR + "/" + INSTALL_SCRIPT_FILE;
+    private static final String INSTALL_EXIT_CODE_PATH = REQUIREMENTS_DIR + "/mwaa-requirements.exit";
+    private static final String STARTUP_ENV_PATH = REQUIREMENTS_DIR + "/mwaa-startup.env";
+    /** A first {@code pip install} of a real requirements file can take minutes. */
+    private static final int REQUIREMENTS_INSTALL_TIMEOUT_SECONDS = 900;
+    /** The Airflow web UI admin Floci creates, and the identity a web login token signs in as. */
+    static final String AIRFLOW_ADMIN_USER = "admin";
     private static final Set<String> MWAA_CLI_COMMANDS = Set.of("cheat-sheet", "version");
     private static final Map<String, Set<String>> MWAA_CLI_SUBCOMMANDS = Map.of(
             "connections", Set.of("add", "delete"),
@@ -103,8 +114,11 @@ public class MwaaEnvironmentManager {
      * @param startupScriptContent the {@code StartupScriptS3Path} object's bytes (already fetched
      *                              from S3 by the caller), or {@code null}/empty if the environment
      *                              has none configured
+     * @param requirementsContent   the {@code RequirementsS3Path} object's bytes, installed after the
+     *                              startup script and before Airflow starts, or {@code null}/empty
      */
-    public void startEnvironment(Environment environment, String airflowVersion, byte[] startupScriptContent) {
+    public void startEnvironment(Environment environment, String airflowVersion, byte[] startupScriptContent,
+                                 byte[] requirementsContent) {
         String name = environment.getName();
         String dbPassword = generateSecret(24);
         environment.setDbPassword(dbPassword);
@@ -137,14 +151,15 @@ public class MwaaEnvironmentManager {
         LOG.infov("MWAA Postgres container {0} ready for environment {1} at {2}:{3}",
                 dbContainerId, name, dbIp, String.valueOf(POSTGRES_PORT));
 
-        startAirflowContainer(environment, airflowVersion, dbIp, dbPassword, startupScriptContent);
+        startAirflowContainer(environment, airflowVersion, dbIp, dbPassword, startupScriptContent,
+                requirementsContent);
     }
 
     // Package-private (not private) so MwaaEnvironmentManagerTest can exercise container-spec
     // construction directly with a mocked ContainerLifecycleManager, without needing to also mock
     // the exec-based Postgres readiness wait that startEnvironment() performs first.
     void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
-                               byte[] startupScriptContent) {
+                               byte[] startupScriptContent, byte[] requirementsContent) {
         String name = environment.getName();
         String airflowContainerName = airflowContainerName(config, environment);
         String dagsVolume = airflowContainerName + "-dags";
@@ -155,8 +170,8 @@ public class MwaaEnvironmentManager {
         lifecycleManager.ensureVolume(logsVolume);
 
         String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
-        String adminUser = "admin";
         String adminPassword = generateSecret(24);
+        environment.setAirflowAdminPassword(adminPassword);
         String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
 
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
@@ -170,9 +185,10 @@ public class MwaaEnvironmentManager {
                 "AIRFLOW__CORE__FERNET_KEY=" + generateFernetKey(),
                 "AIRFLOW__WEBSERVER__SECRET_KEY=" + generateSecret(32),
                 "AIRFLOW__CORE__LOAD_EXAMPLES=false",
-                "_AIRFLOW_WWW_USER_USERNAME=" + adminUser,
+                "_AIRFLOW_WWW_USER_USERNAME=" + AIRFLOW_ADMIN_USER,
                 "_AIRFLOW_WWW_USER_PASSWORD=" + adminPassword));
         env.addAll(airflowConfigurationOptionsEnv(environment.getAirflowConfigurationOptions()));
+        env.addAll(signInRateLimitEnv(airflowVersion, environment.getAirflowConfigurationOptions()));
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(airflowContainerName)
@@ -180,8 +196,8 @@ public class MwaaEnvironmentManager {
                 // Overrides the stock apache/airflow entrypoint, which is designed to run a single
                 // role per container. This runs migrations, the admin bootstrap (using the stock
                 // _AIRFLOW_WWW_USER_* var names, since the stock entrypoint's own auto-creation
-                // logic is bypassed along with the rest of it), then backgrounds the scheduler and
-                // execs the webserver as PID 1 so container signals reach it directly.
+                // logic is bypassed along with the rest of it), then backgrounds the triggerer and the
+                // scheduler and execs the webserver as PID 1 so container signals reach it directly.
                 .withEntrypoint(List.of("sh", "-c"))
                 .withCmd(List.of(airflowBootstrapScript()))
                 .withNamedVolume(dagsVolume, DAGS_MOUNT)
@@ -198,8 +214,8 @@ public class MwaaEnvironmentManager {
         }
 
         ContainerSpec spec = specBuilder.build();
-        // create -> inject startup.sh (if configured) + the sudoers grant -> start, so both exist
-        // before the entrypoint runs — same sequencing EksClusterManager uses to inject
+        // create -> inject startup.sh and requirements.txt (if configured) + the sudoers grant -> start,
+        // so they exist before the entrypoint runs: the same sequencing EksClusterManager uses to inject
         // registries.yaml/the webhook kubeconfig before the k3s container's entrypoint boots.
         String containerId = lifecycleManager.create(spec);
         ContainerInfo info;
@@ -227,6 +243,12 @@ public class MwaaEnvironmentManager {
                                     + containerId + " for environment " + environment.getName());
                 }
             }
+            if (requirementsContent != null && requirementsContent.length > 0
+                    && !copyRequirementsIntoContainer(containerId, requirementsContent)) {
+                throw new IllegalStateException(
+                        "Could not inject the configured requirements.txt into MWAA container "
+                                + containerId + " for environment " + environment.getName());
+            }
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
             lifecycleManager.removeIfExists(containerId);
@@ -249,8 +271,8 @@ public class MwaaEnvironmentManager {
     }
 
     /**
-     * Polls the Airflow container's unauthenticated {@code /health} endpoint and requires both
-     * {@code metadatabase.status} and {@code scheduler.status} to be {@code "healthy"}.
+     * Polls the Airflow container's unauthenticated {@code /health} endpoint until
+     * {@link #isHealthy} accepts it.
      */
     public boolean isReady(Environment environment) {
         String host = environment.getAirflowInternalHost();
@@ -270,11 +292,20 @@ public class MwaaEnvironmentManager {
             try (InputStream in = conn.getInputStream()) {
                 body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             }
-            return body.contains("\"metadatabase\"") && body.contains("\"scheduler\"")
-                    && healthySection(body, "metadatabase") && healthySection(body, "scheduler");
+            return isHealthy(body);
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Requires {@code metadatabase}, {@code scheduler} and {@code triggerer} to report
+     * {@code "healthy"}, so an environment is never AVAILABLE without the triggerer its deferrable
+     * tasks need.
+     */
+    static boolean isHealthy(String body) {
+        return healthySection(body, "metadatabase") && healthySection(body, "scheduler")
+                && healthySection(body, "triggerer");
     }
 
     /**
@@ -360,16 +391,20 @@ public class MwaaEnvironmentManager {
         }
     }
 
-    /** Writes requirements.txt into the container and runs {@code pip install -r} against it. */
+    /**
+     * Writes requirements.txt into the running container and installs it with
+     * {@link #requirementsInstallScript}, for a requirements file whose content changed after the
+     * environment started. The script's own time limit stops pip before this exec gives up waiting,
+     * so a timed-out install never keeps running beside the next one.
+     */
     public void installRequirements(Environment environment, byte[] requirementsContent) {
         String containerId = environment.getAirflowContainerId();
-        if (containerId == null) {
+        if (containerId == null || !copyRequirementsIntoContainer(containerId, requirementsContent)) {
             return;
         }
-        copyFileIntoContainer(containerId, "/tmp", "mwaa-requirements.txt", requirementsContent);
         try {
-            ContainerExec.Result result = execInContainer(containerId,
-                    new String[]{"pip", "install", "--no-cache-dir", "-r", "/tmp/mwaa-requirements.txt"});
+            ContainerExec.Result result = execInContainer(containerId, new String[]{"sh", INSTALL_SCRIPT_PATH},
+                    REQUIREMENTS_INSTALL_TIMEOUT_SECONDS + 60);
             if (result.exitCode() != 0) {
                 LOG.warnv("pip install -r requirements.txt exited {0} for environment {1}: {2}",
                         String.valueOf(result.exitCode()), environment.getName(), result.stderr());
@@ -386,9 +421,10 @@ public class MwaaEnvironmentManager {
      * arguments with POSIX quoting rules and executed without a shell, so shell syntax such as
      * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
      */
-    public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+    public ContainerExec.Result runAirflowCli(String airflowContainerId, String airflowVersion, String cliCommand)
+            throws Exception {
         List<String> arguments = splitCliArguments(cliCommand);
-        if (!isSupportedCliCommand(arguments)) {
+        if (!isSupportedCliCommand(arguments, airflowVersion)) {
             return new ContainerExec.Result(1, "", "Command is not supported by Amazon MWAA\n", false);
         }
         List<String> argv = new ArrayList<>();
@@ -397,7 +433,7 @@ public class MwaaEnvironmentManager {
         return execInContainer(airflowContainerId, argv.toArray(new String[0]));
     }
 
-    static boolean isSupportedCliCommand(List<String> arguments) {
+    static boolean isSupportedCliCommand(List<String> arguments, String airflowVersion) {
         if (arguments.isEmpty()) {
             return false;
         }
@@ -405,7 +441,14 @@ public class MwaaEnvironmentManager {
             return true;
         }
         Set<String> subcommands = MWAA_CLI_SUBCOMMANDS.get(arguments.getFirst());
-        return arguments.size() >= 2 && subcommands != null && subcommands.contains(arguments.get(1));
+        if (arguments.size() < 2 || subcommands == null || !subcommands.contains(arguments.get(1))) {
+            return false;
+        }
+        // Amazon MWAA's CLI reference lists "providers notifications" from v2.8 on. It is the one
+        // command above whose minimum is newer than v2.7.2, the oldest version MWAA still offers.
+        boolean providersNotifications = "providers".equals(arguments.getFirst())
+                && "notifications".equals(arguments.get(1));
+        return !providersNotifications || isAtLeast(airflowVersion, 2, 8);
     }
 
     /**
@@ -523,10 +566,30 @@ public class MwaaEnvironmentManager {
      * every 3.x release) runs Python 3.12.
      */
     static String pythonTagFor(String airflowVersion) {
+        return isAtLeast(airflowVersion, 2, 11) ? "python3.12" : "python3.11";
+    }
+
+    /**
+     * Turns off Airflow's sign-in rate limit, which counts sign-ins by client address (5 per 40 seconds by default):
+     * every sign-in reaches Airflow from the web proxy's one address, each {@code /aws_mwaa/login} and each UI login
+     * it forwards, so the limit would count every client of the environment together. The option moved from
+     * {@code webserver} to {@code fab} in Airflow 2.9. An {@code AirflowConfigurationOptions} entry setting it in
+     * either section is kept.
+     */
+    static List<String> signInRateLimitEnv(String airflowVersion, Map<String, String> options) {
+        if (options != null && (options.containsKey("webserver.auth_rate_limited")
+                || options.containsKey("fab.auth_rate_limited"))) {
+            return List.of();
+        }
+        return List.of((isAtLeast(airflowVersion, 2, 9) ? "AIRFLOW__FAB__" : "AIRFLOW__WEBSERVER__")
+                + "AUTH_RATE_LIMITED=False");
+    }
+
+    static boolean isAtLeast(String airflowVersion, int major, int minor) {
         String[] parts = airflowVersion.split("\\.", 3);
-        int major = Integer.parseInt(parts[0]);
-        int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-        return (major > 2 || (major == 2 && minor >= 11)) ? "python3.12" : "python3.11";
+        int actualMajor = Integer.parseInt(parts[0]);
+        int actualMinor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+        return actualMajor > major || (actualMajor == major && actualMinor >= minor);
     }
 
     /**
@@ -625,15 +688,66 @@ public class MwaaEnvironmentManager {
                 .map(v -> "export " + v + "=\"$_FLOCI_ORIG_" + v + "\"")
                 .collect(Collectors.joining("\n", "", "\n"));
 
+        // Same order as real MWAA: the startup script, then requirements.txt, then Airflow. The
+        // exported environment is saved for the DAG-sync reinstall. A failing install is logged and
+        // Airflow still starts; the first DAG-sync pass reads its exit code and installs again.
+        // The triggerer is restarted if it exits, since nothing else would bring it back.
         return snapshot
                 + "if [ -f /startup.sh ]; then . /startup.sh || exit 1; fi\n"
                 + restore
+                + "(umask 077; export -p > " + STARTUP_ENV_PATH + ")\n"
+                + "if [ -f " + REQUIREMENTS_PATH + " ]; then sh " + INSTALL_SCRIPT_PATH
+                + " || echo 'pip install -r requirements.txt failed' >&2; fi\n"
                 + "airflow db migrate && "
                 + "(airflow users create --username \"$_AIRFLOW_WWW_USER_USERNAME\" "
                 + "--password \"$_AIRFLOW_WWW_USER_PASSWORD\" --firstname Admin --lastname User "
                 + "--role Admin --email admin@example.com || true); "
+                + "(while true; do airflow triggerer; echo 'airflow triggerer exited; restarting it' >&2; "
+                + "sleep 5; done) & "
                 + "airflow scheduler & "
                 + "exec airflow webserver";
+    }
+
+    /**
+     * The exit code {@link #requirementsInstallScript} recorded for the container's last install, or
+     * {@code null} when there is none to read.
+     */
+    public Integer lastRequirementsInstallExitCode(Environment environment) {
+        String containerId = environment.getAirflowContainerId();
+        if (containerId == null) {
+            return null;
+        }
+        try {
+            ContainerExec.Result result = execInContainer(containerId, new String[]{"cat", INSTALL_EXIT_CODE_PATH});
+            return result.exitCode() == 0 ? Integer.valueOf(result.stdout().trim()) : null;
+        } catch (Exception e) {
+            LOG.warnv("Could not read the requirements.txt install result for environment {0}: {1}",
+                    environment.getName(), e.getMessage());
+            return null;
+        }
+    }
+
+    private boolean copyRequirementsIntoContainer(String containerId, byte[] requirementsContent) {
+        return copyFileIntoContainer(containerId, REQUIREMENTS_DIR, REQUIREMENTS_FILE, requirementsContent)
+                && copyFileIntoContainer(containerId, REQUIREMENTS_DIR, INSTALL_SCRIPT_FILE,
+                        requirementsInstallScript().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Installs requirements.txt for both the bootstrap and the DAG-sync reinstall: with the
+     * variables the startup script exported (saved by the bootstrap, since a {@code docker exec}
+     * does not inherit them), under a time limit, and with pip's exit code recorded for
+     * {@link #lastRequirementsInstallExitCode}. Runs pip as {@code python -m pip}: the image's
+     * {@code PATH} starts with {@code /root/bin}, which the {@code airflow} user cannot read, so a
+     * bare {@code pip} exec fails with "Permission denied".
+     */
+    static String requirementsInstallScript() {
+        return "if [ -f " + STARTUP_ENV_PATH + " ]; then . " + STARTUP_ENV_PATH + "; fi\n"
+                + "timeout " + REQUIREMENTS_INSTALL_TIMEOUT_SECONDS + " python -m pip install --no-cache-dir -r "
+                + REQUIREMENTS_PATH + "\n"
+                + "code=$?\n"
+                + "echo \"$code\" > " + INSTALL_EXIT_CODE_PATH + "\n"
+                + "exit \"$code\"\n";
     }
 
     /**
@@ -703,8 +817,15 @@ public class MwaaEnvironmentManager {
     }
 
     ContainerExec.Result execInContainer(String containerId, String[] cmd) throws Exception {
-        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 30).throwIfTimedOut(containerId);
+        return execInContainer(containerId, cmd, 30);
     }
+
+    private ContainerExec.Result execInContainer(String containerId, String[] cmd, int timeoutSeconds)
+            throws Exception {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds)
+                .throwIfTimedOut(containerId);
+    }
+
 
     private static String generateSecret(int bytes) {
         byte[] buf = new byte[bytes];

@@ -93,14 +93,28 @@ class SidecarFieldAuthorizationPlannerTest {
     }
 
     @Test
+    void cognitoDirectiveOnlyChecksGroupMembershipWhenGroupsAreListed() {
+        GraphqlApi api = api(AuthenticationType.API_KEY);
+        withAdditional(api, AuthenticationType.AMAZON_COGNITO_USER_POOLS);
+        Map<String, Object> identity = Map.of("groups", List.of("Readers"));
+        AppSyncAuthContext cognito = cognitoContext(api, identity);
+        PlanResult bare = plan(field("Query", "todo", List.of(directive("aws_cognito_user_pools")), List.of()));
+        PlanResult restricted = plan(field("Query", "secret", List.of(directive("aws_cognito_user_pools",
+                Map.of("cognito_groups", List.of("Admins")))), List.of()));
+
+        assertAllowed(planner.planDenyFields(bare, cognito));
+        assertDenied(planner.planDenyFields(bare, apiKeyContext(api)));
+        assertDenied(planner.planDenyFields(restricted, cognito));
+    }
+
+    @Test
     void awsAuthIgnoredWhenAdditionalModesExist() {
         PlanResult plan = plan(field("Query", "secret",
                 List.of(directive("aws_auth", Map.of("cognito_groups", List.of("admin")))), List.of()));
         GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
         withAdditional(api, AuthenticationType.API_KEY);
         Map<String, Object> identity = IdentityBuilder.cognito(Map.of("sub", "s", "iss", "https://iss"), List.of(), "ALLOW");
-        AppSyncAuthContext ctx = new AppSyncAuthContext(identity, AppSyncAuth.AUTH_TYPE_COGNITO,
-                AuthenticationType.AMAZON_COGNITO_USER_POOLS, Set.of(), api, null, "us-east-1", "000000000000");
+        AppSyncAuthContext ctx = cognitoContext(api, identity);
 
         assertAllowed(planner.planDenyFields(plan, ctx));
     }
@@ -112,8 +126,7 @@ class SidecarFieldAuthorizationPlannerTest {
         GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
         Map<String, Object> identity = IdentityBuilder.cognito(
                 Map.of("sub", "s", "iss", "https://iss", "cognito:groups", List.of("users")), List.of(), "ALLOW");
-        AppSyncAuthContext ctx = new AppSyncAuthContext(identity, AppSyncAuth.AUTH_TYPE_COGNITO,
-                AuthenticationType.AMAZON_COGNITO_USER_POOLS, Set.of(), api, null, "us-east-1", "000000000000");
+        AppSyncAuthContext ctx = cognitoContext(api, identity);
 
         assertDenied(planner.planDenyFields(plan, ctx));
     }
@@ -199,6 +212,11 @@ class SidecarFieldAuthorizationPlannerTest {
                 IdentityBuilder.iam("000000000000", "test", "test", "arn:aws:iam::000000000000:root", List.of()),
                 AppSyncAuth.AUTH_TYPE_IAM, AuthenticationType.AWS_IAM, Set.of(), api, "test",
                 "us-east-1", "000000000000");
+    }
+
+    private static AppSyncAuthContext cognitoContext(GraphqlApi api, Map<String, Object> identity) {
+        return new AppSyncAuthContext(identity, AppSyncAuth.AUTH_TYPE_COGNITO,
+                AuthenticationType.AMAZON_COGNITO_USER_POOLS, Set.of(), api, null, "us-east-1", "000000000000");
     }
 
     private static AppSyncAuthContext apiKeyContext(GraphqlApi api) {

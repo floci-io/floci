@@ -1,0 +1,190 @@
+name: Helm Chart
+
+# Lints, unit-tests and installs charts/floci, and inventories the image it deploys.
+#
+#   lint     helm lint (strict) per CI values file, helm-unittest (its signed release), and
+#            ct lint, which also fails a pull request that changes the chart without bumping
+#            its version.
+#   install  ct install on kind, once per supported Kubernetes version: every
+#            charts/floci/ci/*-values.yaml file is installed into a fresh namespace and
+#            `helm test` runs the AWS CLI against the Service. Two of those files also
+#            invoke a Lambda function, which Floci runs as a pod through the chart's RBAC.
+#   sbom     an SPDX SBOM of the Floci image the chart deploys (syft) and a vulnerability
+#            report from it (grype), both uploaded as artifacts.
+#
+# The scan reports and never fails the build. The image is a published Floci release:
+# its packages are fixed where the image is built (release.yml), not in the chart, so a
+# finding in a base image layer would only block unrelated chart changes. Its severity
+# counts go to the job summary, where a regression is visible on every chart change.
+
+on:
+  pull_request:
+    paths:
+      - 'charts/**'
+      - '.github/ct.yaml'
+      - '.github/workflows/helm-chart.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'charts/**'
+      - '.github/ct.yaml'
+      - '.github/workflows/helm-chart.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel a superseded run only on pull requests; a run on main is left to finish (see ci.yml).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The versions the chart was verified with locally; bump them together.
+  HELM_VERSION: v4.3.1
+  HELM_UNITTEST_VERSION: v1.2.1
+  # The key helm-unittest signs its plugin releases with (public-key.asc in its repository).
+  HELM_UNITTEST_KEY_FINGERPRINT: 853008CD0B0A5A2DA04FF8A5616AD47F65B54AC7
+
+jobs:
+  lint:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # ct lint diffs against the target branch to find changed charts and check
+          # that their version was bumped.
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: |
+          helm lint charts/floci --strict
+          for values in charts/floci/ci/*-values.yaml; do
+            helm lint charts/floci --strict --values "$values"
+          done
+
+      - name: helm-unittest
+        run: |
+          # The signed release tarball: Helm 4 checks its .prov signature against
+          # helm-unittest's public key, and that key must carry the pinned fingerprint, so a
+          # replaced tarball, signature or key fails here instead of running.
+          key="$RUNNER_TEMP/helm-unittest.asc"
+          keyring="$RUNNER_TEMP/helm-unittest.gpg"
+          curl -fsSL -o "$key" \
+            "https://raw.githubusercontent.com/helm-unittest/helm-unittest/$HELM_UNITTEST_VERSION/public-key.asc"
+          fingerprints="$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10 }')"
+          if [ "$fingerprints" != "$HELM_UNITTEST_KEY_FINGERPRINT" ]; then
+            echo "::error::helm-unittest key fingerprint is '$fingerprints', expected $HELM_UNITTEST_KEY_FINGERPRINT"
+            exit 1
+          fi
+          gpg --dearmor --output "$keyring" "$key"
+          helm plugin install --keyring "$keyring" \
+            "https://github.com/helm-unittest/helm-unittest/releases/download/$HELM_UNITTEST_VERSION/unittest-${HELM_UNITTEST_VERSION#v}.tgz"
+          helm unittest charts/floci
+
+      - uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
+
+      - name: ct lint
+        run: ct lint --config .github/ct.yaml
+
+  install:
+    name: Install on Kubernetes ${{ matrix.kubernetes }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest and the newest node image kind v0.33.0 publishes.
+        include:
+          - kubernetes: v1.34.11
+            node_image: kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+          - kubernetes: v1.37.0
+            node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
+
+      - uses: helm/kind-action@ea822c7bf1874f08e5a491df991c228edffc3376 # v1.15.2
+        with:
+          version: v0.33.0
+          node_image: ${{ matrix.node_image }}
+          cluster_name: floci-chart
+
+      - name: ct install
+        # --charts installs the chart on every run, including pushes to main, where there
+        # is no diff against the target branch to detect it as changed.
+        run: ct install --config .github/ct.yaml --charts charts/floci
+
+  sbom:
+    name: SBOM and vulnerability report
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Resolve the image the chart deploys
+        id: image
+        run: |
+          # Read from the rendered Deployment rather than repeated here, so the report
+          # always covers the default values' image.
+          ref="$(helm template floci charts/floci --show-only templates/deployment.yaml \
+            | awk '$1 == "image:" { gsub(/"/, "", $2); print $2; exit }')"
+          [ -n "$ref" ] || { echo "::error::no image found in the rendered Deployment"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "name=$(echo "$ref" | tr '/:@' '___')" >> "$GITHUB_OUTPUT"
+          echo "Image: \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate SBOM (syft)
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ steps.image.outputs.ref }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Scan SBOM (grype)
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          sbom: sbom.spdx.json
+          fail-build: false
+          output-format: json
+          output-file: grype.json
+
+      - name: Summarize findings
+        run: |
+          {
+            echo ""
+            echo "| Severity | Findings |"
+            echo "|---|---|"
+            jq -r '[.matches[].vulnerability.severity] | group_by(.) | map("| \(.[0]) | \(length) |") | .[]' grype.json
+            echo ""
+            echo "Total: $(jq '.matches | length' grype.json). Report only, see the workflow header."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-${{ steps.image.outputs.name }}
+          path: |
+            sbom.spdx.json
+            grype.json
+          retention-days: 30

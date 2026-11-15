@@ -1,7 +1,15 @@
 package io.floci.aws.services.codeartifact;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -58,6 +66,48 @@ public interface RepositorySidecarManager {
      */
     Optional<byte[]> fetchPackageVersionAsset(String repositoryContainerId, String domain, String repository,
             String namespace, String packageName, String version, String assetName);
+
+    /**
+     * {@link #fetchPackageVersionAsset}'s streamed sibling, for a caller that hands the content
+     * straight to an HTTP response instead of holding it in memory ({@code GetPackageVersionAsset},
+     * {@code CopyPackageVersions}): the caller owns closing the returned stream.
+     * {@code contentLength} is -1 when it could not be determined up front. The default falls back
+     * to {@link #fetchPackageVersionAsset} and wraps the resulting array, so every implementation
+     * keeps working correctly without its own override, just without the size headroom a real
+     * streamed override provides; every sidecar that matters for this overrides it directly.
+     */
+    default Optional<StreamedAsset> fetchPackageVersionAssetStreamed(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String version, String assetName) {
+        return fetchPackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName, version,
+                assetName).map(content -> new StreamedAsset(new ByteArrayInputStream(content), content.length));
+    }
+
+    /** {@code contentLength} is -1 when the sidecar's own response carried no known length. */
+    record StreamedAsset(InputStream content, long contentLength) {}
+
+    /**
+     * {@link #fetchPackageVersionAsset}'s digest-only sibling, for a caller that only needs an
+     * asset's size and hashes, never its content ({@code ListPackageVersionAssets}, byte-accounting
+     * on a disposed version's delete): streams through {@link #fetchPackageVersionAssetStreamed}
+     * and digests it without ever holding the whole thing in memory, correct for any size asset
+     * regardless of which sidecar implements the streamed fetch it builds on.
+     */
+    default Optional<AssetDigest> fetchPackageVersionAssetDigest(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String version, String assetName) {
+        return fetchPackageVersionAssetStreamed(repositoryContainerId, domain, repository, namespace, packageName,
+                version, assetName).map(streamed -> {
+            try (InputStream in = streamed.content()) {
+                AssetDigestingInputStream digesting = new AssetDigestingInputStream(in, Long.MAX_VALUE);
+                digesting.transferTo(OutputStream.nullOutputStream());
+                return new AssetDigest(digesting.size(), digesting.hashesHex());
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+    }
+
+    /** One asset's size and every {@code ASSET_HASH_ALGORITHMS} hash, with no content attached. */
+    record AssetDigest(long size, Map<String, String> hashes) {}
 
     /**
      * {@code true} when this sidecar holds at least one version of the named package. {@code namespace}
@@ -162,6 +212,27 @@ public interface RepositorySidecarManager {
     }
 
     /**
+     * {@link #storePackageVersionAsset(String, String, String, String, String, String, String,
+     * byte[])}'s own streamed sibling, for an asset too large to ever hold as one {@code byte[]}
+     * (~2 GiB, the JVM array limit): an implementer whose own write naturally streams from a file
+     * (every one that matters for this, as of this javadoc) overrides this directly; the default
+     * here falls back to reading the whole file into memory and delegating to the {@code byte[]}
+     * overload, so an implementer that has not been given its own streamed override yet still
+     * works correctly for anything that fits in memory, just without the size headroom the
+     * streamed override exists for.
+     */
+    default void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength) {
+        try {
+            storePackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName, version,
+                    assetName, Files.readAllBytes(content));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
      * {@code CopyPackageVersions}' own destination write, as opposed to a bare {@link
      * #storePackageVersionAsset} call with no notion of a source: the default simply forwards to
      * it, correct for a format whose version-level metadata is entirely recoverable from the
@@ -178,6 +249,19 @@ public interface RepositorySidecarManager {
             String assetName, byte[] content) {
         storePackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName, version,
                 assetName, content);
+    }
+
+    /**
+     * {@link #copyPackageVersionAsset(String, String, String, String, String, String, String,
+     * String, String, byte[])}'s own streamed sibling, mirroring {@link
+     * #storePackageVersionAsset(String, String, String, String, String, String, String, Path,
+     * long)}'s own reason for existing.
+     */
+    default void copyPackageVersionAsset(String sourceRepositoryContainerId, String domain, String sourceRepository,
+            String repositoryContainerId, String repository, String namespace, String packageName, String version,
+            String assetName, Path content, long contentLength) {
+        storePackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName, version,
+                assetName, content, contentLength);
     }
 
     /**

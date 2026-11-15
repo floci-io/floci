@@ -4,7 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
@@ -28,10 +31,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -62,19 +67,19 @@ public class AppConfigService {
     AppConfigService(StorageFactory storageFactory, RegionResolver regions, Clock clock) {
         this.clock = clock;
         this.regions = regions;
-        this.applicationStore = new AppConfigStorage<>(storageFactory, regions,
+        this.applicationStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-applications.json", new TypeReference<>() {});
-        this.environmentStore = new AppConfigStorage<>(storageFactory, regions,
+        this.environmentStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-environments.json", new TypeReference<>() {});
-        this.profileStore = new AppConfigStorage<>(storageFactory, regions,
+        this.profileStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-profiles.json", new TypeReference<>() {});
-        this.strategyStore = new AppConfigStorage<>(storageFactory, regions,
+        this.strategyStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-strategies.json", new TypeReference<>() {});
-        this.versionStore = new AppConfigStorage<>(storageFactory, regions,
+        this.versionStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-versions.json", new TypeReference<>() {});
-        this.deploymentStore = new AppConfigStorage<>(storageFactory, regions,
+        this.deploymentStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-deployments.json", new TypeReference<>() {});
-        this.activeConfigStore = new AppConfigStorage<>(storageFactory, regions,
+        this.activeConfigStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-active-configs.json", new TypeReference<>() {});
     }
 
@@ -103,6 +108,11 @@ public class AppConfigService {
 
     public List<Application> listApplications() {
         return applicationStore.scan(k -> true);
+    }
+
+    public PaginatedResult<Application> listApplicationsPage(Integer maxResults, String nextToken) {
+        String scope = "appconfig-applications:" + regions.getAccountId() + ":" + regions.getRegion();
+        return pageAppConfigList(listApplications(), Application::getId, maxResults, nextToken, scope);
     }
 
     /** The application whose ID is exactly {@code applicationId}; GetApplication also takes a name. */
@@ -223,6 +233,13 @@ public class AppConfigService {
                 .toList();
     }
 
+    public PaginatedResult<Environment> listEnvironmentsPage(String applicationIdentifier,
+                                                              Integer maxResults, String nextToken) {
+        String appId = resolveApplication(applicationIdentifier).getId();
+        String scope = "appconfig-environments:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
+        return pageAppConfigList(listEnvironments(appId), Environment::getId, maxResults, nextToken, scope);
+    }
+
     /** The environment whose ID is exactly {@code environmentId}, in whichever application holds it. */
     public Optional<Environment> findEnvironment(String environmentId) {
         return environmentStore.get(environmentId);
@@ -317,6 +334,14 @@ public class AppConfigService {
         return profileStore.scan(k -> true).stream()
                 .filter(p -> p.getApplicationId().equals(appId))
                 .toList();
+    }
+
+    public PaginatedResult<ConfigurationProfile> listConfigurationProfilesPage(String applicationIdentifier,
+                                                                                Integer maxResults, String nextToken) {
+        String appId = resolveApplication(applicationIdentifier).getId();
+        String scope = "appconfig-profiles:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
+        return pageAppConfigList(listConfigurationProfiles(appId), ConfigurationProfile::getId,
+                maxResults, nextToken, scope);
     }
 
     /** The configuration profile whose ID is exactly {@code profileId}, in whichever application holds it. */
@@ -439,6 +464,17 @@ public class AppConfigService {
                 .toList();
     }
 
+    public PaginatedResult<HostedConfigurationVersionSummary> listHostedConfigurationVersionsPage(
+            String applicationIdentifier, String profileIdentifier, Integer maxResults, String nextToken) {
+        String appId = resolveApplication(applicationIdentifier).getId();
+        String profileId = resolveConfigurationProfile(appId, profileIdentifier).getId();
+        String scope = "appconfig-hosted-versions:" + regions.getAccountId() + ":" + regions.getRegion()
+                + ":" + appId + ":" + profileId;
+        return pageAppConfigList(listHostedConfigurationVersions(appId, profileId),
+                version -> String.format(Locale.ROOT, "%010d", version.getVersionNumber()),
+                maxResults, nextToken, scope);
+    }
+
     public synchronized void deleteHostedConfigurationVersion(String applicationIdentifier,
                                                   String profileIdentifier,
                                                   int versionNumber) {
@@ -485,6 +521,19 @@ public class AppConfigService {
                 builtinStrategy("AppConfig.Canary10Percent20Minutes")));
         result.addAll(strategyStore.scan(k -> true));
         return result;
+    }
+
+    public PaginatedResult<DeploymentStrategy> listDeploymentStrategiesPage(Integer maxResults, String nextToken) {
+        String scope = "appconfig-strategies:" + regions.getAccountId() + ":" + regions.getRegion();
+        return pageAppConfigList(listDeploymentStrategies(), DeploymentStrategy::getId,
+                maxResults, nextToken, scope);
+    }
+
+    private static <T> PaginatedResult<T> pageAppConfigList(List<T> items, Function<T, String> cursorOf,
+                                                              Integer maxResults, String nextToken,
+                                                              String scope) {
+        return Pagination.paginate(items, cursorOf, maxResults, nextToken,
+                50, 50, 2048, "BadRequestException", scope, true);
     }
 
     /**

@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
@@ -68,6 +69,8 @@ public class Ec2MetadataServer {
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
     /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
     private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
+    /** The addresses of the relays that name each caller in X-Forwarded-For, which is read from them alone. */
+    private final Set<String> forwarders = ConcurrentHashMap.newKeySet();
 
     private volatile HttpServer httpServer;
     private final InstanceConnectKeys instanceConnect;
@@ -96,6 +99,23 @@ public class Ec2MetadataServer {
         return Optional.ofNullable(instanceConnect);
     }
 
+    /**
+     * Trusts the relay at {@code address}, which holds 169.254.169.254 for containers that cannot hold it themselves and
+     * names each caller's address in {@code X-Forwarded-For}: a request from it is answered for that caller.
+     */
+    public void trustForwarder(String address) {
+        if (address != null && !address.isBlank()) {
+            forwarders.add(address);
+        }
+    }
+
+    /** Stops trusting the relay at {@code address}, which has gone. */
+    public void distrustForwarder(String address) {
+        if (address != null) {
+            forwarders.remove(address);
+        }
+    }
+
     /** Called by Ec2ContainerManager after a container starts to register its IP. */
     public void registerContainer(String containerIp, String instanceId, Instance instance) {
         if (containerIp != null && !containerIp.isBlank()) {
@@ -109,6 +129,14 @@ public class Ec2MetadataServer {
     public void unregisterContainer(String containerIp, Instance instance) {
         if (containerIp != null && instance != null) {
             containerIpToInstance.remove(containerIp, instance);
+        }
+    }
+
+    void rollbackContainerRegistration(String containerIp, Instance instance) {
+        containerIpToInstance.remove(containerIp, instance);
+        if (!containerIpToInstance.containsValue(instance)) {
+            credentials.unregister(instance);
+            tokens.values().removeIf(token -> token.instance() == instance);
         }
     }
 
@@ -172,10 +200,10 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/hostname").handler(ctx -> handleText(ctx, inst -> inst.getPrivateDnsName()));
         router.get("/latest/meta-data/mac").handler(ctx -> handleMac(ctx));
         router.get("/latest/meta-data/security-groups").handler(ctx -> handleSecurityGroups(ctx));
-        router.get("/latest/meta-data/placement/availability-zone").handler(ctx -> handleText(ctx, inst ->
-                inst.getPlacement() != null
-                        ? inst.getPlacement().getAvailabilityZone()
-                        : config.defaultAvailabilityZone()));
+        router.get("/latest/meta-data/placement/availability-zone").handler(ctx -> handleText(ctx,
+                this::availabilityZone));
+        router.get("/latest/meta-data/placement/availability-zone-id").handler(ctx -> handleText(ctx, inst ->
+                AvailabilityZoneIds.forZoneName(inst.getRegion(), availabilityZone(inst))));
         router.get("/latest/meta-data/placement/region").handler(ctx -> handleText(ctx, inst -> inst.getRegion()));
         router.get("/latest/meta-data/iam/info").handler(ctx -> handleIamInfo(ctx));
         router.get("/latest/meta-data/iam/security-credentials/").handler(ctx -> handleCredentialsList(ctx));
@@ -226,6 +254,7 @@ public class Ec2MetadataServer {
         tokens.clear();
         containerIpToInstance.clear();
         synthesizedProfiles.clear();
+        forwarders.clear();
         if (httpServer != null) {
             httpServer.close();
             httpServer = null;
@@ -252,7 +281,7 @@ public class Ec2MetadataServer {
         }
         else {
             LOG.debugv("IMDS: token requested from {0}, which is not a registered EC2 container; "
-                    + "metadata requests with this token will fail", ctx.request().remoteAddress().host());
+                    + "metadata requests with this token will fail", callerAddress(ctx));
         }
 
         ctx.response()
@@ -442,6 +471,11 @@ public class Ec2MetadataServer {
         ctx.response().putHeader("content-type", "application/json").end(credentialsJson(result.get()));
     }
 
+    /** The instance's zone; one without a placement is in the configured default zone. */
+    private String availabilityZone(Instance inst) {
+        return inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : config.defaultAvailabilityZone();
+    }
+
     /** The account that launched the instance; instances persisted before it was recorded belong to the default one. */
     private String ownerAccount(Instance inst) {
         return inst.getOwnerId() != null ? inst.getOwnerId() : config.defaultAccountId();
@@ -549,8 +583,14 @@ public class Ec2MetadataServer {
     // ── Instance resolution ───────────────────────────────────────────────────
 
     private Instance resolveInstanceByIp(RoutingContext ctx) {
-        String remoteIp = ctx.request().remoteAddress().host();
-        return containerIpToInstance.get(remoteIp);
+        return containerIpToInstance.get(callerAddress(ctx));
+    }
+
+    // The caller's address: the request's own, or the one a trusted relay names for its caller.
+    private String callerAddress(RoutingContext ctx) {
+        String remote = ctx.request().remoteAddress().host();
+        String forwarded = forwarders.contains(remote) ? ctx.request().getHeader("X-Forwarded-For") : null;
+        return forwarded != null && !forwarded.isBlank() ? forwarded.trim() : remote;
     }
 
     /**
@@ -572,8 +612,7 @@ public class Ec2MetadataServer {
     }
 
     private Instance resolveInstance(RoutingContext ctx) {
-        String remoteIp = ctx.request().remoteAddress().host();
-        Instance inst = containerIpToInstance.get(remoteIp);
+        Instance inst = containerIpToInstance.get(callerAddress(ctx));
 
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
         // caller fetches a new token. A token is not valid on another instance, so a caller whose
@@ -600,7 +639,7 @@ public class Ec2MetadataServer {
         }
 
         if (inst == null) {
-            String message = unregisteredContainerMessage(remoteIp);
+            String message = unregisteredContainerMessage(callerAddress(ctx));
             LOG.warnv("IMDS: {0}", message);
             ctx.response().setStatusCode(404)
                     .putHeader("content-type", "text/plain")

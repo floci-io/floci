@@ -58,6 +58,79 @@ class GlueJsonHandlerTest {
                 schemaRegistryService, mapper);
     }
 
+    @Test
+    void databasesPageAcrossResultsAndPreserveMetadata() throws Exception {
+        for (String name : List.of("third", "first", "second")) {
+            ObjectNode create = mapper.createObjectNode();
+            create.putObject("DatabaseInput").put("Name", name).put("Description", "description-" + name);
+            handler.handle("CreateDatabase", create, REGION);
+        }
+        JsonNode first = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("MaxResults", 2), REGION)));
+        assertEquals(2, first.get("DatabaseList").size());
+        assertEquals("first", first.get("DatabaseList").get(0).get("Name").asText());
+        assertEquals("description-first", first.get("DatabaseList").get(0).get("Description").asText());
+        assertEquals(ACCOUNT_ID, first.get("DatabaseList").get(0).get("CatalogId").asText());
+        JsonNode last = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("MaxResults", 2)
+                        .put("NextToken", first.get("NextToken").asText()), REGION)));
+        assertEquals(1, last.get("DatabaseList").size());
+        assertEquals("third", last.get("DatabaseList").get(0).get("Name").asText());
+        assertFalse(last.has("NextToken"));
+    }
+
+    @Test
+    void databasesUseHundredRowDefault() throws Exception {
+        for (int index = 0; index < 101; index++) {
+            ObjectNode create = mapper.createObjectNode();
+            create.putObject("DatabaseInput").put("Name", "database-%03d".formatted(index));
+            handler.handle("CreateDatabase", create, REGION);
+        }
+        JsonNode first = mapper.valueToTree(body(handler.handle("GetDatabases", mapper.createObjectNode(), REGION)));
+        assertEquals(100, first.get("DatabaseList").size());
+        JsonNode last = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("NextToken", first.get("NextToken").asText()), REGION)));
+        assertEquals(1, last.get("DatabaseList").size());
+        assertFalse(last.has("NextToken"));
+    }
+
+    @Test
+    void databasesRejectInvalidPageSizesAndTokens() {
+        for (int limit : List.of(-1, 0, 101)) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("GetDatabases",
+                    mapper.createObjectNode().put("MaxResults", limit), REGION));
+            assertEquals("InvalidInputException", error.getErrorCode());
+        }
+        for (String token : List.of("invalid", "-1", "1")) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("GetDatabases",
+                    mapper.createObjectNode().put("NextToken", token), REGION));
+            assertEquals("InvalidInputException", error.getErrorCode());
+        }
+    }
+
+    @Test
+    void catalogListsRejectNonIntegerPageSizesAndNonStringTokens() {
+        for (String action : List.of("GetDatabases", "GetTables", "GetPartitions", "GetTableVersions")) {
+            for (JsonNode value : List.of(mapper.getNodeFactory().textNode("1"),
+                    mapper.getNodeFactory().numberNode(1.5), mapper.getNodeFactory().numberNode(Long.MAX_VALUE))) {
+                ObjectNode request = mapper.createObjectNode().put("DatabaseName", "catalog-db").put("TableName", "catalog-table");
+                request.set("MaxResults", value);
+                assertEquals("InvalidInputException", assertThrows(AwsException.class,
+                        () -> handler.handle(action, request, REGION)).getErrorCode());
+            }
+            assertEquals("InvalidInputException", assertThrows(AwsException.class, () -> handler.handle(action,
+                    mapper.createObjectNode().put("DatabaseName", "catalog-db").put("TableName", "catalog-table").put("NextToken", 0), REGION)).getErrorCode());
+        }
+    }
+
+    @Test
+    void databasesReturnEmptyTerminalPage() throws Exception {
+        JsonNode empty = mapper.valueToTree(body(handler.handle("GetDatabases",
+                mapper.createObjectNode().put("MaxResults", 100), REGION)));
+        assertEquals(0, empty.get("DatabaseList").size());
+        assertFalse(empty.has("NextToken"));
+    }
+
     private void createDatabaseAndTable(String dbName, String tableName) throws Exception {
         ObjectNode createDb = mapper.createObjectNode();
         createDb.putObject("DatabaseInput").put("Name", dbName);

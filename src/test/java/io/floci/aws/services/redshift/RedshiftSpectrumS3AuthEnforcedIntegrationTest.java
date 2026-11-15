@@ -14,7 +14,6 @@ import io.floci.aws.testing.SidecarS3AuthEnforcedProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -22,14 +21,12 @@ import org.junit.jupiter.api.Timeout;
 
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.List;
-import java.util.Objects;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,8 +63,9 @@ class RedshiftSpectrumS3AuthEnforcedIntegrationTest {
     private String glueDatabase;
 
     @BeforeAll
-    static void requireDocker() {
+    static void requireDocker() throws ClassNotFoundException {
         SidecarContainersProfile.requireDocker();
+        Class.forName("org.postgresql.Driver");
     }
 
     @AfterEach
@@ -152,10 +150,4 @@ class RedshiftSpectrumS3AuthEnforcedIntegrationTest {
         }
     }
 
-    private static Connection waitForConnection(Cluster cluster) {
-        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
-        return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
-    }
 }

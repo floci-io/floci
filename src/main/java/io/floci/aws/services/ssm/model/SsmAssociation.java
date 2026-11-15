@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -60,6 +61,9 @@ public class SsmAssociation {
 
     @JsonProperty("AssociationVersion")
     private String associationVersion;
+
+    @JsonProperty("Tags")
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public SsmAssociation() {}
 
@@ -222,6 +226,14 @@ public class SsmAssociation {
 
     public void setAssociationVersion(String associationVersion) {
         this.associationVersion = associationVersion;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
     }
 
     @RegisterForReflection

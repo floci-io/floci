@@ -44,6 +44,8 @@ final class ExtendedS3Exchange {
         boolean failed = true;
         try {
             failed = !switch (statement) {
+                case CopyStatementParser.S3CopyJobRun run -> runEtlCopy(client, backend, executeFrame, run,
+                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend);
                 case CopyStatementParser.S3CopyFrom copy -> runEtlCopy(client, backend, executeFrame, copy,
                         s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend);
                 case CopyStatementParser.S3Unload unload -> runOwnedUnload(client, backend, executeFrame, unload,
@@ -153,7 +155,7 @@ final class ExtendedS3Exchange {
     }
 
     private static boolean runEtlCopy(Socket client, Socket backend,
-            PostgresWireDecoder.FrontendMessage executeFrame, CopyStatementParser.S3CopyFrom spec,
+            PostgresWireDecoder.FrontendMessage executeFrame, CopyStatementParser.S3Statement spec,
             S3Service s3, IamService iam, String account, List<String> roles,
             BackendResponseCoordinator coordinator, CopyBackendSession copyBackend) throws IOException {
         OutputStream output = backend.getOutputStream();

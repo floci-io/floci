@@ -121,6 +121,12 @@ public class PypiserverSidecarManager implements ContainerTeardown {
                         "-P", ".",
                         "--disable-fallback",
                         "--health-endpoint", HEALTH_PATH,
+                        // pypiserver's own default server selection ("auto") lands on a
+                        // single-threaded synchronous fallback that cannot reliably receive a
+                        // real multi-GB publish body, discovered by hand-testing one end to end
+                        // (the connection was dropped mid-upload); gevent is already present in
+                        // the pinned image and handles a large body correctly.
+                        "--server", "gevent",
                         PACKAGES_DIR))
                 .build();
         String containerId = lifecycleManager.create(spec);

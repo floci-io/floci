@@ -3,6 +3,8 @@ package io.floci.aws.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -37,7 +39,7 @@ class CloudFormationYamlParserTest {
               Fn::Select:
                 - 1
                 - Fn::Cidr:
-                    - Fn::GetAtt: [Vpc, CidrBlock]
+                    - Fn::GetAtt: Vpc.CidrBlock
                     - 4
                     - 8
             """);
@@ -61,5 +63,51 @@ class CloudFormationYamlParserTest {
             """);
         assertEquals(longForm, shorthand);
         assertEquals("Producer", shorthand.get("SubnetId").get("Fn::GetStackOutput").get("StackName").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "Value: !GetAtt [Vpc, CidrBlock]\n",
+        "Value: !GetAtt\n  - Vpc\n  - CidrBlock\n"
+    })
+    void getAttShorthandAcceptsTheSequenceForm(String yaml) throws Exception {
+        JsonNode shorthand = parse(yaml);
+        JsonNode longForm = parse("""
+            Value:
+              Fn::GetAtt: [Vpc, CidrBlock]
+            """);
+        assertEquals(longForm, shorthand);
+        assertEquals("CidrBlock", shorthand.get("Value").get("Fn::GetAtt").get(1).asText());
+    }
+
+    @Test
+    void getAttSequenceFormPreservesANestedIntrinsic() throws Exception {
+        JsonNode shorthand = parse("Value: !GetAtt [Vpc, !Ref AttributeName]\n");
+        assertEquals("AttributeName", shorthand.get("Value").get("Fn::GetAtt").get(1).get("Ref").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Vpc.CidrBlock", "Vpc", "Vpc.", ".CidrBlock", ""})
+    void getAttScalarFormPreservesItsOriginalString(String operand) throws Exception {
+        JsonNode getAtt = parse("Value: !GetAtt '" + operand + "'").get("Value").get("Fn::GetAtt");
+        assertTrue(getAtt.isTextual());
+        assertEquals(operand, getAtt.textValue());
+    }
+
+    @Test
+    void unquotedDatesStayText() throws Exception {
+        JsonNode node = parse("""
+            AWSTemplateFormatVersion: 2010-09-09
+            Resources:
+              Policy:
+                Properties:
+                  PolicyDocument:
+                    Version: 2012-10-17
+            """);
+        assertTrue(node.get("AWSTemplateFormatVersion").isTextual());
+        assertEquals("2010-09-09", node.get("AWSTemplateFormatVersion").asText());
+        JsonNode version = node.get("Resources").get("Policy").get("Properties").get("PolicyDocument").get("Version");
+        assertTrue(version.isTextual());
+        assertEquals("2012-10-17", version.asText());
     }
 }

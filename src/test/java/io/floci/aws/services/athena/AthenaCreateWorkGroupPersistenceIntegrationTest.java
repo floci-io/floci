@@ -276,7 +276,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
     }
 
     @Test
-    void createWorkGroupResolvesBlankSelectedEngineVersionToDefaultEffectiveVersion() throws Exception {
+    void createWorkGroupRejectsBlankSelectedEngineVersionWithoutPersistingIt() throws Exception {
         Files.deleteIfExists(WORKGROUPS_FILE);
 
         given()
@@ -295,22 +295,14 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
-        cleanup.register(() -> deleteWorkGroup("engine-blank-selected"));
+            .statusCode(400);
 
         PersistentStorage<String, Map<String, Object>> store = new PersistentStorage<>(
                 WORKGROUPS_FILE,
                 new TypeReference<Map<String, Map<String, Object>>>() {});
         store.load();
 
-        Map<String, Object> persisted = store.get("000000000000/us-east-1:engine-blank-selected").orElseThrow();
-        @SuppressWarnings("unchecked")
-        Map<String, Object> configuration = (Map<String, Object>) persisted.get("Configuration");
-        @SuppressWarnings("unchecked")
-        Map<String, Object> engineVersion = (Map<String, Object>) configuration.get("EngineVersion");
-
-        assertEquals("AUTO", engineVersion.get("SelectedEngineVersion"));
-        assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
+        assertTrue(store.get("000000000000/us-east-1:engine-blank-selected").isEmpty());
     }
 
     @Test

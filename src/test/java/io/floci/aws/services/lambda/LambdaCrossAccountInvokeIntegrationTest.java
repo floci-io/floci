@@ -154,9 +154,11 @@ class LambdaCrossAccountInvokeIntegrationTest {
         String caller = createUser(CALLER, "invoker-" + suffix(), INVOKE_ANYTHING);
 
         invoke(caller, functionArn + ":live").statusCode(200);
-        invoke(caller, functionArn, "live").statusCode(200);
         invoke(caller, functionArn).statusCode(403);
         invoke(caller, functionArn + ":1").statusCode(403);
+        // The Service Reference gives InvokeFunction the function alone, so a Qualifier names nothing for it: the
+        // call is checked on the function as named, which the alias grant does not cover.
+        invoke(caller, functionArn, "live").statusCode(403);
     }
 
     @Test
@@ -224,17 +226,26 @@ class LambdaCrossAccountInvokeIntegrationTest {
      */
     @Test
     void aQualifiedReadOfAnotherAccountsFunctionNeedsItsGrant() {
-        String foreignArn = createFunction(OWNER, "read-" + suffix());
+        String name = "read-" + suffix();
+        String foreignArn = createFunction(OWNER, name);
+        publishVersionAndAlias(OWNER, name, "live");
         String user = createUser(CALLER, "reader-" + suffix(), """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"lambda:GetFunction","Resource":"*"}]}""");
 
-        lambda(user).get("/2015-03-31/functions/{name}", foreignArn + ":$LATEST").then().statusCode(403);
-        lambda(user).queryParam("Qualifier", "$LATEST").get("/2015-03-31/functions/{name}", foreignArn)
+        lambda(user).get("/2015-03-31/functions/{name}", foreignArn + ":live").then().statusCode(403);
+        lambda(user).queryParam("Qualifier", "live").get("/2015-03-31/functions/{name}", foreignArn)
                 .then().statusCode(403);
 
+        // An alias in the function's name is part of the function checked, so a grant on the function does not
+        // cover it, and one on the alias does; a Qualifier names nothing for GetFunction, which the Service
+        // Reference gives the function alone, so the grant on the function covers that read.
         addPermission(OWNER, foreignArn, null, Map.of("Principal", CALLER, "Action", "lambda:GetFunction"));
-        lambda(user).get("/2015-03-31/functions/{name}", foreignArn + ":$LATEST")
+        lambda(user).get("/2015-03-31/functions/{name}", foreignArn + ":live").then().statusCode(403);
+        lambda(user).queryParam("Qualifier", "live").get("/2015-03-31/functions/{name}", foreignArn)
+                .then().statusCode(200).body("Configuration.FunctionArn", startsWith(foreignArn));
+        addPermission(OWNER, foreignArn, "live", Map.of("Principal", CALLER, "Action", "lambda:GetFunction"));
+        lambda(user).get("/2015-03-31/functions/{name}", foreignArn + ":live")
                 .then().statusCode(200).body("Configuration.FunctionArn", startsWith(foreignArn));
     }
 

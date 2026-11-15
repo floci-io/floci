@@ -232,22 +232,26 @@ class RedshiftServerlessRuntimeTest {
     }
 
     @Test
-    void restoreMasterPasswordLeavesTheProxyAloneWhenTheRoleCannotBeRestored() {
+    void aRoleChangeThatFailsLeavesTheProxyAlone() {
         doThrow(new RuntimeException("psql failed")).when(containers)
                 .alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
 
         assertThrows(RuntimeException.class,
-                () -> runtime.restoreMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123"));
+                () -> runtime.changeMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", null, "Secret123"));
 
         verify(proxies, never()).updateMasterPassword(any(), any());
     }
 
     @Test
-    void restoreMasterPasswordResetsTheRoleAndTheProxy() {
-        runtime.restoreMasterPassword(ACCOUNT, REGION, "my-wg", "root", "analytics", "Secret123");
+    void withNoOldPasswordAFailedProxyUpdateLeavesTheRoleAsItIs() {
+        RuntimeException proxyFailure = new RuntimeException("proxy gone");
+        doThrow(proxyFailure).when(proxies).updateMasterPassword(RELAY_KEY, "Secret123");
 
-        verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Secret123", "analytics");
-        verify(proxies).updateMasterPassword(RELAY_KEY, "Secret123");
+        RuntimeException thrown = assertThrows(RuntimeException.class, () -> runtime.changeMasterPassword(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", null, "Secret123"));
+
+        assertEquals(proxyFailure, thrown);
+        verify(containers, times(1)).alterUserPassword(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -310,5 +314,18 @@ class RedshiftServerlessRuntimeTest {
         assertTrue(first.matches("[A-Za-z0-9]+"), first);
         assertTrue(first.matches(".*[A-Z].*") && first.matches(".*[a-z].*") && first.matches(".*[0-9].*"), first);
         assertNotEquals(first, second);
+    }
+
+    @Test
+    void aRollbackThatTheProxyRejectsPutsTheRoleBackToTheRotatedPasswordInOrder() {
+        doThrow(new RuntimeException("proxy failed")).when(proxies).updateMasterPassword(RELAY_KEY, "Old123");
+
+        assertThrows(RuntimeException.class, () -> runtime.changeMasterPassword(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", "New456", "Old123"));
+
+        InOrder order = inOrder(containers, proxies);
+        order.verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Old123", "analytics");
+        order.verify(proxies).updateMasterPassword(RELAY_KEY, "Old123");
+        order.verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "New456", "analytics");
     }
 }

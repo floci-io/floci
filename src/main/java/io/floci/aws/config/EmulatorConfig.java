@@ -357,6 +357,7 @@ public interface EmulatorConfig {
     }
 
     interface ServiceStorageOverrides {
+        RekognitionStorageConfig rekognition();
         SsmStorageConfig ssm();
         SqsStorageConfig sqs();
         S3StorageConfig s3();
@@ -407,6 +408,13 @@ public interface EmulatorConfig {
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
         SageMakerStorageConfig sagemaker();
+    }
+
+    interface RekognitionStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
     }
 
     interface ApsStorageConfig {
@@ -468,6 +476,7 @@ public interface EmulatorConfig {
     }
 
     interface CloudWatchLogsStorageConfig {
+        // Saved query definitions share the Logs storage mode and flush interval.
         Optional<String> mode();
 
         // Log events are the largest and most write-heavy store, so they flush less often than the rest.
@@ -874,6 +883,8 @@ public interface EmulatorConfig {
         ConnectServiceConfig connect();
         AppIntegrationsServiceConfig appintegrations();
         DlmServiceConfig dlm();
+        SignerServiceConfig signer();
+        XrayServiceConfig xray();
         CognitoIdentityServiceConfig cognitoidentity();
         GlobalAcceleratorServiceConfig globalaccelerator();
         DataSyncServiceConfig datasync();
@@ -934,6 +945,15 @@ public interface EmulatorConfig {
          */
         @WithDefault("bagetter/bagetter:1.6.5")
         String nugetImage();
+
+        /**
+         * Image used for the per-repository Kellnr container backing the {@code cargo} format.
+         * Same reasoning as {@link #npmImage()}: Kellnr has no native concept of multiple named
+         * registries inside one instance either, so this gets one container per CodeArtifact
+         * repository too, and there is no single external instance a URL override could name.
+         */
+        @WithDefault("ghcr.io/kellnr/kellnr:5.14.1")
+        String cargoImage();
     }
 
     interface ConnectServiceConfig {
@@ -947,6 +967,24 @@ public interface EmulatorConfig {
     }
 
     interface DlmServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface SignerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Records signing jobs as succeeded without producing an artifact, for callers that only
+         * read job metadata. Off by default: a job that reports success must have something to
+         * download, and Floci does not sign code.
+         */
+        @WithDefault("false")
+        boolean mockSigningJobs();
+    }
+
+    interface XrayServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1152,6 +1190,28 @@ public interface EmulatorConfig {
         Optional<String> hiveImageTemplate();
 
         /**
+         * How many executors a {@code docker} Spark job run may have at once, each in a container of its own, as each
+         * has a worker of its own on EMR Serverless; 0, the default, runs a job's executors in its driver's container, in
+         * Spark's local mode. The application's maximum capacity limits them too.
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_EXECUTOR_CONTAINERS
+         */
+        @WithDefault("0")
+        int executorContainers();
+
+        /**
+         * When true, a {@code docker} job run's driver and executors run for its application's architecture,
+         * {@code X86_64} on linux/amd64 and {@code ARM64} on linux/arm64; when false, the default, or for an
+         * application that names none, on the Docker host's own platform. Off by default, as Lambda's
+         * {@code honour-architectures}: tools such as Terraform name {@code X86_64} unless told otherwise, and a
+         * foreign platform needs the Docker host to emulate it (Docker Desktop, or {@code binfmt_misc} with QEMU).
+         *
+         * Env var: FLOCI_SERVICES_EMRSERVERLESS_HONOUR_ARCHITECTURES
+         */
+        @WithDefault("false")
+        boolean honourArchitectures();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
          * previous run of <em>this same</em> Floci left on the daemon (matched by the
          * {@code io.floci.owner} label) before its first job run starts. Turn it off when two Floci
@@ -1319,6 +1379,9 @@ public interface EmulatorConfig {
     interface ApplicationAutoScalingServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("1")
+        long scheduledActionIntervalSeconds();
     }
 
     interface ElasticBeanstalkServiceConfig {
@@ -1510,6 +1573,10 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean globalBucketNamespace();
+
+        /** Seconds before RestoreObject reports a completed temporary copy. */
+        @WithDefault("0")
+        long restoreCompletionDelaySeconds();
 
         /**
          * Run the background sweep that applies bucket lifecycle expiration rules: Expiration,
@@ -1775,6 +1842,16 @@ public interface EmulatorConfig {
 
         @WithDefault("60")
         long snapshotCopySweepIntervalSeconds();
+
+        /**
+         * Run the scheduled actions of provisioned clusters, which pause or resume a cluster on a schedule.
+         * Env: FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTIONS_ENABLED
+         */
+        @WithDefault("true")
+        boolean scheduledActionsEnabled();
+
+        @WithDefault("60")
+        long scheduledActionSweepIntervalSeconds();
         @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
@@ -1814,6 +1891,9 @@ public interface EmulatorConfig {
 
         @WithDefault("1000000")
         long spectrumMaxRows();
+
+        @WithDefault("false")
+        boolean spectrumLakeFormationEnforcement();
     }
 
     interface RdsServiceConfig {
@@ -2090,6 +2170,33 @@ public interface EmulatorConfig {
         Optional<String> hiveImageTemplate();
 
         /**
+         * The memory, in MB, a {@code docker} cluster's NodeManager offers the YARN containers its steps' Spark
+         * executors run in. EMR sizes it by the instance type; Floci's node shares the machine it runs on.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_NODE_MEMORY_MB
+         */
+        @WithDefault("4096")
+        int yarnNodeMemoryMb();
+
+        /**
+         * The virtual cores a {@code docker} cluster's NodeManager offers YARN's containers.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_NODE_VCORES
+         */
+        @WithDefault("4")
+        int yarnNodeVcores();
+
+        /**
+         * The most core and task nodes a {@code docker} cluster runs as containers of their own, core nodes first; each
+         * costs 300 to 800 MB while idle. With 0 the primary node holds its DataNode and NodeManager, as a cluster of one
+         * node does.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_MAX_WORKER_NODES
+         */
+        @WithDefault("4")
+        int yarnMaxWorkerNodes();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
          * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
          * {@code io.floci.owner} label), and the images bootstrap actions left for clusters that are gone or
@@ -2185,6 +2292,12 @@ public interface EmulatorConfig {
     interface KinesisServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("0")
+        long creatingDelayMillis();
+
+        @WithDefault("0")
+        long updatingDelayMillis();
 
         /**
          * Lifetime of ListShards and ListStreams NextTokens, in milliseconds. Defaults to 300000;
@@ -3741,6 +3854,14 @@ public interface EmulatorConfig {
         @WithDefault("0")
         int maxVcpus();
 
+        /**
+         * Optional EC2 catalog instance type the k3s node container is sized from, in place of its
+         * first node group's type. The node group, the node's {@code node.kubernetes.io/instance-type}
+         * label and the synthesized EC2 instance keep the requested type. A type absent from the
+         * catalog is ignored with a warning; {@link #maxMemoryMib()} and {@link #maxVcpus()} still apply.
+         */
+        Optional<String> nodeInstanceType();
+
         @WithDefault("k3s")
         String provider();
 
@@ -3898,8 +4019,9 @@ public interface EmulatorConfig {
         /** Airflow versions environments may request. Combined with the image tag
          *  {@code apache/airflow:<version>-<pythonTag>}, where the Python tag matches the
          *  version real Amazon MWAA runs for that Airflow version: see
-         *  {@code MwaaEnvironmentManager.pythonTagFor}. */
-        @WithDefault("2.10.5,2.9.3,2.8.4")
+         *  {@code MwaaEnvironmentManager.pythonTagFor}. The default is every Airflow 2.x version
+         *  Amazon MWAA offers, plus 2.10.5, 2.9.3 and 2.8.4, which Floci offered first. */
+        @WithDefault("2.11.2,2.11.0,2.10.5,2.10.3,2.10.1,2.9.3,2.9.2,2.8.4,2.8.1,2.7.2")
         List<String> supportedVersions();
 
         /** Airflow version used when {@code CreateEnvironment} omits {@code AirflowVersion}. */
@@ -3971,6 +4093,13 @@ public interface EmulatorConfig {
 
         /** Path to PEM private key file. Env: FLOCI_TLS_KEY_PATH */
         Optional<String> keyPath();
+
+        /**
+         * PEM file of extra CA certificates that Floci's own outbound HTTPS clients trust, on top of
+         * the JVM's default roots (and Floci's CA when TLS is on). Applies whether or not TLS is enabled.
+         * Containers Floci launches are not affected. Env: FLOCI_TLS_EXTRA_CA_PATH
+         */
+        Optional<String> extraCaPath();
 
         /**
          * Auto-generate a server certificate when no cert-path/key-path is provided. The leaf is
@@ -4087,7 +4216,8 @@ public interface EmulatorConfig {
          * Optional registry/repository base for every Docker image Floci launches.
          * When set, images such as {@code postgres:16-alpine} and
          * {@code public.ecr.aws/docker/library/ubuntu:24.04} resolve under this
-         * base before the container is created.
+         * base before the container is created. An image in a registry on the Docker
+         * host's loopback, Floci's own ECR among them, is launched as it is.
          */
         Optional<String> imageRegistryBase();
 

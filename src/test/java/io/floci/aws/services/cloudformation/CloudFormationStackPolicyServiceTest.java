@@ -51,7 +51,7 @@ class CloudFormationStackPolicyServiceTest {
     void setUp() {
         provisioner = mock(CfnResourceDispatcher.class);
         when(provisioner.provision(anyString(), anyString(), any(), any(), anyString(), anyString(), anyString(),
-                any(), any(), any(), any())).thenAnswer(invocation -> {
+                any(), any(), any(), any(), any())).thenAnswer(invocation -> {
                     StackResource resource = new StackResource();
                     resource.setLogicalId(invocation.getArgument(0));
                     resource.setResourceType(invocation.getArgument(1));

@@ -127,8 +127,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
 
     // Lazily resolved: JAX-RS providers are instantiated before runtime config mappings exist
     // (the AwsProtocolClaimFilter pattern).
-    private final jakarta.inject.Provider<EmulatorConfig> configProvider;
-    private volatile EmulatorConfig config;
+    private final MemoizedSupplier<EmulatorConfig> config;
     private final IamService iamService;
     private final ResolvedServiceCatalog catalog;
     private final CurrentVertxRequest currentVertxRequest;
@@ -140,19 +139,14 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
     public SigV4HeaderSignatureFilter(jakarta.inject.Provider<EmulatorConfig> configProvider,
                                       IamService iamService, ResolvedServiceCatalog catalog,
                                       CurrentVertxRequest currentVertxRequest) {
-        this.configProvider = configProvider;
+        this.config = new MemoizedSupplier<>(configProvider::get);
         this.iamService = iamService;
         this.catalog = catalog;
         this.currentVertxRequest = currentVertxRequest;
     }
 
     private EmulatorConfig config() {
-        EmulatorConfig resolved = config;
-        if (resolved == null) {
-            resolved = configProvider.get();
-            config = resolved;
-        }
-        return resolved;
+        return config.get();
     }
 
     @Override
@@ -220,18 +214,13 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         String token = ctx.getHeaderString("X-Amz-Security-Token");
         ServiceDescriptor queryService = null;
         if (presigned) {
-            try {
+            if (token == null) {
+                token = RequestBodyReader.formField(ctx, "X-Amz-Security-Token");
                 if (token == null) {
-                    token = RequestBodyReader.formField(ctx, "X-Amz-Security-Token");
-                    if (token == null) {
-                        token = query.getFirst("X-Amz-Security-Token");
-                    }
+                    token = query.getFirst("X-Amz-Security-Token");
                 }
-                queryService = queryService(ctx, resource);
-            } catch (IllegalArgumentException error) {
-                incompleteSignature(ctx, resource, "Cannot read presigned request form parameters.");
-                return;
             }
+            queryService = queryService(ctx, resource);
         }
         Optional<String> secretKey = resolveSecretKey(scope.accessKeyId(), token);
         if (secretKey.isEmpty()) {

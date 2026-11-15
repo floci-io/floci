@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
@@ -652,7 +653,7 @@ class DynamoDbPartiQLIntegrationTest {
             [{"S":"a","N":null},{"N":"abc"}]                  | The parameter cannot be converted to a numeric value: abc
             """)
     void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
-        String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
+        String deep = nestedMap(40, "n", "{\"S\":\"leaf\"}");
 
         request("DynamoDB_20120810.ExecuteStatement", """
                 {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND x = ? AND y = ?","Parameters":%s}
@@ -856,6 +857,46 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("Validation failed in TransactStatements[0]: "
                     + "Number of parameters in request and statement don't match."));
+    }
+
+    @Test
+    @Order(40)
+    void aCallStatementIsRefusedBeforeItsParametersAreCounted() {
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        statement("foo(?)")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"foo(1)"}]}
+                """)
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"foo(?)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
+    }
+
+    @Test
+    @Order(41)
+    void aNestedStatementIsReadAsATerm() {
+        statement("SELECT * FROM \"ttt\" WHERE pk = (SELECT * FROM \"ttt\")")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unsupported token in expression: SELECT at 1:33:6"));
+        statement("foo(DELETE FROM \"ttt\" WHERE pk = 1)")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: "
+                    + "Keyword delete only expected at the top level in the query"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"EXISTS(SELECT * FROM \\"ttt\\" WHERE pk = 1, 1)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
     }
 
     private static void putItem(String pk, String attributes) {

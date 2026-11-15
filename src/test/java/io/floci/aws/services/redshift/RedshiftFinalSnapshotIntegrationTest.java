@@ -78,6 +78,10 @@ class RedshiftFinalSnapshotIntegrationTest {
                 Snapshot snapshot = client.describeClusterSnapshots(request -> request.snapshotIdentifier(backup))
                         .snapshots().getFirst();
                 assertEquals(retention, snapshot.manualSnapshotRetentionPeriod());
+                Snapshot unchanged = client.modifyClusterSnapshot(request -> request.snapshotIdentifier(backup).force(true))
+                        .snapshot();
+                assertEquals(retention, unchanged.manualSnapshotRetentionPeriod());
+                assertEquals(backup, unchanged.snapshotIdentifier());
                 assertEquals(source, snapshot.clusterIdentifier());
                 assertEquals("available", snapshot.status());
                 assertNotNull(snapshot.snapshotCreateTime());

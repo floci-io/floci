@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryBooleans;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
@@ -375,8 +376,7 @@ public class SesQueryHandler {
         String identityValue = getParam(params, "Identity");
         String notificationType = getParam(params, "NotificationType");
         String snsTopic = getParam(params, "SnsTopic");
-        identityService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic,
-                region);
+        sesService.setIdentityNotificationTopic(identityValue, notificationType, snsTopic, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("SetIdentityNotificationTopic", AwsNamespaces.SES)).build();
     }
 
@@ -493,18 +493,7 @@ public class SesQueryHandler {
      */
     private static boolean parseXsdBoolean(MultivaluedMap<String, String> params, String name) {
         String raw = params.getFirst(name);
-        if (raw == null) {
-            return false;
-        }
-        if (raw.isEmpty()) {
-            throw new AwsException("MalformedInput", "missing value for boolean type", 400);
-        }
-        return switch (raw) {
-            case "true", "1" -> true;
-            case "false", "0" -> false;
-            default -> throw new AwsException("MalformedInput",
-                    "boolean must follow xsd1.1 definition", 400);
-        };
+        return raw != null && AwsQueryBooleans.parse(raw);
     }
 
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
@@ -1016,7 +1005,7 @@ public class SesQueryHandler {
         String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
+        configSetService.createEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region, false);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "CreateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }
@@ -1026,7 +1015,7 @@ public class SesQueryHandler {
         String configSet = requireConfigurationSetName(params, "ConfigurationSetName");
         String edName = requireParam(params, "EventDestination.Name");
         EventDestination dest = readEventDestination(params, "EventDestination");
-        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region);
+        configSetService.updateEventDestination(configSet, edName, dest, regionResolver.getAccountId(), region, false);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetEventDestination", AwsNamespaces.SES)).build();
     }

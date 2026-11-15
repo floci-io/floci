@@ -17,6 +17,15 @@ public final class CopyJobSql {
     private CopyJobSql() {
     }
 
+    public static String runName(String sql) {
+        if (sql == null || RedshiftAuditSql.statements(sql).size() != 1) {
+            return null;
+        }
+        List<Token> tokens = RedshiftAuditSql.tokens(RedshiftAuditSql.statements(sql).getFirst());
+        return tokens.size() == 4 && tokens.get(0).keyword("COPY") && tokens.get(1).keyword("JOB")
+                && tokens.get(2).keyword("RUN") && isName(tokens.get(3)) ? tokens.get(3).identifier() : null;
+    }
+
     /** Identifies job clauses outside strings, quoted identifiers and comments. */
     public static boolean matches(String sql) {
         return sql != null && RedshiftAuditSql.statements(sql).stream()
@@ -103,7 +112,8 @@ public final class CopyJobSql {
                     ? "CALL floci_internal.alter_copy_job(" + PostgresWire.quoteLiteral(arguments.getFirst().identifier())
                             + ", " + arguments.get(2).keyword("ON") + ")"
                     : reject("42601", "COPY JOB ALTER needs a job name and AUTO ON or AUTO OFF");
-            case "RUN" -> reject("0A000", "COPY JOB RUN is not supported");
+            case "RUN" -> hasName && arguments.size() == 1 ? sql
+                    : reject("42601", "COPY JOB RUN needs a job name");
             default -> reject("42601", "Unknown COPY JOB command");
         };
     }

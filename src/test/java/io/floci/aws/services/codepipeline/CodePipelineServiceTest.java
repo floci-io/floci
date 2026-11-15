@@ -22,6 +22,9 @@ import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.testing.ThreadStates;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -30,9 +33,11 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -48,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -693,6 +699,122 @@ class CodePipelineServiceTest {
         assertEquals("Failed", summaries.get(0).path("status").asText());
     }
 
+    @Test
+    void customActionTypeTagsAreResourceTagsOfItsArn() throws Exception {
+        String arn = "arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/TagProvider/1";
+        JsonNode created = handle("CreateCustomActionType", """
+                {
+                    "category": "Build",
+                    "provider": "TagProvider",
+                    "version": "1",
+                    "inputArtifactDetails": {"minimumCount": 0, "maximumCount": 1},
+                    "outputArtifactDetails": {"minimumCount": 0, "maximumCount": 1},
+                    "tags": [{"key": "team", "value": "red"}]
+                }
+                """);
+
+        assertEquals(mapper.readTree("[{\"key\": \"team\", \"value\": \"red\"}]"), created.path("tags"));
+        assertFalse(created.path("actionType").has("tags"));
+        assertEquals(created.path("tags"),
+                handle("ListTagsForResource", "{\"resourceArn\": \"" + arn + "\"}").path("tags"));
+
+        handle("TagResource", """
+                {"resourceArn": "%s", "tags": [{"key": "env", "value": "dev"}]}
+                """.formatted(arn));
+        handle("UntagResource", """
+                {"resourceArn": "%s", "tagKeys": ["team"]}
+                """.formatted(arn));
+
+        assertEquals(mapper.readTree("[{\"key\": \"env\", \"value\": \"dev\"}]"),
+                handle("ListTagsForResource", "{\"resourceArn\": \"" + arn + "\"}").path("tags"));
+        AwsException missing = assertThrows(AwsException.class, () -> handle("ListTagsForResource",
+                "{\"resourceArn\": \"" + arn.replace("TagProvider", "OtherProvider") + "\"}"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void tagResourceCountsTheTagsTheResourceAlreadyHas() throws Exception {
+        String arn = "arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/FullProvider/1";
+        handle("CreateCustomActionType", customActionTypeRequest("FullProvider", 50));
+
+        AwsException tooMany = assertThrows(AwsException.class, () -> handle("TagResource", """
+                {"resourceArn": "%s", "tags": [{"key": "k50", "value": "v"}]}
+                """.formatted(arn)));
+        assertEquals("TooManyTagsException", tooMany.getErrorCode());
+        handle("TagResource", """
+                {"resourceArn": "%s", "tags": [{"key": "k0", "value": "changed"}]}
+                """.formatted(arn));
+
+        JsonNode tags = handle("ListTagsForResource", "{\"resourceArn\": \"" + arn + "\"}").path("tags");
+        assertEquals(50, tags.size());
+        assertEquals("changed", tags.get(0).path("value").asText());
+    }
+
+    @Test
+    void secondCreateOfACustomActionTypeWaitsForTheFirstAndIsRefused() throws Exception {
+        String request = customActionTypeRequest("RaceProvider", 0);
+        Future<JsonNode> second = handleWhileHoldingActionTypeLock("RaceProvider", "CreateCustomActionType",
+                request, () -> handle("CreateCustomActionType", request));
+
+        ExecutionException refused = assertThrows(ExecutionException.class, second::get);
+        assertEquals("ActionTypeAlreadyExistsException", ((AwsException) refused.getCause()).getErrorCode());
+    }
+
+    @Test
+    void tagWriteWaitsForACustomActionTypeDeleteAndDoesNotRestoreIt() throws Exception {
+        String arn = "arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/DeletedProvider/1";
+        handle("CreateCustomActionType", customActionTypeRequest("DeletedProvider", 0));
+        Future<JsonNode> tagged = handleWhileHoldingActionTypeLock("DeletedProvider", "TagResource", """
+                {"resourceArn": "%s", "tags": [{"key": "env", "value": "dev"}]}
+                """.formatted(arn), () -> handle("DeleteCustomActionType", """
+                {"category": "Build", "provider": "DeletedProvider", "version": "1"}
+                """));
+
+        ExecutionException missing = assertThrows(ExecutionException.class, tagged::get);
+        assertEquals("ResourceNotFoundException", ((AwsException) missing.getCause()).getErrorCode());
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> handle("ListTagsForResource", "{\"resourceArn\": \"" + arn + "\"}"));
+        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+    }
+
+    /**
+     * Sends {@code operation} from another thread while this one holds the lock of the custom action
+     * type Build/{@code provider}/1, and runs {@code meanwhile} once the request waits on it.
+     */
+    private Future<JsonNode> handleWhileHoldingActionTypeLock(String provider, String operation, String body,
+                                                              Executable meanwhile) {
+        String lockKey = ACCOUNT + ":" + REGION + ":action:Build:Custom:" + provider + ":1";
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            AtomicReference<Thread> requestThread = new AtomicReference<>();
+            return service.actionTypeLocks.withLock(lockKey, () -> {
+                Future<JsonNode> response = requests.submit(() -> {
+                    requestThread.set(Thread.currentThread());
+                    return handle(operation, body);
+                });
+                assertDoesNotThrow(() -> ThreadStates.awaitBlockedOrDone(requestThread, response));
+                assertDoesNotThrow(meanwhile);
+                return response;
+            });
+        }
+    }
+
+    private static String customActionTypeRequest(String provider, int tagCount) {
+        StringJoiner tags = new StringJoiner(", ");
+        for (int i = 0; i < tagCount; i++) {
+            tags.add("{\"key\": \"k" + i + "\", \"value\": \"v\"}");
+        }
+        return """
+                {
+                    "category": "Build",
+                    "provider": "%s",
+                    "version": "1",
+                    "inputArtifactDetails": {"minimumCount": 0, "maximumCount": 1},
+                    "outputArtifactDetails": {"minimumCount": 0, "maximumCount": 1},
+                    "tags": [%s]
+                }
+                """.formatted(provider, tags);
+    }
+
     private JsonNode handle(String action, String body) throws Exception {
         return service.handle(action, mapper.readTree(body), REGION, ACCOUNT);
     }
@@ -1132,6 +1254,69 @@ class CodePipelineServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void workerCompletionCannotBeOverwrittenByStopPublication(boolean abandon) throws Exception {
+        String pipeline = "stop-publication";
+        String executionId = "stopping-execution";
+        CountDownLatch approvalPolling = new CountDownLatch(1);
+        CountDownLatch stopPublished = new CountDownLatch(1);
+        CountDownLatch releaseStop = new CountDownLatch(1);
+        AtomicReference<Thread> requester = new AtomicReference<>();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(service, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            CodePipelineExecution execution = spy(waitingExecution(storage, pipeline, executionId, 1, null));
+            doAnswer(invocation -> {
+                boolean requested = (boolean) invocation.callRealMethod();
+                if (requested && Thread.currentThread() != requester.get()) {
+                    worker.compareAndSet(null, Thread.currentThread());
+                } else if (!requested && approvalPolling.getCount() > 0) {
+                    synchronized (execution) {
+                        if (execution.getActionExecutions().stream().anyMatch(action -> action.getToken() != null)) {
+                            approvalPolling.countDown();
+                        }
+                    }
+                }
+                return requested;
+            }).when(execution).isStopRequested();
+            doAnswer(invocation -> {
+                invocation.callRealMethod();
+                if ((boolean) invocation.getArgument(0)) {
+                    stopPublished.countDown();
+                    assertTrue(releaseStop.await(5, TimeUnit.SECONDS));
+                }
+                return null;
+            }).when(execution).setStopRequested(anyBoolean());
+            storage.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId, execution);
+            service.resumePersistedExecutions();
+            assertTrue(approvalPolling.await(5, TimeUnit.SECONDS),
+                    "Approval worker must enter polling before stop holds the execution monitor");
+            Future<?> stopped = requests.submit(() -> {
+                requester.set(Thread.currentThread());
+                stopExecution(service, pipeline, executionId, abandon);
+                return null;
+            });
+            try {
+                assertTrue(stopPublished.await(5, TimeUnit.SECONDS));
+                await().atMost(Duration.ofSeconds(3)).until(() -> worker.get() != null);
+                ThreadStates.awaitBlockedOrDone(worker.get());
+            } finally {
+                releaseStop.countDown();
+            }
+            stopped.get(5, TimeUnit.SECONDS);
+            await().atMost(Duration.ofSeconds(3))
+                    .until(() -> !service.activeRuns.contains(ACCOUNT + ":" + executionId));
+            assertEquals("Stopped", execution.getStatus());
+        } finally {
+            releaseStop.countDown();
+            service.shutdown();
+        }
+    }
+
     @Test
     void abandonIncludesAnActionRegisteredWhileTheStopWaits() throws Exception {
         String pipeline = "abandon-during-action-registration";
@@ -1147,20 +1332,9 @@ class CodePipelineServiceTest {
             execution.getActionExecutions().add(completed);
             ActionExecution registering = new ActionExecution();
             registering.setStatus("InProgress");
-            AtomicReference<Thread> stoppingThread = new AtomicReference<>();
             Future<JsonNode> stopped;
             synchronized (execution) {
-                stopped = requests.submit(() -> {
-                    stoppingThread.set(Thread.currentThread());
-                    return handle("StopPipelineExecution", """
-                            {
-                              "pipelineName": "%s",
-                              "pipelineExecutionId": "%s",
-                              "abandon": true
-                            }
-                            """.formatted(pipeline, executionId));
-                });
-                ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
+                stopped = stopWaitingForExecutionMonitor(requests, execution, true);
                 // The worker registers actions under this monitor before the stop can traverse them.
                 execution.getActionExecutions().add(registering);
             }
@@ -1170,6 +1344,181 @@ class CodePipelineServiceTest {
             assertEquals("Stopping", execution.getStatus());
             assertTrue(execution.isStopRequested());
         } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void actionFailureWaitsForStopPublicationBeforeEndingTheExecution() throws Exception {
+        String pipeline = "action-failure-during-stop";
+        String executionId = "failing-execution";
+        CountDownLatch actionEntered = new CountDownLatch(1);
+        CountDownLatch releaseAction = new CountDownLatch(1);
+        CountDownLatch stopChecked = new CountDownLatch(1);
+        CountDownLatch releaseStop = new CountDownLatch(1);
+        AtomicReference<Thread> actionThread = new AtomicReference<>();
+        AtomicReference<Thread> stoppingThread = new AtomicReference<>();
+        CodeBuildService codeBuild = mock(CodeBuildService.class);
+        when(codeBuild.startBuild(anyString(), anyString(), anyString(),
+                any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
+                    actionThread.set(Thread.currentThread());
+                    actionEntered.countDown();
+                    assertTrue(releaseAction.await(5, TimeUnit.SECONDS));
+                    throw new AwsException("ResourceNotFoundException", "Build project is missing", 400);
+                });
+        CapturingStorageFactory captured = new CapturingStorageFactory();
+        CodePipelineService pipelineService = new CodePipelineService(captured, mapper, codeBuild,
+                mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                configWithPollInterval(500L));
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(pipelineService, pipeline, """
+                    {
+                      "name": "BuildAction",
+                      "actionTypeId": {
+                        "category": "Build",
+                        "owner": "AWS",
+                        "provider": "CodeBuild",
+                        "version": "1"
+                      },
+                      "configuration": {
+                        "ProjectName": "missing-project"
+                      }
+                    }
+                    """);
+            CodePipelineExecution execution = spy(waitingExecution(captured, pipeline, executionId, 1, null));
+            doAnswer(invocation -> {
+                String status = (String) invocation.callRealMethod();
+                if (Thread.currentThread() == stoppingThread.get()) {
+                    stopChecked.countDown();
+                    assertTrue(releaseStop.await(5, TimeUnit.SECONDS));
+                }
+                return status;
+            }).when(execution).getStatus();
+            captured.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId, execution);
+            pipelineService.resumePersistedExecutions();
+            assertTrue(actionEntered.await(5, TimeUnit.SECONDS));
+            Future<?> stopped = requests.submit(() -> {
+                stoppingThread.set(Thread.currentThread());
+                stopExecution(pipelineService, pipeline, executionId, false);
+                return null;
+            });
+            try {
+                assertTrue(stopChecked.await(5, TimeUnit.SECONDS));
+                releaseAction.countDown();
+                ThreadStates.awaitBlockedOrDone(actionThread.get());
+                assertEquals(Thread.State.BLOCKED, actionThread.get().getState());
+                assertEquals("InProgress", execution.getStatus());
+                assertFalse(execution.isStopRequested());
+            } finally {
+                releaseStop.countDown();
+            }
+            stopped.get(5, TimeUnit.SECONDS);
+            await().atMost(Duration.ofSeconds(5))
+                    .until(() -> !pipelineService.activeRuns.contains(ACCOUNT + ":" + executionId));
+            assertEquals("Failed", execution.getStatus());
+            assertEquals("Failed", execution.getActionExecutions().getFirst().getStatus());
+            assertTrue(execution.getStatusSummary().contains("Build project is missing"));
+        } finally {
+            releaseAction.countDown();
+            releaseStop.countDown();
+            pipelineService.shutdown();
+        }
+    }
+
+    @Test
+    void aStopThatLosesToTheRunsOwnEndingIsRefusedInsteadOfReplacingIt() throws Exception {
+        // A run ends under its execution's monitor, Stopped in answer to the stop signal or Failed
+        // or Succeeded on its own, and then leaves. A stop that raised its signal or checked the
+        // status outside that monitor could write Stopping after the ending, where it stood for
+        // good: no run was left to finish it.
+        String pipeline = "stop-losing-to-the-run-ending";
+        String executionId = "ending-execution";
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(service, pipeline, """
+                    {
+                      "name": "Approve",
+                      "actionTypeId": {
+                        "category": "Approval",
+                        "owner": "AWS",
+                        "provider": "Manual",
+                        "version": "1"
+                      }
+                    }
+                    """);
+            CodePipelineExecution execution = waitingExecution(storage, pipeline, executionId, 1, "External");
+            Future<JsonNode> stopped;
+            synchronized (execution) {
+                stopped = stopWaitingForExecutionMonitor(requests, execution, true);
+                assertFalse(execution.isStopRequested());
+                assertEquals("InProgress", execution.getStatus());
+                // The run ends here, as it does under this monitor.
+                execution.setStatus("Succeeded");
+            }
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> stopped.get(5, TimeUnit.SECONDS));
+            AwsException cause = (AwsException) refused.getCause();
+            assertEquals("PipelineExecutionNotStoppableException", cause.getErrorCode());
+            assertEquals("Succeeded", execution.getStatus());
+            assertFalse(execution.isStopRequested());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void rejectedApprovalCompletesBeforeAStopWaitingOnItsMonitor() throws Exception {
+        String pipeline = "rejection-during-stop";
+        CountDownLatch approvalChecked = new CountDownLatch(1);
+        CountDownLatch releaseApproval = new CountDownLatch(1);
+        AtomicReference<Thread> approvalThread = new AtomicReference<>();
+        try (ExecutorService requests = Executors.newFixedThreadPool(2)) {
+            CodePipelineExecution execution = createWaitingApprovalExecution(pipeline);
+            ActionExecution approval = spy(approvalAction());
+            doAnswer(invocation -> {
+                String status = (String) invocation.callRealMethod();
+                if (Thread.currentThread() == approvalThread.get()) {
+                    approvalChecked.countDown();
+                    assertTrue(releaseApproval.await(5, TimeUnit.SECONDS));
+                }
+                return status;
+            }).when(approval).getStatus();
+            execution.getActionExecutions().add(approval);
+            Future<JsonNode> rejected = requests.submit(() -> {
+                approvalThread.set(Thread.currentThread());
+                return handle("PutApprovalResult", """
+                        {
+                          "pipelineName": "%s",
+                          "stageName": "External",
+                          "actionName": "Approve",
+                          "token": "%s",
+                          "result": {
+                            "status": "Rejected",
+                            "summary": "rejected by test"
+                          }
+                        }
+                        """.formatted(pipeline, approval.getToken()));
+            });
+            Future<JsonNode> stopped;
+            try {
+                assertTrue(approvalChecked.await(5, TimeUnit.SECONDS));
+                stopped = stopWaitingForExecutionMonitor(requests, execution, false);
+                assertFalse(execution.isStopRequested(), "Stop must wait for the approval result to be written");
+                assertEquals("InProgress", execution.getStatus());
+            } finally {
+                releaseApproval.countDown();
+            }
+            assertTrue(rejected.get(5, TimeUnit.SECONDS).path("approvedAt").isNumber());
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> stopped.get(5, TimeUnit.SECONDS));
+            AwsException cause = (AwsException) refused.getCause();
+            assertEquals("PipelineExecutionNotStoppableException", cause.getErrorCode());
+            assertEquals("Failed", approval.getStatus());
+            assertEquals("Failed", execution.getStatus());
+            assertEquals("Failed", execution.getStageExecutionStatuses().get("External"));
+            assertEquals("Action Approve failed: rejected by test", execution.getStatusSummary());
+            assertFalse(execution.isStopRequested());
+        } finally {
+            releaseApproval.countDown();
             service.shutdown();
         }
     }
@@ -1253,6 +1602,24 @@ class CodePipelineServiceTest {
         } finally {
             service.shutdown();
         }
+    }
+
+    private Future<JsonNode> stopWaitingForExecutionMonitor(ExecutorService requests,
+                                                            CodePipelineExecution execution,
+                                                            boolean abandon) throws Exception {
+        AtomicReference<Thread> stoppingThread = new AtomicReference<>();
+        Future<JsonNode> stopped = requests.submit(() -> {
+            stoppingThread.set(Thread.currentThread());
+            return handle("StopPipelineExecution", """
+                    {
+                      "pipelineName": "%s",
+                      "pipelineExecutionId": "%s",
+                      "abandon": %s
+                    }
+                    """.formatted(execution.getPipelineName(), execution.getPipelineExecutionId(), abandon));
+        });
+        ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
+        return stopped;
     }
 
     private CodePipelineExecution createWaitingApprovalExecution(String pipeline) throws Exception {

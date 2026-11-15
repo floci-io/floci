@@ -658,4 +658,19 @@ class AcmServiceTest {
         assertEquals("SHA512WITHRSA", cert.getSignatureAlgorithm(), "the RSA CA's signature, whatever the leaf key");
         return leaf;
     }
+
+    @Test
+    void reimportKeepsTheTagsOfTheCertificate() {
+        CertificateGenerator.GeneratedCertificate original = generator.generateSelfSignedCertificate(
+                "tagged.example.test", List.of(), KeyAlgorithm.EC_prime256v1);
+        Certificate existing = service.importCertificate(original.certificatePem(), original.privateKeyPem(),
+                null, null, Map.of("team", "payments"), REGION);
+        CertificateGenerator.GeneratedCertificate replacement = generator.generateSelfSignedCertificate(
+                "tagged.example.test", List.of(), KeyAlgorithm.EC_prime256v1);
+
+        service.importCertificate(replacement.certificatePem(), replacement.privateKeyPem(),
+                null, existing.getArn(), null, REGION);
+
+        assertEquals(Map.of("team", "payments"), service.getCertificate(existing.getArn(), REGION).getTags());
+    }
 }

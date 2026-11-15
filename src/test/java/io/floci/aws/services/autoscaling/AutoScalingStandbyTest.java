@@ -783,7 +783,9 @@ class AutoScalingStandbyTest {
             doThrow(failure).doNothing().when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
         }
 
-        List<LogRecord> records = LogCapture.capture(AutoScalingReconciler.class,
+        // Target groups are registered through AutoScalingService.registerWithTargetGroups, which logs there.
+        List<LogRecord> records = LogCapture.capture(
+                classicFailure ? AutoScalingReconciler.class : AutoScalingService.class,
                 () -> reconciler.reconcile(group()));
 
         List<LogRecord> warnings = records.stream()

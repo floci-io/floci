@@ -411,8 +411,12 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
                                                 StackResource r) {
         LambdaFunction current = existing;
         if (lambdaConfigurationChanged(current, desired.configRequest())) {
+            Map<String, Object> configuration = new HashMap<>(desired.configRequest());
+            if (Objects.equals(current.getEnvironment(), environmentVariables(configuration.get("Environment")))) {
+                configuration.remove("Environment");
+            }
             current = lambdaService.updateFunctionConfiguration(region, current.getFunctionName(),
-                    desired.configRequest());
+                    configuration);
         }
         if (lambdaCodeChanged(current, desired.code(), r.getAttributes().get(LAMBDA_CODE_IDENTITY_ATTR))) {
             current = lambdaService.updateFunctionCode(region, current.getFunctionName(), desired.code().request());

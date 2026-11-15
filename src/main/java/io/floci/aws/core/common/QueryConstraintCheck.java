@@ -114,6 +114,11 @@ public final class QueryConstraintCheck {
         return of(model, SmithyValidationErrors.Violations.QUOTED);
     }
 
+    /** Whether the generated input shape declares this top-level member. Unknown operations declare none. */
+    public boolean hasMember(String operation, String member) {
+        return shapes.path(operations.path(operation).asText("")).path("members").has(member);
+    }
+
     public static QueryConstraintCheck of(JsonNode model, SmithyValidationErrors.Violations messages) {
         return new QueryConstraintCheck(model, messages);
     }

@@ -5,13 +5,33 @@
 
 EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
 
+## Cluster request IAM conditions
+
+With IAM enforcement enabled, `CreateCluster` evaluates `eks:authenticationMode`,
+`eks:bootstrapClusterCreatorAdminPermissions`, `eks:endpointPrivateAccess`, and
+`eks:endpointPublicAccess` from the request's `accessConfig` and `resourcesVpcConfig`.
+The generated metadata also maps those keys for `UpdateClusterConfig`, except the
+create-only bootstrap flag; this does not implement the currently unsupported
+update API. Its extraction is covered by resolver tests, not an SDK update lifecycle.
+The action-to-key mappings come from AWS's Service Reference and the request paths from
+botocore. Omitted attributes remain absent from the IAM context; stored cluster settings
+and service defaults do not supply missing request conditions. Generic request-tag
+conditions continue to apply alongside these EKS-specific keys.
+
+A `CreateCluster` body is checked against botocore's EKS request shapes, vendored by
+`tools/aws/regen_eks_shapes.py`, before it is read. A boolean member given anything but a JSON
+boolean or the text `true` or `false`, such as `"endpointPublicAccess": 1`, is refused with
+`SerializationException`, so it cannot reach a cluster as `true` while its condition key carries
+no value. A structure, list or map of the wrong kind is refused the same way. EKS's own wording
+for this error has not been measured; Floci answers as the REST JSON services it was measured on do.
+
 ## Supported Operations
 
 | Operation | Description |
 |---|---|
 | `CreateCluster` | Create a new EKS cluster |
 | `DescribeCluster` | Describe a cluster by name |
-| `ListClusters` | List all cluster names |
+| `ListClusters` | List cluster names with pagination (`maxResults` 1-100 and `nextToken`) |
 | `DeleteCluster` | Delete a cluster |
 | `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
@@ -111,8 +131,12 @@ A matching pod is patched exactly the way real EKS patches it. Every init contai
 | `AWS_CONTAINER_CREDENTIALS_FULL_URI` | `http://169.254.170.23/v1/credentials` |
 | `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` | `/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token` |
 | Volume mount | `/var/run/secrets/pods.eks.amazonaws.com/serviceaccount`, read-only, from volume `eks-pod-identity-token` |
+| `AWS_ENDPOINT_URL` | Floci's endpoint, as a cluster container reaches it (Floci only) |
+| `AWS_ENDPOINT_URL_STS` | The same endpoint (Floci only) |
 
-The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or either environment variable) is left as the workload set it.
+The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or any of the environment variables) is left as the workload set it.
+
+Real EKS sets neither endpoint variable. Floci adds them so the credentials it hands out are used against Floci, as every container Floci launches already is, instead of being sent to AWS, which rejects them. `AWS_ENDPOINT_URL_STS` is set beside the global variable because the AWS SDK for Go v2 builds the STS client of its web identity provider before it reads `AWS_ENDPOINT_URL`. A pod cannot resolve the Docker host name (`host.docker.internal` lives only in the cluster container's `/etc/hosts`) or Floci's hostname (on a custom Docker network k3s replaces the loopback resolver `127.0.0.11` with a public one, so `localhost.floci.io` answers `127.0.0.1`), so the endpoint is the Docker host address and is injected only when that is an IP address, as it is when Floci runs in a container. A container that sets `AWS_ENDPOINT_URL` itself gets no `AWS_ENDPOINT_URL_STS`, which would override its choice for STS. A container with any `envFrom` source gets no endpoint variable, because its values are unknown at admission and an injected `env` entry would take precedence over them; it still gets the credentials variables.
 
 ### Credential endpoint
 
@@ -381,6 +405,22 @@ Floci runs one k3s container per cluster. The worker node reflects the metadata 
 #### Timing and post-start nodegroups
 Kubelet flags are fixed when the cluster container starts. For nodegroups created while the cluster is already running, metadata is recorded in the EKS store and Floci logs an informational message that labels and taints are not applied to the running node. Surviving cluster containers are adopted as-is without rebuilding kubelet flags on restore.
 
+#### Auto Scaling group
+
+Each nodegroup has the Auto Scaling group that `DescribeNodegroup` names in `resources.autoScalingGroups`, in the nodegroup's account and Region. Its minimum, maximum and desired sizes are the nodegroup's `scalingConfig`, its subnets are the nodegroup's, and it is tagged `eks:cluster-name`, `eks:nodegroup-name`, `k8s.io/cluster-autoscaler/enabled=true` and `k8s.io/cluster-autoscaler/<cluster-name>=owned`. Its instance is the cluster's shared node, `InService` and `Healthy`. A node that registers after the nodegroup was created joins the group then.
+
+- Attaching a target group to the group, with `AttachLoadBalancerTargetGroups` or as an `elbv2` traffic source with `AttachTrafficSources`, registers the node with it by instance id at once. Detaching it, or detaching the node with `DetachInstances`, deregisters the node, unless the group of another of the cluster's nodegroups still has that target group attached.
+- Deleting the nodegroup deletes its group and deregisters the node the same way, and so does `DeleteAutoScalingGroup` on the group, which still needs `ForceDelete` while the group holds the node and terminates nothing. Deleting the cluster deletes the groups of its nodegroups. A group that cannot be deleted is logged, and the nodegroup or cluster is deleted all the same.
+- Auto Scaling never launches, terminates, replaces or moves the group's instance. `TerminateInstanceInAutoScalingGroup`, `EnterStandby`, `ExitStandby`, `StartInstanceRefresh`, `AttachInstances`, and `SetInstanceHealth` with `Unhealthy`, are refused on the group with a `ValidationError` saying it is managed by EKS for a nodegroup. Its settings still change: `SetDesiredCapacity` and the sizes of `UpdateAutoScalingGroup` change only the capacity the group reports, and a `Healthy` status and scale-in protection are recorded.
+- `DescribeNodegroup` keeps the `scalingConfig` the nodegroup was created with. AWS copies sizes changed on the group directly back into the nodegroup from time to time; Floci does not, and does not implement `UpdateNodegroupConfig` either.
+- A nodegroup stored before Floci kept these groups gets its group when Floci's EKS service starts: at Floci's startup when clusters run in Docker, and in mock mode when Floci first uses EKS, at the latest with the first EKS request. The nodegroup records that its group was created, so this happens once: a group deleted through Auto Scaling is not created again.
+
+Floci runs one node per cluster, so the groups of all of a cluster's nodegroups hold the same instance:
+
+- `DescribeAutoScalingInstances` lists the node once for each nodegroup, with that nodegroup's group.
+- An operation that acts on the group of an instance, such as `SetInstanceHealth`, acts on the first group it finds holding the node. Those that would change the node are refused, as above.
+- The node stays registered with a target group as long as one of the groups holding it has that target group attached.
+
 ### Metadata only inputs
 
 The remaining structured inputs are recorded as metadata:
@@ -450,7 +490,13 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
 - A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
   started in place, keeping its published API server port and data volume: deployments come
   back as they were.
-- A missing container is recreated. Its named k3s data volume (`floci-aws-eks-<name>`; for a
+- A missing container, or a survivor that cannot be adopted, is recreated on the API server port
+  the cluster's endpoint names, so existing kubeconfigs stay valid. Only when that port is in use
+  (by another process, another container or another cluster), or it is outside the configured
+  range, does the cluster move to the first free port, which changes its endpoint; Floci logs a
+  warning when a port in use moves it. A `network` mode endpoint names the container itself, so it
+  stays the same whatever host port the container gets.
+  Its named k3s data volume (`floci-aws-eks-<name>`; for a
   [non-default account](../configuration/multi-account.md), `floci-aws-eks-<account>.<name>`) is
   reused if it survived; volumes follow the global prune policy
   (`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`, default `false`), so they are retained when the
@@ -459,6 +505,12 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
   `floci-eks-<name>` container and volume: restoration adopts the surviving container when its
   `io.floci.account` label matches the owning account, so pre-upgrade workloads are not
   orphaned.
+- Cluster names are unique only within a Region of an account, so a cluster outside the default
+  Region, or one sharing its name with a cluster in another Region, puts its Region first in its
+  container and volume names: `floci-aws-eks-<region>.<name>`, or
+  `floci-aws-eks-<region>.<account>.<name>` for a non-default account. A cluster in the default
+  Region keeps the unqualified name, and so does any cluster created before Region qualification:
+  its record moves to a Region-scoped key on startup, but its container and volume keep their names.
 
 A restored cluster reports `CREATING` until its API server answers again, then returns to
 `ACTIVE` with a freshly extracted certificate authority. If the container cannot be brought
@@ -485,6 +537,15 @@ capacity. Memory is capped at 80% of the Docker host's memory so other processes
 run. `floci.services.eks.max-memory-mib` and `floci.services.eks.max-vcpus` provide optional lower
 ceilings; zero means no extra ceiling. Their environment variables are `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB`
 and `FLOCI_SERVICES_EKS_MAX_VCPUS`.
+
+Those ceilings can only lower the node. To give a workload more room locally than its node group
+asks for on AWS, set `floci.services.eks.node-instance-type` (`FLOCI_SERVICES_EKS_NODE_INSTANCE_TYPE`)
+to a catalog type such as `t2.2xlarge`. The node container's memory and CPU and its kubelet
+reservations are then sized from that type (k3s `maxPods` does not change), while
+`DescribeNodegroup`, the node's `node.kubernetes.io/instance-type` label and the synthesized EC2
+instance keep the requested type, so the same Terraform plans no changes. The two ceilings still apply on top. A type absent from the catalog is ignored with a
+warning. Changing the setting recreates a surviving node on the next start, keeping its data volume.
+This setting is Floci-only; it has no AWS equivalent.
 
 The same calculation sets kubelet's `kube-reserved`, `system-reserved`, and `eviction-hard` flags.
 The EKS AMI reserves `255 + 11 * maxPods` MiB and a tiered CPU fraction for kubelet and the
@@ -548,7 +609,7 @@ The node name, the instance ID in `spec.providerID`, and the synthetic EC2 insta
 
 Stock Amazon EKS clusters historically define a default `gp2` StorageClass pointing to the legacy in-tree `kubernetes.io/aws-ebs` plugin, but run no active storage provisioner without the EBS CSI driver. Unqualified PersistentVolumeClaims remain `Pending` on EKS because nothing can provision them. Floci matches this behavior by disabling k3s's bundled `local-path` provisioner and StorageClass, preventing unqualified claims from silently binding to the node filesystem.
 
-Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass.
+Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass. As on an EKS node, the cluster node's mounts are shared, so a driver's node plugin can mount volumes under `/var/lib/kubelet` with `Bidirectional` propagation.
 
 For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
 
@@ -597,6 +658,7 @@ does not enable it; omitted or false values keep the simulated behavior.
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
 | `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB` | `0` | Optional k3s container memory ceiling in MiB |
 | `FLOCI_SERVICES_EKS_MAX_VCPUS` | `0` | Optional k3s container vCPU ceiling |
+| `FLOCI_SERVICES_EKS_NODE_INSTANCE_TYPE` | *(unset)* | Catalog instance type the k3s node container is sized from; the API keeps the node group's type |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
 | `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
@@ -771,7 +833,7 @@ services:
 ```
 
 ## Instance Metadata Service (IMDS)
-The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the same type used for the container limits.
+The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the node group's type, which also sizes the container unless `floci.services.eks.node-instance-type` is set.
 
 When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
 
@@ -894,6 +956,8 @@ curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
 
 `audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional. This is Floci plumbing under `_floci/…`, not an AWS API.
 
+Cluster names are unique only within a Region of an account. When clusters with the same name exist in more than one Region, add `?region=<region>` to choose one, for example `…/clusters/my-cluster/oidc-token?region=eu-west-1`. Without it, the request's Region is used, and then the account's only cluster of that name. The discovery and key routes below take the same parameter.
+
 ### Trust policy
 
 Note that the OIDC provider ARN and the condition keys use the issuer with the scheme stripped `oidc.eks.<region>.amazonaws.com/id/<id>`, which is how the AWS console, `eksctl`, and Terraform all render it.
@@ -941,6 +1005,8 @@ Served for fidelity and debugging, nothing in the IRSA flow dereferences them:
 | `GET /_floci/eks/clusters/<name>/oidc/keys` | JWKS containing the cluster's public key |
 
 These live under `_floci/…` rather than at the AWS-shaped issuer path, which Floci's embedded DNS does not resolve and which would collide with S3's path-style routing.
+
+Both take an optional `?region=<region>` query parameter. Cluster names are unique only within a Region of an account, so without it the request's Region is used, and then the account's only cluster of that name. The discovery document's `jwks_uri` always names the cluster's Region.
 
 ## ARN Format
 

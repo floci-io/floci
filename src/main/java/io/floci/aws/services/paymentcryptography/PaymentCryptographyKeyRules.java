@@ -108,6 +108,46 @@ final class PaymentCryptographyKeyRules {
     }
 
     /**
+     * The algorithm a key has to have for an operation.
+     *
+     * <p>The algorithm is what the cipher runs, so the operation names the one it is
+     * defined over: a Triple DES key and an AES key are different ciphers, and so are
+     * the two Triple DES forms.
+     *
+     * @param key the key the operation runs under
+     * @param algorithm the algorithm the operation needs
+     * @param what the operation, for the message
+     */
+    static void requireAlgorithm(PaymentCryptographyKey key, String algorithm, String what) {
+        if (!algorithm.equals(key.getKeyAlgorithm())) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is a " + key.getKeyAlgorithm() + " key, and "
+                            + what + " needs a " + algorithm + " one", 400);
+        }
+    }
+
+    /**
+     * The mode of use a key has to have to derive from it.
+     *
+     * <p>A derivation reads the key, so the key has to allow it. A key with no modes
+     * of use allows nothing, and is refused here rather than read.
+     *
+     * @param key the key the operation runs under
+     * @param what the operation, for the message
+     */
+    static void requireDerive(PaymentCryptographyKey key, String what) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        boolean derives = modes != null
+                && (Boolean.TRUE.equals(modes.get("DeriveKey"))
+                        || Boolean.TRUE.equals(modes.get("NoRestrictions")));
+        if (!derives) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " does not have the mode of use DeriveKey, "
+                            + "which it needs to " + what, 400);
+        }
+    }
+
+    /**
      * The material of a key.
      *
      * <p>The material is held by the key while the emulator runs and is not written to the

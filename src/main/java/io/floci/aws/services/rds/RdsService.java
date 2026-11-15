@@ -35,6 +35,7 @@ import io.floci.aws.services.rds.container.AutoPauseListener;
 import io.floci.aws.services.rds.container.RdsContainerHandle;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.export.SnapshotExportSource;
+import io.floci.aws.services.rds.model.BlueGreenDeployment;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterAutomatedBackup;
@@ -187,6 +188,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
     private final StorageBackend<String, EventSubscription> eventSubscriptions;
     private final StorageBackend<String, DbClusterEndpoint> clusterEndpoints;
+    private final StorageBackend<String, BlueGreenDeployment> blueGreenDeployments;
     /** The account's ModifyCertificates override per Region, by CA identifier. */
     private final StorageBackend<String, String> certificateOverrides;
     private final StorageBackend<String, DbProxyEndpoint> proxyEndpoints;
@@ -269,6 +271,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, EventSubscription>>() {});
         this.clusterEndpoints = storageFactory.create("rds", "rds-cluster-endpoints.json",
                 new TypeReference<Map<String, DbClusterEndpoint>>() {});
+        this.blueGreenDeployments = storageFactory.create("rds", "rds-blue-green-deployments.json",
+                new TypeReference<Map<String, BlueGreenDeployment>>() {});
         this.proxyEndpoints = storageFactory.create("rds", "rds-proxy-endpoints.json",
                 new TypeReference<Map<String, DbProxyEndpoint>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -440,6 +444,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.eventSubscriptions = new InMemoryStorage<>();
         this.certificateOverrides = new InMemoryStorage<>();
         this.clusterEndpoints = new InMemoryStorage<>();
+        this.blueGreenDeployments = new InMemoryStorage<>();
         this.proxyEndpoints = new InMemoryStorage<>();
         this.instanceAutomatedBackups = new InMemoryStorage<>();
         this.clusterAutomatedBackups = new InMemoryStorage<>();
@@ -901,6 +906,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerHost(handle.getHost());
                     instance.setContainerPort(handle.getPort());
                 } else if (!containerManager.refusedParameterGroup(dbInstanceArn)) {
+                    instance.setBackendNeverStarted(containerManager.getActiveHandle(dbInstanceArn) == null);
                     LOG.warnv("DB instance {0} created without a backing database container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the database do not until a daemon appears.", id);
@@ -3211,6 +3217,13 @@ public class RdsService implements Resettable, ResourceProvider {
                     eventSubscriptions.put(eventSubscriptionKey(effectiveRegion, resourceId), subscription);
                 });
             }
+            case "deployment" -> {
+                BlueGreenDeployment deployment = requireBlueGreenDeployment(effectiveRegion, resourceId);
+                yield new TagHandle(deployment.getTags(), updated -> {
+                    deployment.setTags(updated);
+                    blueGreenDeployments.put(blueGreenDeploymentKey(effectiveRegion, resourceId), deployment);
+                });
+            }
             case "db-proxy-endpoint" -> {
                 DbProxyEndpoint endpoint = proxyEndpoints.scan(k -> k.startsWith(effectiveRegion + "::")).stream()
                         .filter(candidate -> resourceName.equals(candidate.getDbProxyEndpointArn()))
@@ -3881,6 +3894,8 @@ public class RdsService implements Resettable, ResourceProvider {
         // Resolved before the first setter runs, since the checks it carries read the instance's
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
+        String previousEngineVersion = instance.getEngineVersion();
+        boolean restartForUpgrade = requiresMinorEngineRestart(instance, resolvedScaling.engineVersion());
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
             effective.validateStorageType();
@@ -3943,6 +3958,9 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
         effective.applyTo(instance);
+        if (restartForUpgrade) {
+            instance.setStatus(DbInstanceStatus.MODIFYING);
+        }
         resolvedScaling.applyTo(instance);
         if (publiclyAccessible != null) {
             instance.setPubliclyAccessible(publiclyAccessible);
@@ -3964,8 +3982,112 @@ public class RdsService implements Resettable, ResourceProvider {
                     rdsResourceRelayKey(instance.getDbInstanceArn(), id), iamEnabled);
         }
 
+        if (restartForUpgrade) {
+            restartForMinorEngineUpgrade(instance, previousEngineVersion, effectiveRegion);
+        }
+
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    private boolean requiresMinorEngineRestart(DbInstance instance, String requestedVersion) {
+        if (config.services().rds().mock()
+                || isBlank(requestedVersion) || requestedVersion.equals(instance.getEngineVersion())) {
+            return false;
+        }
+        String currentVersion = instance.getEngineVersion();
+        boolean imageChanges = !imageForEngine(instance.getEngine(), currentVersion)
+                .equals(imageForEngine(instance.getEngine(), requestedVersion));
+        if (instance.isBackendNeverStarted() && imageChanges) {
+            return false;
+        }
+        boolean numericVersions = currentVersion != null
+                && currentVersion.matches("[0-9]{1,9}(\\.[0-9]{1,9})*")
+                && requestedVersion.matches("[0-9]{1,9}(\\.[0-9]{1,9})*");
+        if (!isBlank(instance.getDbClusterIdentifier()) || isAuroraEngine(engineName(instance))
+                || !numericVersions
+                || !engineVersionFamily(instance.getEngine(), currentVersion)
+                        .equals(engineVersionFamily(instance.getEngine(), requestedVersion))
+                || RdsEngineCatalog.compareVersions(requestedVersion, currentVersion) <= 0
+                || !imageChanges) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Only minor engine upgrades with version-specific images are supported for "
+                            + "standalone container-backed DB instances.", 400);
+        }
+        return true;
+    }
+
+    private static String engineVersionFamily(DatabaseEngine engine, String version) {
+        String[] parts = version.split("\\.");
+        if (parts.length == 1 || engine == DatabaseEngine.POSTGRES && parts[0].length() > 1) {
+            return parts[0];
+        }
+        return parts[0] + "." + parts[1];
+    }
+
+    private void restartForMinorEngineUpgrade(DbInstance instance, String previousVersion, String region) {
+        String id = instance.getDbInstanceIdentifier();
+        String previousContainerId = instance.getContainerId();
+        try {
+            proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+            if (previousContainerId != null) {
+                containerManager.stop(buildHandle(instance));
+            }
+            instance.setContainerId(null);
+            instance.setContainerHost(null);
+            instance.setContainerPort(0);
+            startStandaloneInstanceBackend(instance, id, region);
+            if (!hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+                throw new AwsException("InvalidDBInstanceState",
+                        "The database backend could not be started for the engine version upgrade.", 400);
+            }
+            instance.setStatus(DbInstanceStatus.AVAILABLE);
+            putInstanceForScope(currentAccountId(), region, id, instance);
+        } catch (RuntimeException | Error failure) {
+            if (!hasBackend(instance.getContainerHost(), instance.getContainerPort())
+                    || Objects.equals(previousContainerId, instance.getContainerId())) {
+                instance.setEngineVersion(previousVersion);
+            }
+            instance.setStatus(DbInstanceStatus.FAILED);
+            try {
+                putInstanceForScope(currentAccountId(), region, id, instance);
+            } catch (RuntimeException persistFailure) {
+                failure.addSuppressed(persistFailure);
+            }
+            throw failure;
+        }
+    }
+
+    /**
+     * Gives a DB instance exactly the VPC security groups {@code groupIds}, as CloudFormation sets
+     * them on an update and puts them back on a rollback. ModifyDBInstance keeps the groups when the
+     * request names none; here an empty list leaves the instance with none, as one created without.
+     */
+    public synchronized DbInstance setDbInstanceVpcSecurityGroups(String region, String instanceId,
+                                                                  List<String> groupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        instance.setVpcSecurityGroupIds(groupIds);
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("DB instance {0} security groups set to {1}", instanceId, groupIds);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /**
+     * The groups AWS's CloudFormation handler gives a standalone DB instance whose template stops
+     * declaring {@code VPCSecurityGroups}: the default security group of its VPC, or none when EC2
+     * has no default group for it.
+     */
+    public List<String> defaultVpcSecurityGroupIds(String region, String instanceId) {
+        String effectiveRegion = effectiveRegion(region);
+        String vpcId = getDbInstance(instanceId, effectiveRegion).getVpcId();
+        if (isBlank(vpcId)) {
+            return List.of();
+        }
+        return ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId)
+                .map(group -> List.of(group.getGroupId()))
+                .orElse(List.of());
     }
 
     private static void validateInstanceSettings(DbInstanceSettings settings) {
@@ -4326,16 +4448,11 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             return;
         }
-        String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
         String storageResourceId = resolvedInstanceStorageResourceId(instance);
         String dockerVolumeName = resolvedInstanceDockerVolumeName(instance);
         RdsContainerHandle handle;
         try {
-            handle = containerManager.tryStart(
-                    instance.getDbInstanceArn(), id, storageResourceId,
-                    dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
-                    instance.getMasterPassword(), instance.getDbName(),
-                    instanceEngineParameters(instance));
+            handle = startInstanceContainer(instance);
         } catch (RuntimeException | Error e) {
             instance.setStatus(DbInstanceStatus.FAILED);
             putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
@@ -4612,14 +4729,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                     throw e;
                 }
-                String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
                 String storageResourceId = resolvedInstanceStorageResourceId(instance);
                 String dockerVolumeName = resolvedInstanceDockerVolumeName(instance);
-                RdsContainerHandle handle = containerManager.tryStart(
-                        instance.getDbInstanceArn(), id, storageResourceId,
-                        dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
-                        instance.getMasterPassword(), instance.getDbName(),
-                        instanceEngineParameters(instance));
+                RdsContainerHandle handle = startInstanceContainer(instance);
                 instance.setContainerStorageResourceId(storageResourceId);
                 instance.setDockerVolumeName(dockerVolumeName);
                 instance.setContainerId(handle != null ? handle.getContainerId() : null);
@@ -4801,12 +4913,7 @@ public class RdsService implements Resettable, ResourceProvider {
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
         } else {
-            String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-            started = containerManager.tryStart(
-                    instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
-                    resolvedInstanceDockerVolumeName(instance), instance.getEngine(), image,
-                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
-                    instanceEngineParameters(instance));
+            started = startInstanceContainer(instance);
             if (started == null) {
                 return instance;
             }
@@ -4862,6 +4969,31 @@ public class RdsService implements Resettable, ResourceProvider {
         reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         LOG.infov("Backing database container for DB instance {0} started on retry", id);
         return instance;
+    }
+
+    /** Records a possible database initialization before startup, even if its proxy later fails. */
+    private RdsContainerHandle startInstanceContainer(DbInstance instance) {
+        boolean neverStarted = instance.isBackendNeverStarted();
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        String region = regionFromArn(instance.getDbInstanceArn());
+        String id = instance.getDbInstanceIdentifier();
+        if (neverStarted) {
+            instance.setBackendNeverStarted(false);
+            putInstanceForScope(accountId, region, id, instance);
+        }
+        RdsContainerHandle started = containerManager.tryStart(
+                instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
+                resolvedInstanceDockerVolumeName(instance), instance.getEngine(),
+                imageForEngine(instance.getEngine(), instance.getEngineVersion()),
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
+                instanceEngineParameters(instance));
+        if (neverStarted && started == null
+                && !containerManager.refusedParameterGroup(instance.getDbInstanceArn())
+                && containerManager.getActiveHandle(instance.getDbInstanceArn()) == null) {
+            instance.setBackendNeverStarted(true);
+            putInstanceForScope(accountId, region, id, instance);
+        }
+        return started;
     }
 
     /**
@@ -5117,6 +5249,10 @@ public class RdsService implements Resettable, ResourceProvider {
                 "RDS_INSTANCE", id, regionFromArn(instance.getDbInstanceArn()))) {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is registered with a DB proxy target group.", 400);
+        }
+        if (provisioningIds.contains(blueGreenSourceKey(instance.getDbInstanceArn()))) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + id + " is the source of a blue/green deployment being created.", 400);
         }
 
         String clusterId = instance.getDbClusterIdentifier();
@@ -9667,13 +9803,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerHost(cluster.getContainerHost());
                     instance.setContainerPort(cluster.getContainerPort());
                 } else {
-                    String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-                    restoredHandle = containerManager.tryStart(
-                            instance.getDbInstanceArn(), instance.getDbInstanceIdentifier(),
-                            instance.getContainerStorageResourceId(),
-                            instance.getDockerVolumeName(), instance.getEngine(), image,
-                            instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
-                            instanceEngineParameters(instance));
+                    restoredHandle = startInstanceContainer(instance);
                     backendHost = restoredHandle != null ? restoredHandle.getHost() : null;
                     backendPort = restoredHandle != null ? restoredHandle.getPort() : 0;
                     instance.setContainerId(restoredHandle != null ? restoredHandle.getContainerId() : null);
@@ -12029,6 +12159,608 @@ public class RdsService implements Resettable, ResourceProvider {
                 clusterEndpoints.put(clusterEndpointKey(region, endpoint.getDbClusterEndpointIdentifier()), endpoint);
             }
         }
+    }
+
+    // ── Blue/Green deployments ────────────────────────────────────────────────
+
+    private static final Pattern BLUE_GREEN_DEPLOYMENT_NAME = Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
+    private static final int MAX_BLUE_GREEN_DEPLOYMENT_NAME = 60;
+    private static final int MAX_DB_INSTANCE_IDENTIFIER = 63;
+    private static final Set<DatabaseEngine> BLUE_GREEN_ENGINES =
+            Set.of(DatabaseEngine.POSTGRES, DatabaseEngine.MYSQL, DatabaseEngine.MARIADB);
+    private static final Set<String> BLUE_GREEN_FILTERS = Set.of(
+            "blue-green-deployment-identifier", "blue-green-deployment-name", "source", "target");
+    private static final int MIN_SWITCHOVER_TIMEOUT = 30;
+    private static final int MAX_SWITCHOVER_TIMEOUT = 3600;
+    private static final String BLUE_GREEN_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+    /** The CreateBlueGreenDeployment request members Floci applies to the green instance. */
+    public record BlueGreenDeploymentRequest(String name,
+                                             String source,
+                                             String targetEngineVersion,
+                                             String targetDbParameterGroupName,
+                                             String targetDbClusterParameterGroupName,
+                                             String targetDbInstanceClass,
+                                             Integer targetAllocatedStorage,
+                                             String targetStorageType,
+                                             Map<String, String> tags) {}
+
+    /** One page of deployments, plus the marker to continue from, or null at the end. */
+    public record BlueGreenDeploymentPage(List<BlueGreenDeployment> deployments, String marker) {}
+
+    /**
+     * Creates a blue/green deployment for a DB instance. The green instance is a copy of the blue
+     * one named {@code <blue>-green-<suffix>}, linked to it as a read replica the way
+     * DescribeDBInstances reports it on AWS, with the target engine version, parameter group,
+     * class and storage applied. Its database is initialised from a dump of the blue one taken
+     * now, so it holds the blue data as of creation; later writes to blue do not stream to it.
+     *
+     * <p>Creation runs to completion before the response, so the deployment is reported
+     * {@code AVAILABLE} rather than passing through {@code PROVISIONING}.
+     */
+    public BlueGreenDeployment createBlueGreenDeployment(BlueGreenDeploymentRequest request, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        String name = request.name();
+        if (isBlank(name)) {
+            throw new AwsException("InvalidParameterValue", "BlueGreenDeploymentName is required.", 400);
+        }
+        if (name.length() > MAX_BLUE_GREEN_DEPLOYMENT_NAME || !BLUE_GREEN_DEPLOYMENT_NAME.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "BlueGreenDeploymentName must be 1 to " + MAX_BLUE_GREEN_DEPLOYMENT_NAME
+                    + " letters, digits or hyphens, start with a letter, and not end with or "
+                    + "contain two consecutive hyphens.", 400);
+        }
+        if (isBlank(request.source())) {
+            throw new AwsException("InvalidParameterValue", "Source is required.", 400);
+        }
+        if (!isBlank(request.targetDbClusterParameterGroupName())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "TargetDBClusterParameterGroupName applies only to a DB cluster source.", 400);
+        }
+
+        String provisioningKey = "bgd:" + currentAccountId() + ":" + effectiveRegion + ":" + name;
+        if (!provisioningIds.add(provisioningKey)) {
+            throw blueGreenDeploymentAlreadyExists(name);
+        }
+        try {
+            return doCreateBlueGreenDeployment(request, effectiveRegion);
+        } finally {
+            provisioningIds.remove(provisioningKey);
+        }
+    }
+
+    private BlueGreenDeployment doCreateBlueGreenDeployment(BlueGreenDeploymentRequest request, String region) {
+        String name = request.name();
+        DbInstance blue;
+        String sourceKey;
+        synchronized (this) {
+            if (findBlueGreenDeploymentByName(region, name) != null) {
+                throw blueGreenDeploymentAlreadyExists(name);
+            }
+            blue = resolveBlueGreenSource(request.source(), region);
+            requireBlueGreenSourceSupported(blue, region);
+            // The membership check above sees only finished deployments, so a second create naming
+            // the same source while the first is still copying data is stopped here. Taken under
+            // the same lock, so a delete of the source either ran first or sees this and refuses.
+            sourceKey = blueGreenSourceKey(blue.getDbInstanceArn());
+            if (!provisioningIds.add(sourceKey)) {
+                throw new AwsException("InvalidDBInstanceState",
+                        "DB instance " + blue.getDbInstanceIdentifier()
+                        + " is already the source of a blue/green deployment being created.", 400);
+            }
+        }
+        try {
+            return provisionBlueGreenDeployment(request, blue, region);
+        } finally {
+            provisioningIds.remove(sourceKey);
+        }
+    }
+
+    private BlueGreenDeployment provisionBlueGreenDeployment(
+            BlueGreenDeploymentRequest request, DbInstance blue, String region) {
+        String name = request.name();
+        String blueId = blue.getDbInstanceIdentifier();
+
+        String sourceVersion = blue.getEngineVersion();
+        String targetVersion = firstNonBlank(request.targetEngineVersion(), sourceVersion);
+        if (sourceVersion != null && RdsEngineCatalog.compareVersions(targetVersion, sourceVersion) < 0) {
+            throw new AwsException("InvalidParameterCombination",
+                    "TargetEngineVersion " + targetVersion + " is lower than the source engine version "
+                    + sourceVersion + ".", 400);
+        }
+        String engineParam = blue.getEngineIdentifier() != null
+                ? blue.getEngineIdentifier() : blue.getEngine().name().toLowerCase(Locale.ROOT);
+        boolean sameFamily = Objects.equals(
+                expectedClusterParameterGroupFamily(engineParam, sourceVersion),
+                expectedClusterParameterGroupFamily(engineParam, targetVersion));
+        String parameterGroupName = !isBlank(request.targetDbParameterGroupName())
+                ? request.targetDbParameterGroupName()
+                : sameFamily ? blue.getParameterGroupName() : null;
+        if (!isBlank(request.targetDbParameterGroupName())) {
+            getDbParameterGroup(request.targetDbParameterGroupName(), region);
+        }
+
+        if (request.targetAllocatedStorage() != null && request.targetAllocatedStorage() <= 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "TargetAllocatedStorage must be a positive number of GiB.", 400);
+        }
+        String greenId = greenInstanceIdentifier(blueId);
+        DbInstanceSettings settings = new DbInstanceSettings(
+                blue.isStorageEncrypted() ? Boolean.TRUE : null,
+                blue.isStorageEncrypted() ? blue.getKmsKeyId() : null,
+                blue.getBackupRetentionPeriod(), blue.getPreferredBackupWindow(),
+                blue.getPreferredMaintenanceWindow(), blue.isCopyTagsToSnapshot())
+                .withStorageType(firstNonBlank(request.targetStorageType(), blue.getStorageType()))
+                .withCaCertificateIdentifier(blue.getCaCertificateIdentifier());
+        DbInstance green = createDbInstance(greenId, engineParam, targetVersion,
+                blue.getMasterUsername(), blue.getMasterPassword(), blue.getDbName(),
+                firstNonBlank(request.targetDbInstanceClass(), blue.getDbInstanceClass()),
+                request.targetAllocatedStorage() != null
+                        ? request.targetAllocatedStorage() : blue.getAllocatedStorage(),
+                blue.isIamDatabaseAuthenticationEnabled(), parameterGroupName,
+                blue.getDbSubnetGroupName(), null, blue.getAvailabilityZone(), blue.isMultiAz(),
+                false, null, blue.getTags(), blue.getVpcSecurityGroupIds(), blue.getOptionGroupName(),
+                region, blue.isAutoMinorVersionUpgrade(), settings, blue.isPubliclyAccessible(),
+                null, false);
+
+        linkReadReplica(blue, green);
+        if (!config.services().rds().mock()
+                && blue.getContainerId() != null && green.getContainerId() != null) {
+            try {
+                copyInstanceData(blue, green);
+            } catch (Exception e) {
+                try {
+                    deleteDbInstance(greenId, region);
+                } catch (RuntimeException cleanupError) {
+                    e.addSuppressed(cleanupError);
+                }
+                AwsException failure = new AwsException("InvalidDBInstanceState",
+                        "Failed to initialise green DB instance " + greenId + " from " + blueId + ": "
+                        + e.getMessage(), 400);
+                failure.initCause(e);
+                throw failure;
+            }
+        }
+
+        synchronized (this) {
+            green.setStatus(DbInstanceStatus.AVAILABLE);
+            putInstanceForScope(accountIdFromArn(green.getDbInstanceArn()), region, greenId, green);
+
+            BlueGreenDeployment deployment = new BlueGreenDeployment();
+            String id = "bgd-" + randomLowercase(16);
+            deployment.setBlueGreenDeploymentIdentifier(id);
+            deployment.setBlueGreenDeploymentName(name);
+            deployment.setBlueGreenDeploymentArn(regionResolver.buildArn("rds", region, "deployment:" + id));
+            deployment.setSource(blue.getDbInstanceArn());
+            deployment.setTarget(green.getDbInstanceArn());
+            deployment.setStatus(BlueGreenDeployment.AVAILABLE);
+            deployment.getSwitchoverDetails().add(new BlueGreenDeployment.SwitchoverDetail(
+                    blue.getDbInstanceArn(), green.getDbInstanceArn(), BlueGreenDeployment.AVAILABLE));
+            deployment.getTasks().add(new BlueGreenDeployment.Task("CREATING_READ_REPLICA_OF_SOURCE", "COMPLETED"));
+            if (!Objects.equals(targetVersion, sourceVersion)) {
+                deployment.getTasks().add(new BlueGreenDeployment.Task("DB_ENGINE_VERSION_UPGRADE", "COMPLETED"));
+            }
+            deployment.getTasks().add(new BlueGreenDeployment.Task("CONFIGURE_BACKUPS", "COMPLETED"));
+            deployment.setTags(request.tags());
+            deployment.setCreateTime(Instant.now());
+            blueGreenDeployments.put(blueGreenDeploymentKey(region, id), deployment);
+            LOG.infov("Blue/green deployment {0} created: {1} -> {2}", id, blueId, greenId);
+            return deployment;
+        }
+    }
+
+    /**
+     * Switches the green instance into production. Green takes the blue instance's identifier,
+     * ARN and endpoint, so clients reconnect to the same address and reach the new database; the
+     * blue instance is renamed {@code <name>-old<n>}, moves to the endpoint green had, and stays
+     * running. Blue's tags replace green's, as on AWS. The switchover completes before the
+     * response, so {@code SwitchoverTimeout} is validated and otherwise has nothing to bound.
+     */
+    public synchronized BlueGreenDeployment switchoverBlueGreenDeployment(
+            String identifier, Integer switchoverTimeout, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        if (switchoverTimeout != null
+                && (switchoverTimeout < MIN_SWITCHOVER_TIMEOUT || switchoverTimeout > MAX_SWITCHOVER_TIMEOUT)) {
+            throw new AwsException("InvalidParameterValue",
+                    "SwitchoverTimeout must be between " + MIN_SWITCHOVER_TIMEOUT + " and "
+                    + MAX_SWITCHOVER_TIMEOUT + " seconds.", 400);
+        }
+        // Refreshed first, so a member deleted or promoted since the last describe is caught here.
+        BlueGreenDeployment deployment = refreshBlueGreenStatus(
+                effectiveRegion, requireBlueGreenDeployment(effectiveRegion, identifier));
+        if (!BlueGreenDeployment.AVAILABLE.equals(deployment.getStatus())) {
+            throw new AwsException("InvalidBlueGreenDeploymentStateFault",
+                    "Blue/green deployment " + deployment.getBlueGreenDeploymentIdentifier()
+                    + " is " + deployment.getStatus() + " and can't be switched over.", 400);
+        }
+        String accountId = currentAccountId();
+        DbInstance blue = findInstanceByArn(accountId, effectiveRegion, deployment.getSource());
+        DbInstance green = findInstanceByArn(accountId, effectiveRegion, deployment.getTarget());
+        for (DbInstance member : new DbInstance[] {blue, green}) {
+            if (member.getStatus() != DbInstanceStatus.AVAILABLE) {
+                throw new AwsException("InvalidBlueGreenDeploymentStateFault",
+                        "DB instance " + member.getDbInstanceIdentifier() + " is not in available state.", 400);
+            }
+        }
+
+        String blueId = blue.getDbInstanceIdentifier();
+        String greenId = green.getDbInstanceIdentifier();
+        String blueArn = blue.getDbInstanceArn();
+        String greenArn = green.getDbInstanceArn();
+        String oldId = oldBlueIdentifier(accountId, effectiveRegion, blueId);
+        String oldArn = regionResolver.buildArn("rds", effectiveRegion, "db:" + oldId);
+        boolean mock = config.services().rds().mock();
+
+        if (!mock) {
+            proxyManager.stopProxy(rdsResourceRelayKey(blueArn, blueId));
+            proxyManager.stopProxy(rdsResourceRelayKey(greenArn, greenId));
+        }
+        unlinkReadReplica(green);
+
+        DbEndpoint blueEndpoint = blue.getEndpoint();
+        int bluePort = blue.getProxyPort();
+        blue.setEndpoint(green.getEndpoint());
+        blue.setProxyPort(green.getProxyPort());
+        green.setEndpoint(blueEndpoint);
+        green.setProxyPort(bluePort);
+
+        // Blue moves off its ARN first, so it is free when green takes it.
+        deleteInstanceForScope(accountId, effectiveRegion, blueId);
+        deleteInstanceForScope(accountId, effectiveRegion, greenId);
+        containerManager.renameRuntime(blueArn, oldArn, oldId);
+        containerManager.renameRuntime(greenArn, blueArn, blueId);
+        blue.setDbInstanceIdentifier(oldId);
+        blue.setDbInstanceArn(oldArn);
+        green.setDbInstanceIdentifier(blueId);
+        green.setDbInstanceArn(blueArn);
+        green.setTags(new LinkedHashMap<>(blue.getTags()));
+        putInstanceForScope(accountId, effectiveRegion, oldId, blue);
+        putInstanceForScope(accountId, effectiveRegion, blueId, green);
+
+        if (!mock) {
+            startInstanceRelay(blue);
+            startInstanceRelay(green);
+        }
+
+        deployment.setSource(oldArn);
+        deployment.setTarget(blueArn);
+        deployment.setStatus(BlueGreenDeployment.SWITCHOVER_COMPLETED);
+        deployment.setSwitchoverDetails(List.of(new BlueGreenDeployment.SwitchoverDetail(
+                oldArn, blueArn, BlueGreenDeployment.SWITCHOVER_COMPLETED)));
+        blueGreenDeployments.put(blueGreenDeploymentKey(effectiveRegion,
+                deployment.getBlueGreenDeploymentIdentifier()), deployment);
+        LOG.infov("Blue/green deployment {0} switched over: {1} is now {2}, {3} is now {1}",
+                deployment.getBlueGreenDeploymentIdentifier(), blueId, oldId, greenId);
+        return deployment;
+    }
+
+    /**
+     * Deletes the deployment record. With {@code deleteTarget} the green instance is deleted too,
+     * which AWS allows only before a switchover; without it the green instance is kept as a
+     * standalone instance, as RDS for PostgreSQL leaves it. The blue instance is not touched.
+     */
+    public synchronized BlueGreenDeployment deleteBlueGreenDeployment(
+            String identifier, Boolean deleteTarget, String region) {
+        String effectiveRegion = effectiveRegion(region);
+        BlueGreenDeployment deployment = requireBlueGreenDeployment(effectiveRegion, identifier);
+        String status = deployment.getStatus();
+        if (BlueGreenDeployment.SWITCHOVER_IN_PROGRESS.equals(status)
+                || BlueGreenDeployment.DELETING.equals(status)) {
+            throw new AwsException("InvalidBlueGreenDeploymentStateFault",
+                    "Blue/green deployment " + deployment.getBlueGreenDeploymentIdentifier()
+                    + " is " + status + " and can't be deleted.", 400);
+        }
+        boolean switchedOver = BlueGreenDeployment.SWITCHOVER_COMPLETED.equals(status);
+        if (Boolean.TRUE.equals(deleteTarget) && switchedOver) {
+            throw new AwsException("InvalidBlueGreenDeploymentStateFault",
+                    "DeleteTarget can't be specified after blue/green deployment "
+                    + deployment.getBlueGreenDeploymentIdentifier() + " has switched over.", 400);
+        }
+        if (!switchedOver) {
+            DbInstance green = findInstanceByArnOrNull(currentAccountId(), effectiveRegion, deployment.getTarget());
+            if (green != null) {
+                if (Boolean.TRUE.equals(deleteTarget)) {
+                    deleteDbInstance(green.getDbInstanceIdentifier(), effectiveRegion);
+                } else {
+                    unlinkReadReplica(green);
+                    putInstanceForScope(currentAccountId(), effectiveRegion,
+                            green.getDbInstanceIdentifier(), green);
+                }
+            }
+        }
+        blueGreenDeployments.delete(blueGreenDeploymentKey(effectiveRegion,
+                deployment.getBlueGreenDeploymentIdentifier()));
+        deployment.setStatus(BlueGreenDeployment.DELETING);
+        deployment.setDeleteTime(Instant.now());
+        return deployment;
+    }
+
+    /**
+     * The deployments in the Region, or the one the identifier names, narrowed by the four
+     * documented filters and paged by identifier. Before switchover a deployment whose blue or
+     * green instance is gone, or whose green instance was promoted, reports
+     * {@code INVALID_CONFIGURATION}, as AWS does.
+     */
+    public synchronized BlueGreenDeploymentPage describeBlueGreenDeployments(
+            String region, String identifier, Map<String, List<String>> filters,
+            Integer maxRecords, String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        requireValidMaxRecords(maxRecords);
+        for (String filterName : filters.keySet()) {
+            if (!BLUE_GREEN_FILTERS.contains(filterName)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Unrecognized filter name: " + filterName + ".", 400);
+            }
+        }
+        List<BlueGreenDeployment> all;
+        if (!isBlank(identifier)) {
+            all = List.of(requireBlueGreenDeployment(effectiveRegion, identifier));
+        } else {
+            all = blueGreenDeployments.scan(k -> k.startsWith(blueGreenDeploymentKey(effectiveRegion, "")))
+                    .stream()
+                    .sorted(Comparator.comparing(BlueGreenDeployment::getBlueGreenDeploymentIdentifier))
+                    .toList();
+        }
+        List<BlueGreenDeployment> matching = all.stream()
+                .filter(d -> matchesBlueGreenFilter(filters, "blue-green-deployment-identifier",
+                        d.getBlueGreenDeploymentIdentifier()))
+                .filter(d -> matchesBlueGreenFilter(filters, "blue-green-deployment-name",
+                        d.getBlueGreenDeploymentName()))
+                .filter(d -> matchesBlueGreenFilter(filters, "source", d.getSource()))
+                .filter(d -> matchesBlueGreenFilter(filters, "target", d.getTarget()))
+                .map(d -> refreshBlueGreenStatus(effectiveRegion, d))
+                .toList();
+        int from = 0;
+        if (!isBlank(marker)) {
+            while (from < matching.size()
+                    && matching.get(from).getBlueGreenDeploymentIdentifier().compareTo(marker) <= 0) {
+                from++;
+            }
+        }
+        int limit = maxRecords == null ? DEFAULT_MAX_RECORDS : maxRecords;
+        int to = Math.min(matching.size(), from + limit);
+        List<BlueGreenDeployment> page = matching.subList(Math.min(from, matching.size()), to);
+        String next = to < matching.size() && !page.isEmpty()
+                ? page.getLast().getBlueGreenDeploymentIdentifier() : null;
+        return new BlueGreenDeploymentPage(page, next);
+    }
+
+    private static boolean matchesBlueGreenFilter(Map<String, List<String>> filters, String name, String value) {
+        List<String> wanted = filters.get(name);
+        return wanted == null || wanted.isEmpty() || wanted.contains(value);
+    }
+
+    private BlueGreenDeployment refreshBlueGreenStatus(String region, BlueGreenDeployment deployment) {
+        if (!BlueGreenDeployment.AVAILABLE.equals(deployment.getStatus())) {
+            return deployment;
+        }
+        String accountId = currentAccountId();
+        DbInstance blue = findInstanceByArnOrNull(accountId, region, deployment.getSource());
+        DbInstance green = findInstanceByArnOrNull(accountId, region, deployment.getTarget());
+        String memberStatus = blue == null ? "MISSING_SOURCE"
+                : green == null ? "MISSING_TARGET"
+                : !blue.getDbInstanceIdentifier().equals(green.getReadReplicaSourceDbInstanceIdentifier())
+                        ? BlueGreenDeployment.INVALID_CONFIGURATION : null;
+        if (memberStatus == null) {
+            return deployment;
+        }
+        deployment.setStatus(BlueGreenDeployment.INVALID_CONFIGURATION);
+        if (!BlueGreenDeployment.INVALID_CONFIGURATION.equals(memberStatus)) {
+            deployment.setSwitchoverDetails(List.of(new BlueGreenDeployment.SwitchoverDetail(
+                    deployment.getSource(), deployment.getTarget(), memberStatus)));
+        }
+        blueGreenDeployments.put(blueGreenDeploymentKey(region,
+                deployment.getBlueGreenDeploymentIdentifier()), deployment);
+        return deployment;
+    }
+
+    /** The Source of a create request: the ARN of a DB instance in this account and Region. */
+    private DbInstance resolveBlueGreenSource(String source, String region) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(source);
+        } catch (IllegalArgumentException malformed) {
+            throw new AwsException("InvalidParameterValue",
+                    "Source must be the ARN of a DB instance: " + source, 400);
+        }
+        String resource = arn.resource();
+        int sep = resource.indexOf(':');
+        if (!"rds".equals(arn.service()) || sep < 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "Source must be the ARN of a DB instance: " + source, 400);
+        }
+        String type = resource.substring(0, sep);
+        String id = resource.substring(sep + 1);
+        boolean local = region.equals(arn.region()) && currentAccountId().equals(arn.accountId());
+        if ("cluster".equals(type)) {
+            if (!local || findClusterForScope(currentAccountId(), region, id) == null) {
+                throw new AwsException("DBClusterNotFoundFault", "DB cluster " + id + " not found.", 404);
+            }
+            throw new AwsException("SourceClusterNotSupportedFault",
+                    "Floci supports blue/green deployments for DB instances only, not DB cluster " + id + ".", 400);
+        }
+        if (!"db".equals(type)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Source must be the ARN of a DB instance: " + source, 400);
+        }
+        DbInstance instance = local ? findInstanceForScope(currentAccountId(), region, id) : null;
+        if (instance == null || !source.equals(instance.getDbInstanceArn())) {
+            throw new AwsException("DBInstanceNotFound", "DB instance " + id + " not found.", 404);
+        }
+        return instance;
+    }
+
+    private void requireBlueGreenSourceSupported(DbInstance blue, String region) {
+        String id = blue.getDbInstanceIdentifier();
+        // Ahead of the replica check: a blue instance already has its green copy as a replica.
+        String arn = blue.getDbInstanceArn();
+        for (BlueGreenDeployment existing : blueGreenDeployments.scan(
+                k -> k.startsWith(blueGreenDeploymentKey(region, "")))) {
+            if (!BlueGreenDeployment.SWITCHOVER_COMPLETED.equals(existing.getStatus())
+                    && (arn.equals(existing.getSource()) || arn.equals(existing.getTarget()))) {
+                throw new AwsException("InvalidDBInstanceState",
+                        "DB instance " + id + " is already part of blue/green deployment "
+                        + existing.getBlueGreenDeploymentIdentifier() + ".", 400);
+            }
+        }
+        if (!isBlank(blue.getDbClusterIdentifier())) {
+            throw new AwsException("SourceDatabaseNotSupportedFault",
+                    "DB instance " + id + " belongs to DB cluster " + blue.getDbClusterIdentifier()
+                    + "; Floci supports blue/green deployments for standalone DB instances only.", 400);
+        }
+        if (!BLUE_GREEN_ENGINES.contains(blue.getEngine())) {
+            throw new AwsException("SourceDatabaseNotSupportedFault",
+                    "Blue/green deployments are not supported for engine "
+                    + blue.getEngine().name().toLowerCase(Locale.ROOT) + ".", 400);
+        }
+        if (blue.getReadReplicaSourceDbInstanceIdentifier() != null
+                || !blue.getReadReplicaDbInstanceIdentifiers().isEmpty()) {
+            throw new AwsException("SourceDatabaseNotSupportedFault",
+                    "DB instance " + id + " is a read replica or has read replicas; Floci does not "
+                    + "support blue/green deployments for replicated DB instances.", 400);
+        }
+        if (blue.getMasterUserSecretArn() != null) {
+            throw new AwsException("SourceDatabaseNotSupportedFault",
+                    "Blue/green deployments are not supported for DB instance " + id
+                    + " because its master user password is managed in Secrets Manager.", 400);
+        }
+        if (isRegisteredProxyTarget("RDS_INSTANCE", id, region)) {
+            throw new AwsException("SourceDatabaseNotSupportedFault",
+                    "DB instance " + id + " is registered with a DB proxy target group; Floci does not "
+                    + "support blue/green deployments for DB proxy targets.", 400);
+        }
+        if (blue.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + id + " is not in available state.", 400);
+        }
+        if (blue.getBackupRetentionPeriod() <= 0) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "Automated backups must be enabled on DB instance " + id
+                    + " before it can be the source of a blue/green deployment.", 400);
+        }
+    }
+
+    /** {@code <blue>-green-<6 random>}, with the blue part shortened to keep it a valid identifier. */
+    private String greenInstanceIdentifier(String blueId) {
+        return withIdentifierSuffix(blueId, "-green-" + randomLowercase(6));
+    }
+
+    /** The first free {@code <name>-old<n>}, shortening the name when the suffix would overflow. */
+    private String oldBlueIdentifier(String accountId, String region, String blueId) {
+        for (int n = 1; ; n++) {
+            String candidate = withIdentifierSuffix(blueId, "-old" + n);
+            if (findInstanceForScope(accountId, region, candidate) == null
+                    && !scopedKeyExists(instances, accountId, dbResourceKey(region, candidate))) {
+                return candidate;
+            }
+        }
+    }
+
+    /**
+     * {@code base + suffix}, with {@code base} shortened so the result fits the identifier limit
+     * and trimmed of trailing hyphens, which would otherwise leave an invalid double hyphen.
+     */
+    private static String withIdentifierSuffix(String base, String suffix) {
+        String head = base.length() + suffix.length() > MAX_DB_INSTANCE_IDENTIFIER
+                ? base.substring(0, MAX_DB_INSTANCE_IDENTIFIER - suffix.length()) : base;
+        while (head.endsWith("-")) {
+            head = head.substring(0, head.length() - 1);
+        }
+        return head + suffix;
+    }
+
+    private static String blueGreenSourceKey(String sourceArn) {
+        return "bgd-source:" + sourceArn;
+    }
+
+    private static String randomLowercase(int length) {
+        SecureRandom random = new SecureRandom();
+        StringBuilder value = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            value.append(BLUE_GREEN_ID_ALPHABET.charAt(random.nextInt(BLUE_GREEN_ID_ALPHABET.length())));
+        }
+        return value.toString();
+    }
+
+    /** Copies the source's databases into the target with the dump and restore snapshots use. */
+    private void copyInstanceData(DbInstance source, DbInstance target) {
+        if (source.getEngine() == DatabaseEngine.POSTGRES) {
+            String dump = containerManager.createPostgresSnapshot(
+                    source.getContainerId(), source.getMasterUsername());
+            containerManager.restorePostgresSnapshot(
+                    target.getContainerId(), target.getMasterUsername(), dump);
+        } else {
+            String dump = containerManager.createMysqlSnapshot(source.getEngine(), source.getContainerId(),
+                    source.getMasterUsername(), source.getMasterPassword());
+            containerManager.restoreMysqlSnapshot(target.getEngine(), target.getContainerId(),
+                    target.getMasterUsername(), target.getMasterPassword(), dump);
+        }
+    }
+
+    /** Starts the auth relay that publishes an instance's endpoint, when it has a backend to reach. */
+    private void startInstanceRelay(DbInstance instance) {
+        if (!hasBackend(instance.getContainerHost(), instance.getContainerPort()) || instance.getEndpoint() == null) {
+            return;
+        }
+        String id = instance.getDbInstanceIdentifier();
+        String effectiveMasterUser = instance.getMasterUsername() != null ? instance.getMasterUsername() : "root";
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+        InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
+        proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                backendIdentity.runtimeId(),
+                instance.getEngine(),
+                instance.isIamDatabaseAuthenticationEnabled(),
+                instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                instance.getEndpoint().address(),
+                effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
+                (user, pw) -> validateDbPasswordForScope(accountId, instanceRegion, id, user, pw),
+                proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
+                        instance.getEndpoint().port(), instanceRegion, accountId,
+                        backendIdentity.dbUserResourceId()));
+    }
+
+    private DbInstance findInstanceByArn(String accountId, String region, String arn) {
+        DbInstance instance = findInstanceByArnOrNull(accountId, region, arn);
+        if (instance == null) {
+            throw new AwsException("InvalidBlueGreenDeploymentStateFault",
+                    "DB instance " + arn + " of the blue/green deployment no longer exists.", 400);
+        }
+        return instance;
+    }
+
+    private DbInstance findInstanceByArnOrNull(String accountId, String region, String arn) {
+        if (arn == null) {
+            return null;
+        }
+        String id = arn.substring(arn.lastIndexOf(':') + 1);
+        DbInstance instance = findInstanceForScope(accountId, region, id);
+        return instance != null && arn.equals(instance.getDbInstanceArn()) ? instance : null;
+    }
+
+    private BlueGreenDeployment findBlueGreenDeploymentByName(String region, String name) {
+        return blueGreenDeployments.scan(k -> k.startsWith(blueGreenDeploymentKey(region, ""))).stream()
+                .filter(d -> name.equals(d.getBlueGreenDeploymentName()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private BlueGreenDeployment requireBlueGreenDeployment(String region, String identifier) {
+        if (isBlank(identifier)) {
+            throw new AwsException("InvalidParameterValue", "BlueGreenDeploymentIdentifier is required.", 400);
+        }
+        return blueGreenDeployments.get(blueGreenDeploymentKey(region, identifier))
+                .orElseThrow(() -> new AwsException("BlueGreenDeploymentNotFoundFault",
+                        "Blue/green deployment " + identifier + " not found.", 404));
+    }
+
+    private static AwsException blueGreenDeploymentAlreadyExists(String name) {
+        return new AwsException("BlueGreenDeploymentAlreadyExistsFault",
+                "Blue/green deployment " + name + " already exists.", 400);
+    }
+
+    private static String blueGreenDeploymentKey(String region, String identifier) {
+        return "bgd::" + region + "::" + identifier;
     }
 
     private static String clusterEndpointKey(String region, String endpointId) {

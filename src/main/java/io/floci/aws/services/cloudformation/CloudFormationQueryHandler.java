@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -42,6 +43,26 @@ public class CloudFormationQueryHandler {
     public CloudFormationQueryHandler(CloudFormationService cfnService, StackSetService stackSetService) {
         this.cfnService = cfnService;
         this.stackSetService = stackSetService;
+    }
+
+    /** The id of the stack a stack name or id names, as a request naming it finds it. */
+    public Optional<String> stackId(String stackNameOrId, String region) {
+        return cfnService.stackId(stackNameOrId, region);
+    }
+
+    /** The id of the stack holding the change set {@code changeSetArn} names. */
+    public Optional<String> stackIdOfChangeSet(String changeSetArn, String region) {
+        return cfnService.stackIdOfChangeSet(changeSetArn, region);
+    }
+
+    /** The id of the stack that owns the resource {@code physicalResourceId} names. */
+    public Optional<String> stackIdOfResource(String physicalResourceId, String region) {
+        return cfnService.stackIdOfResource(physicalResourceId, region);
+    }
+
+    /** The id of the stack set of this name. */
+    public Optional<String> stackSetId(String stackSetName) {
+        return stackSetService.stackSetId(stackSetName);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -71,7 +92,7 @@ public class CloudFormationQueryHandler {
             case "DescribeOrganizationsAccess" -> describeOrganizationsAccess();
             case "ActivateOrganizationsAccess" -> activateOrganizationsAccess();
             case "CreateStackSet" -> createStackSet(params);
-            case "DescribeStackSet" -> describeStackSet(params);
+            case "DescribeStackSet" -> describeStackSet(params, region);
             case "ListStackSets" -> listStackSets();
             case "UpdateStackSet" -> updateStackSet(params);
             case "DeleteStackSet" -> deleteStackSet(params);
@@ -125,7 +146,8 @@ public class CloudFormationQueryHandler {
                 templateBody, templateUrl, parameters, capabilities, tags, region,
                 terminationProtection, stackPolicy);
         try {
-            cfnService.executeChangeSet(initial.getStackId(), initial.getChangeSetId(), region);
+            cfnService.executeChangeSetWithToken(initial.getStackId(), initial.getChangeSetId(), region,
+                    params.getFirst("ClientRequestToken"));
         } catch (AwsException e) {
             if (terminationProtection) {
                 cfnService.clearProtectionAfterRejectedCreate(stackName, initial, region);
@@ -171,7 +193,8 @@ public class CloudFormationQueryHandler {
             cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
             return xmlError("ValidationError", "No updates are to be performed.", 400);
         }
-        cfnService.executeChangeSet(cs.getStackId(), cs.getChangeSetId(), region);
+        cfnService.executeChangeSetWithToken(cs.getStackId(), cs.getChangeSetId(), region,
+                params.getFirst("ClientRequestToken"));
 
         String xml = new XmlBuilder()
                 .start("UpdateStackResponse", CF_NS)
@@ -190,7 +213,7 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         List<String> retainResources = extractList(params, "RetainResources.member.");
         try {
-            cfnService.deleteStack(stackName, retainResources, region);
+            cfnService.deleteStackForRequest(stackName, retainResources, region, params.getFirst("ClientRequestToken"));
             String xml = new XmlBuilder()
                     .start("DeleteStackResponse", CF_NS)
                     .raw(AwsQueryResponse.responseMetadata())
@@ -208,10 +231,12 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         List<String> resourcesToSkip = extractList(params, "ResourcesToSkip.member.");
         boolean forceRollback = Boolean.parseBoolean(params.getFirst("ForceRollback"));
-        // RoleARN and ClientRequestToken are accepted and have no effect: Floci assumes no role
-        // for stack operations and does not deduplicate retried requests.
+        // RoleARN is accepted and has no effect: Floci assumes no role for stack operations.
+        // ClientRequestToken goes on the status events the operation sends; a repeated one is not
+        // refused, as Floci does not deduplicate retried requests.
         try {
-            cfnService.continueUpdateRollback(stackName, resourcesToSkip, forceRollback, region);
+            cfnService.continueUpdateRollback(stackName, resourcesToSkip, forceRollback, region,
+                    params.getFirst("ClientRequestToken"));
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
@@ -362,7 +387,8 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String changeSetName = params.getFirst("ChangeSetName");
         try {
-            cfnService.executeChangeSetForRequest(stackName, changeSetName, region);
+            cfnService.executeChangeSetForRequest(stackName, changeSetName, region,
+                    params.getFirst("ClientRequestToken"));
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
@@ -896,7 +922,7 @@ public class CloudFormationQueryHandler {
         }
     }
 
-    private Response describeStackSet(MultivaluedMap<String, String> params) {
+    private Response describeStackSet(MultivaluedMap<String, String> params, String region) {
         try {
             StackSet ss = stackSetService.describeStackSet(params.getFirst("StackSetName"));
             XmlBuilder xml = new XmlBuilder()
@@ -905,6 +931,7 @@ public class CloudFormationQueryHandler {
                     .start("StackSet")
                     .elem("StackSetName", ss.getStackSetName())
                     .elem("StackSetId", ss.getStackSetId())
+                    .elem("StackSetARN", stackSetService.stackSetArn(ss, region))
                     .elem("Status", ss.getStatus())
                     .elem("Description", ss.getDescription())
                     .elem("TemplateBody", ss.getTemplateBody())

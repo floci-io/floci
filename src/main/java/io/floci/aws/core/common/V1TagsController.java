@@ -12,6 +12,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 /**
  * Dispatcher for the AWS services that put their tag endpoints on {@code /v1/tags/{resourceArn}}
@@ -46,7 +47,9 @@ public class V1TagsController extends AbstractTagsController {
     @POST
     @Consumes(MediaType.APPLICATION_JSON)
     public Response listTagsForResourceByQuery(@Context HttpHeaders headers,
+                                               @Context UriInfo uriInfo,
                                                @QueryParam("resourceArn") String resourceArn) {
+        dispatcher().resolveHandler(resourceArn, uriInfo);
         return dispatcher().listTagsForArn(headers, resourceArn);
     }
 }

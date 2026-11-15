@@ -132,7 +132,10 @@ public class Ec2LaunchTemplateCfnProvisioner implements CfnResourceProvisioner {
             try {
                 LaunchTemplateSnapshot snapshot = MAPPER.readValue(rawSnapshot, LaunchTemplateSnapshot.class);
                 if (snapshot.createdVersion() != null) {
-                    ec2Service.deleteLaunchTemplateVersion(snapshot.region(), snapshot.launchTemplateId(), snapshot.createdVersion());
+                    CfnDeletes.safeDelete("Launch template version", snapshot.createdVersion(),
+                            () -> ec2Service.deleteLaunchTemplateVersion(snapshot.region(),
+                                    snapshot.launchTemplateId(), snapshot.createdVersion()),
+                            "launchTemplateVersionDoesNotExist");
                 }
                 resource.getAttributes().put("LatestVersionNumber", snapshot.priorLatestVersion());
                 resource.getAttributes().put("DefaultVersionNumber", snapshot.priorDefaultVersion());

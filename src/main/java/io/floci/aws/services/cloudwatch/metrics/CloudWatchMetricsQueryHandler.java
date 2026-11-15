@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudwatch.metrics;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
@@ -66,6 +67,8 @@ public class CloudWatchMetricsQueryHandler {
             case "PutCompositeAlarm" -> handlePutCompositeAlarm(params, region);
             case "DescribeAlarms" -> handleDescribeAlarms(params, region);
             case "DeleteAlarms" -> handleDeleteAlarms(params, region);
+            case "DisableAlarmActions" -> handleAlarmActions(params, region, false);
+            case "EnableAlarmActions" -> handleAlarmActions(params, region, true);
             case "SetAlarmState" -> handleSetAlarmState(params, region);
             case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(params, region);
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
@@ -335,6 +338,18 @@ public class CloudWatchMetricsQueryHandler {
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAlarms", null)).build();
     }
 
+    private Response handleAlarmActions(MultivaluedMap<String, String> params, String region, boolean enabled) {
+        List<AwsQueryLists.IndexedMember> members = AwsQueryLists.members(params, "AlarmNames", null);
+        List<String> names = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember member : members) {
+            names.add(params.getFirst(member.prefix()));
+        }
+        boolean supplied = params.containsKey("AlarmNames") || !members.isEmpty();
+        metricsService.setAlarmActionsEnabled(supplied ? names : null, enabled, region);
+        String action = enabled ? "EnableAlarmActions" : "DisableAlarmActions";
+        return Response.ok(AwsQueryResponse.envelopeNoResult(action, null)).build();
+    }
+
     private Response handleSetAlarmState(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("AlarmName");
         String state = params.getFirst("StateValue");
@@ -456,12 +471,12 @@ public class CloudWatchMetricsQueryHandler {
     }
 
     private Response handleListDashboards(MultivaluedMap<String, String> params, String region) {
-        List<Dashboard> dashboards =
-                dashboardsService.listDashboards(params.getFirst("DashboardNamePrefix"), region);
+        PaginatedResult<Dashboard> page = dashboardsService.listDashboardsPage(
+                params.getFirst("DashboardNamePrefix"), params.getFirst("NextToken"), region);
 
         DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
         XmlBuilder xml = new XmlBuilder().start("DashboardEntries");
-        for (Dashboard d : dashboards) {
+        for (Dashboard d : page.items()) {
             xml.start("member")
                     .elem("DashboardName", d.getDashboardName())
                     .elem("DashboardArn", d.getDashboardArn())
@@ -470,6 +485,9 @@ public class CloudWatchMetricsQueryHandler {
                     .end("member");
         }
         xml.end("DashboardEntries");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListDashboards", null, xml.build())).build();
     }
 

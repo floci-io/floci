@@ -46,6 +46,7 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
         table.setTableName(TABLE_NAME);
         table.setTableArn(TABLE_ARN);
         table.setKeySchema(List.of(new KeySchemaElement("id", "HASH")));
+        table.setAttributeDefinitions(List.of(new AttributeDefinition("id", "S")));
         return table;
     }
 
@@ -89,6 +90,14 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
                                        Long writeCapacity, List<GlobalSecondaryIndex> globalSecondaryIndexes,
                                        List<LocalSecondaryIndex> localSecondaryIndexes) {
         return record("createTable", scope);
+    }
+
+    @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return record("createOnDemandTable", scope);
     }
 
     @Override

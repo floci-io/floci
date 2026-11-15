@@ -1,6 +1,10 @@
 package io.floci.aws.services.backup;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.backup.model.BackupPlan;
 import io.floci.aws.services.backup.model.BackupRule;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -18,12 +22,14 @@ import software.amazon.awssdk.services.backup.BackupClient;
 import software.amazon.awssdk.services.backup.model.BackupException;
 import software.amazon.awssdk.services.backup.model.BackupPlansListMember;
 import software.amazon.awssdk.services.backup.model.BackupRuleInput;
+import software.amazon.awssdk.services.backup.model.GetBackupPlanResponse;
 import software.amazon.awssdk.services.backup.model.ListBackupPlansRequest;
 import software.amazon.awssdk.services.backup.model.ListBackupPlansResponse;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -47,6 +53,9 @@ class BackupListPlansPaginationIntegrationTest {
     @Inject
     BackupService service;
 
+    @Inject
+    StorageFactory storage;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -61,7 +70,15 @@ class BackupListPlansPaginationIntegrationTest {
     @AfterEach
     void cleanUp() {
         try {
-            RequestScopes.runAs(ACCOUNT, REGION, () -> plans.forEach(service::deleteBackupPlan));
+            RequestScopes.runAs(ACCOUNT, REGION, () -> {
+                AccountAwareStorageBackend<BackupPlan> store = storage.create("backup", "backup-plans.json",
+                        new TypeReference<Map<String, BackupPlan>>() {});
+                for (BackupPlan plan : store.scan(key -> true)) {
+                    if (plan.getBackupPlanName().startsWith(name + "-")) {
+                        store.delete(plan.getBackupPlanId());
+                    }
+                }
+            });
             client.deleteBackupVault(request -> request.backupVaultName(name));
         } finally {
             client.close();
@@ -113,9 +130,8 @@ class BackupListPlansPaginationIntegrationTest {
         create();
         create();
         String deletedId = plans.getFirst();
-        Instant deletion = Instant.ofEpochSecond(1720000000);
-        RequestScopes.runAs(ACCOUNT, REGION,
-                () -> service.getBackupPlan(deletedId).setDeletionDate(deletion.getEpochSecond()));
+        Instant deletion = client.deleteBackupPlan(request -> request.backupPlanId(deletedId)).deletionDate();
+        assertNotNull(deletion);
         assertEquals(2, client.listBackupPlans(request -> request.includeDeleted(false)).backupPlansList().size());
         ListBackupPlansResponse first = client.listBackupPlans(request -> request.maxResults(1));
         assertEquals(1, first.backupPlansList().size());
@@ -128,6 +144,69 @@ class BackupListPlansPaginationIntegrationTest {
         assertEquals(3, all.backupPlansList().size());
         assertEquals(deletion, all.backupPlansList().stream().filter(plan -> plan.backupPlanId().equals(deletedId))
                 .findFirst().orElseThrow().deletionDate());
+    }
+
+    @Test
+    void deletedPlanRetainsItsSummaryButRejectsActiveOperations() {
+        create();
+        String id = plans.getFirst();
+        GetBackupPlanResponse before =
+                client.getBackupPlan(request -> request.backupPlanId(id));
+        Instant deleted = client.deleteBackupPlan(request -> request.backupPlanId(id)).deletionDate();
+        assertTrue(client.listBackupPlans().backupPlansList().isEmpty());
+        assertTrue(client.listBackupPlans(request -> request.includeDeleted(false)).backupPlansList().isEmpty());
+        List<BackupPlansListMember> history = client.listBackupPlans(request -> request.includeDeleted(true))
+                .backupPlansList();
+        assertEquals(1, history.size());
+        BackupPlansListMember summary = history.getFirst();
+        assertEquals(id, summary.backupPlanId());
+        assertEquals(before.backupPlanArn(), summary.backupPlanArn());
+        assertEquals(before.versionId(), summary.versionId());
+        assertEquals(before.creationDate(), summary.creationDate());
+        assertEquals(deleted, summary.deletionDate());
+        for (Runnable operation : List.<Runnable>of(
+                () -> client.getBackupPlan(request -> request.backupPlanId(id)),
+                () -> client.deleteBackupPlan(request -> request.backupPlanId(id)),
+                () -> client.updateBackupPlan(request -> request.backupPlanId(id).backupPlan(body -> body
+                        .backupPlanName(name).rules(BackupRuleInput.builder().ruleName("daily")
+                                .targetBackupVaultName(name).build()))),
+                () -> client.tagResource(request -> request.resourceArn(before.backupPlanArn()).tags(Map.of("x", "y"))),
+                () -> client.untagResource(request -> request.resourceArn(before.backupPlanArn()).tagKeyList("x")),
+                () -> client.listTags(request -> request.resourceArn(before.backupPlanArn())),
+                () -> client.createBackupSelection(request -> request.backupPlanId(id).backupSelection(body -> body
+                        .selectionName("late").iamRoleArn("arn:aws:iam::" + ACCOUNT + ":role/backup")
+                        .resources("arn:aws:s3:::example"))))) {
+            BackupException error = assertThrows(BackupException.class, operation::run);
+            assertEquals("ResourceNotFoundException", error.awsErrorDetails().errorCode());
+        }
+        assertEquals(deleted, client.listBackupPlans(request -> request.includeDeleted(true))
+                .backupPlansList().getFirst().deletionDate());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"741664900002,eu-north-1", "741664900001,us-west-2"})
+    void deletedHistoryAndItsTokensRemainAccountAndRegionScoped(String account, String region) {
+        create();
+        create();
+        client.deleteBackupPlan(request -> request.backupPlanId(plans.getFirst()));
+        ListBackupPlansResponse page = client.listBackupPlans(request -> request.includeDeleted(true).maxResults(1));
+        assertNotNull(page.nextToken());
+        assertEquals(2, client.listBackupPlans(request -> request.includeDeleted(true)).backupPlansList().size());
+        try (BackupClient other = AwsTestClients.create(BackupClient.builder(), account, Region.of(region))) {
+            assertTrue(other.listBackupPlans(request -> request.includeDeleted(true)).backupPlansList().stream()
+                    .noneMatch(plan -> plans.contains(plan.backupPlanId())));
+            BackupException error = assertThrows(BackupException.class, () -> other.listBackupPlans(request -> request
+                    .includeDeleted(true).nextToken(page.nextToken())));
+            assertEquals("InvalidParameterValueException", error.awsErrorDetails().errorCode());
+        }
+        BackupException error = assertThrows(BackupException.class, () -> client.listBackupPlans(request -> request
+                .includeDeleted(false).nextToken(page.nextToken())));
+        assertEquals("InvalidParameterValueException", error.awsErrorDetails().errorCode());
+        ListBackupPlansResponse remaining = client.listBackupPlans(request -> request.includeDeleted(true)
+                .nextToken(page.nextToken()));
+        assertEquals(plans.stream().sorted().toList(), List.of(page, remaining).stream()
+                .flatMap(result -> result.backupPlansList().stream()).map(BackupPlansListMember::backupPlanId).toList());
+        assertNull(remaining.nextToken());
     }
 
     @Test

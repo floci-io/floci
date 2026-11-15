@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -16,6 +17,10 @@ import static org.hamcrest.Matchers.not;
  * {@code NoSuchEntity}, or on the second of those to be answered with a 200, where AWS's validation
  * layer runs ahead of the operation and answers {@code ValidationError}, which is the ordering
  * #6402 settled for this package.
+ *
+ * <p>A member the request carries empty is a value, not a member it left out: what a blank breaks
+ * is the shape declared for it, and only an absent member is reported as absent. That holds for the
+ * two members this package still reads by hand as well as for the ones the walk reads.
  *
  * <p>{@code AttachRolePolicy}'s {@code RoleName} is the parity case rather than a change:
  * {@code IamService.validateRoleName} answers it from the same bounds and the same pattern, and
@@ -229,7 +234,7 @@ class IamRequestConstraintsIntegrationTest {
     void aBooleanOutsideTrueAndFalseIsLeftToTheOperation() {
         iam("CreatePolicyVersion")
             .formParam("PolicyArn", SHORTEST_ARN)
-            .formParam("PolicyDocument", "{}")
+            .formParam("PolicyDocument", EMPTY_POLICY_DOCUMENT)
             .formParam("SetAsDefault", "maybe")
         .when().post("/").then().statusCode(404)
             .body(CODE, equalTo("NoSuchEntity"));
@@ -382,5 +387,120 @@ class IamRequestConstraintsIntegrationTest {
             .body(MESSAGE, equalTo("1 validation error detected: Value at"
                     + " 'permissions.parameters.1.member.name' failed to satisfy constraint:"
                     + " Member must have length greater than or equal to 5"));
+    }
+
+    /**
+     * {@code PolicySourceArn} is read by hand on the simulators and through the walk on
+     * {@code GetContextKeysForPrincipalPolicy}. A blank is a value on either, so both hold it to
+     * the 20 characters {@code arnType} declares and answer in the same words.
+     */
+    @Test
+    void aBlankArnReadByHandBreaksItsLengthRatherThanReadingAsAbsent() {
+        String refusal = "1 validation error detected: Value at 'policySourceArn' failed to satisfy"
+                + " constraint: Member must have length greater than or equal to 20";
+
+        iam("SimulatePrincipalPolicy")
+            .formParam("PolicySourceArn", "")
+            .formParam("ActionNames.member.1", "s3:GetObject")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo(refusal));
+
+        iam("GetContextKeysForPrincipalPolicy")
+            .formParam("PolicySourceArn", "")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo(refusal));
+    }
+
+    /**
+     * The member left out keeps the sentence the operation answers it with, which is the answer
+     * those two actions already carried and which no capture moves.
+     */
+    @Test
+    void thatArnLeftOutKeepsTheOperationsOwnSentence() {
+        iam("SimulatePrincipalPolicy")
+            .formParam("ActionNames.member.1", "s3:GetObject")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("PolicySourceArn is required."));
+    }
+
+    /**
+     * {@code serviceName} declares no length, no pattern and no value set, so nothing ahead of the
+     * operation holds a blank and the operation answers it: a service name nothing supports is
+     * {@code NoSuchEntity}, which is what LocalStack's AWS-validated snapshots record for a
+     * malformed name as well as for an unsupported one. The name is echoed as the caller sent it,
+     * which is why nothing stands between the two spaces.
+     *
+     * <p>The user is created so the blank name is the only thing wrong with the request. IAM reads
+     * the user ahead of the service name and answers a user that is not there first, which
+     * LocalStack's snapshot of a request carrying neither records, so naming a user that was never
+     * created would be asking for an answer a blank name is not what earns.
+     */
+    @Test
+    void aBlankValueTheModelConstrainsInNoWayReachesTheOperation() {
+        String userName = "constraints-blank-service-" + System.nanoTime();
+        iam("CreateUser").formParam("UserName", userName).when().post("/").then().statusCode(200);
+        try {
+            iam("CreateServiceSpecificCredential")
+                .formParam("UserName", userName)
+                .formParam("ServiceName", "")
+            .when().post("/").then().statusCode(404)
+                .body(CODE, equalTo("NoSuchEntity"))
+                .body(MESSAGE, equalTo("No such service  is supported for Service Specific"
+                        + " Credentials"));
+        } finally {
+            iam("DeleteUser").formParam("UserName", userName).when().post("/");
+        }
+    }
+
+    /**
+     * The one member a blank reaches the store through: this write replaces the policy a role is
+     * assumed under, and a blank trust policy matches nothing, so the role it was written to could
+     * no longer be assumed. The shape admits the value, a minimum of 1 beside a pattern that takes
+     * whitespace, so the operation answers it with the modelled {@code MalformedPolicyDocument} and
+     * the stored policy stays as it was.
+     */
+    @Test
+    void aBlankTrustPolicyIsRefusedAndLeavesTheStoredOneStanding() {
+        String roleName = "constraints-blank-trust-" + System.nanoTime();
+        iam("CreateRole")
+            .formParam("RoleName", roleName)
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+        .when().post("/").then().statusCode(200);
+        try {
+            iam("UpdateAssumeRolePolicy")
+                .formParam("RoleName", roleName)
+                .formParam("PolicyDocument", " ")
+            .when().post("/").then().statusCode(400)
+                .body(CODE, equalTo("MalformedPolicyDocument"))
+                .body(MESSAGE, equalTo("This policy contains invalid Json"));
+
+            iam("GetRole")
+                .formParam("RoleName", roleName)
+            .when().post("/").then().statusCode(200)
+                .body("GetRoleResponse.GetRoleResult.Role.AssumeRolePolicyDocument",
+                        containsString("sts:AssumeRole"));
+
+            // A document the member's shape admits and this operation writes is still written.
+            iam("UpdateAssumeRolePolicy")
+                .formParam("RoleName", roleName)
+                .formParam("PolicyDocument", TRUST_POLICY)
+            .when().post("/").then().statusCode(200);
+        } finally {
+            iam("DeleteRole").formParam("RoleName", roleName).when().post("/");
+        }
+    }
+
+    /** The same member left out is still a member the request never carried. */
+    @Test
+    void thatValueLeftOutIsStillReportedAsAbsent() {
+        iam("CreateServiceSpecificCredential")
+            .formParam("UserName", "constraints-absent-service")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'serviceName' failed to"
+                    + " satisfy constraint: Member must not be null"));
     }
 }

@@ -268,6 +268,8 @@ public class EcsContainerManager {
             throw new AwsException("ClientException",
                     "awsfirelens log driver requires a firelensConfiguration container", 400);
         }
+        List<String> firelensSecretEnv = addFirelensSecretOptions(
+                firelensLogOptions, taskDef.getContainerDefinitions(), isFluentdRouter(firelensRouter), region);
 
         List<ContainerDefinition> launchOrder = orderForDependencies(
                 launchOrder(taskDef.getContainerDefinitions(), firelensRouter), firelensRouter);
@@ -322,6 +324,9 @@ public class EcsContainerManager {
                         metadataId, taskRoleEndpoint.vending()));
                 imagesByContainer.put(def,
                         containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(def.getImage())));
+            }
+            if (firelensRouter != null) {
+                envVarsByContainer.get(firelensRouter).addAll(firelensSecretEnv);
             }
             // Pulled for every container before any is created, as the ECS agent does, so a tag
             // moved in its registry since the last launch is what this task runs. Each container is
@@ -651,9 +656,6 @@ public class EcsContainerManager {
             containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
         }
         task.setContainers(containersInDefinitionOrder);
-        task.setLastStatus(TaskStatus.RUNNING.name());
-        task.setDesiredStatus(TaskStatus.RUNNING.name());
-        task.setStartedAt(Instant.now());
 
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
@@ -739,8 +741,8 @@ public class EcsContainerManager {
      *
      * <p>The wait is bounded by the dependent container's {@code startTimeout}, defaulting to
      * {@value #DEPENDENCY_WAIT_SECONDS} seconds rather than AWS's longer agent default, because
-     * RunTask here is synchronous and a caller is holding the request open. A dependency that does
-     * not get there in time fails the task.
+     * the service scheduler starts a service's tasks on its own thread, which a long wait holds up.
+     * A dependency that does not get there in time fails the task.
      */
     private void awaitDependencies(ContainerDefinition definition, Map<String, String> startedContainerIds) {
         if (definition.getDependsOn() == null || definition.getDependsOn().isEmpty()) {
@@ -1644,6 +1646,39 @@ public class EcsContainerManager {
         return options;
     }
 
+    /**
+     * Hands each awsfirelens container's {@code secretOptions} to the router the way the ECS agent does: the
+     * value, resolved from Secrets Manager or SSM, is an environment variable of the router named
+     * {@code <option>_<container index>}, and the output option beside the container's {@code options}
+     * only references it. The value never becomes config text, so it cannot add directives to the config.
+     *
+     * @return the router's environment entries, one per secret option
+     */
+    private List<String> addFirelensSecretOptions(
+            Map<String, Map<String, String>> logOptions, List<ContainerDefinition> defs, boolean fluentd,
+            String region) {
+        List<String> routerEnv = new ArrayList<>();
+        for (int index = 0; index < defs.size(); index++) {
+            ContainerDefinition def = defs.get(index);
+            if (!isAwsFirelens(def)) {
+                continue;
+            }
+            List<Secret> secretOptions = def.getLogConfiguration().secretOptions();
+            if (secretOptions == null || secretOptions.isEmpty()) {
+                continue;
+            }
+            Map<String, String> options = new LinkedHashMap<>(logOptions.get(def.getName()));
+            for (Secret secretOption : secretOptions) {
+                String variable = secretOption.name() + "_" + index;
+                routerEnv.add(variable + "=" + resolveSecretValue(secretOption.valueFrom(), region));
+                options.put(secretOption.name(),
+                        fluentd ? "\"#{ENV['" + variable + "']}\"" : "${" + variable + "}");
+            }
+            logOptions.put(def.getName(), options);
+        }
+        return routerEnv;
+    }
+
     private static boolean isAwsFirelens(ContainerDefinition def) {
         LogConfiguration log = def.getLogConfiguration();
         return log != null && "awsfirelens".equals(log.logDriver());
@@ -2486,7 +2521,4 @@ public class EcsContainerManager {
             hostVolumePolicy.validate(hostPath, HostVolumePolicy.DEVICE_HOST_PATH);
         }
     }
-
-    // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability
-    private enum TaskStatus {RUNNING}
 }

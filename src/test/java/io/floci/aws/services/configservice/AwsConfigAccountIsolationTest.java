@@ -46,25 +46,26 @@ class AwsConfigAccountIsolationTest {
     void recorderStartStopAndDeletionStayInTheirAccount() {
         for (String account : List.of(FIRST, SECOND)) {
             context.setAccountId(account);
-            service.putConfigurationRecorder(REGION, new ConfigurationRecorder("default", "role", null, null));
+            service.putConfigurationRecorder(REGION, new ConfigurationRecorder(null, "default", "role", null, null),
+                    null);
             service.putDeliveryChannel(REGION, new DeliveryChannel("default", "bucket", null, null, null, null));
         }
         context.setAccountId(FIRST);
         service.startConfigurationRecorder(REGION, "default");
         context.setAccountId(SECOND);
-        assertFalse(service.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
-        assertNull(service.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStartTime());
+        assertFalse(service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().recording());
+        assertNull(service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStartTime());
         service.deleteDeliveryChannel(REGION, "default");
         service.startConfigurationRecorder(REGION, "default");
         service.stopConfigurationRecorder(REGION, "default");
         context.setAccountId(FIRST);
-        assertTrue(service.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
-        assertNull(service.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStopTime());
+        assertTrue(service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().recording());
+        assertNull(service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStopTime());
         context.setAccountId(SECOND);
         service.deleteConfigurationRecorder(REGION, "default");
         context.setAccountId(FIRST);
-        assertTrue(service.describeConfigurationRecorderStatus(REGION, null).getFirst().recording());
-        assertNotNull(service.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStartTime());
+        assertTrue(service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().recording());
+        assertNotNull(service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStartTime());
     }
 
     @Test

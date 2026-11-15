@@ -22,6 +22,7 @@ import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.IamException;
+import software.amazon.awssdk.services.iam.model.Role;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.AssumeRoleWithSamlResponse;
 import software.amazon.awssdk.services.sts.model.StsException;
@@ -383,8 +384,8 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                 String trust = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"Federated\":\"" + providerArn
                         + "\"},\"Action\":\"sts:AssumeRoleWithSAML\"}]}";
-                roleArn = client.createRole(b -> b.roleName(name).assumeRolePolicyDocument(trust)
-                        .maxSessionDuration(maximum)).role().arn();
+                roleArn = client.createRole(b -> b.roleName(name).path("/teams/saml/").assumeRolePolicyDocument(trust)
+                        .maxSessionDuration(maximum).tags(tag -> tag.key("team").value("federated"))).role().arn();
             } catch (RuntimeException | Error failure) {
                 try {
                     close();
@@ -402,6 +403,8 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                     .principalArn(providerArn).durationSeconds(duration)
                     .samlAssertion(assertion(roleArn, providerArn, expiry, AUDIENCE, ISSUER, sign)));
             sessions.add(response.credentials().accessKeyId());
+            Role role = client.getRole(b -> b.roleName(name)).role();
+            FederatedSessionAssertions.assertIdentity(endpoint, iamService, role, "saml-subject", response);
             return response;
         }
 

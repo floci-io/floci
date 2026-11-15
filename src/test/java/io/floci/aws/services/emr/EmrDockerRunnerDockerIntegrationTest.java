@@ -2,6 +2,7 @@ package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -50,12 +51,13 @@ import static io.floci.aws.testing.EmrServerlessRequests.deleteApplication;
 import static io.floci.aws.testing.EmrServerlessRequests.startJobRun;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * EMR steps and EMR Serverless job runs through Floci's Docker runner for real: a cluster in the {@code docker}
  * runner mode runs each step, and an application each job run, in a container of the release's EMR Serverless image,
- * which reaches Floci's S3 and Glue from there. The cached {@code emr-7.5.0} image keeps a local run from pulling;
+ * which reaches Floci's S3 and Glue from there, a job run's executors each in a container of their own, as the profile sets. The cached {@code emr-7.5.0} image keeps a local run from pulling;
  * CI pulls it (3.5 GB) the first time.
  */
 @QuarkusTest
@@ -127,6 +129,39 @@ class EmrDockerRunnerDockerIntegrationTest {
     }
 
     @Test
+    void aStreamingJobsMapperAndReducerRunInYarnContainersOnItsClustersCoreAndTaskNodes() {
+        // Each says the host it ran on, after the words it counted.
+        String where = """
+                import socket
+                print(sys.argv[1] + " " + socket.gethostname() + "\\t1")
+                """;
+        put("side/where-mapper.py", MAPPER + where);
+        put("side/where-reducer.py", REDUCER + where);
+        startCluster("[]", null, ",{\"Name\":\"core\",\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1},{\"Name\":\"task\",\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1}");
+        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getList("Instances.PrivateDnsName");
+        List<String> nodes = instances.subList(1, instances.size());
+
+        // The mapper and the reducer, from the files -files sends, with a shuffle between them, run on the core and
+        // task nodes, not in the step's container.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop-streaming",
+                "-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1",
+                "-files", side("where-mapper.py", "where-reducer.py"), "-mapper", "python3 where-mapper.py mapper",
+                "-reducer", "python3 where-reducer.py reducer", "-input", s3Uri("in/"), "-output", s3Uri("where/")));
+        Map<String, Integer> counts = counts("where/");
+        assertEquals(WORD_COUNTS, counts.entrySet().stream().filter(entry -> !entry.getKey().contains(" "))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)), counts::toString);
+        List<String> ranOn = counts.keySet().stream().filter(key -> key.contains(" ")).toList();
+        assertEquals(List.of("mapper", "reducer"), ranOn.stream().map(task -> task.split(" ")[0]).distinct().toList(),
+                ranOn::toString);
+        for (String task : ranOn) {
+            assertTrue(nodes.contains(task.split(" ")[1]), task + " among " + nodes);
+        }
+    }
+
+    @Test
     void aCustomJarAtEmrsStreamingJarPathRunsItsWordCountInTheDriver() {
         startCluster("[]");
 
@@ -175,6 +210,77 @@ class EmrDockerRunnerDockerIntegrationTest {
         assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop", "fs", "-test", "-e",
                 "/stream/checkpoint/offsets/0"));
         assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop", "fs", "-ls", "/"));
+    }
+
+    @Test
+    void aSparkStepRunsOnTheClustersYarnInEitherDeployMode() {
+        put("side/where.py", """
+                import socket
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                sc = spark.sparkContext
+                executors = sc.parallelize(range(4), 4).map(lambda _: socket.gethostname()).distinct().collect()
+                where = " ".join([sc.master, sc.getConf().get("spark.submit.deployMode"),
+                                  str(socket.gethostname() in executors)])
+                print("driver: " + where, flush=True)
+                spark.createDataFrame([(where,)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                """);
+        startCluster("[]", s3Uri("logs/"));
+
+        // Its driver in the step's container, its executors on the primary node.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit",
+                s3Uri("side/where.py"), s3Uri("client/")));
+        assertEquals("yarn client False\n", partFiles("client/"));
+        // Its driver on the primary node too, whose output is in its application's container logs, where a user
+        // reads it, the step's own holding only the client's.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit", "--deploy-mode", "cluster",
+                s3Uri("side/where.py"), s3Uri("cluster/")));
+        assertEquals("yarn cluster True\n", partFiles("cluster/"));
+        List<String> driverLogs = containerStdoutsHolding("driver: yarn cluster True");
+        assertEquals(1, driverLogs.size(), () -> "container stdouts with the driver's line: " + driverLogs);
+        String containers = "logs/" + clusterId + "/containers/";
+        assertTrue(driverLogs.get(0).matches(containers + "application_\\d+_\\d+/container_\\w+/stdout\\.gz"),
+                driverLogs.get(0));
+    }
+
+    @Test
+    void aClustersCoreAndTaskNodesRunItsExecutorsAndAShrinkKeepsItsHdfsData() {
+        put("side/nodes.py", """
+                import socket
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                lines = spark.sparkContext.parallelize(range(8), 8) \\
+                    .map(lambda i: (socket.gethostname(), "line " + str(i))).cache()
+                lines.map(lambda line: line[1]).saveAsTextFile("hdfs:///kept")
+                hosts = " ".join(sorted(set(lines.map(lambda line: line[0]).collect())))
+                spark.createDataFrame([(hosts,)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                """);
+        startCluster("[]", null, ",{\"Name\":\"core\",\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":2},{\"Name\":\"task\",\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1}");
+
+        // Its executors run on its core and task nodes, each named as ListInstances names it, not on its primary node.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit", s3Uri("side/nodes.py"),
+                s3Uri("hosts/")));
+        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getList("Instances.PrivateDnsName");
+        for (String host : partFiles("hosts/").trim().split(" ")) {
+            assertTrue(instances.subList(1, instances.size()).contains(host), host + " among " + instances);
+        }
+
+        // A core node goes, once HDFS has moved its blocks to the one that stays, and every line is still there.
+        String core = emr("ListInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
+        emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceGroups\":[{\"InstanceGroupId\":\""
+                + core + "\",\"InstanceCount\":1}]}").then().statusCode(200);
+        String leaving = ContainerStorageHelper.dockerName(config, "emr-" + clusterId + "-node-1-2");
+        await("core node " + leaving + " to go").atMost(Duration.ofMinutes(5)).pollInterval(Duration.ofSeconds(1))
+                .until(() -> gone(leaving));
+        assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp", "--src", "hdfs:///kept/",
+                "--dest", s3Uri("kept/")));
+        assertEquals("line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n", partFiles("kept/"));
     }
 
     @Test
@@ -286,6 +392,38 @@ class EmrDockerRunnerDockerIntegrationTest {
         assertEquals("from the archive environment\n", partFiles("venv-out/"));
     }
 
+    @Test
+    void anEmrServerlessRunsExecutorsRunInContainersOfTheirOwnThatGoWithIt() {
+        put("side/hosts.py", """
+                import socket, sys, time
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                hosts = spark.sparkContext.parallelize(range(24), 24) \\
+                    .map(lambda i: (time.sleep(0.5), socket.gethostname())[1]).distinct().collect()
+                where = "with the driver" if socket.gethostname() in hosts else "apart from the driver"
+                spark.createDataFrame([("%d executors, %s" % (len(hosts), where),)], ["value"]) \\
+                    .coalesce(1).write.text(sys.argv[1])
+                """);
+        String applicationId = createSparkApplication(REGION, "emr-7.5.0");
+        cleanup.register(() -> deleteApplication(REGION, applicationId));
+        ObjectNode run = JSON.createObjectNode().put("clientToken", UUID.randomUUID().toString())
+                .put("executionRoleArn", "arn:aws:iam::000000000000:role/emr-serverless-job");
+        ObjectNode sparkSubmit = run.putObject("jobDriver").putObject("sparkSubmit")
+                .put("entryPoint", s3Uri("side/hosts.py"))
+                .put("sparkSubmitParameters", "--conf spark.executor.cores=2 --conf spark.executor.memory=1g");
+        sparkSubmit.putArray("entryPointArguments").add(s3Uri("hosts-out/"));
+        String jobRunId = startJobRun(REGION, applicationId, run.toString());
+
+        Response ended = awaitJobRun(REGION, applicationId, jobRunId);
+
+        assertEquals("SUCCESS", ended.jsonPath().getString("jobRun.state"));
+        // Each executor has a worker of its own, as on EMR Serverless, up to the profile's two.
+        assertEquals("2 executors, apart from the driver\n", partFiles("hosts-out/"));
+        await().atMost(Duration.ofSeconds(30)).until(() -> lifecycle.getDockerClient().listContainersCmd()
+                .withShowAll(true).withLabelFilter(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, jobRunId))
+                .exec().isEmpty());
+    }
+
     /**
      * A stand-in for the guide's packed virtual environment that needs no package index: its {@code bin/python}
      * runs the image's Python with the archive's own {@code lib} on the path, where the module the job imports is.
@@ -306,13 +444,34 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     /** A one-primary cluster of the cached release, with {@code configurations} as its Configurations. */
     private void startCluster(String configurations) {
+        startCluster(configurations, null);
+    }
+
+    /** The same, its logs under {@code logUri} when that is not null, as the cluster's {@code LogUri}. */
+    private void startCluster(String configurations, String logUri) {
+        startCluster(configurations, logUri, "");
+    }
+
+    /** The same, with the instance groups {@code moreGroups}, each led by a comma, after its primary node's. */
+    private void startCluster(String configurations, String logUri, String moreGroups) {
         clusterId = emr("RunJobFlow", "{\"Name\":\"docker-runner\",\"ReleaseLabel\":\"emr-7.5.0\","
+                + (logUri == null ? "" : "\"LogUri\":\"" + logUri + "\",")
                 + "\"Applications\":[{\"Name\":\"Hadoop\"},{\"Name\":\"Spark\"}],"
                 + "\"Configurations\":" + configurations + ","
                 + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":[{\"Name\":\"primary\","
-                + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}" + moreGroups + "]}}")
                 .then().statusCode(200).extract().jsonPath().getString("JobFlowId");
         cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
+    }
+
+    /** Whether Docker no longer has the container named so. */
+    private boolean gone(String name) {
+        try {
+            lifecycle.getDockerClient().inspectContainerCmd(name).exec();
+            return false;
+        } catch (NotFoundException e) {
+            return true;
+        }
     }
 
     /** Adds one step to the cluster and returns the state it ended in. */
@@ -348,6 +507,16 @@ class EmrDockerRunnerDockerIntegrationTest {
             }
         }
         return counts;
+    }
+
+    /** The keys of the cluster's container {@code stdout} logs under {@code logs/} that hold {@code line}. */
+    private List<String> containerStdoutsHolding(String line) {
+        String prefix = "logs/" + clusterId + "/containers/";
+        return s3.listObjectsV2Paginator(request -> request.bucket(bucket).prefix(prefix)).contents().stream()
+                .map(S3Object::key)
+                .filter(key -> key.endsWith("/stdout.gz"))
+                .filter(key -> S3TestClients.gunzipped(s3, bucket, key).contains(line))
+                .toList();
     }
 
     /** What a job wrote under {@code prefix}: its part files, in key order, one after the other. */

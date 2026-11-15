@@ -76,6 +76,7 @@ nav:
   - Getting Started:
     - Quick Start: getting-started/quick-start.md
     - Installation: getting-started/installation.md
+    - Kubernetes (Helm): getting-started/kubernetes.md
     - AWS CLI & SDK Setup: getting-started/aws-setup.md
     - Terraform: getting-started/terraform.md
     - Migrate from LocalStack: getting-started/migrate-from-localstack.md
@@ -85,6 +86,7 @@ nav:
     - Docker Compose: configuration/docker-compose.md
     - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
+    - Control-Plane Endpoints: configuration/endpoints.md
     - Multi-Account Isolation: configuration/multi-account.md
     - AWS Partitions: configuration/partitions.md
     - Storage Modes: configuration/storage.md
@@ -165,12 +167,14 @@ nav:
     - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
     - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
+    - X-Ray: services/xray.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
     - AppIntegrations: services/appintegrations.md
     - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
+    - AWS Signer: services/signer.md
     - Payment Cryptography: services/payment-cryptography.md
     - Payment Cryptography data plane: services/payment-cryptography-data.md
     - ECS: services/ecs.md

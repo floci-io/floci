@@ -8,8 +8,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -24,10 +27,11 @@ import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SchedulerService {
+public class SchedulerService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SchedulerService.class);
 
@@ -37,6 +41,9 @@ public class SchedulerService {
             "arn:(?:" + AwsArnUtils.PARTITION_REGEX + "):iam::\\d{12}:role/[\\w+=,.@/-]+");
     private static final String ROLE_ARN_MODEL_PATTERN = "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$"; // partition-literal: the Scheduler model's RoleArn pattern, quoted verbatim in the error message
     private static final String DEFAULT_GROUP = "default";
+    // ListScheduleGroups and ListSchedules model MaxResults as 1-100 and NextToken as 1-2048 chars.
+    private static final int MAX_PAGE_SIZE = 100;
+    private static final int MAX_TOKEN_LENGTH = 2048;
     // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
     // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
     private static final ObjectReader JSON = new ObjectMapper()
@@ -64,6 +71,28 @@ public class SchedulerService {
         this.groupStore = groupStore;
         this.scheduleStore = scheduleStore;
         this.regionResolver = regionResolver;
+    }
+
+    // ──────────────────────────── IAM lookups ────────────────────────────
+
+    @Override
+    public String namespace() {
+        return "scheduler";
+    }
+
+    /** Scheduler mints no part of an ARN a request names, so there is nothing to look up by name. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The schedule group Scheduler acts on for a request naming none, {@code default}, which every account has in
+     * every Region. Reads only: the group is not stored until a request uses it.
+     */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "schedule-group".equals(type) ? Optional.of(buildGroupArn(region, DEFAULT_GROUP)) : Optional.empty();
     }
 
     // ──────────────────────────── Schedule Groups ────────────────────────────
@@ -183,6 +212,13 @@ public class SchedulerService {
             String groupName = k.substring(storagePrefix.length());
             return groupName.startsWith(namePrefix);
         });
+    }
+
+    public PaginatedResult<ScheduleGroup> listScheduleGroups(String namePrefix, Integer maxResults,
+                                                             String nextToken, String region) {
+        return Pagination.paginate(listScheduleGroups(namePrefix, region), ScheduleGroup::getName,
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, MAX_TOKEN_LENGTH,
+                "ValidationException", pageNamespace("ListScheduleGroups", region), true);
     }
 
     // ──────────────────────────── Schedules ────────────────────────────
@@ -322,6 +358,18 @@ public class SchedulerService {
             }
             return true;
         }).toList();
+    }
+
+    public PaginatedResult<Schedule> listSchedules(String groupName, String namePrefix, String state,
+                                                   Integer maxResults, String nextToken, String region) {
+        return Pagination.paginate(listSchedules(groupName, namePrefix, state, region),
+                schedule -> schedule.getGroupName() + ":" + schedule.getName(),
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, MAX_TOKEN_LENGTH,
+                "ValidationException", pageNamespace("ListSchedules", region), true);
+    }
+
+    private String pageNamespace(String operation, String region) {
+        return "scheduler:" + operation + ":" + regionResolver.getAccountId() + ":" + region;
     }
 
     // ──────────────────────────── Helpers ────────────────────────────

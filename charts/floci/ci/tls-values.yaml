@@ -1,0 +1,8 @@
+# ct install: TLS on. A Lambda invocation then also makes Floci publish its CA bundle as
+# the floci-lambda-ca ConfigMap, which exercises the TLS-only RBAC rules.
+floci:
+  tls:
+    enabled: true
+tests:
+  lambda:
+    enabled: true

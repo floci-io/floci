@@ -13,6 +13,10 @@ Floci implements the AWS Security Hub CSPM organization and central-configuratio
 | --- | --- |
 | `ListOrganizationAdminAccounts` | - |
 | `EnableOrganizationAdminAccount` | - |
+| `DisableOrganizationAdminAccount` | Removes the delegated administrator; only the management account may call it. The former administrator keeps Security Hub, and its organization members become `Removed` |
+| `GetMembers` | Returns the named members whatever their status; an account that is not a member is listed in `UnprocessedAccounts` |
+| `DisassociateMembers` | Sets the named members to `Removed`; an account that is not a member is `ResourceNotFoundException`, and then none of the batch changes |
+| `DeleteMembers` | Deletes invited members; an organization account or a non member is listed in `UnprocessedAccounts`, since AWS allows only disassociating organization accounts |
 | `DescribeHub` | - |
 | `EnableSecurityHub` | - |
 | `UpdateSecurityHubConfiguration` | - |
@@ -36,6 +40,8 @@ Floci implements the AWS Security Hub CSPM organization and central-configuratio
 | `StartConfigurationPolicyAssociation` | - |
 | `StartConfigurationPolicyDisassociation` | - |
 | `ListConfigurationPolicyAssociations` | - |
+| `CreateMembers` | Adds up to 50 accounts. The delegated administrator's organization accounts become `Enabled` at once, with Security Hub and its default standards enabled for them; other accounts are `Created` |
+| `ListMembers` | Lists `Enabled` members, or every member with `OnlyAssociated=false`, in account order with up to 50 per page |
 | `ListTagsForResource` | - |
 | `TagResource` | - |
 | `UntagResource` | - |
@@ -46,6 +52,10 @@ Floci implements the AWS Security Hub CSPM organization and central-configuratio
 The supported surface includes Security Hub CSPM enablement and configuration, delegated administrator management, finding aggregators, organization configuration, configuration policies, policy associations, and resource tags.
 
 `EnableOrganizationAdminAccount` supports the AWS `SecurityHub` and `SecurityHubV2` feature values. Legacy `SecurityHub` delegation enables Security Hub CSPM for the delegated administrator in the current Region, matching AWS organization behavior.
+
+Member accounts follow the AWS organization model. `CreateMembers` from the delegated `SecurityHub` administrator adds an account of the same organization as an `Enabled` member, without an invitation, and enables Security Hub CSPM with its default standards in that account unless it is already enabled. The organization management account is the exception: it must enable Security Hub CSPM itself, and until it does it is reported in `UnprocessedAccounts`. Any other account is added as `Created`; `InviteMembers` and the member side of invitations are not implemented. `CreateMembers` on a `Removed` member adds it again.
+
+`POST /members` and `GET /members` are shared with Macie, which serves `CreateMember` and `ListMembers` at the same paths. Floci routes each request by the service in its SigV4 credential scope; an unsigned request reaches Macie, as before.
 
 Finding aggregators support `ALL_REGIONS`, `ALL_REGIONS_EXCEPT_SPECIFIED`, `SPECIFIED_REGIONS`, and `NO_REGIONS`. `GetFindingAggregator` accepts the complete finding-aggregator ARN carried in the greedy AWS REST path.
 

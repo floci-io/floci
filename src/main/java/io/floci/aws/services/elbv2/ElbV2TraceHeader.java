@@ -1,13 +1,12 @@
 package io.floci.aws.services.elbv2;
 
+import io.floci.aws.core.common.XRayTraceIds;
 import io.vertx.core.MultiMap;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * The {@code X-Amzn-Trace-Id} header an Application Load Balancer adds or updates before it sends a
@@ -59,8 +58,6 @@ final class ElbV2TraceHeader {
     }
 
     private static String traceId() {
-        byte[] id = new byte[12];
-        ThreadLocalRandom.current().nextBytes(id);
-        return "1-" + String.format("%08x", Instant.now().getEpochSecond()) + "-" + HexFormat.of().formatHex(id);
+        return XRayTraceIds.traceId(Instant.now().getEpochSecond());
     }
 }

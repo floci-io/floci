@@ -3,14 +3,18 @@ package io.floci.aws.services.codeartifact;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
 
 import java.net.URI;
+import java.time.Duration;
+import java.util.Locale;
 
 /**
- * Shared URI-construction helpers for the Maven, npm, and pypi sidecar clients, each of which
- * builds a request URI out of its own {@code baseUrl} plus one or more caller-supplied path
- * segments (a repository id, package coordinates, an asset filename). Package-private: every
- * caller lives in this package, and {@link #combine} in particular requires its {@code
- * encodedPath} argument to already be fully percent-encoded, a precondition not worth exposing
- * to unrelated callers outside the three clients that know to uphold it.
+ * Shared helpers for the Maven, npm, pypi, NuGet, and Kellnr (Cargo) sidecar clients, and their
+ * external-connection siblings: URI construction out of each one's own {@code baseUrl} plus one
+ * or more caller-supplied path segments (a repository id, package coordinates, an asset
+ * filename), and a request timeout sized for forwarding a large asset's real bytes rather than a
+ * small metadata-only request. Package-private: every caller lives in this package, and {@link
+ * #combine} in particular requires its {@code encodedPath} argument to already be fully
+ * percent-encoded, a precondition not worth exposing to unrelated callers outside the clients
+ * that know to uphold it.
  */
 final class SidecarUriUtils {
 
@@ -56,5 +60,68 @@ final class SidecarUriUtils {
             return segment.replace(".", "%2E");
         }
         return SigV4Canonicalization.uriEncode(segment);
+    }
+
+    /** A deliberately pessimistic floor: real transfers to a local sidecar container are far
+     * faster than this in practice, but the point of a floor is to be safe against a slow one,
+     * not to reflect a realistic average. */
+    private static final long MIN_TRANSFER_BYTES_PER_SECOND = 10L * 1024 * 1024;
+
+    /**
+     * A request timeout long enough to cover forwarding {@code contentLength} bytes to a sidecar
+     * container even at {@link #MIN_TRANSFER_BYTES_PER_SECOND}, plus a fixed 30-second grace
+     * period for the sidecar's own processing time, not just the wire transfer. Every sidecar
+     * client's own small, metadata-only request keeps its existing flat 30-second timeout
+     * unchanged; this is only for the one call per format that actually forwards an asset's real
+     * bytes, discovered by hand-testing a multi-GB upload end to end: a flat 30 seconds was never
+     * enough once an asset is sized in gigabytes rather than the kilobytes every existing test
+     * fixture uses, and every one of the four sidecar clients shared the exact same gap.
+     */
+    static Duration transferTimeout(long contentLength) {
+        return Duration.ofSeconds(30 + contentLength / MIN_TRANSFER_BYTES_PER_SECOND);
+    }
+
+    /**
+     * {@link #transferTimeout}'s own worst-case sibling, for a download whose real size isn't
+     * known until the response itself arrives: a GET can't size its own request timeout off a
+     * {@code contentLength} the way a PUT/POST already knows its own body's size upfront, so this
+     * uses {@code CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES} itself as the worst case instead.
+     * Every real asset-fetching GET, both the four sidecar clients' own streamed reads and the
+     * four external-connection clients' real public-registry fetches, shares this same gap for the
+     * identical reason the write side once did: a flat, small timeout sized for a metadata-only
+     * request silently cancels a transfer still legitimately in progress once it is no longer a
+     * few kilobytes but up to 5 GB.
+     */
+    static Duration maxTransferTimeout() {
+        return transferTimeout(CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+    }
+
+    /**
+     * The real crates.io sparse-index bucketing rule (RFC 2789), confirmed live against both
+     * Kellnr and the real {@code index.crates.io} (a 1 or 2 character name sits directly under a
+     * {@code 1}/{@code 2} directory, a 3 character name adds one more level keyed by its own
+     * first character, and a 4+ character name buckets by its own first two, then next two,
+     * characters), with no leading slash and no host-specific prefix: {@link KellnrSidecarClient}
+     * prepends its own {@code /api/v1/crates/}, {@code CargoExternalConnectionClient} prepends
+     * nothing (the real {@code index.crates.io} serves bucket paths straight off its own root).
+     * Lowercased: the Cargo Book's own registry-index page is explicit that both the bucket
+     * directory names and the index filename itself are the package name "converted to
+     * lowercase," confirmed live against the real production index (a mixed-case crate like
+     * {@code Inflector} 404s at {@code In/fl/Inflector} and only resolves at {@code in/fl/
+     * inflector}; the returned index line's own {@code name} field still preserves the original
+     * case). The {@code packageName} value itself, as used for anything other than this one path,
+     * keeps its original casing.
+     */
+    static String cratesIoBucketPath(String packageName) {
+        String lower = packageName.toLowerCase(Locale.ROOT);
+        String encoded = encodeSegment(lower);
+        int length = lower.length();
+        if (length <= 2) {
+            return length + "/" + encoded;
+        }
+        if (length == 3) {
+            return "3/" + encodeSegment(lower.substring(0, 1)) + "/" + encoded;
+        }
+        return encodeSegment(lower.substring(0, 2)) + "/" + encodeSegment(lower.substring(2, 4)) + "/" + encoded;
     }
 }

@@ -17,9 +17,11 @@ import io.floci.aws.services.redshift.model.EventSubscription;
 import io.floci.aws.services.redshift.model.Integration;
 import io.floci.aws.services.redshift.model.Parameter;
 import io.floci.aws.services.redshift.model.RedshiftEvent;
+import io.floci.aws.services.redshift.model.ScheduledAction;
 import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
+import io.floci.aws.services.redshift.model.TableRestoreStatus;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -64,6 +66,8 @@ public class RedshiftQueryHandler {
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
     private final IamEnforcementFilter iamEnforcementFilter;
     private final RedshiftResourcePolicies resourcePolicies;
+    private final RedshiftScheduledActionService scheduledActions;
+    private final RedshiftTableRestoreService tableRestores;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
@@ -71,7 +75,9 @@ public class RedshiftQueryHandler {
                                 RegionResolver regionResolver,
                                 RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
                                 IamEnforcementFilter iamEnforcementFilter,
-                                RedshiftResourcePolicies resourcePolicies) {
+                                RedshiftResourcePolicies resourcePolicies,
+                                RedshiftScheduledActionService scheduledActions,
+                                RedshiftTableRestoreService tableRestores) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
@@ -80,12 +86,14 @@ public class RedshiftQueryHandler {
         this.zeroEtlConsumer = zeroEtlConsumer;
         this.iamEnforcementFilter = iamEnforcementFilter;
         this.resourcePolicies = resourcePolicies;
+        this.scheduledActions = scheduledActions;
+        this.tableRestores = tableRestores;
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                          EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                          RegionResolver regionResolver) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null);
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null, null, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -185,7 +193,7 @@ public class RedshiftQueryHandler {
         case "CreateClusterSnapshot" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier);
+            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterSnapshotResponse")
                       .start("CreateClusterSnapshotResult")
@@ -201,7 +209,12 @@ public class RedshiftQueryHandler {
         case "DescribeClusterSnapshots" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            List<Snapshot> snapshots = service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
+            String ownerAccount = params.getFirst("OwnerAccount");
+            boolean shared = service.isOtherAccount(ownerAccount);
+            List<Snapshot> snapshots = shared
+                    ? service.describeSharedSnapshots(ownerAccount, snapshotIdentifier, clusterIdentifier)
+                    : service.describeSnapshots(snapshotIdentifier, clusterIdentifier);
+            String owner = shared ? ownerAccount : regionResolver.getAccountId();
             String snapshotType = params.getFirst("SnapshotType");
             if (snapshotType != null) {
                 if (!List.of("manual", "automated").contains(snapshotType)) {
@@ -214,7 +227,7 @@ public class RedshiftQueryHandler {
                       .start("DescribeClusterSnapshotsResult")
                         .start("Snapshots");
             for (Snapshot snapshot : snapshots) {
-                xmlBuilder.raw(buildSnapshotXml(snapshot));
+                xmlBuilder.raw(buildSnapshotXml(snapshot, owner));
             }
             String xml = xmlBuilder
                         .end("Snapshots")
@@ -223,6 +236,31 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DescribeClusterSnapshotsResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "AuthorizeSnapshotAccess", "RevokeSnapshotAccess" -> {
+            boolean authorize = "AuthorizeSnapshotAccess".equals(action);
+            String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
+            String snapshotClusterIdentifier = params.getFirst("SnapshotClusterIdentifier");
+            RestoredSnapshot named = resolveSnapshot(snapshotIdentifier, snapshotClusterIdentifier,
+                    params.getFirst("SnapshotArn"), authorizationHeader);
+            if (named.owner() != null) {
+                throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + named.name() + " not found", 404);
+            }
+            String accountId = requireParam(params, "AccountWithRestoreAccess");
+            Snapshot snapshot = authorize
+                    ? service.authorizeSnapshotAccess(named.name(), named.cluster(), accountId)
+                    : service.revokeSnapshotAccess(named.name(), named.cluster(), accountId);
+            String xml = new XmlBuilder()
+                    .start(action + "Response")
+                      .start(action + "Result")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end(action + "Result")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end(action + "Response")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -238,6 +276,23 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DeleteClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "ModifyClusterSnapshot" -> {
+            String snapshotIdentifier = requireParam(params, "SnapshotIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+            Boolean force = booleanParam(params, "Force");
+            Snapshot snapshot = service.modifyClusterSnapshot(snapshotIdentifier, manualRetention, force);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterSnapshotResponse")
+                      .start("ModifyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("ModifyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterSnapshotResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -269,8 +324,9 @@ public class RedshiftQueryHandler {
             String nodeType = params.getFirst("NodeType");
             RestoredSnapshot snapshot = resolveSnapshot(snapshotIdentifier,
                     params.getFirst("SnapshotClusterIdentifier"), snapshotArn, authorizationHeader);
+            String ownerAccount = snapshot.owner() != null ? snapshot.owner() : params.getFirst("OwnerAccount");
             Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, snapshot.name(),
-                    snapshot.cluster(), nodeType);
+                    snapshot.cluster(), nodeType, ownerAccount);
             String xml = new XmlBuilder()
                     .start("RestoreFromClusterSnapshotResponse")
                       .start("RestoreFromClusterSnapshotResult")
@@ -283,11 +339,55 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "RestoreTableFromClusterSnapshot" -> {
+            TableRestoreStatus status = tableRestores.restoreTable(new RedshiftTableRestoreService.Request(
+                    requireParam(params, "ClusterIdentifier"), requireParam(params, "SnapshotIdentifier"),
+                    requireParam(params, "SourceDatabaseName"), params.getFirst("SourceSchemaName"),
+                    requireParam(params, "SourceTableName"), params.getFirst("TargetDatabaseName"),
+                    params.getFirst("TargetSchemaName"), requireParam(params, "NewTableName"),
+                    Boolean.TRUE.equals(booleanParam(params, "EnableCaseSensitiveIdentifier"))));
+            String xml = new XmlBuilder()
+                    .start("RestoreTableFromClusterSnapshotResponse")
+                      .start("RestoreTableFromClusterSnapshotResult")
+                        .raw(tableRestoreStatusXml(status))
+                      .end("RestoreTableFromClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("RestoreTableFromClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "DescribeTableRestoreStatus" -> {
+            PaginatedResult<TableRestoreStatus> page = tableRestores.describeTableRestoreStatus(
+                    params.getFirst("ClusterIdentifier"), params.getFirst("TableRestoreRequestId"),
+                    intParam(params, "MaxRecords"), params.getFirst("Marker"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("DescribeTableRestoreStatusResponse")
+                      .start("DescribeTableRestoreStatusResult")
+                        .start("TableRestoreStatusDetails");
+            for (TableRestoreStatus status : page.items()) {
+                xml.raw(tableRestoreStatusXml(status));
+            }
+            xml.end("TableRestoreStatusDetails");
+            if (page.nextToken() != null) {
+                xml.elem("Marker", page.nextToken());
+            }
+            String body = xml
+                      .end("DescribeTableRestoreStatusResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DescribeTableRestoreStatusResponse")
+                    .build();
+            return Response.ok(body).type(MediaType.APPLICATION_XML).build();
+        }
         case "CreateClusterParameterGroup" -> {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             String parameterGroupFamily = params.getFirst("ParameterGroupFamily");
             String description = params.getFirst("Description");
-            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily,
+                    description, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterParameterGroupResponse")
                       .start("CreateClusterParameterGroupResult")
@@ -514,7 +614,9 @@ public class RedshiftQueryHandler {
                       .start("DescribeIntegrationsResult")
                         .start("Integrations");
             for (Integration integration : found.integrations()) {
-                xmlBuilder.raw(buildIntegrationXml(integration, true));
+                xmlBuilder.start("Integration")
+                        .raw(buildIntegrationXml(integration, true))
+                        .end("Integration");
             }
             xmlBuilder.end("Integrations");
             // Marker only when a further page exists: real Redshift omits it on the terminal page,
@@ -803,6 +905,22 @@ public class RedshiftQueryHandler {
                     intParam(params, "RetentionPeriod"), Boolean.parseBoolean(params.getFirst("Manual")));
             return clusterResponse(action, cluster);
         }
+        case "CreateScheduledAction" -> {
+            ScheduledAction request = scheduledActionRequest(params);
+            return scheduledActionResponse(action, scheduledActions.createScheduledAction(request));
+        }
+        case "ModifyScheduledAction" -> {
+            ScheduledAction changes = scheduledActionRequest(params);
+            Boolean enable = booleanParam(params, "Enable");
+            return scheduledActionResponse(action, scheduledActions.modifyScheduledAction(changes, enable));
+        }
+        case "DeleteScheduledAction" -> {
+            scheduledActions.deleteScheduledAction(requireParam(params, "ScheduledActionName"));
+            return emptyResponse(action);
+        }
+        case "DescribeScheduledActions" -> {
+            return describeScheduledActionsResponse(params);
+        }
         case "CreateSnapshotSchedule" -> {
             SnapshotSchedule schedule = service.createSnapshotSchedule(params.getFirst("ScheduleIdentifier"),
                     params.getFirst("ScheduleDescription"), memberList(params, "ScheduleDefinitions"),
@@ -1016,7 +1134,8 @@ public class RedshiftQueryHandler {
             int duration = resolveDurationSeconds(params);
 
             TempCredential credential = credentialBroker.issue(
-                    regionResolver.getAccountId(), clusterId, effectiveDbUser, dbGroups, duration);
+                    regionResolver.getAccountId(), clusterId, effectiveDbUser, dbGroups, duration,
+                    dbUser, autoCreate);
             return Response.ok(getClusterCredentialsXml("GetClusterCredentials", credential))
                     .type(MediaType.APPLICATION_XML).build();
         }
@@ -1025,10 +1144,10 @@ public class RedshiftQueryHandler {
             service.describeClusters(clusterId);
             String dbUser = iamDbUserResolver.resolveDbUser(authorizationHeader);
             int duration = resolveDurationSeconds(params);
-            List<String> dbGroups = memberList(params, "DbGroups");
 
             TempCredential credential = credentialBroker.issue(
-                    regionResolver.getAccountId(), clusterId, dbUser, dbGroups, duration);
+                    regionResolver.getAccountId(), clusterId, dbUser, List.of(), duration,
+                    dbUser, true);
             return Response.ok(getClusterCredentialsXml("GetClusterCredentialsWithIAM", credential))
                     .type(MediaType.APPLICATION_XML).build();
         }
@@ -1191,14 +1310,7 @@ public class RedshiftQueryHandler {
           .end("ClusterParameterGroups");
 
         if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : cluster.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(cluster.getTags()));
         }
 
         if (cluster.getSnapshotCopyDestinationRegion() != null) {
@@ -1240,8 +1352,14 @@ public class RedshiftQueryHandler {
         };
     }
 
-    /** The snapshot a restore names: its name, and the cluster it was taken from, which the request is checked on. */
-    private record RestoredSnapshot(String cluster, String name) {
+    /**
+     * The snapshot a restore names: its name, and the cluster it was taken from, which the request is checked on.
+     * {@code owner} is the account an ARN names when it is not the caller's, otherwise null.
+     */
+    private record RestoredSnapshot(String cluster, String name, String owner) {
+        RestoredSnapshot(String cluster, String name) {
+            this(cluster, name, null);
+        }
     }
 
     /**
@@ -1275,20 +1393,27 @@ public class RedshiftQueryHandler {
                 || slash < 0 || slash == resource.length() - 1) {
             throw new AwsException("InvalidParameterValue", "Invalid SnapshotArn: " + snapshotArn, 400);
         }
-        // An ARN from another account or region must not match a local snapshot by name.
-        if (!arn.accountId().equals(regionResolver.getAccountId())
-                || !arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
+        // An ARN from another region must not match a local snapshot by name. One from another account names that
+        // account's snapshot, which the service checks was shared with the caller.
+        String requestRegion = regionResolver.resolveRegionFromAuth(authorizationHeader);
+        if (!arn.region().equals(requestRegion)
+                || !arn.partition().equals(regionResolver.partitionForRegion(requestRegion))) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
+        String owner = arn.accountId().equals(regionResolver.getAccountId()) ? null : arn.accountId();
         String cluster = resource.substring("snapshot:".length(), slash);
         if (cluster.isBlank() || snapshotClusterIdentifier != null && !snapshotClusterIdentifier.isBlank()
                 && !snapshotClusterIdentifier.equals(cluster)) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
-        return new RestoredSnapshot(cluster, resource.substring(slash + 1));
+        return new RestoredSnapshot(cluster, resource.substring(slash + 1), owner);
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
+        return buildSnapshotXml(snapshot, regionResolver.getAccountId());
+    }
+
+    private String buildSnapshotXml(Snapshot snapshot, String ownerAccount) {
         // Both are absent on snapshots persisted before these fields existed; omit them.
         String createTime = snapshot.getSnapshotCreateTime() != null
                 ? DateTimeFormatter.ISO_INSTANT.format(snapshot.getSnapshotCreateTime())
@@ -1304,12 +1429,17 @@ public class RedshiftQueryHandler {
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
             .elem("MasterUsername", snapshot.getMasterUsername())
-            .elem("SourceRegion", snapshot.getSourceRegion());
+            .elem("SourceRegion", snapshot.getSourceRegion())
+            .elem("OwnerAccount", ownerAccount)
+            .start("AccountsWithRestoreAccess");
+        for (String account : snapshot.getAccountsWithRestoreAccess()) {
+            builder.start("AccountWithRestoreAccess").elem("AccountId", account).end("AccountWithRestoreAccess");
+        }
+        builder.end("AccountsWithRestoreAccess");
         if (snapshot.getKmsKeyId() != null) {
             builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
         }
-
-        return builder.end("Snapshot").build();
+        return builder.raw(tagsXml(snapshot.getTags())).end("Snapshot").build();
     }
 
     private Response clusterResponse(String operation, Cluster cluster) {
@@ -1341,6 +1471,130 @@ public class RedshiftQueryHandler {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
+    /**
+     * The members a Create or ModifyScheduledAction request carries; a member left out stays null.
+     * TargetAction is a union of which exactly one member may be set.
+     */
+    private static ScheduledAction scheduledActionRequest(MultivaluedMap<String, String> params) {
+        ScheduledAction request = new ScheduledAction();
+        request.setScheduledActionName(requireParam(params, "ScheduledActionName"));
+        request.setIamRole(params.getFirst("IamRole"));
+        request.setSchedule(params.getFirst("Schedule"));
+        request.setDescription(params.getFirst("ScheduledActionDescription"));
+        request.setStartTime(timestampParam(params, "StartTime"));
+        request.setEndTime(timestampParam(params, "EndTime"));
+        Boolean enable = booleanParam(params, "Enable");
+        if (enable != null) {
+            request.setEnabled(enable);
+        }
+        List<String> targets = params.keySet().stream()
+                .filter(key -> key.startsWith("TargetAction."))
+                .map(key -> key.substring("TargetAction.".length()).split("\\.")[0])
+                .distinct()
+                .toList();
+        if (targets.size() > 1) {
+            throw new AwsException("InvalidScheduledAction", "TargetAction must set exactly one member.", 400);
+        }
+        if (!targets.isEmpty()) {
+            String type = targets.get(0);
+            if ("ResizeCluster".equals(type)) {
+                throw new AwsException("ScheduledActionTypeUnsupported",
+                        "Scheduled ResizeCluster actions are not supported.", 400);
+            }
+            if (!ScheduledAction.PAUSE_CLUSTER.equals(type) && !ScheduledAction.RESUME_CLUSTER.equals(type)) {
+                throw new AwsException("InvalidScheduledAction", "Unknown TargetAction member " + type + ".", 400);
+            }
+            request.setTargetActionType(type);
+            request.setClusterIdentifier(requireParam(params, "TargetAction." + type + ".ClusterIdentifier"));
+        }
+        return request;
+    }
+
+    private Response describeScheduledActionsResponse(MultivaluedMap<String, String> params) {
+        List<String> clusterIdentifiers = new ArrayList<>();
+        List<String> iamRoles = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember filter : AwsQueryLists.members(params, "Filters", "ScheduledActionFilter")) {
+            String name = params.getFirst(filter.prefix() + ".Name");
+            List<String> values = AwsQueryLists.values(params, filter.prefix() + ".Values", "item");
+            if ("cluster-identifier".equals(name)) {
+                clusterIdentifiers.addAll(values);
+            } else if ("iam-role".equals(name)) {
+                iamRoles.addAll(values);
+            } else {
+                throw new AwsException("InvalidParameterValue",
+                        "Filter name must be cluster-identifier or iam-role.", 400);
+            }
+        }
+        PaginatedResult<ScheduledAction> page = scheduledActions.describeScheduledActions(
+                params.getFirst("ScheduledActionName"), params.getFirst("TargetActionType"),
+                timestampParam(params, "StartTime"), timestampParam(params, "EndTime"),
+                booleanParam(params, "Active"),
+                clusterIdentifiers, iamRoles,
+                intParam(params, "MaxRecords"), params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeScheduledActionsResponse")
+                  .start("DescribeScheduledActionsResult")
+                    .start("ScheduledActions");
+        for (ScheduledAction scheduledAction : page.items()) {
+            xml.start("ScheduledAction").raw(buildScheduledActionFields(scheduledAction)).end("ScheduledAction");
+        }
+        xml.end("ScheduledActions");
+        if (page.nextToken() != null) {
+            xml.elem("Marker", page.nextToken());
+        }
+        String body = xml
+                  .end("DescribeScheduledActionsResult")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end("DescribeScheduledActionsResponse")
+                .build();
+        return Response.ok(body).type(MediaType.APPLICATION_XML).build();
+    }
+
+    // Create/ModifyScheduledAction return the ScheduledAction members directly inside the Result.
+    private Response scheduledActionResponse(String operation, ScheduledAction scheduledAction) {
+        String xml = new XmlBuilder()
+                .start(operation + "Response")
+                  .start(operation + "Result")
+                    .raw(buildScheduledActionFields(scheduledAction))
+                  .end(operation + "Result")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end(operation + "Response")
+                .build();
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private String buildScheduledActionFields(ScheduledAction scheduledAction) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("ScheduledActionName", scheduledAction.getScheduledActionName())
+                .start("TargetAction")
+                  .start(scheduledAction.getTargetActionType())
+                    .elem("ClusterIdentifier", scheduledAction.getClusterIdentifier())
+                  .end(scheduledAction.getTargetActionType())
+                .end("TargetAction")
+                .elem("Schedule", scheduledAction.getSchedule())
+                .elem("IamRole", scheduledAction.getIamRole());
+        if (scheduledAction.getDescription() != null) {
+            xml.elem("ScheduledActionDescription", scheduledAction.getDescription());
+        }
+        xml.elem("State", scheduledAction.isEnabled() ? "ACTIVE" : "DISABLED");
+        xml.start("NextInvocations");
+        for (Instant invocation : scheduledActions.upcomingInvocations(scheduledAction, 5)) {
+            xml.elem("ScheduledActionTime", DateTimeFormatter.ISO_INSTANT.format(invocation));
+        }
+        xml.end("NextInvocations");
+        if (scheduledAction.getStartTime() != null) {
+            xml.elem("StartTime", DateTimeFormatter.ISO_INSTANT.format(scheduledAction.getStartTime()));
+        }
+        if (scheduledAction.getEndTime() != null) {
+            xml.elem("EndTime", DateTimeFormatter.ISO_INSTANT.format(scheduledAction.getEndTime()));
+        }
+        return xml.build();
+    }
+
     private static Response emptyResponse(String operation) {
         String xml = new XmlBuilder()
                 .start(operation + "Response")
@@ -1361,15 +1615,8 @@ public class RedshiftQueryHandler {
         }
         builder.end("ScheduleDefinitions")
             .elem("ScheduleIdentifier", schedule.getScheduleIdentifier())
-            .elem("ScheduleDescription", schedule.getScheduleDescription());
-        builder.start("Tags");
-        for (Map.Entry<String, String> tag : schedule.getTags().entrySet()) {
-            builder.start("Tag")
-                .elem("Key", tag.getKey())
-                .elem("Value", tag.getValue())
-              .end("Tag");
-        }
-        builder.end("Tags");
+            .elem("ScheduleDescription", schedule.getScheduleDescription())
+            .raw(tagsXml(schedule.getTags()));
         List<String> associated = service.clustersUsingSnapshotSchedule(schedule.getScheduleIdentifier());
         builder.elem("AssociatedClusterCount", associated.size()).start("AssociatedClusters");
         for (String clusterIdentifier : associated) {
@@ -1437,13 +1684,13 @@ public class RedshiftQueryHandler {
     }
 
     private String buildClusterParameterGroupXml(ClusterParameterGroup group) {
-        XmlBuilder builder = new XmlBuilder()
+        return new XmlBuilder()
             .start("ClusterParameterGroup")
             .elem("ParameterGroupName", group.getParameterGroupName())
             .elem("ParameterGroupFamily", group.getParameterGroupFamily())
-            .elem("Description", group.getDescription());
-        
-        return builder.end("ClusterParameterGroup").build();
+            .elem("Description", group.getDescription())
+            .raw(tagsXml(group.getTags()))
+            .end("ClusterParameterGroup").build();
     }
 
     private String buildClusterSubnetGroupXml(ClusterSubnetGroup group) {
@@ -1462,11 +1709,7 @@ public class RedshiftQueryHandler {
             }
             builder.elem("SubnetStatus", "Active").end("Subnet");
         }
-        builder.end("Subnets").start("Tags");
-        for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags").end("ClusterSubnetGroup").build();
+        return builder.end("Subnets").raw(tagsXml(group.getTags())).end("ClusterSubnetGroup").build();
     }
 
     private Response eventSubscriptionResponse(String operation, EventSubscription subscription) {
@@ -1500,14 +1743,10 @@ public class RedshiftQueryHandler {
         for (String category : subscription.getEventCategoriesList()) {
             builder.elem("EventCategory", category);
         }
-        builder.end("EventCategoriesList")
+        return builder.end("EventCategoriesList")
                 .elem("SubscriptionCreationTime", EVENT_TIMESTAMP.format(subscription.getSubscriptionCreationTime()))
                 .elem("Enabled", String.valueOf(subscription.isEnabled()))
-                .start("Tags");
-        for (Map.Entry<String, String> tag : subscription.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags")
+                .raw(tagsXml(subscription.getTags()))
                 .elem("Status", subscription.getStatus())
                 .elem("CustomerAwsId", subscription.getCustomerAwsId())
                 .end("EventSubscription").build();
@@ -1528,6 +1767,30 @@ public class RedshiftQueryHandler {
         return builder.end("EventCategories")
                 .elem("Message", event.getMessage())
                 .end("Event").build();
+    }
+
+    private static String tableRestoreStatusXml(TableRestoreStatus status) {
+        XmlBuilder xml = new XmlBuilder().start("TableRestoreStatus")
+                .elem("TableRestoreRequestId", status.getTableRestoreRequestId())
+                .elem("Status", status.getStatus())
+                .elem("Message", status.getMessage())
+                .elem("RequestTime", status.getRequestTime() == null ? null
+                        : DateTimeFormatter.ISO_INSTANT.format(status.getRequestTime()))
+                .elem("ClusterIdentifier", status.getClusterIdentifier())
+                .elem("SnapshotIdentifier", status.getSnapshotIdentifier())
+                .elem("SourceDatabaseName", status.getSourceDatabaseName())
+                .elem("SourceSchemaName", status.getSourceSchemaName())
+                .elem("SourceTableName", status.getSourceTableName())
+                .elem("TargetDatabaseName", status.getTargetDatabaseName())
+                .elem("TargetSchemaName", status.getTargetSchemaName())
+                .elem("NewTableName", status.getNewTableName());
+        if (status.getProgressInMegaBytes() != null) {
+            xml.elem("ProgressInMegaBytes", status.getProgressInMegaBytes());
+        }
+        if (status.getTotalDataInMegaBytes() != null) {
+            xml.elem("TotalDataInMegaBytes", status.getTotalDataInMegaBytes());
+        }
+        return xml.end("TableRestoreStatus").build();
     }
 
     private static Boolean booleanParam(MultivaluedMap<String, String> params, String name) {
@@ -1571,14 +1834,7 @@ public class RedshiftQueryHandler {
             .elem("KmsKeyId", grant.getKmsKeyId());
 
         if (grant.getTags() != null && !grant.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : grant.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(grant.getTags()));
         }
 
         return builder.end("SnapshotCopyGrant").build();
@@ -1607,13 +1863,12 @@ public class RedshiftQueryHandler {
      */
     private String buildIntegrationXml(Integration integration, boolean includeErrors) {
         XmlBuilder builder = new XmlBuilder()
-                .start("Integration")
-                  .elem("IntegrationArn", integration.getIntegrationArn())
-                  .elem("IntegrationName", integration.getIntegrationName())
-                  .elem("SourceArn", integration.getSourceArn())
-                  .elem("TargetArn", integration.getTargetArn())
-                  .elem("Status", integration.getStatus())
-                  .elem("CreateTime", integration.getCreateTime());
+                .elem("IntegrationArn", integration.getIntegrationArn())
+                .elem("IntegrationName", integration.getIntegrationName())
+                .elem("SourceArn", integration.getSourceArn())
+                .elem("TargetArn", integration.getTargetArn())
+                .elem("Status", integration.getStatus())
+                .elem("CreateTime", integration.getCreateTime());
         if (integration.getSourceType() != null) {
             builder.elem("SourceType", integration.getSourceType());
         }
@@ -1638,16 +1893,17 @@ public class RedshiftQueryHandler {
             builder.start("Errors").end("Errors");
         }
         if (integration.getTags() != null && !integration.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : integration.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(integration.getTags()));
         }
-        return builder.end("Integration").build();
+        return builder.build();
+    }
+
+    private static String tagsXml(Map<String, String> tags) {
+        XmlBuilder builder = new XmlBuilder().start("Tags");
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
+        }
+        return builder.end("Tags").build();
     }
 
     /**

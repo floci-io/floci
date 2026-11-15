@@ -230,10 +230,13 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Scope scope = new Scope(ctx.accountId(), region);
+        boolean onDemand = "PAY_PER_REQUEST".equals(ctx.resolveOptional(props, "BillingMode"));
         TableDefinition table;
         boolean created = false;
         try {
-            table = dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
+            table = onDemand
+                    ? dynamoDb.tables().createOnDemandTable(scope, tableName, keySchema, attrDefs, gsis, lsis)
+                    : dynamoDb.tables().createTable(scope, tableName, keySchema, attrDefs, null, null, gsis, lsis);
             created = true;
         } catch (AwsException e) {
             if (!"ResourceInUseException".equals(e.getErrorCode())) {

@@ -1,0 +1,2013 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_rekognition_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "AssociateFaces": "AssociateFacesRequest",
+    "CompareFaces": "CompareFacesRequest",
+    "CopyProjectVersion": "CopyProjectVersionRequest",
+    "CreateCollection": "CreateCollectionRequest",
+    "CreateDataset": "CreateDatasetRequest",
+    "CreateFaceLivenessSession": "CreateFaceLivenessSessionRequest",
+    "CreateProject": "CreateProjectRequest",
+    "CreateProjectVersion": "CreateProjectVersionRequest",
+    "CreateStreamProcessor": "CreateStreamProcessorRequest",
+    "CreateUser": "CreateUserRequest",
+    "DeleteCollection": "DeleteCollectionRequest",
+    "DeleteDataset": "DeleteDatasetRequest",
+    "DeleteFaces": "DeleteFacesRequest",
+    "DeleteProject": "DeleteProjectRequest",
+    "DeleteProjectPolicy": "DeleteProjectPolicyRequest",
+    "DeleteProjectVersion": "DeleteProjectVersionRequest",
+    "DeleteStreamProcessor": "DeleteStreamProcessorRequest",
+    "DeleteUser": "DeleteUserRequest",
+    "DescribeCollection": "DescribeCollectionRequest",
+    "DescribeDataset": "DescribeDatasetRequest",
+    "DescribeProjectVersions": "DescribeProjectVersionsRequest",
+    "DescribeProjects": "DescribeProjectsRequest",
+    "DescribeStreamProcessor": "DescribeStreamProcessorRequest",
+    "DetectCustomLabels": "DetectCustomLabelsRequest",
+    "DetectFaces": "DetectFacesRequest",
+    "DetectLabels": "DetectLabelsRequest",
+    "DetectModerationLabels": "DetectModerationLabelsRequest",
+    "DetectProtectiveEquipment": "DetectProtectiveEquipmentRequest",
+    "DetectText": "DetectTextRequest",
+    "DisassociateFaces": "DisassociateFacesRequest",
+    "DistributeDatasetEntries": "DistributeDatasetEntriesRequest",
+    "GetCelebrityInfo": "GetCelebrityInfoRequest",
+    "GetCelebrityRecognition": "GetCelebrityRecognitionRequest",
+    "GetContentModeration": "GetContentModerationRequest",
+    "GetFaceDetection": "GetFaceDetectionRequest",
+    "GetFaceLivenessSessionResults": "GetFaceLivenessSessionResultsRequest",
+    "GetFaceSearch": "GetFaceSearchRequest",
+    "GetLabelDetection": "GetLabelDetectionRequest",
+    "GetMediaAnalysisJob": "GetMediaAnalysisJobRequest",
+    "GetPersonTracking": "GetPersonTrackingRequest",
+    "GetSegmentDetection": "GetSegmentDetectionRequest",
+    "GetTextDetection": "GetTextDetectionRequest",
+    "IndexFaces": "IndexFacesRequest",
+    "ListCollections": "ListCollectionsRequest",
+    "ListDatasetEntries": "ListDatasetEntriesRequest",
+    "ListDatasetLabels": "ListDatasetLabelsRequest",
+    "ListFaces": "ListFacesRequest",
+    "ListMediaAnalysisJobs": "ListMediaAnalysisJobsRequest",
+    "ListProjectPolicies": "ListProjectPoliciesRequest",
+    "ListStreamProcessors": "ListStreamProcessorsRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "ListUsers": "ListUsersRequest",
+    "PutProjectPolicy": "PutProjectPolicyRequest",
+    "RecognizeCelebrities": "RecognizeCelebritiesRequest",
+    "SearchFaces": "SearchFacesRequest",
+    "SearchFacesByImage": "SearchFacesByImageRequest",
+    "SearchUsers": "SearchUsersRequest",
+    "SearchUsersByImage": "SearchUsersByImageRequest",
+    "StartCelebrityRecognition": "StartCelebrityRecognitionRequest",
+    "StartContentModeration": "StartContentModerationRequest",
+    "StartFaceDetection": "StartFaceDetectionRequest",
+    "StartFaceSearch": "StartFaceSearchRequest",
+    "StartLabelDetection": "StartLabelDetectionRequest",
+    "StartMediaAnalysisJob": "StartMediaAnalysisJobRequest",
+    "StartPersonTracking": "StartPersonTrackingRequest",
+    "StartProjectVersion": "StartProjectVersionRequest",
+    "StartSegmentDetection": "StartSegmentDetectionRequest",
+    "StartStreamProcessor": "StartStreamProcessorRequest",
+    "StartTextDetection": "StartTextDetectionRequest",
+    "StopProjectVersion": "StopProjectVersionRequest",
+    "StopStreamProcessor": "StopStreamProcessorRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateDatasetEntries": "UpdateDatasetEntriesRequest",
+    "UpdateStreamProcessor": "UpdateStreamProcessorRequest"
+  },
+  "shapes": {
+    "Asset": {
+      "type": "structure",
+      "members": {
+        "GroundTruthManifest": "GroundTruthManifest"
+      }
+    },
+    "Assets": {
+      "type": "list",
+      "member": "Asset"
+    },
+    "AssociateFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "UserId",
+        "FaceIds"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "UserId": "UserId",
+        "FaceIds": "UserFaceIdList",
+        "UserMatchThreshold": "Percent",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "Attribute": {
+      "type": "string",
+      "enum": [
+        "DEFAULT",
+        "ALL",
+        "AGE_RANGE",
+        "BEARD",
+        "EMOTIONS",
+        "EYE_DIRECTION",
+        "EYEGLASSES",
+        "EYES_OPEN",
+        "GENDER",
+        "MOUTH_OPEN",
+        "MUSTACHE",
+        "FACE_OCCLUDED",
+        "SMILE",
+        "SUNGLASSES"
+      ]
+    },
+    "Attributes": {
+      "type": "list",
+      "member": "Attribute"
+    },
+    "AuditImagesLimit": {
+      "type": "integer",
+      "min": 0,
+      "max": 4
+    },
+    "BlackFrame": {
+      "type": "structure",
+      "members": {
+        "MaxPixelThreshold": "MaxPixelThreshold",
+        "MinCoveragePercentage": "MinCoveragePercentage"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "BoundingBox": {
+      "type": "structure",
+      "members": {
+        "Width": "Float",
+        "Height": "Float",
+        "Left": "Float",
+        "Top": "Float"
+      }
+    },
+    "BoundingBoxHeight": {
+      "type": "float",
+      "min": 0,
+      "max": 1
+    },
+    "BoundingBoxWidth": {
+      "type": "float",
+      "min": 0,
+      "max": 1
+    },
+    "CelebrityRecognitionSortBy": {
+      "type": "string",
+      "enum": [
+        "ID",
+        "TIMESTAMP"
+      ]
+    },
+    "ChallengePreference": {
+      "type": "structure",
+      "required": [
+        "Type"
+      ],
+      "members": {
+        "Type": "ChallengeType",
+        "Versions": "Versions"
+      }
+    },
+    "ChallengePreferences": {
+      "type": "list",
+      "member": "ChallengePreference"
+    },
+    "ChallengeType": {
+      "type": "string",
+      "enum": [
+        "FaceMovementAndLightChallenge",
+        "FaceMovementChallenge"
+      ]
+    },
+    "ClientRequestToken": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[a-zA-Z0-9-_]+$"
+    },
+    "CollectionId": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "CompareFacesRequest": {
+      "type": "structure",
+      "required": [
+        "SourceImage",
+        "TargetImage"
+      ],
+      "members": {
+        "SourceImage": "Image",
+        "TargetImage": "Image",
+        "SimilarityThreshold": "Percent",
+        "QualityFilter": "QualityFilter"
+      }
+    },
+    "ConnectedHomeLabel": {
+      "type": "string"
+    },
+    "ConnectedHomeLabels": {
+      "type": "list",
+      "min": 1,
+      "max": 128,
+      "member": "ConnectedHomeLabel"
+    },
+    "ConnectedHomeSettings": {
+      "type": "structure",
+      "required": [
+        "Labels"
+      ],
+      "members": {
+        "Labels": "ConnectedHomeLabels",
+        "MinConfidence": "Percent"
+      }
+    },
+    "ConnectedHomeSettingsForUpdate": {
+      "type": "structure",
+      "members": {
+        "Labels": "ConnectedHomeLabels",
+        "MinConfidence": "Percent"
+      }
+    },
+    "ContentClassifier": {
+      "type": "string",
+      "enum": [
+        "FreeOfPersonallyIdentifiableInformation",
+        "FreeOfAdultContent"
+      ]
+    },
+    "ContentClassifiers": {
+      "type": "list",
+      "max": 256,
+      "member": "ContentClassifier"
+    },
+    "ContentModerationAggregateBy": {
+      "type": "string",
+      "enum": [
+        "TIMESTAMPS",
+        "SEGMENTS"
+      ]
+    },
+    "ContentModerationSortBy": {
+      "type": "string",
+      "enum": [
+        "NAME",
+        "TIMESTAMP"
+      ]
+    },
+    "CopyProjectVersionRequest": {
+      "type": "structure",
+      "required": [
+        "SourceProjectArn",
+        "SourceProjectVersionArn",
+        "DestinationProjectArn",
+        "VersionName",
+        "OutputConfig"
+      ],
+      "members": {
+        "SourceProjectArn": "ProjectArn",
+        "SourceProjectVersionArn": "ProjectVersionArn",
+        "DestinationProjectArn": "ProjectArn",
+        "VersionName": "VersionName",
+        "OutputConfig": "OutputConfig",
+        "Tags": "TagMap",
+        "KmsKeyId": "KmsKeyId"
+      }
+    },
+    "CreateCollectionRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Tags": "TagMap"
+      }
+    },
+    "CreateDatasetRequest": {
+      "type": "structure",
+      "required": [
+        "DatasetType",
+        "ProjectArn"
+      ],
+      "members": {
+        "DatasetSource": "DatasetSource",
+        "DatasetType": "DatasetType",
+        "ProjectArn": "ProjectArn",
+        "Tags": "TagMap"
+      }
+    },
+    "CreateFaceLivenessSessionRequest": {
+      "type": "structure",
+      "members": {
+        "KmsKeyId": "KmsKeyId",
+        "Settings": "CreateFaceLivenessSessionRequestSettings",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "CreateFaceLivenessSessionRequestSettings": {
+      "type": "structure",
+      "members": {
+        "OutputConfig": "LivenessOutputConfig",
+        "AuditImagesLimit": "AuditImagesLimit",
+        "ChallengePreferences": "ChallengePreferences"
+      }
+    },
+    "CreateProjectRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectName"
+      ],
+      "members": {
+        "ProjectName": "ProjectName",
+        "Feature": "CustomizationFeature",
+        "AutoUpdate": "ProjectAutoUpdate",
+        "Tags": "TagMap"
+      }
+    },
+    "CreateProjectVersionRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectArn",
+        "VersionName",
+        "OutputConfig"
+      ],
+      "members": {
+        "ProjectArn": "ProjectArn",
+        "VersionName": "VersionName",
+        "OutputConfig": "OutputConfig",
+        "TrainingData": "TrainingData",
+        "TestingData": "TestingData",
+        "Tags": "TagMap",
+        "KmsKeyId": "KmsKeyId",
+        "VersionDescription": "VersionDescription",
+        "FeatureConfig": "CustomizationFeatureConfig"
+      }
+    },
+    "CreateStreamProcessorRequest": {
+      "type": "structure",
+      "required": [
+        "Input",
+        "Output",
+        "Name",
+        "Settings",
+        "RoleArn"
+      ],
+      "members": {
+        "Input": "StreamProcessorInput",
+        "Output": "StreamProcessorOutput",
+        "Name": "StreamProcessorName",
+        "Settings": "StreamProcessorSettings",
+        "RoleArn": "RoleArn",
+        "Tags": "TagMap",
+        "NotificationChannel": "StreamProcessorNotificationChannel",
+        "KmsKeyId": "KmsKeyId",
+        "RegionsOfInterest": "RegionsOfInterest",
+        "DataSharingPreference": "StreamProcessorDataSharingPreference"
+      }
+    },
+    "CreateUserRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "UserId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "UserId": "UserId",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "CustomizationFeature": {
+      "type": "string",
+      "enum": [
+        "CONTENT_MODERATION",
+        "CUSTOM_LABELS"
+      ]
+    },
+    "CustomizationFeatureConfig": {
+      "type": "structure",
+      "members": {
+        "ContentModeration": "CustomizationFeatureContentModerationConfig"
+      }
+    },
+    "CustomizationFeatureContentModerationConfig": {
+      "type": "structure",
+      "members": {
+        "ConfidenceThreshold": "Percent"
+      }
+    },
+    "CustomizationFeatures": {
+      "type": "list",
+      "min": 1,
+      "max": 2,
+      "member": "CustomizationFeature"
+    },
+    "DatasetArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "(^arn:[a-z\\d-]+:rekognition:[a-z\\d-]+:\\d{12}:project\\/[a-zA-Z0-9_.\\-]{1,255}\\/dataset\\/(train|test)\\/[0-9]+$)"
+    },
+    "DatasetChanges": {
+      "type": "structure",
+      "required": [
+        "GroundTruth"
+      ],
+      "members": {
+        "GroundTruth": "GroundTruthBlob"
+      }
+    },
+    "DatasetLabel": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": ".{1,}"
+    },
+    "DatasetLabels": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "DatasetLabel"
+    },
+    "DatasetSource": {
+      "type": "structure",
+      "members": {
+        "GroundTruthManifest": "GroundTruthManifest",
+        "DatasetArn": "DatasetArn"
+      }
+    },
+    "DatasetType": {
+      "type": "string",
+      "enum": [
+        "TRAIN",
+        "TEST"
+      ]
+    },
+    "DeleteCollectionRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId"
+      }
+    },
+    "DeleteDatasetRequest": {
+      "type": "structure",
+      "required": [
+        "DatasetArn"
+      ],
+      "members": {
+        "DatasetArn": "DatasetArn"
+      }
+    },
+    "DeleteFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "FaceIds"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "FaceIds": "FaceIdList"
+      }
+    },
+    "DeleteProjectPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectArn",
+        "PolicyName"
+      ],
+      "members": {
+        "ProjectArn": "ProjectArn",
+        "PolicyName": "ProjectPolicyName",
+        "PolicyRevisionId": "ProjectPolicyRevisionId"
+      }
+    },
+    "DeleteProjectRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectArn"
+      ],
+      "members": {
+        "ProjectArn": "ProjectArn"
+      }
+    },
+    "DeleteProjectVersionRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectVersionArn"
+      ],
+      "members": {
+        "ProjectVersionArn": "ProjectVersionArn"
+      }
+    },
+    "DeleteStreamProcessorRequest": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "StreamProcessorName"
+      }
+    },
+    "DeleteUserRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "UserId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "UserId": "UserId",
+        "ClientRequestToken": "ClientRequestToken"
+      }
+    },
+    "DescribeCollectionRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId"
+      }
+    },
+    "DescribeDatasetRequest": {
+      "type": "structure",
+      "required": [
+        "DatasetArn"
+      ],
+      "members": {
+        "DatasetArn": "DatasetArn"
+      }
+    },
+    "DescribeProjectVersionsRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectArn"
+      ],
+      "members": {
+        "ProjectArn": "ProjectArn",
+        "VersionNames": "VersionNames",
+        "NextToken": "ExtendedPaginationToken",
+        "MaxResults": "ProjectVersionsPageSize"
+      }
+    },
+    "DescribeProjectsRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "ExtendedPaginationToken",
+        "MaxResults": "ProjectsPageSize",
+        "ProjectNames": "ProjectNames",
+        "Features": "CustomizationFeatures"
+      }
+    },
+    "DescribeStreamProcessorRequest": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "StreamProcessorName"
+      }
+    },
+    "DetectCustomLabelsRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectVersionArn",
+        "Image"
+      ],
+      "members": {
+        "ProjectVersionArn": "ProjectVersionArn",
+        "Image": "Image",
+        "MaxResults": "UInteger",
+        "MinConfidence": "Percent"
+      }
+    },
+    "DetectFacesRequest": {
+      "type": "structure",
+      "required": [
+        "Image"
+      ],
+      "members": {
+        "Image": "Image",
+        "Attributes": "Attributes"
+      }
+    },
+    "DetectLabelsFeatureList": {
+      "type": "list",
+      "min": 0,
+      "max": 2,
+      "member": "DetectLabelsFeatureName"
+    },
+    "DetectLabelsFeatureName": {
+      "type": "string",
+      "enum": [
+        "GENERAL_LABELS",
+        "IMAGE_PROPERTIES"
+      ]
+    },
+    "DetectLabelsImagePropertiesSettings": {
+      "type": "structure",
+      "members": {
+        "MaxDominantColors": "DetectLabelsMaxDominantColors"
+      }
+    },
+    "DetectLabelsMaxDominantColors": {
+      "type": "integer",
+      "min": 0,
+      "max": 20
+    },
+    "DetectLabelsRequest": {
+      "type": "structure",
+      "required": [
+        "Image"
+      ],
+      "members": {
+        "Image": "Image",
+        "MaxLabels": "UInteger",
+        "MinConfidence": "Percent",
+        "Features": "DetectLabelsFeatureList",
+        "Settings": "DetectLabelsSettings"
+      }
+    },
+    "DetectLabelsSettings": {
+      "type": "structure",
+      "members": {
+        "GeneralLabels": "GeneralLabelsSettings",
+        "ImageProperties": "DetectLabelsImagePropertiesSettings"
+      }
+    },
+    "DetectModerationLabelsRequest": {
+      "type": "structure",
+      "required": [
+        "Image"
+      ],
+      "members": {
+        "Image": "Image",
+        "MinConfidence": "Percent",
+        "HumanLoopConfig": "HumanLoopConfig",
+        "ProjectVersion": "ProjectVersionId"
+      }
+    },
+    "DetectProtectiveEquipmentRequest": {
+      "type": "structure",
+      "required": [
+        "Image"
+      ],
+      "members": {
+        "Image": "Image",
+        "SummarizationAttributes": "ProtectiveEquipmentSummarizationAttributes"
+      }
+    },
+    "DetectTextFilters": {
+      "type": "structure",
+      "members": {
+        "WordFilter": "DetectionFilter",
+        "RegionsOfInterest": "RegionsOfInterest"
+      }
+    },
+    "DetectTextRequest": {
+      "type": "structure",
+      "required": [
+        "Image"
+      ],
+      "members": {
+        "Image": "Image",
+        "Filters": "DetectTextFilters"
+      }
+    },
+    "DetectionFilter": {
+      "type": "structure",
+      "members": {
+        "MinConfidence": "Percent",
+        "MinBoundingBoxHeight": "BoundingBoxHeight",
+        "MinBoundingBoxWidth": "BoundingBoxWidth"
+      }
+    },
+    "DisassociateFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "UserId",
+        "FaceIds"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "UserId": "UserId",
+        "ClientRequestToken": "ClientRequestToken",
+        "FaceIds": "UserFaceIdList"
+      }
+    },
+    "DistributeDataset": {
+      "type": "structure",
+      "required": [
+        "Arn"
+      ],
+      "members": {
+        "Arn": "DatasetArn"
+      }
+    },
+    "DistributeDatasetEntriesRequest": {
+      "type": "structure",
+      "required": [
+        "Datasets"
+      ],
+      "members": {
+        "Datasets": "DistributeDatasetMetadataList"
+      }
+    },
+    "DistributeDatasetMetadataList": {
+      "type": "list",
+      "min": 2,
+      "max": 2,
+      "member": "DistributeDataset"
+    },
+    "ExtendedPaginationToken": {
+      "type": "string",
+      "max": 1024
+    },
+    "ExternalImageId": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9_.\\-:]+"
+    },
+    "FaceAttributes": {
+      "type": "string",
+      "enum": [
+        "DEFAULT",
+        "ALL"
+      ]
+    },
+    "FaceId": {
+      "type": "string",
+      "pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    },
+    "FaceIdList": {
+      "type": "list",
+      "min": 1,
+      "max": 4096,
+      "member": "FaceId"
+    },
+    "FaceSearchSettings": {
+      "type": "structure",
+      "members": {
+        "CollectionId": "CollectionId",
+        "FaceMatchThreshold": "Percent"
+      }
+    },
+    "FaceSearchSortBy": {
+      "type": "string",
+      "enum": [
+        "INDEX",
+        "TIMESTAMP"
+      ]
+    },
+    "Float": {
+      "type": "float"
+    },
+    "FlowDefinitionArn": {
+      "type": "string",
+      "max": 256
+    },
+    "GeneralLabelsFilterList": {
+      "type": "list",
+      "min": 0,
+      "max": 100,
+      "member": "GeneralLabelsFilterValue"
+    },
+    "GeneralLabelsFilterValue": {
+      "type": "string",
+      "min": 0,
+      "max": 50,
+      "pattern": "[A-Za-z0-9\u00e0\u00e2\u00e8\u00e7\u00f1\u00f3'-_(). ]*"
+    },
+    "GeneralLabelsSettings": {
+      "type": "structure",
+      "members": {
+        "LabelInclusionFilters": "GeneralLabelsFilterList",
+        "LabelExclusionFilters": "GeneralLabelsFilterList",
+        "LabelCategoryInclusionFilters": "GeneralLabelsFilterList",
+        "LabelCategoryExclusionFilters": "GeneralLabelsFilterList"
+      }
+    },
+    "GetCelebrityInfoRequest": {
+      "type": "structure",
+      "required": [
+        "Id"
+      ],
+      "members": {
+        "Id": "RekognitionUniqueId"
+      }
+    },
+    "GetCelebrityRecognitionRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken",
+        "SortBy": "CelebrityRecognitionSortBy"
+      }
+    },
+    "GetContentModerationRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken",
+        "SortBy": "ContentModerationSortBy",
+        "AggregateBy": "ContentModerationAggregateBy"
+      }
+    },
+    "GetFaceDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken"
+      }
+    },
+    "GetFaceLivenessSessionResultsRequest": {
+      "type": "structure",
+      "required": [
+        "SessionId"
+      ],
+      "members": {
+        "SessionId": "LivenessSessionId"
+      }
+    },
+    "GetFaceSearchRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken",
+        "SortBy": "FaceSearchSortBy"
+      }
+    },
+    "GetLabelDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken",
+        "SortBy": "LabelDetectionSortBy",
+        "AggregateBy": "LabelDetectionAggregateBy"
+      }
+    },
+    "GetMediaAnalysisJobRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "MediaAnalysisJobId"
+      }
+    },
+    "GetPersonTrackingRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken",
+        "SortBy": "PersonTrackingSortBy"
+      }
+    },
+    "GetSegmentDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken"
+      }
+    },
+    "GetTextDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "JobId"
+      ],
+      "members": {
+        "JobId": "JobId",
+        "MaxResults": "MaxResults",
+        "NextToken": "PaginationToken"
+      }
+    },
+    "GroundTruthBlob": {
+      "type": "blob",
+      "min": 1,
+      "max": 5242880
+    },
+    "GroundTruthManifest": {
+      "type": "structure",
+      "members": {
+        "S3Object": "S3Object"
+      }
+    },
+    "HasErrors": {
+      "type": "boolean"
+    },
+    "HumanLoopConfig": {
+      "type": "structure",
+      "required": [
+        "HumanLoopName",
+        "FlowDefinitionArn"
+      ],
+      "members": {
+        "HumanLoopName": "HumanLoopName",
+        "FlowDefinitionArn": "FlowDefinitionArn",
+        "DataAttributes": "HumanLoopDataAttributes"
+      }
+    },
+    "HumanLoopDataAttributes": {
+      "type": "structure",
+      "members": {
+        "ContentClassifiers": "ContentClassifiers"
+      }
+    },
+    "HumanLoopName": {
+      "type": "string",
+      "min": 1,
+      "max": 63,
+      "pattern": "^[a-z0-9](-*[a-z0-9])*"
+    },
+    "Image": {
+      "type": "structure",
+      "members": {
+        "S3Object": "S3Object"
+      }
+    },
+    "IndexFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "Image"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Image": "Image",
+        "ExternalImageId": "ExternalImageId",
+        "DetectionAttributes": "Attributes",
+        "MaxFaces": "MaxFacesToIndex",
+        "QualityFilter": "QualityFilter"
+      }
+    },
+    "InferenceUnits": {
+      "type": "integer",
+      "min": 1
+    },
+    "IsLabeled": {
+      "type": "boolean"
+    },
+    "JobId": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[a-zA-Z0-9-_]+$"
+    },
+    "JobTag": {
+      "type": "string",
+      "min": 1,
+      "max": 1024,
+      "pattern": "[a-zA-Z0-9_.\\-:+=\\/]+"
+    },
+    "KinesisDataArn": {
+      "type": "string",
+      "pattern": "(^arn:([a-z\\d-]+):kinesis:([a-z\\d-]+):\\d{12}:.+$)"
+    },
+    "KinesisDataStream": {
+      "type": "structure",
+      "members": {
+        "Arn": "KinesisDataArn"
+      }
+    },
+    "KinesisVideoArn": {
+      "type": "string",
+      "pattern": "(^arn:([a-z\\d-]+):kinesisvideo:([a-z\\d-]+):\\d{12}:.+$)"
+    },
+    "KinesisVideoStream": {
+      "type": "structure",
+      "members": {
+        "Arn": "KinesisVideoArn"
+      }
+    },
+    "KinesisVideoStreamFragmentNumber": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^[0-9]+$"
+    },
+    "KinesisVideoStreamStartSelector": {
+      "type": "structure",
+      "members": {
+        "ProducerTimestamp": "ULong",
+        "FragmentNumber": "KinesisVideoStreamFragmentNumber"
+      }
+    },
+    "KmsKeyId": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:_/+=,@.-]{0,2048}$"
+    },
+    "LabelDetectionAggregateBy": {
+      "type": "string",
+      "enum": [
+        "TIMESTAMPS",
+        "SEGMENTS"
+      ]
+    },
+    "LabelDetectionFeatureList": {
+      "type": "list",
+      "min": 0,
+      "max": 1,
+      "member": "LabelDetectionFeatureName"
+    },
+    "LabelDetectionFeatureName": {
+      "type": "string",
+      "enum": [
+        "GENERAL_LABELS"
+      ]
+    },
+    "LabelDetectionSettings": {
+      "type": "structure",
+      "members": {
+        "GeneralLabels": "GeneralLabelsSettings"
+      }
+    },
+    "LabelDetectionSortBy": {
+      "type": "string",
+      "enum": [
+        "NAME",
+        "TIMESTAMP"
+      ]
+    },
+    "ListCollectionsRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "PaginationToken",
+        "MaxResults": "PageSize"
+      }
+    },
+    "ListDatasetEntriesPageSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListDatasetEntriesRequest": {
+      "type": "structure",
+      "required": [
+        "DatasetArn"
+      ],
+      "members": {
+        "DatasetArn": "DatasetArn",
+        "ContainsLabels": "DatasetLabels",
+        "Labeled": "IsLabeled",
+        "SourceRefContains": "QueryString",
+        "HasErrors": "HasErrors",
+        "NextToken": "ExtendedPaginationToken",
+        "MaxResults": "ListDatasetEntriesPageSize"
+      }
+    },
+    "ListDatasetLabelsPageSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListDatasetLabelsRequest": {
+      "type": "structure",
+      "required": [
+        "DatasetArn"
+      ],
+      "members": {
+        "DatasetArn": "DatasetArn",
+        "NextToken": "ExtendedPaginationToken",
+        "MaxResults": "ListDatasetLabelsPageSize"
+      }
+    },
+    "ListFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "NextToken": "PaginationToken",
+        "MaxResults": "PageSize",
+        "UserId": "UserId",
+        "FaceIds": "FaceIdList"
+      }
+    },
+    "ListMediaAnalysisJobsPageSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ListMediaAnalysisJobsRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "ExtendedPaginationToken",
+        "MaxResults": "ListMediaAnalysisJobsPageSize"
+      }
+    },
+    "ListProjectPoliciesPageSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 5
+    },
+    "ListProjectPoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectArn"
+      ],
+      "members": {
+        "ProjectArn": "ProjectArn",
+        "NextToken": "ExtendedPaginationToken",
+        "MaxResults": "ListProjectPoliciesPageSize"
+      }
+    },
+    "ListStreamProcessorsRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "PaginationToken",
+        "MaxResults": "MaxResults"
+      }
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceArn"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn"
+      }
+    },
+    "ListUsersRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "MaxResults": "MaxUserResults",
+        "NextToken": "PaginationToken"
+      }
+    },
+    "LivenessOutputConfig": {
+      "type": "structure",
+      "required": [
+        "S3Bucket"
+      ],
+      "members": {
+        "S3Bucket": "S3Bucket",
+        "S3KeyPrefix": "LivenessS3KeyPrefix"
+      }
+    },
+    "LivenessS3KeyPrefix": {
+      "type": "string",
+      "max": 950,
+      "pattern": "\\S*"
+    },
+    "LivenessSessionId": {
+      "type": "string",
+      "min": 36,
+      "max": 36,
+      "pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    },
+    "MaxDurationInSecondsULong": {
+      "type": "long",
+      "min": 1,
+      "max": 120
+    },
+    "MaxFaces": {
+      "type": "integer",
+      "min": 1,
+      "max": 4096
+    },
+    "MaxFacesToIndex": {
+      "type": "integer",
+      "min": 1
+    },
+    "MaxPixelThreshold": {
+      "type": "float",
+      "min": 0,
+      "max": 1
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1
+    },
+    "MaxUserResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 500
+    },
+    "MediaAnalysisDetectModerationLabelsConfig": {
+      "type": "structure",
+      "members": {
+        "MinConfidence": "Percent",
+        "ProjectVersion": "ProjectVersionId"
+      }
+    },
+    "MediaAnalysisInput": {
+      "type": "structure",
+      "required": [
+        "S3Object"
+      ],
+      "members": {
+        "S3Object": "S3Object"
+      }
+    },
+    "MediaAnalysisJobId": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[a-zA-Z0-9-_]+$"
+    },
+    "MediaAnalysisJobName": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "MediaAnalysisOperationsConfig": {
+      "type": "structure",
+      "members": {
+        "DetectModerationLabels": "MediaAnalysisDetectModerationLabelsConfig"
+      }
+    },
+    "MediaAnalysisOutputConfig": {
+      "type": "structure",
+      "required": [
+        "S3Bucket"
+      ],
+      "members": {
+        "S3Bucket": "S3Bucket",
+        "S3KeyPrefix": "MediaAnalysisS3KeyPrefix"
+      }
+    },
+    "MediaAnalysisS3KeyPrefix": {
+      "type": "string",
+      "max": 800,
+      "pattern": "\\S*"
+    },
+    "MinCoveragePercentage": {
+      "type": "float",
+      "min": 0,
+      "max": 100
+    },
+    "NotificationChannel": {
+      "type": "structure",
+      "required": [
+        "SNSTopicArn",
+        "RoleArn"
+      ],
+      "members": {
+        "SNSTopicArn": "SNSTopicArn",
+        "RoleArn": "RoleArn"
+      }
+    },
+    "OutputConfig": {
+      "type": "structure",
+      "members": {
+        "S3Bucket": "S3Bucket",
+        "S3KeyPrefix": "S3KeyPrefix"
+      }
+    },
+    "PageSize": {
+      "type": "integer",
+      "min": 0,
+      "max": 4096
+    },
+    "PaginationToken": {
+      "type": "string",
+      "max": 255
+    },
+    "Percent": {
+      "type": "float",
+      "min": 0,
+      "max": 100
+    },
+    "PersonTrackingSortBy": {
+      "type": "string",
+      "enum": [
+        "INDEX",
+        "TIMESTAMP"
+      ]
+    },
+    "Point": {
+      "type": "structure",
+      "members": {
+        "X": "Float",
+        "Y": "Float"
+      }
+    },
+    "Polygon": {
+      "type": "list",
+      "member": "Point"
+    },
+    "ProjectArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "(^arn:[a-z\\d-]+:rekognition:[a-z\\d-]+:\\d{12}:project\\/[a-zA-Z0-9_.\\-]{1,255}\\/[0-9]+$)"
+    },
+    "ProjectAutoUpdate": {
+      "type": "string",
+      "enum": [
+        "ENABLED",
+        "DISABLED"
+      ]
+    },
+    "ProjectName": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "ProjectNames": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "ProjectName"
+    },
+    "ProjectPolicyDocument": {
+      "type": "string",
+      "min": 1,
+      "max": 2000,
+      "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u00FF]+"
+    },
+    "ProjectPolicyName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "ProjectPolicyRevisionId": {
+      "type": "string",
+      "max": 64,
+      "pattern": "[0-9A-Fa-f]+"
+    },
+    "ProjectVersionArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "(^arn:[a-z\\d-]+:rekognition:[a-z\\d-]+:\\d{12}:project\\/[a-zA-Z0-9_.\\-]{1,255}\\/version\\/[a-zA-Z0-9_.\\-]{1,255}\\/[0-9]+$)"
+    },
+    "ProjectVersionId": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "(^arn:[a-z\\d-]+:rekognition:[a-z\\d-]+:\\d{12}:project\\/[a-zA-Z0-9_.\\-]{1,255}\\/version\\/[a-zA-Z0-9_.\\-]{1,255}\\/[0-9]+$)"
+    },
+    "ProjectVersionsPageSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ProjectsPageSize": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "ProtectiveEquipmentSummarizationAttributes": {
+      "type": "structure",
+      "required": [
+        "MinConfidence",
+        "RequiredEquipmentTypes"
+      ],
+      "members": {
+        "MinConfidence": "Percent",
+        "RequiredEquipmentTypes": "ProtectiveEquipmentTypes"
+      }
+    },
+    "ProtectiveEquipmentType": {
+      "type": "string",
+      "enum": [
+        "FACE_COVER",
+        "HAND_COVER",
+        "HEAD_COVER"
+      ]
+    },
+    "ProtectiveEquipmentTypes": {
+      "type": "list",
+      "member": "ProtectiveEquipmentType"
+    },
+    "PutProjectPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectArn",
+        "PolicyName",
+        "PolicyDocument"
+      ],
+      "members": {
+        "ProjectArn": "ProjectArn",
+        "PolicyName": "ProjectPolicyName",
+        "PolicyRevisionId": "ProjectPolicyRevisionId",
+        "PolicyDocument": "ProjectPolicyDocument"
+      }
+    },
+    "QualityFilter": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "AUTO",
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ]
+    },
+    "QueryString": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": ".*\\S.*"
+    },
+    "RecognizeCelebritiesRequest": {
+      "type": "structure",
+      "required": [
+        "Image"
+      ],
+      "members": {
+        "Image": "Image"
+      }
+    },
+    "RegionOfInterest": {
+      "type": "structure",
+      "members": {
+        "BoundingBox": "BoundingBox",
+        "Polygon": "Polygon"
+      }
+    },
+    "RegionsOfInterest": {
+      "type": "list",
+      "min": 0,
+      "max": 10,
+      "member": "RegionOfInterest"
+    },
+    "RekognitionUniqueId": {
+      "type": "string",
+      "pattern": "[0-9A-Za-z]*"
+    },
+    "ResourceArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048
+    },
+    "RoleArn": {
+      "type": "string",
+      "pattern": "arn:aws:iam::\\d{12}:role/?[a-zA-Z_0-9+=,.@\\-_/]+"
+    },
+    "S3Bucket": {
+      "type": "string",
+      "min": 3,
+      "max": 255,
+      "pattern": "[0-9A-Za-z\\.\\-_]*"
+    },
+    "S3Destination": {
+      "type": "structure",
+      "members": {
+        "Bucket": "S3Bucket",
+        "KeyPrefix": "S3KeyPrefix"
+      }
+    },
+    "S3KeyPrefix": {
+      "type": "string",
+      "max": 1024
+    },
+    "S3Object": {
+      "type": "structure",
+      "members": {
+        "Bucket": "S3Bucket",
+        "Name": "S3ObjectName",
+        "Version": "S3ObjectVersion"
+      }
+    },
+    "S3ObjectName": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "S3ObjectVersion": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "SNSTopicArn": {
+      "type": "string",
+      "pattern": "(^arn:aws:sns:.*:\\w{12}:.+$)"
+    },
+    "SearchFacesByImageRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "Image"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Image": "Image",
+        "MaxFaces": "MaxFaces",
+        "FaceMatchThreshold": "Percent",
+        "QualityFilter": "QualityFilter"
+      }
+    },
+    "SearchFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "FaceId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "FaceId": "FaceId",
+        "MaxFaces": "MaxFaces",
+        "FaceMatchThreshold": "Percent"
+      }
+    },
+    "SearchUsersByImageRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "Image"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Image": "Image",
+        "UserMatchThreshold": "Percent",
+        "MaxUsers": "MaxUserResults",
+        "QualityFilter": "QualityFilter"
+      }
+    },
+    "SearchUsersRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "UserId": "UserId",
+        "FaceId": "FaceId",
+        "UserMatchThreshold": "Percent",
+        "MaxUsers": "MaxUserResults"
+      }
+    },
+    "SegmentConfidence": {
+      "type": "float",
+      "min": 50,
+      "max": 100
+    },
+    "SegmentType": {
+      "type": "string",
+      "enum": [
+        "TECHNICAL_CUE",
+        "SHOT"
+      ]
+    },
+    "SegmentTypes": {
+      "type": "list",
+      "min": 1,
+      "member": "SegmentType"
+    },
+    "StartCelebrityRecognitionRequest": {
+      "type": "structure",
+      "required": [
+        "Video"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag"
+      }
+    },
+    "StartContentModerationRequest": {
+      "type": "structure",
+      "required": [
+        "Video"
+      ],
+      "members": {
+        "Video": "Video",
+        "MinConfidence": "Percent",
+        "ClientRequestToken": "ClientRequestToken",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag"
+      }
+    },
+    "StartFaceDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "Video"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "NotificationChannel": "NotificationChannel",
+        "FaceAttributes": "FaceAttributes",
+        "JobTag": "JobTag"
+      }
+    },
+    "StartFaceSearchRequest": {
+      "type": "structure",
+      "required": [
+        "Video",
+        "CollectionId"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "FaceMatchThreshold": "Percent",
+        "CollectionId": "CollectionId",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag"
+      }
+    },
+    "StartLabelDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "Video"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "MinConfidence": "Percent",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag",
+        "Features": "LabelDetectionFeatureList",
+        "Settings": "LabelDetectionSettings"
+      }
+    },
+    "StartMediaAnalysisJobRequest": {
+      "type": "structure",
+      "required": [
+        "OperationsConfig",
+        "Input",
+        "OutputConfig"
+      ],
+      "members": {
+        "ClientRequestToken": "ClientRequestToken",
+        "JobName": "MediaAnalysisJobName",
+        "OperationsConfig": "MediaAnalysisOperationsConfig",
+        "Input": "MediaAnalysisInput",
+        "OutputConfig": "MediaAnalysisOutputConfig",
+        "KmsKeyId": "KmsKeyId"
+      }
+    },
+    "StartPersonTrackingRequest": {
+      "type": "structure",
+      "required": [
+        "Video"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag"
+      }
+    },
+    "StartProjectVersionRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectVersionArn",
+        "MinInferenceUnits"
+      ],
+      "members": {
+        "ProjectVersionArn": "ProjectVersionArn",
+        "MinInferenceUnits": "InferenceUnits",
+        "MaxInferenceUnits": "InferenceUnits"
+      }
+    },
+    "StartSegmentDetectionFilters": {
+      "type": "structure",
+      "members": {
+        "TechnicalCueFilter": "StartTechnicalCueDetectionFilter",
+        "ShotFilter": "StartShotDetectionFilter"
+      }
+    },
+    "StartSegmentDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "Video",
+        "SegmentTypes"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag",
+        "Filters": "StartSegmentDetectionFilters",
+        "SegmentTypes": "SegmentTypes"
+      }
+    },
+    "StartShotDetectionFilter": {
+      "type": "structure",
+      "members": {
+        "MinSegmentConfidence": "SegmentConfidence"
+      }
+    },
+    "StartStreamProcessorRequest": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "StreamProcessorName",
+        "StartSelector": "StreamProcessingStartSelector",
+        "StopSelector": "StreamProcessingStopSelector"
+      }
+    },
+    "StartTechnicalCueDetectionFilter": {
+      "type": "structure",
+      "members": {
+        "MinSegmentConfidence": "SegmentConfidence",
+        "BlackFrame": "BlackFrame"
+      }
+    },
+    "StartTextDetectionFilters": {
+      "type": "structure",
+      "members": {
+        "WordFilter": "DetectionFilter",
+        "RegionsOfInterest": "RegionsOfInterest"
+      }
+    },
+    "StartTextDetectionRequest": {
+      "type": "structure",
+      "required": [
+        "Video"
+      ],
+      "members": {
+        "Video": "Video",
+        "ClientRequestToken": "ClientRequestToken",
+        "NotificationChannel": "NotificationChannel",
+        "JobTag": "JobTag",
+        "Filters": "StartTextDetectionFilters"
+      }
+    },
+    "StopProjectVersionRequest": {
+      "type": "structure",
+      "required": [
+        "ProjectVersionArn"
+      ],
+      "members": {
+        "ProjectVersionArn": "ProjectVersionArn"
+      }
+    },
+    "StopStreamProcessorRequest": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "StreamProcessorName"
+      }
+    },
+    "StreamProcessingStartSelector": {
+      "type": "structure",
+      "members": {
+        "KVSStreamStartSelector": "KinesisVideoStreamStartSelector"
+      }
+    },
+    "StreamProcessingStopSelector": {
+      "type": "structure",
+      "members": {
+        "MaxDurationInSeconds": "MaxDurationInSecondsULong"
+      }
+    },
+    "StreamProcessorDataSharingPreference": {
+      "type": "structure",
+      "required": [
+        "OptIn"
+      ],
+      "members": {
+        "OptIn": "Boolean"
+      }
+    },
+    "StreamProcessorInput": {
+      "type": "structure",
+      "members": {
+        "KinesisVideoStream": "KinesisVideoStream"
+      }
+    },
+    "StreamProcessorName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "StreamProcessorNotificationChannel": {
+      "type": "structure",
+      "required": [
+        "SNSTopicArn"
+      ],
+      "members": {
+        "SNSTopicArn": "SNSTopicArn"
+      }
+    },
+    "StreamProcessorOutput": {
+      "type": "structure",
+      "members": {
+        "KinesisDataStream": "KinesisDataStream",
+        "S3Destination": "S3Destination"
+      }
+    },
+    "StreamProcessorParameterToDelete": {
+      "type": "string",
+      "enum": [
+        "ConnectedHomeMinConfidence",
+        "RegionsOfInterest"
+      ]
+    },
+    "StreamProcessorParametersToDelete": {
+      "type": "list",
+      "member": "StreamProcessorParameterToDelete"
+    },
+    "StreamProcessorSettings": {
+      "type": "structure",
+      "members": {
+        "FaceSearch": "FaceSearchSettings",
+        "ConnectedHome": "ConnectedHomeSettings"
+      }
+    },
+    "StreamProcessorSettingsForUpdate": {
+      "type": "structure",
+      "members": {
+        "ConnectedHomeForUpdate": "ConnectedHomeSettingsForUpdate"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^(?!aws:)[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*$"
+    },
+    "TagKeyList": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "TagKey"
+    },
+    "TagMap": {
+      "type": "map",
+      "min": 0,
+      "max": 200,
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "Tags"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn",
+        "Tags": "TagMap"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "TestingData": {
+      "type": "structure",
+      "members": {
+        "Assets": "Assets",
+        "AutoCreate": "Boolean"
+      }
+    },
+    "TrainingData": {
+      "type": "structure",
+      "members": {
+        "Assets": "Assets"
+      }
+    },
+    "UInteger": {
+      "type": "integer",
+      "min": 0
+    },
+    "ULong": {
+      "type": "long",
+      "min": 0
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "TagKeys"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn",
+        "TagKeys": "TagKeyList"
+      }
+    },
+    "UpdateDatasetEntriesRequest": {
+      "type": "structure",
+      "required": [
+        "DatasetArn",
+        "Changes"
+      ],
+      "members": {
+        "DatasetArn": "DatasetArn",
+        "Changes": "DatasetChanges"
+      }
+    },
+    "UpdateStreamProcessorRequest": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "StreamProcessorName",
+        "SettingsForUpdate": "StreamProcessorSettingsForUpdate",
+        "RegionsOfInterestForUpdate": "RegionsOfInterest",
+        "DataSharingPreferenceForUpdate": "StreamProcessorDataSharingPreference",
+        "ParametersToDelete": "StreamProcessorParametersToDelete"
+      }
+    },
+    "UserFaceIdList": {
+      "type": "list",
+      "min": 1,
+      "max": 100,
+      "member": "FaceId"
+    },
+    "UserId": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.\\-:]+"
+    },
+    "Version": {
+      "type": "string",
+      "min": 5,
+      "max": 11,
+      "pattern": "^(0|[1-9]\\d{0,2})\\.(0|[1-9]\\d{0,2})\\.(0|[1-9]\\d{0,2})$"
+    },
+    "VersionDescription": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9-_. ()':,;?]+"
+    },
+    "VersionName": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "VersionNames": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "VersionName"
+    },
+    "Versions": {
+      "type": "structure",
+      "members": {
+        "Minimum": "Version",
+        "Maximum": "Version"
+      }
+    },
+    "Video": {
+      "type": "structure",
+      "members": {
+        "S3Object": "S3Object"
+      }
+    }
+  }
+}

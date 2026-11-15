@@ -92,7 +92,8 @@ class OrganizationsCrossAccountIntegrationTest {
     @Order(3)
     void inviteAccountToOrganization() {
         inviteHandshakeId = organizations(MANAGEMENT_ACCOUNT, "InviteAccountToOrganization",
-                "{\"Target\":{\"Id\":\"" + INVITED_ACCOUNT + "\",\"Type\":\"ACCOUNT\"},\"Notes\":\"join us\"}")
+                "{\"Target\":{\"Id\":\"" + INVITED_ACCOUNT + "\",\"Type\":\"ACCOUNT\"},\"Notes\":\"join us\","
+                        + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"red\"}]}")
         .when()
             .post("/")
         .then()
@@ -179,6 +180,15 @@ class OrganizationsCrossAccountIntegrationTest {
             .body("Accounts.Id", hasItem(INVITED_ACCOUNT))
             .body("Accounts.find { it.Id == '" + INVITED_ACCOUNT + "' }.JoinedMethod", equalTo("INVITED"))
             .body("Accounts.find { it.Id == '" + INVITED_ACCOUNT + "' }.Status", equalTo("ACTIVE"));
+
+        organizations(MANAGEMENT_ACCOUNT, "ListTagsForResource", "{\"ResourceId\":\"" + INVITED_ACCOUNT + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("team"))
+            .body("Tags[0].Value", equalTo("red"));
     }
 
     @Test

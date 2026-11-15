@@ -40,6 +40,7 @@ import io.floci.aws.services.eventbridge.model.ReplayState;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.pipes.PipesFilterMatcher;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -50,6 +51,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -69,6 +71,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final int MAX_LIST_LIMIT = 100;
     private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
+    private static final Set<String> NUMERIC_OPERATORS = Set.of("=", ">", ">=", "<", "<=");
 
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
@@ -179,18 +182,28 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public EventBus createEventBus(String name, String description,
                                    Map<String, String> tags, String region) {
-        return createEventBus(name, description, null, null, null, tags, region);
+        return createEventBus(name, null, description, tags, region);
+    }
+
+    public EventBus createEventBus(String name, String eventSourceName, String description,
+                                   Map<String, String> tags, String region) {
+        return createEventBus(name, eventSourceName, description, null, null, null, tags, region);
     }
 
     /**
      * Creates a custom bus with the KMS key, dead-letter queue and log configuration the request
      * gives, as {@code CreateEventBus} takes them; a null member leaves the bus without it. The
      * dead-letter and log configurations are stored as their JSON, as {@link #updateEventBus} does.
+     * A non-null {@code eventSourceName} makes it a partner bus, which takes the source's name.
      */
-    public EventBus createEventBus(String name, String description, String kmsKeyIdentifier,
-                                   String deadLetterConfig, String logConfig,
+    public EventBus createEventBus(String name, String eventSourceName, String description,
+                                   String kmsKeyIdentifier, String deadLetterConfig, String logConfig,
                                    Map<String, String> tags, String region) {
-        validateCustomEventBusName(name);
+        if (eventSourceName == null) {
+            validateCustomEventBusName(name);
+        } else {
+            validatePartnerEventBusName(name, eventSourceName);
+        }
         validateEventBusDescription(description);
         String key = busKey(region, name);
         if (busStore.get(key).isPresent()) {
@@ -237,7 +250,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return;
         }
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
-        boolean hasRules = ruleStore.keys().stream().anyMatch(k -> k.startsWith(rulePrefix));
+        boolean hasRules = ruleStore.scan(k -> k.startsWith(rulePrefix)).stream()
+                .anyMatch(rule -> effectiveName.equals(rule.getEventBusName()));
         if (hasRules) {
             throw new AwsException("ValidationException",
                     "Cannot delete event bus with existing rules: " + name, 400);
@@ -319,6 +333,22 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
     }
 
+    public static final Pattern PARTNER_EVENT_SOURCE_NAME =
+            Pattern.compile("aws\\.partner(/[\\.\\-_A-Za-z0-9]+){2,}");
+    private static final Pattern EVENT_BUS_NAME = Pattern.compile("[/\\.\\-_A-Za-z0-9]+");
+
+    private void validatePartnerEventBusName(String name, String eventSourceName) {
+        List<String> violations = new ArrayList<>(nameViolations("name", name, 256, EVENT_BUS_NAME));
+        violations.addAll(nameViolations("eventSourceName", eventSourceName, 256, PARTNER_EVENT_SOURCE_NAME));
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+        if (!eventSourceName.equals(name)) {
+            throw new AwsException("ValidationException",
+                    "Partner event bus name must match its event source name: " + eventSourceName, 400);
+        }
+    }
+
     private void validateEventBusDescription(String description) {
         if (description != null && description.length() > 512) {
             throw new AwsException("ValidationException",
@@ -352,16 +382,34 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Rule putRule(String name, String busName, String eventPattern,
                         String scheduleExpression, RuleState state, String description,
                         String roleArn, Map<String, String> tags, String region) {
+        validateRuleName("name", name);
         if ((eventPattern == null || eventPattern.isBlank())
                 && (scheduleExpression == null || scheduleExpression.isBlank())) {
             throw new AwsException("ValidationException",
                     "Parameter(s) EventPattern or ScheduleExpression must be specified.", 400);
         }
+        if (eventPattern != null && !eventPattern.isBlank()) {
+            validateEventPattern(eventPattern);
+        }
+        if (scheduleExpression != null && !scheduleExpression.isBlank()) {
+            try {
+                ScheduleExpressionParser.validate(scheduleExpression);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("ValidationException", "Parameter ScheduleExpression is not valid.", 400);
+            }
+        }
         String effectiveBus = resolvedBusName(busName);
         ensureBusExists(effectiveBus, region);
 
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key).orElse(new Rule());
+        Optional<Rule> stored = ruleStore.get(key);
+        if (stored.isPresent() && !effectiveBus.equals(stored.get().getEventBusName())) {
+            throw new AwsException("ValidationException",
+                    "Rule " + name + " on event bus " + effectiveBus + " conflicts with rule "
+                            + stored.get().getName() + " on event bus " + stored.get().getEventBusName()
+                            + ". Delete that rule first.", 400);
+        }
+        Rule rule = stored.orElse(new Rule());
         rule.setAccountId(regionResolver.getAccountId());
         rule.setName(name);
         rule.setArn(buildRuleArn(region, effectiveBus, name));
@@ -392,11 +440,46 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return rule;
     }
 
+    private static final Pattern NON_PARTNER_NAME = Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+
+    private static void validateRuleName(String member, String name) {
+        List<String> violations = nameViolations(member, name, 64, NON_PARTNER_NAME);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    private void validateRuleReference(String member, String name, String busName, String region) {
+        boolean legacyRuleOfBus = name != null
+                && ruleStore.get(ruleKey(region, busName, name))
+                        .map(rule -> busName.equals(rule.getEventBusName()))
+                        .orElse(false);
+        if (!legacyRuleOfBus) {
+            validateRuleName(member, name);
+        }
+    }
+
+    private static List<String> nameViolations(String path, String value, int maxLength, Pattern pattern) {
+        if (value == null) {
+            return List.of(SmithyValidationErrors.notNull(path));
+        }
+        List<String> violations = new ArrayList<>();
+        String length = SmithyValidationErrors.lengthOutOfRange(path, value, 1, maxLength);
+        if (length != null) {
+            violations.add(length);
+        }
+        if (!pattern.matcher(value).matches()) {
+            violations.add(SmithyValidationErrors.pattern(path, value, pattern.pattern()));
+        }
+        return violations;
+    }
+
     public void deleteRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("name", name, effectiveBus, region);
         ensureBusExists(effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key).orElse(null);
+        Rule rule = ruleOfBus(key, effectiveBus).orElse(null);
         if (rule == null) {
             return;
         }
@@ -415,9 +498,19 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         LOG.infov("Deleted rule: {0}", name);
     }
 
+    /**
+     * Whether a rule is stored under this exact name on the bus, without validating the name, so a
+     * caller can tell a rule persisted before name validation from one that is already gone.
+     */
+    public boolean ruleExists(String name, String busName, String region) {
+        String effectiveBus = resolvedBusName(busName);
+        return name != null && ruleOfBus(ruleKey(region, effectiveBus, name), effectiveBus).isPresent();
+    }
+
     public Rule describeRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
-        return ruleStore.get(ruleKey(region, effectiveBus, name))
+        validateRuleReference("name", name, effectiveBus, region);
+        return ruleOfBus(ruleKey(region, effectiveBus, name), effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));
     }
@@ -426,11 +519,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         String prefix = ruleKeyPrefix(region, effectiveBus);
         return ruleStore.scan(k -> {
-            if (!k.startsWith(prefix)) return false;
+            if (!isRuleKeyOfBus(k, prefix)) return false;
             if (namePrefix == null || namePrefix.isBlank()) return true;
             String ruleName = k.substring(prefix.length());
             return ruleName.startsWith(namePrefix);
-        });
+        }).stream().filter(rule -> effectiveBus.equals(rule.getEventBusName())).toList();
     }
 
     /**
@@ -465,8 +558,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void enableRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("name", name, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key)
+        Rule rule = ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));
         rule.setState(RuleState.ENABLED);
@@ -476,8 +570,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void disableRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("name", name, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key)
+        Rule rule = ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));
         rule.setState(RuleState.DISABLED);
@@ -507,8 +602,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private int upsertTargets(String ruleName, String busName, List<Target> newTargets, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
-        Rule rule = ruleStore.get(key)
+        Rule rule = ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + ruleName, 400));
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
@@ -617,7 +713,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public RemoveTargetsResult removeTargets(String ruleName, String busName,
                                              List<String> ids, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
+        if (ruleStore.get(key).filter(rule -> !effectiveBus.equals(rule.getEventBusName())).isPresent()) {
+            return new RemoveTargetsResult(0, ids.size());
+        }
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         int removed = 0;
         for (String id : ids) {
@@ -632,8 +732,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public List<Target> listTargetsByRule(String ruleName, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
-        ruleStore.get(key)
+        ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + ruleName, 400));
         return targetStore.get(key).orElse(List.of());
@@ -695,7 +796,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static RuleRef parseRuleResource(String resource) {
         String afterRule = resource.substring("rule/".length());
-        int slashIdx = afterRule.indexOf('/');
+        int slashIdx = afterRule.lastIndexOf('/');
         if (slashIdx >= 0) {
             // Custom bus: rule/{busName}/{ruleName}
             return new RuleRef(afterRule.substring(0, slashIdx), afterRule.substring(slashIdx + 1));
@@ -786,7 +887,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void putPermission(String busName, String action, String principal,
                               String statementId, String conditionJson, String policyJson, String region) {
-        String effectiveBus = resolvedBusName(busName);
+        String effectiveBus = resolvedNonPartnerBusName(busName);
         if ("default".equals(effectiveBus)) {
             getOrCreateDefaultBus(region);
         }
@@ -869,7 +970,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     public void removePermission(String busName, String statementId, boolean removeAll, String region) {
-        String effectiveBus = resolvedBusName(busName);
+        String effectiveBus = resolvedNonPartnerBusName(busName);
         if ("default".equals(effectiveBus)) {
             getOrCreateDefaultBus(region);
         }
@@ -1065,10 +1166,10 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
             String eventId = UUID.randomUUID().toString();
             String rulePrefix = ruleKeyPrefix(region, effectiveBus);
-            List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> k.startsWith(rulePrefix));
+            List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> isRuleKeyOfBus(k, rulePrefix));
 
             for (Rule rule : candidateRules) {
-                if (rule.getState() != RuleState.ENABLED) {
+                if (!effectiveBus.equals(rule.getEventBusName()) || rule.getState() != RuleState.ENABLED) {
                     continue;
                 }
                 // A rule without an event pattern is a schedule rule: it never matches put events.
@@ -1130,12 +1231,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         if (eventJson == null || eventJson.isBlank()) {
             throw new AwsException("InvalidEventPatternException", "Event is required.", 400);
         }
-        try {
-            objectMapper.readTree(eventPattern);
-        } catch (Exception e) {
-            throw new AwsException("InvalidEventPatternException",
-                    "Event pattern is not valid JSON: " + e.getMessage(), 400);
-        }
+        validateEventPattern(eventPattern);
         JsonNode event;
         try {
             event = objectMapper.readTree(eventJson);
@@ -1168,6 +1264,43 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             entry.put("Region", event.get("region").asText());
         }
         return matchesPattern(entry, eventPattern);
+    }
+
+    private void validateEventPattern(String eventPattern) {
+        JsonNode pattern;
+        try {
+            pattern = objectMapper.readTree(eventPattern);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidEventPatternException",
+                    "Event pattern is not valid JSON: " + e.getMessage(), 400);
+        }
+        if (pattern == null || !pattern.isObject()) {
+            throw new AwsException("InvalidEventPatternException", "Event pattern must be a JSON object.", 400);
+        }
+        validateNumericPatterns(pattern);
+    }
+
+    private void validateNumericPatterns(JsonNode pattern) {
+        Iterator<Map.Entry<String, JsonNode>> fields = pattern.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            JsonNode expected = field.getValue();
+            if ("$or".equals(field.getKey()) && expected.isArray()) {
+                for (JsonNode branch : expected) {
+                    validateNumericPatterns(branch);
+                }
+            } else if (expected.isObject()) {
+                validateNumericPatterns(expected);
+            } else if (expected.isArray()) {
+                for (JsonNode filter : expected) {
+                    if (filter.isObject() && filter.has("numeric") && !isValidNumericFilter(filter.get("numeric"))) {
+                        throw new AwsException("InvalidEventPatternException",
+                                "numeric must contain one comparison or a lower bound followed by an upper bound"
+                                        + " with a strictly greater endpoint.", 400);
+                    }
+                }
+            }
+        }
     }
 
     boolean matchesPattern(Map<String, Object> event, String eventPattern) {
@@ -1253,6 +1386,18 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
     }
 
+    private boolean matchesNestedDetail(JsonNode actual, JsonNode pattern) {
+        if (actual.isArray()) {
+            for (JsonNode element : actual) {
+                if (matchesDetailNode(element, pattern)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return matchesDetailNode(actual, pattern);
+    }
+
     private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
         JsonNode orClauses = pattern.get("$or");
         if (orClauses != null && orClauses.isArray()) {
@@ -1276,7 +1421,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {
-                if (!matchesArrayField(expected, actualField)) {
+                JsonNode leaf = actualField != null && actualField.isArray() && actualField.isEmpty()
+                        ? null : actualField;
+                if (!matchesArrayField(expected, leaf)) {
                     return false;
                 }
             } else if (expected.isObject()) {
@@ -1291,7 +1438,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                         return false;
                     }
                 }
-                if (!matchesDetailNode(nestedActual, expected)) {
+                if (!matchesNestedDetail(nestedActual, expected)) {
                     return false;
                 }
             }
@@ -1305,6 +1452,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, JsonNode actual) {
+        if (actual != null && actual.isArray()) {
+            for (JsonNode value : actual) {
+                if (matchesArrayField(arrayNode, value)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         for (JsonNode element : arrayNode) {
             if (matchesSingleElement(element, actual)) {
                 return true;
@@ -1325,6 +1480,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
             if (element.has("equals-ignore-case")) {
                 return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
+            }
+            if (element.has("numeric")) {
+                JsonNode comparisons = element.get("numeric");
+                return actual != null && isValidNumericFilter(comparisons)
+                        && PipesFilterMatcher.matchesNumeric(comparisons, actual);
             }
             if (element.has("anything-but")) {
                 JsonNode anythingBut = element.get("anything-but");
@@ -1352,6 +1512,27 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         // Exact literal match (string, null, boolean, number)
         return matchesExactValue(element, actual);
+    }
+
+    private boolean isValidNumericFilter(JsonNode comparisons) {
+        if (!comparisons.isArray() || (comparisons.size() != 2 && comparisons.size() != 4)) {
+            return false;
+        }
+        for (int i = 0; i < comparisons.size(); i += 2) {
+            JsonNode operator = comparisons.get(i);
+            if (!operator.isTextual() || !NUMERIC_OPERATORS.contains(operator.textValue())
+                    || !comparisons.get(i + 1).isNumber()) {
+                return false;
+            }
+        }
+        if (comparisons.size() == 2) {
+            return true;
+        }
+        String lowerOperator = comparisons.get(0).textValue();
+        String upperOperator = comparisons.get(2).textValue();
+        return (">".equals(lowerOperator) || ">=".equals(lowerOperator))
+                && ("<".equals(upperOperator) || "<=".equals(upperOperator))
+                && comparisons.get(1).decimalValue().compareTo(comparisons.get(3).decimalValue()) < 0;
     }
 
     private boolean matchesExactValue(JsonNode expected, JsonNode actual) {
@@ -1405,7 +1586,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             node.put("source", source);
             node.put("detail-type", detailType);
             node.put("account", envelopeAccount);
-            node.put("time", Instant.now().toString());
+            Instant time = entry.get("Time") instanceof Instant entryTime ? entryTime : Instant.now();
+            node.put("time", time.truncatedTo(ChronoUnit.SECONDS).toString());
             node.put("region", envelopeRegion);
             node.putArray("resources").addAll(resources);
             node.set("detail", objectMapper.readTree(detail));
@@ -1466,6 +1648,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 .filter(policy -> !policy.isBlank());
     }
 
+    /**
+     * The bus a permission call addresses. {@code PutPermission} and {@code RemovePermission} model
+     * the name as {@code NonPartnerEventBusName}, so a partner bus, whose name holds a slash, is
+     * refused there as AWS refuses it rather than given a policy nothing would enforce.
+     */
+    private static String resolvedNonPartnerBusName(String busName) {
+        String effectiveBus = resolvedBusName(busName);
+        if (effectiveBus.indexOf('/') >= 0) {
+            throw SmithyValidationErrors.validationException(
+                    nameViolations("eventBusName", busName, 256, NON_PARTNER_NAME));
+        }
+        return effectiveBus;
+    }
+
     private static String resolvedBusName(String busName) {
         if (busName == null || busName.isBlank()) {
             return "default";
@@ -1509,6 +1705,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static String ruleKeyPrefix(String region, String busName) {
         return "rule:" + region + ":" + busName + "/";
+    }
+
+    private Optional<Rule> ruleOfBus(String key, String busName) {
+        return ruleStore.get(key).filter(rule -> busName.equals(rule.getEventBusName()));
+    }
+
+    private static boolean isRuleKeyOfBus(String key, String rulePrefix) {
+        return key.startsWith(rulePrefix) && key.indexOf('/', rulePrefix.length()) < 0;
     }
 
     private static String ruleKey(String region, String busName, String ruleName) {
@@ -1711,6 +1915,13 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     @Override
     public String namespace() {
         return "events";
+    }
+
+    /** The Region's default event bus, which a request naming no bus acts on. */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "event-bus".equals(type) ? Optional.of(regionResolver.buildArn("events", region, "event-bus/default"))
+                : Optional.empty();
     }
 
     /**

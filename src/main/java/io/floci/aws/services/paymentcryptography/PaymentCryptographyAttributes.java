@@ -1,6 +1,7 @@
 package io.floci.aws.services.paymentcryptography;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -31,6 +32,64 @@ final class PaymentCryptographyAttributes {
         }
         JsonNode declared = request.get(member);
         return declared == null || declared.isNull() ? "" : declared.asText("");
+    }
+
+    /**
+     * A hexadecimal member, checked to be one the cipher can read.
+     *
+     * <p>The model states the length of a hexadecimal member and does not always state an
+     * even one, so a member of an odd length is a request the model allows and the cipher
+     * cannot read. It is refused with the error the model names, rather than answered with
+     * a failure the caller cannot catch.
+     *
+     * @param member the member's path, for the refusal
+     * @param value the member's text
+     * @return the member's text, unchanged
+     */
+    static String hex(String member, String value) {
+        if (value.length() % 2 != 0) {
+            throw new AwsException("ValidationException",
+                    member + " must be an even number of hexadecimal characters", 400);
+        }
+        return value;
+    }
+
+    /**
+     * A hexadecimal member that the cipher reads as whole blocks.
+     *
+     * <p>The ISO 9797-1 MAC runs over eight-byte blocks, so the data it reads has to
+     * be a whole number of them. The user guide tells the caller to pad the
+     * transaction data before sending it, and a length that is not a whole number of
+     * blocks is a request the cipher cannot read, so it is refused rather than read
+     * as the blocks that fit.
+     *
+     * @param member the member's path, for the refusal
+     * @param value the member's text
+     * @return the member's text, unchanged
+     */
+    static String blocks(String member, String value) {
+        if (value.length() % 16 != 0) {
+            throw new AwsException("ValidationException",
+                    member + " must be a whole number of eight-byte blocks", 400);
+        }
+        return value;
+    }
+
+    /**
+     * Refuses the wrapped-key form of a key.
+     *
+     * <p>A wrapped key is a TR-31 key block that the service unwraps with a key-encryption
+     * key, and the unwrapping is part of the key exchange. Until it is made, a request that
+     * carries one is refused rather than answered as if the key were a fixed one.
+     *
+     * @param request the request to read
+     * @param member the member the wrapped key would come in
+     */
+    static void refuseWrappedKey(JsonNode request, String member) {
+        if (request.get(member) != null) {
+            throw new AwsException("ValidationException",
+                    member + " is not supported by this service", 400);
+        }
     }
 
     /**

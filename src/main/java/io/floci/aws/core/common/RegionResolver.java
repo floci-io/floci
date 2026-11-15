@@ -50,7 +50,8 @@ public class RegionResolver {
     @Inject
     Instance<RequestContext> requestContextInstance;
 
-    private volatile RequestContext requestContextProxy;
+    private final MemoizedSupplier<RequestContext> requestContextProxy =
+            new MemoizedSupplier<>(() -> requestContextInstance.get());
 
     @Inject
     public RegionResolver(EmulatorConfig config) {
@@ -261,12 +262,7 @@ public class RegionResolver {
     }
 
     private RequestContext requestContext() {
-        RequestContext proxy = requestContextProxy;
-        if (proxy == null) {
-            proxy = requestContextInstance.get();
-            requestContextProxy = proxy;
-        }
-        return proxy;
+        return requestContextProxy.get();
     }
 
     /**

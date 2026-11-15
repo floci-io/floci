@@ -85,6 +85,8 @@ public class CloudWatchMetricsJsonHandler {
             case "PutCompositeAlarm" -> handlePutCompositeAlarm(request, region);
             case "DescribeAlarms" -> handleDescribeAlarms(request, region);
             case "DeleteAlarms" -> handleDeleteAlarms(request, region);
+            case "DisableAlarmActions" -> handleAlarmActions(request, region, false);
+            case "EnableAlarmActions" -> handleAlarmActions(request, region, true);
             case "SetAlarmState" -> handleSetAlarmState(request, region);
             case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
@@ -440,6 +442,25 @@ public class CloudWatchMetricsJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleAlarmActions(JsonNode request, String region, boolean enabled) {
+        JsonNode names = request.get("AlarmNames");
+        List<String> alarmNames = null;
+        if (names != null && !names.isNull()) {
+            if (!names.isArray()) {
+                throw new AwsException("SerializationException", "AlarmNames must be an array", 400);
+            }
+            alarmNames = new ArrayList<>();
+            for (JsonNode name : names) {
+                if (!name.isTextual() && !name.isNull()) {
+                    throw new AwsException("SerializationException", "AlarmNames members must be strings", 400);
+                }
+                alarmNames.add(name.asText(null));
+            }
+        }
+        metricsService.setAlarmActionsEnabled(alarmNames, enabled, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleSetAlarmState(JsonNode request, String region) {
         String name = request.path("AlarmName").asText();
         String state = request.path("StateValue").asText();
@@ -621,16 +642,20 @@ public class CloudWatchMetricsJsonHandler {
     private Response handleListDashboards(JsonNode request, String region) {
         String prefix = request.has("DashboardNamePrefix")
                 ? request.path("DashboardNamePrefix").asText() : null;
-        List<Dashboard> dashboards = dashboardsService.listDashboards(prefix, region);
+        PaginatedResult<Dashboard> page = dashboardsService.listDashboardsPage(prefix,
+                Pagination.parseNextToken(request, "NextToken", "InvalidParameterValue"), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode entries = response.putArray("DashboardEntries");
-        for (Dashboard d : dashboards) {
+        for (Dashboard d : page.items()) {
             ObjectNode node = entries.addObject();
             node.put("DashboardName", d.getDashboardName());
             node.put("DashboardArn", d.getDashboardArn());
             node.put("LastModified", d.getLastModified());
             node.put("Size", d.getSize());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }

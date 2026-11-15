@@ -483,9 +483,9 @@ class SamTransformIntegrationTest {
             .toList();
         assertThat(oldVersionStatuses, hasItem("DELETE_COMPLETE"));
         assertThat(oldVersionStatuses, not(hasItem("DELETE_SKIPPED")));
-        // floci reports the version deleted but keeps every version it publishes; AWS deletes it.
+        // VersionDeletionPolicy: Delete removes the replaced version from the native inventory.
         given().when().get("/2015-03-31/functions/" + function + "/versions")
-            .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "1", "2")));
+            .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "2")));
     }
 
     /**
@@ -910,6 +910,56 @@ class SamTransformIntegrationTest {
             .body("Configuration.MemorySize", equalTo(256))
             .body("Configuration.Environment.Variables.TABLE_NAME", equalTo("my-table"))
             .body("Configuration.Environment.Variables.STAGE", equalTo("local"));
+    }
+
+    @Test
+    void samDurableFunctionKeepsDurableAndLoggingConfig() {
+        String stackName = "sam-durable-stack";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            AWSTemplateFormatVersion: '2010-09-09'
+            Transform: AWS::Serverless-2016-10-31
+            Globals:
+              Function:
+                LoggingConfig:
+                  LogFormat: JSON
+                  ApplicationLogLevel: DEBUG
+            Resources:
+              DurableFunc:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-durable-func
+                  Handler: app.handler
+                  Runtime: python3.13
+                  InlineCode: "def handler(event, context): return event"
+                  DurableConfig:
+                    ExecutionTimeout: 60
+                    RetentionPeriodInDays: 3
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/sam-durable-func")
+        .then()
+            .statusCode(200)
+            .body("Configuration.DurableConfig.ExecutionTimeout", equalTo(60))
+            .body("Configuration.DurableConfig.RetentionPeriodInDays", equalTo(3))
+            .body("Configuration.LoggingConfig.LogFormat", equalTo("JSON"))
+            .body("Configuration.LoggingConfig.ApplicationLogLevel", equalTo("DEBUG"));
     }
 
     @Test
