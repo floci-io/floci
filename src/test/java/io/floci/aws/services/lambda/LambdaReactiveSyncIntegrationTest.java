@@ -26,7 +26,7 @@ class LambdaReactiveSyncIntegrationTest {
     private static final String KEY    = "function.zip";
     private static final String FN     = "reactive-sync-fn";
 
-    private static byte[] makeZip(String body) throws Exception {
+    private static byte[] makeZip(String body) {
         return LambdaCodeFixtures.nodeJsZip("exports.handler = async (e) => ({ body: '" + body + "' });");
     }
 
