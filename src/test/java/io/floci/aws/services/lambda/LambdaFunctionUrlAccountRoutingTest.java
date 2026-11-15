@@ -69,7 +69,7 @@ class LambdaFunctionUrlAccountRoutingTest {
                 .extract().path("FunctionUrl");
     }
 
-    private byte[] lambdaZip() throws Exception {
+    private byte[] lambdaZip() {
         return LambdaCodeFixtures.nodeJsZip("""
                 exports.handler = async (event) => ({
                   statusCode: 200,

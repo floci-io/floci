@@ -130,7 +130,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
         }
     }
 
-    private static String handlerZipBase64() throws Exception {
+    private static String handlerZipBase64() {
         return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({});\n");
     }
 

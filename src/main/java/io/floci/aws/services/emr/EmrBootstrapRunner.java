@@ -33,6 +33,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -40,9 +41,11 @@ import java.util.function.BooleanSupplier;
 import java.util.zip.GZIPOutputStream;
 
 /**
- * Runs a cluster's bootstrap actions in a container of the release's EMR Serverless image, the one its
- * steps run in, then commits that container as the image the cluster's steps run in from then on, so what
- * the actions installed or wrote is there for every step. "Bootstrap actions execute as the Hadoop user by
+ * Runs a cluster's bootstrap actions on one of its nodes in a container of the release's EMR Serverless image, the one
+ * its steps run in, then commits that container as the image that node runs from: the primary node's is the one the
+ * cluster's steps run in from then on, so what the actions installed or wrote is there for every step, and a core or
+ * task node's is its own, the container named, and its node's files written, for that node.
+ * "Bootstrap actions execute as the Hadoop user by
  * default. You can execute a bootstrap action with root privileges by using sudo", but the image has no
  * {@code sudo}: an action runs as root instead, in the {@code hadoop} user's home, with a {@code sudo} that
  * runs its command as it is, and what it leaves in that home is the {@code hadoop} user's. Each action's
@@ -109,19 +112,19 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
 
     @Override
     public Outcome run(Bootstrap bootstrap, BooleanSupplier cancelled) {
-        ContainerLaunches.Launch launch = launches.begin(bootstrap.clusterId());
+        ContainerLaunches.Launch launch = launches.begin(launchId(bootstrap));
         Optional<SessionCreds> credentials = Optional.empty();
         try {
             if (cancelled.getAsBoolean()) {
                 return Outcome.halted();
             }
             credentials = roleCredentials.forRole(bootstrap.role(), bootstrap.accountId(),
-                    bootstrap.clusterId() + "-bootstrap");
+                    bootstrap.name() + "-bootstrap");
             String image = EmrServerlessSparkRunner.image(bootstrap.imageTemplate(), bootstrap.releaseLabel());
             Map<String, String> labels = labels(bootstrap);
             ContainerBuilder.Builder container = containerBuilder.newContainer(image)
-                    .withName(ContainerStorageHelper.dockerName(config,
-                            SERVICE + "-" + bootstrap.clusterId() + "-bootstrap"))
+                    .withName(ContainerStorageHelper.dockerName(config, SERVICE + "-" + bootstrap.clusterId()
+                            + "-bootstrap" + (bootstrap.node() == null ? "" : "-" + bootstrap.node())))
                     .withUser("root")
                     .withEntrypoint(List.of("sleep", "infinity"))
                     .withHostDockerInternalOnLinux()
@@ -149,7 +152,7 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
                 return Outcome.halted();
             }
             // The actions run on the primary node, whose files say so, as the Management Guide's own action reads them.
-            writeNodeInfo(containerId);
+            writeNodeInfo(containerId, bootstrap.instanceRole());
             List<String> env = awsEnv.sdkBaselineEnv(bootstrap.region(), Optional.empty(), credentials,
                     bootstrap.accountId());
             for (int number = 1; number <= bootstrap.actions().size(); number++) {
@@ -173,7 +176,7 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
             LOG.warnv(e, "The bootstrap actions of EMR cluster {0} could not run", bootstrap.clusterId());
             return Outcome.couldNotRun(e.getMessage());
         } finally {
-            String unclaimed = launches.end(bootstrap.clusterId(), launch);
+            String unclaimed = launches.end(launchId(bootstrap), launch);
             if (unclaimed != null) {
                 lifecycleManager.stopAndRemove(unclaimed, null, STOP_TIMEOUT_SECONDS);
             }
@@ -182,13 +185,14 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
         }
     }
 
-    private void writeNodeInfo(String containerId) {
+    private void writeNodeInfo(String containerId, String instanceRole) {
         ContainerExec.Result written = ContainerExec.run(lifecycleManager.getDockerClient(), containerId,
-                new String[] {"env", EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE + "=MASTER", "bash", "-c",
-                        EmrServerlessSparkRunner.NODE_INFO}, NODE_INFO_TIMEOUT_SECONDS);
+                new String[] {"env", EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE + "=" + instanceRole, "bash",
+                        "-c", EmrServerlessSparkRunner.NODE_INFO}, NODE_INFO_TIMEOUT_SECONDS);
         if (written.exitCode() != 0) {
             String why = written.stderr().strip();
-            throw new IllegalStateException("Could not write the primary node's "
+            String node = "MASTER".equals(instanceRole) ? "primary" : instanceRole.toLowerCase(Locale.ROOT);
+            throw new IllegalStateException("Could not write the " + node + " node's "
                     + EmrServerlessSparkRunner.INSTANCE_FILE + (why.isEmpty() ? "" : ": " + why));
         }
     }
@@ -323,21 +327,25 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
         String released = docker.inspectContainerCmd(containerId).exec().getImageId();
         String user = docker.inspectImageCmd(released).exec().getConfig().getUser();
         String repository = ContainerStorageHelper.dockerName(config, COMPONENT);
-        lifecycleManager.commit(containerId, repository, bootstrap.clusterId(),
+        lifecycleManager.commit(containerId, repository, bootstrap.name(),
                 user == null || user.isBlank() ? "root" : user, labels);
-        String tag = repository + ":" + bootstrap.clusterId();
+        String tag = repository + ":" + bootstrap.name();
         String committed = docker.inspectImageCmd(tag).exec().getId();
         LOG.infov("Kept the bootstrap of EMR cluster {0} as image {1} ({2})", bootstrap.clusterId(), tag, committed);
         return committed;
     }
 
+    // Removing a container ends the action running in it, which run() then reads as stopped: the primary node's and
+    // each core and task node's.
     @Override
     public void stop(String clusterId) {
-        ContainerLaunches.Launch launch = launches.get(clusterId);
-        if (launch != null) {
-            // Removing the container ends the action running in it, which run() then reads as stopped.
-            launch.stopNow(lifecycleManager, STOP_TIMEOUT_SECONDS);
-        }
+        launches.stopEach(id -> id.equals(clusterId) || id.startsWith(clusterId + "/"), lifecycleManager,
+                STOP_TIMEOUT_SECONDS);
+    }
+
+    // A cluster's primary node's bootstrap by the cluster's id, a core or task node's after it.
+    private static String launchId(Bootstrap bootstrap) {
+        return bootstrap.node() == null ? bootstrap.clusterId() : bootstrap.clusterId() + "/" + bootstrap.node();
     }
 
     /** Stops every bootstrap inside {@link #run}, so a reset or a shutdown orphans none. */

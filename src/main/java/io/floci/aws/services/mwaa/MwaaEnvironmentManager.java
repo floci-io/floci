@@ -6,7 +6,6 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Base64Url;
-import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
@@ -17,8 +16,7 @@ import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.services.ec2.Ec2Service;
-import io.floci.aws.services.ec2.model.Subnet;
-import io.floci.aws.services.ec2.net.Cidr4;
+import io.floci.aws.services.ec2.VpcContainerLeases;
 import io.floci.aws.services.mwaa.model.Environment;
 import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -40,7 +38,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -99,8 +96,8 @@ public class MwaaEnvironmentManager {
     private final EmulatorConfig config;
     private final LaunchedContainerAwsEnv awsEnv;
     private final Ec2Service ec2Service;
-    /** The VPC address each Airflow container holds, by container id, returned once the container is gone. */
-    private final Map<String, VpcLease> vpcLeases = new ConcurrentHashMap<>();
+    /** The VPC address each Airflow container holds, returned once the container is gone. */
+    private final VpcContainerLeases vpcLeases;
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
@@ -115,6 +112,8 @@ public class MwaaEnvironmentManager {
         this.config = config;
         this.awsEnv = awsEnv;
         this.ec2Service = ec2Service;
+        this.vpcLeases = new VpcContainerLeases(ec2Service, "MWAA environment",
+                () -> lifecycleManager.getDockerClient());
     }
 
     /**
@@ -401,30 +400,9 @@ public class MwaaEnvironmentManager {
      * between the two ({@link #holdsSubnet}).
      */
     void joinVpcNetwork(Environment environment, String containerId) {
-        String subnetId = firstSubnet(environment);
-        if (ec2Service == null || subnetId == null) {
-            return;
-        }
-        String accountId = environmentAccount(environment);
-        String region = regionOf(environment);
         // Provisioning can run outside the CreateEnvironment request, so the environment's account is named.
-        RequestScopes.runAs(accountId, region, () -> ec2Service.runWithSubnetReferencesHeld(region, () -> {
-            String vpcId = vpcOf(region, subnetId);
-            if (vpcId == null) {
-                return;
-            }
-            Optional<String> address = ec2Service.allocateVpcPrivateIp(region, subnetId);
-            if (address.isEmpty()) {
-                return;
-            }
-            if (ec2Service.attachContainerToVpc(region, vpcId, subnetId, containerId, address.get()).isPresent()) {
-                vpcLeases.put(containerId, new VpcLease(accountId, region, vpcId, subnetId, address.get()));
-                LOG.infov("MWAA environment {0} joined VPC {1} at {2}", environment.getName(), vpcId,
-                        address.get());
-            } else {
-                ec2Service.releaseVpcPrivateIp(region, subnetId, address.get());
-            }
-        }));
+        vpcLeases.join(environmentAccount(environment), regionOf(environment), null, firstSubnet(environment),
+                containerId, environment.getName());
     }
 
     /**
@@ -449,39 +427,18 @@ public class MwaaEnvironmentManager {
             // The container did not outlive the restart, so there is no address to re-claim.
             return;
         }
-        String accountId = environmentAccount(environment);
-        String region = regionOf(environment);
-        RequestScopes.runAs(accountId, region, () -> {
-            List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(subnetId), Map.of());
-            Optional<Cidr4> cidr = subnets.size() == 1 ? Cidr4.parse(subnets.getFirst().getCidrBlock())
-                    : Optional.empty();
-            if (cidr.isEmpty()) {
-                return;
-            }
-            for (ContainerNetwork network : networks) {
-                Optional<Cidr4> address = Cidr4.parse(network.getIpAddress() + "/32");
-                if (address.isPresent() && cidr.get().containsAddress(address.get().network())
-                        && ec2Service.reserveVpcPrivateIp(region, subnetId, network.getIpAddress())) {
-                    vpcLeases.put(containerId, new VpcLease(accountId, region, subnets.getFirst().getVpcId(),
-                            subnetId, network.getIpAddress()));
-                    LOG.infov("MWAA environment {0} re-claimed its VPC address {1}", environment.getName(),
-                            network.getIpAddress());
-                    return;
-                }
-            }
-        });
+        vpcLeases.reclaim(environmentAccount(environment), regionOf(environment), subnetId, containerId,
+                networks.stream().map(ContainerNetwork::getIpAddress).toList(), environment.getName());
     }
 
     /** Whether a live Airflow container of the account holds an address in the subnet. */
     boolean holdsSubnet(String accountId, String region, String subnetId) {
-        return vpcLeases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
-                && lease.region().equals(region) && lease.subnetId().equals(subnetId));
+        return vpcLeases.holdsSubnet(accountId, region, subnetId);
     }
 
     /** Whether a live Airflow container of the account is on the VPC's network. */
     boolean holdsVpc(String accountId, String region, String vpcId) {
-        return vpcLeases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
-                && lease.region().equals(region) && lease.vpcId().equals(vpcId));
+        return vpcLeases.holdsVpc(accountId, region, vpcId);
     }
 
     private static String firstSubnet(Environment environment) {
@@ -490,32 +447,9 @@ public class MwaaEnvironmentManager {
         return subnetIds == null || subnetIds.isEmpty() ? null : subnetIds.getFirst();
     }
 
-    private String vpcOf(String region, String subnetId) {
-        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(subnetId), Map.of());
-        return subnets.size() == 1 ? subnets.getFirst().getVpcId() : null;
-    }
-
-    /**
-     * Gives the container's VPC address back once Docker no longer has the container. A removal that failed (it
-     * logs and carries on) leaves the address held, so the lease is kept rather than offered to someone else.
-     */
+    /** Gives the container's VPC address back once Docker no longer has the container. */
     private void releaseVpcLeaseIfGone(String containerId) {
-        VpcLease lease = vpcLeases.get(containerId);
-        if (lease == null) {
-            return;
-        }
-        try {
-            lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
-            LOG.warnv("MWAA container {0} is still present after removal; it keeps VPC address {1}", containerId,
-                    lease.address());
-        } catch (NotFoundException expected) {
-            // Gone, so its address is free.
-            vpcLeases.remove(containerId);
-            ec2Service.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
-        }
-    }
-
-    private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {
+        vpcLeases.releaseIfGone(containerId);
     }
 
     /** Writes {@code content} to {@code DAGS_MOUNT/relativePath} inside the Airflow container. */
@@ -967,7 +901,6 @@ public class MwaaEnvironmentManager {
         return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, timeoutSeconds)
                 .throwIfTimedOut(containerId);
     }
-
 
     private static String generateSecret(int bytes) {
         byte[] buf = new byte[bytes];

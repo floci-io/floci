@@ -228,6 +228,46 @@ class EmrBootstrapRunnerTest {
     }
 
     @Test
+    void aCoreNodesBootstrapRunsInAContainerOfItsOwnAsThatNodeAndIsKeptAsItsImage() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        String repository = ContainerStorageHelper.dockerName(config, "emr-bootstrap");
+        String nodeImage = "sha256:" + "3".repeat(64);
+        when(docker.inspectImageCmd(repository + ":j-1-1-2").exec().getId()).thenReturn(nodeImage);
+
+        BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"))
+                .onNode("1-2", "CORE", "s3://logs/j-1/node/i-00000000000000003/bootstrap-actions/"), () -> false);
+
+        // Apart from the primary node's, and from each other node's, with a session of its own.
+        assertEquals(BootstrapRunner.Outcome.succeeded(nodeImage), outcome);
+        verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-j-1-bootstrap-1-2"));
+        verify(roleCredentials).forRole("arn:aws:iam::" + ACCOUNT + ":role/emr-ec2", ACCOUNT, "j-1-1-2-bootstrap");
+        // Its files say which node it is.
+        assertEquals(List.of("env", "FLOCI_INSTANCE_ROLE=CORE", "bash", "-c", EmrServerlessSparkRunner.NODE_INFO),
+                commands.get(0));
+        verify(lifecycle).commit(eq(CONTAINER), eq(repository), eq("j-1-1-2"), eq("hadoop"), any());
+        assertTrue(uploaded.containsKey("logs/j-1/node/i-00000000000000003/bootstrap-actions/1/stdout.gz"),
+                uploaded.toString());
+    }
+
+    @Test
+    void stoppingAClustersBootstrapStopsEachOfItsNodesButNoOtherClusters() {
+        ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        when(s3.getObject("bucket", "bootstrap/install.sh")).thenAnswer(read -> {
+            runner.stop("j-10");
+            runner.stop("j-1-1");
+            verify(lifecycle, never()).stopAndRemove(CONTAINER, null, 0);
+            runner.stop("j-1");
+            return content("#!/bin/bash\n");
+        });
+
+        BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh"))
+                .onNode("1-1", "CORE", null), () -> false);
+
+        assertEquals(BootstrapRunner.Outcome.halted(), outcome);
+        verify(lifecycle).stopAndRemove(CONTAINER, null, 0);
+    }
+
+    @Test
     void thePrimaryNodesFilesAreWrittenBeforeTheFirstActionAndGoBeforeTheImageIsKept() {
         List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
 

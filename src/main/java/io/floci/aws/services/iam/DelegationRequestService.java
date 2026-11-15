@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegionFacts;
@@ -135,18 +136,33 @@ public class DelegationRequestService {
      */
     private final Object requestLock = new Object();
 
+    /**
+     * The permissions boundaries registered for each partner account, which a request this partner
+     * files carries. AWS registers them out of band and reports them on the request rather than
+     * taking them from one, so configuration is where they come from here.
+     */
+    private final PartnerPermissionBoundaries partnerPermissionBoundaries;
+
     @Inject
     public DelegationRequestService(StorageFactory storageFactory, Clock clock,
-                                    DelegationNotifier notifier) {
+                                    DelegationNotifier notifier, EmulatorConfig config) {
         this(storageFactory.create("iam", "iam-delegation-requests.json", new TypeReference<>() {}),
-                clock, notifier);
+                clock, notifier,
+                PartnerPermissionBoundaries.load(config.services().iam().partnerPermissionBoundariesPath()));
     }
 
     DelegationRequestService(AccountAwareStorageBackend<DelegationRequest> requests, Clock clock,
                              DelegationNotifier notifier) {
+        this(requests, clock, notifier, PartnerPermissionBoundaries.NONE);
+    }
+
+    DelegationRequestService(AccountAwareStorageBackend<DelegationRequest> requests, Clock clock,
+                             DelegationNotifier notifier,
+                             PartnerPermissionBoundaries partnerPermissionBoundaries) {
         this.requests = requests;
         this.clock = clock;
         this.notifier = notifier;
+        this.partnerPermissionBoundaries = partnerPermissionBoundaries;
     }
 
     /** The {@code CreateDelegationRequest} request, as the handler parsed it. */
@@ -240,6 +256,12 @@ public class DelegationRequestService {
         request.setRedirectUrl(command.redirectUrl());
         request.setRequestMessage(command.requestMessage());
         request.setOnlySendByOwner(command.onlySendByOwner());
+        // The long-term half of the feature: the guide says long-term permissions "limit the
+        // permissions of any roles that are created or managed through temporary access" and are
+        // "implemented as IAM permissions boundaries", registered for the partner out of band. The
+        // member is reported on the request rather than taken from one, so the request carries
+        // whatever is registered for the partner that filed it, which is nothing by default.
+        request.setRolePermissionRestrictionArns(partnerPermissionBoundaries.arnsFor(requestorAccountId));
         // The partner is identified by the account that called. AWS shows a registered partner
         // name here, which onboarding assigns and no API sets, so Floci leaves the name unset
         // rather than inventing one.

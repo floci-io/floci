@@ -87,7 +87,13 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         IamRequestShapes.check("UpdateRole", durationParams);
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
-        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
+        String templateBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
+        // A stack a delegation created caps every role it provisions, the guide limiting roles
+        // "created or managed through temporary access". The cap is the customer's registration
+        // rather than a choice of the template, so it wins over a boundary the template names, the
+        // same way it wins over one a CreateRole call names.
+        String permissionsBoundary = ctx.delegatedRoleBoundaryArn() != null
+                ? ctx.delegatedRoleBoundaryArn() : templateBoundary;
 
         IamRole role;
         boolean createdRole = false;

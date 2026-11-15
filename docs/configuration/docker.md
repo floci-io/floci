@@ -52,9 +52,9 @@ The entrypoint needs to start as root to read the socket's group and to honour t
 
 ## Connection Pool
 
-Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
+Floci's short Docker calls (create, start, stop, remove and the like) go through one client with a bounded connection pool. A few streams also hold a connection from it for as long as they run: CodeBuild phase commands, EKS audit log followers and ECS Exec sessions. When long-lived connections fill the pool, every other Docker call waits for one to free up, and Floci stops making progress.
 
-The default of 1024 connections covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows. Raise it if you widen that range or run many other containers at the same time:
+The default is 1024 connections. Raise it if you run many CodeBuild builds or ECS Exec sessions at the same time:
 
 ```yaml
 floci:
@@ -64,12 +64,12 @@ floci:
 
 Environment variable: `FLOCI_DOCKER_MAX_CONNECTIONS`
 
-Container log-follow streams use a second, separate pool so they can never starve create, start, stop and remove calls. Its size defaults to 512 and follows the same rule (at least 1). Exec-output and container-wait streams (CodeBuild phases, Lambda extensions and exit watchers, EKS audit followers) still use the main pool and count against `max-connections`:
+Streams that stay open for as long as a container runs use a second, separate pool, so they can never starve create, start, stop and remove calls. Each Lambda container holds two of these (its log stream and the watcher that notices its runtime exiting) plus one per Lambda extension, and other containers' log streams use it too. The default of 2048 covers the 500 concurrent Lambda containers the default [Runtime API port range](../services/lambda.md#configuration) allows, with two extensions each. Raise it if you widen that range or run many other containers at the same time. It follows the same rule (at least 1):
 
 ```yaml
 floci:
   docker:
-    streaming-max-connections: 512
+    streaming-max-connections: 2048
 ```
 
 Environment variable: `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS`
@@ -349,7 +349,8 @@ caller keeps its existing failure handling after retries are exhausted.
 |---|---|---|
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(unset)_ | Path to directory containing Docker's `config.json` |
-| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds two connections, so about half this many can run at once |
+| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls, plus CodeBuild phase commands, EKS audit log followers and ECS Exec sessions |
+| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `2048` | Connection pool size for streams that last a container's lifetime. Each live Lambda container holds two (log stream and exit watcher) plus one per extension |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | _(unset)_ | Registry hostname for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | _(unset)_ | Username for credential entry 0 |
 | `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | _(unset)_ | Password for credential entry 0 |

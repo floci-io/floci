@@ -382,17 +382,18 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
-    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for every Docker call Floci makes. Each
-    # live Lambda container holds 1 connection for its whole lifetime (its exit watcher) plus one
-    # per extension; log follow uses the streaming pool below. Past the limit,
-    # create/start/stop/remove wait for a free connection and the emulator stalls. 1024 covers
-    # the 500 containers the runtime API port range allows. Keep in step with the @WithDefault on
-    # EmulatorConfig.DockerConfig.maxConnections: a value set here WINS over the annotation.
+    # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls, plus
+    # CodeBuild phase execs, EKS audit followers and ECS Exec sessions. Past the limit,
+    # create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
+    # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS
+    # over the annotation.
     max-connections: 1024
-    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for container log-follow streams, so
-    # they never starve create/start/stop/remove. Keep in step with the @WithDefault on
+    # FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS: separate pool for streams that last a container's
+    # lifetime, so they never starve create/start/stop/remove. Each live Lambda container holds 2
+    # (log follow and exit watcher) plus one per extension; 2048 covers the 500 containers the
+    # runtime API port range allows with two extensions each. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.streamingMaxConnections: a value set here WINS over the annotation.
-    streaming-max-connections: 512
+    streaming-max-connections: 2048
     # FLOCI_DOCKER_CONNECTION_REQUEST_TIMEOUT_SECONDS: how long a Docker call waits for a free pooled
     # connection before failing, for both pools. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.connectionRequestTimeoutSeconds: a value set here WINS over the annotation.
@@ -511,6 +512,11 @@ floci:
       # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
                            # without creating it first. Unset means the account has no alias,
                            # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
+      partner-permission-boundaries-path: ${FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH:}
+                           # A JSON object of partner account id to an object of boundary ARN to
+                           # policy document, standing in for the permissions boundaries AWS
+                           # registers for a delegation partner by email. Unset registers nothing:
+                           # a request reports no restriction and a delegated role is uncapped.
     msk:
       enabled: true
       mock: false

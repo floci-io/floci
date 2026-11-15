@@ -50,7 +50,7 @@ class LambdaS3DeploymentIntegrationTest {
         }
     }
 
-    private static byte[] makeZip(String body) throws Exception {
+    private static byte[] makeZip(String body) {
         return LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ body: '" + body + "' });");
     }
 }
