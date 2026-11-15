@@ -10,16 +10,12 @@ import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 class BedrockGuardrailCreateNameConcurrencyTest {
@@ -41,45 +37,21 @@ class BedrockGuardrailCreateNameConcurrencyTest {
                 new RegionResolver("us-east-1", "000000000000"), mapper, mock(KmsService.class));
         AtomicReference<Guardrail> firstResult = new AtomicReference<>();
         AtomicReference<Guardrail> secondResult = new AtomicReference<>();
-        AtomicReference<Throwable> firstFailure = new AtomicReference<>();
-        AtomicReference<Throwable> secondFailure = new AtomicReference<>();
-        Thread first = new Thread(() -> {
-            try {
-                firstResult.set(service.createGuardrail(request(mapper, "first"), "us-east-1"));
-            } catch (Throwable error) {
-                firstFailure.set(error);
-            }
-        });
-        Thread second = new Thread(() -> {
-            try {
-                secondResult.set(service.createGuardrail(request(mapper, sameName ? "first" : "second"), "us-east-1"));
-            } catch (Throwable error) {
-                secondFailure.set(error);
-            }
-        });
         storage.parkNextWrite();
-        first.start();
-        try {
-            assertTrue(storage.awaitParked());
-            second.start();
-            await().atMost(Duration.ofSeconds(5)).until(() ->
-                    second.getState() == Thread.State.BLOCKED || second.getState() == Thread.State.TERMINATED);
-        } finally {
-            storage.release();
-            first.join(Duration.ofSeconds(5));
-            second.join(Duration.ofSeconds(5));
-        }
-        assertFalse(first.isAlive());
-        assertFalse(second.isAlive());
-        assertNull(firstFailure.get());
+        assertOperationWaitsForParkedStore(storage,
+                () -> firstResult.set(service.createGuardrail(request(mapper, "first"), "us-east-1")),
+                () -> {
+                    if (sameName) {
+                        AwsException conflict = assertThrows(AwsException.class,
+                                () -> service.createGuardrail(request(mapper, "first"), "us-east-1"));
+                        assertEquals("ConflictException", conflict.getErrorCode());
+                    } else {
+                        secondResult.set(service.createGuardrail(request(mapper, "second"), "us-east-1"));
+                    }
+                });
         assertNotNull(firstResult.get());
         assertEquals(sameName ? 1 : 2, storage.scan(key -> true).size());
-        if (sameName) {
-            assertNull(secondResult.get());
-            AwsException conflict = assertInstanceOf(AwsException.class, secondFailure.get());
-            assertEquals("ConflictException", conflict.getErrorCode());
-        } else {
-            assertNull(secondFailure.get());
+        if (!sameName) {
             assertNotNull(secondResult.get());
         }
     }
