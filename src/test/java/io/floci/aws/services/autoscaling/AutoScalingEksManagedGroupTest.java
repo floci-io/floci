@@ -23,13 +23,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.anyList;
-import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -122,8 +122,8 @@ class AutoScalingEksManagedGroupTest {
         assertEquals("us-east-1b", member.getAvailabilityZone());
         assertEquals("m5.large", member.getInstanceType());
         assertNull(member.getLaunchTemplateId());
-        verify(targets).registerTargets(eq(REGION), eq("tg-attached"), only(NODE));
-        verify(targets).registerTargets(eq(REGION), eq("tg-source"), only(NODE));
+        verify(targets).registerTargets(eq(REGION), eq("tg-attached"), onlyTarget(NODE));
+        verify(targets).registerTargets(eq(REGION), eq("tg-source"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
     }
 
@@ -135,8 +135,8 @@ class AutoScalingEksManagedGroupTest {
         service.attachLoadBalancerTargetGroups(REGION, FIRST, List.of("tg-a"));
         service.attachTrafficSources(REGION, FIRST, List.of(
                 new AutoScalingService.TrafficSourceIdentifier("tg-b", null)));
-        verify(targets).registerTargets(eq(REGION), eq("tg-a"), only(NODE));
-        verify(targets).registerTargets(eq(REGION), eq("tg-b"), only(NODE));
+        verify(targets).registerTargets(eq(REGION), eq("tg-a"), onlyTarget(NODE));
+        verify(targets).registerTargets(eq(REGION), eq("tg-b"), onlyTarget(NODE));
 
         // Attached both ways, tg-a stays attached when one of them is detached.
         service.attachTrafficSources(REGION, FIRST, List.of(
@@ -148,8 +148,8 @@ class AutoScalingEksManagedGroupTest {
                 new AutoScalingService.TrafficSourceIdentifier("tg-a", "elbv2"),
                 new AutoScalingService.TrafficSourceIdentifier("tg-b", "elbv2")));
 
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-a"), only(NODE));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-b"), only(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-a"), onlyTarget(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-b"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
         assertEquals(List.of(NODE), memberIds(FIRST));
     }
@@ -178,8 +178,8 @@ class AutoScalingEksManagedGroupTest {
         service.detachTrafficSources(REGION, FIRST, trafficSource);
         assertEquals(Map.of(), service.describeTrafficSources(REGION, FIRST, null));
 
-        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-a"), only(NODE));
-        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-b"), only(NODE));
+        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-a"), onlyTarget(NODE));
+        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-b"), onlyTarget(NODE));
     }
 
     @Test
@@ -197,7 +197,7 @@ class AutoScalingEksManagedGroupTest {
         service.detachTrafficSources(REGION, SECOND, List.of(
                 new AutoScalingService.TrafficSourceIdentifier("tg-shared", "elbv2")));
 
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-shared"), only(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-shared"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
     }
 
@@ -214,8 +214,8 @@ class AutoScalingEksManagedGroupTest {
 
         assertEquals(List.of(), memberIds(FIRST));
         assertEquals(List.of(NODE), memberIds(SECOND));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), only(NODE));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-source"), only(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), onlyTarget(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-source"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
     }
 
@@ -230,13 +230,13 @@ class AutoScalingEksManagedGroupTest {
 
         assertEquals(List.of(), service.describeAutoScalingGroups(REGION, List.of(FIRST)));
         assertEquals(List.of(NODE), memberIds(SECOND));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), only(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
 
         service.deleteEksManagedGroup(REGION, SECOND);
 
         assertEquals(List.of(), service.describeAutoScalingGroups(REGION, null));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-shared"), only(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-shared"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
         // The node is EKS's: deleting its groups terminates nothing.
         verifyNoInteractions(ec2);
@@ -256,7 +256,7 @@ class AutoScalingEksManagedGroupTest {
         service.deleteAutoScalingGroup(REGION, FIRST, true);
 
         assertEquals(List.of(), service.describeAutoScalingGroups(REGION, List.of(FIRST)));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), only(NODE));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
         verifyNoInteractions(ec2);
     }
@@ -371,9 +371,5 @@ class AutoScalingEksManagedGroupTest {
         node.setInstanceType("m5.large");
         node.setPlacement(new Placement("us-east-1b"));
         return node;
-    }
-
-    private static List<TargetDescription> only(String instanceId) {
-        return argThat(described -> described.size() == 1 && instanceId.equals(described.getFirst().getId()));
     }
 }

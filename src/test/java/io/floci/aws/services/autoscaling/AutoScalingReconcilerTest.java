@@ -33,6 +33,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -84,7 +85,7 @@ class AutoScalingReconcilerTest {
         reconciler.reconcile(asg);
         assertEquals(List.of(), asg.getInstances());
         verify(elbV2Service, times(2)).deregisterTargets(eq("us-east-1"), eq("owned-target-group"),
-                argThat(targets -> targets.size() == 1 && "i-cleanup".equals(targets.getFirst().getId())));
+                onlyTarget("i-cleanup"));
     }
 
     static Stream<Arguments> targetCleanupFailures() {
