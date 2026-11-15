@@ -5379,7 +5379,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return arn != null && "root".equals(AwsArnUtils.parse(arn).resource());
     }
 
-    /** One policy document holding only the Deny statements of a user's policies and boundary. */
+    /**
+     * One policy document holding only the Deny statements of a user's policies and boundary. A
+     * statement is a Deny when its {@code Effect} is that word as written, which is the reading
+     * the policy evaluator makes of the same element.
+     */
     private String denyStatementsOf(String userName) {
         List<String> documents = new ArrayList<>();
         List<String> userPolicies = collectUserPolicies(userName);
@@ -5395,7 +5399,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             try {
                 JsonNode statements = POLICY_MAPPER.readTree(document).path("Statement");
                 for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
-                    if ("Deny".equalsIgnoreCase(statement.path("Effect").asText())) {
+                    if ("Deny".equals(statement.path("Effect").asText())) {
                         denies.add(statement);
                     }
                 }
