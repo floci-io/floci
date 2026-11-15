@@ -100,13 +100,15 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * What finds the resources of a control task's request, reading only; without one such a request names nothing.
+     * What finds the resources of a control task's request, reading only.
      *
-     * @param cloudFormation the stack or stack set of a CloudFormation request
-     * @param sdkManagement  the secret of a Secrets Manager request
-     * @param states         the state machine or activity whose task a callback's token names
+     * @param cloudFormation the stack or stack set of a CloudFormation request; without it such a request names nothing
+     * @param secrets        the secret a Secrets Manager request names, random suffix included; without it a secret is
+     *                       the ARN its format gives the name
+     * @param states         the state machine or activity whose task a callback's token names; without it a token
+     *                       names nothing
      */
-    record ControlServices(CloudFormationQueryHandler cloudFormation, SdkManagementTaskInvoker sdkManagement,
+    record ControlServices(CloudFormationQueryHandler cloudFormation, StoredResourceArns secrets,
                            StoredResourceArns states) {
     }
 
@@ -172,7 +174,8 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
             return Optional.of(lambdaSdk(integration.api(), input, machine));
         }
         if (integration.isSdkService("secretsmanager") && SdkManagementTaskInvoker.supports(integration)) {
-            return Optional.of(secretsManagerDescribeSecret(input, machine, control.sdkManagement()));
+            return Optional.of(accessDenied(SECRETS_MANAGER_PREFIX,
+                    requestPermissions("secretsmanager", "DescribeSecret", input, machine, control.secrets())));
         }
         if (integration.isSdkService("sfn") && SFN_SDK.contains(integration.api())) {
             return Optional.of(sfnSdk(AslExecutor.capitalizeFirst(integration.api()), input, machine, control.states()));
@@ -419,9 +422,19 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      */
     private static List<Permission> ecs(String operation, JsonNode input, StateMachine machine,
                                         StoredResourceArns ecs) {
-        String namedAs = "ecs:" + operation;
-        String action = IamAuthorizedActions.actionFor("ecs", operation);
-        JsonNode request = AslExecutor.recaseKeys(MAPPER, input, false);
+        return requestPermissions("ecs", operation, AslExecutor.recaseKeys(MAPPER, input, false), machine, ecs);
+    }
+
+    /**
+     * The check the vendored request resources give the same call made directly, in the state machine's partition,
+     * Region and account: the operation's action on each resource the request names, {@code stored} finding the ones
+     * only its service knows, or on any resource for an operation that acts on no resource type. A request that is no
+     * object, or an operation the table does not read, needs nothing here: the service answers it.
+     */
+    private static List<Permission> requestPermissions(String namespace, String operation, JsonNode request,
+                                                       StateMachine machine, StoredResourceArns stored) {
+        String namedAs = namespace + ":" + operation;
+        String action = IamAuthorizedActions.actionFor(namespace, operation);
         if (!request.isObject() || !RequestResources.reads(namedAs)) {
             return List.of();
         }
@@ -429,7 +442,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
             return List.of(new Permission(action, ANY_RESOURCE));
         }
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        return RequestResources.ofBody(namedAs, request, owner.partition(), owner.region(), owner.accountId(), ecs)
+        return RequestResources.ofBody(namedAs, request, owner.partition(), owner.region(), owner.accountId(), stored)
                 .stream().map(resource -> new Permission(action, resource)).toList();
     }
 
@@ -466,14 +479,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      * on no resource type, so on any resource.
      */
     private static TaskPermissions ec2DescribeRegions(JsonNode input, StateMachine machine) {
-        String namedAs = "ec2:DescribeRegions";
-        String action = IamAuthorizedActions.actionFor("ec2", "DescribeRegions");
-        if (RequestResources.actsOnNoResource(namedAs)) {
-            return accessDenied("Ec2.", List.of(new Permission(action, ANY_RESOURCE)));
-        }
-        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        return accessDenied("Ec2.", RequestResources.ofBody(namedAs, input, owner.partition(), owner.region(),
-                owner.accountId(), null).stream().map(resource -> new Permission(action, resource)).toList());
+        return accessDenied("Ec2.", requestPermissions("ec2", "DescribeRegions", input, machine, null));
     }
 
     /** The members of the EMR request the integration sends that name the cluster. */
@@ -626,24 +632,6 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * {@code secretsmanager:DescribeSecret} on the secret's stored ARN, random suffix included, as a direct request is.
-     * An ARN naming no secret here is evaluated as given, which only a grant on it or the owner's policy allows; a name
-     * no secret goes by names nothing, so Secrets Manager answers it.
-     */
-    private static TaskPermissions secretsManagerDescribeSecret(JsonNode input, StateMachine machine,
-                                                                SdkManagementTaskInvoker stored) {
-        String secretId = text(input.path("SecretId"));
-        if (secretId == null || stored == null) {
-            return accessDenied(SECRETS_MANAGER_PREFIX, List.of());
-        }
-        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        Optional<String> secret = stored.secretArn(owner.accountId(), secretId, owner.region());
-        String resource = secret.orElse(AwsArnUtils.isArnFor(secretId, "secretsmanager") ? secretId : null);
-        return accessDenied(SECRETS_MANAGER_PREFIX, resource == null ? List.of()
-                : List.of(new Permission("secretsmanager:DescribeSecret", resource)));
-    }
-
-    /**
      * The check a direct request of the operation gets, on what it names: the state machine it starts, the Map Run it
      * describes, or the activity or state machine waiting on the callback's token. A token naming no task, or anything
      * that is not the ARN the request needs, names nothing, so Step Functions answers it.
@@ -664,13 +652,9 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
 
     private static List<Permission> statesPermissions(String operation, JsonNode input, StateMachine machine,
                                                       StoredResourceArns stored) {
-        String namedAs = "states:" + operation;
-        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         try {
-            return RequestResources.ofBody(namedAs, AslExecutor.recaseKeys(MAPPER, input, false), owner.partition(),
-                            owner.region(), owner.accountId(), stored).stream()
-                    .map(resource -> new Permission(namedAs, resource))
-                    .toList();
+            return requestPermissions("states", operation, AslExecutor.recaseKeys(MAPPER, input, false), machine,
+                    stored);
         } catch (AwsException expected) {
             LOG.debugv("The {0} request names no task: {1}", operation, expected.getMessage());
             return List.of();

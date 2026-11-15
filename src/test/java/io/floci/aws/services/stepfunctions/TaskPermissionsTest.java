@@ -618,10 +618,10 @@ class TaskPermissionsTest {
     private static final String STACK = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/s/id";
 
     private static TaskPermissions control(String tail, String request, CloudFormationQueryHandler cloudFormation,
-                                           SdkManagementTaskInvoker sdkManagement, StoredResourceArns states,
+                                           StoredResourceArns secrets, StoredResourceArns states,
                                            boolean callback) throws Exception {
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, callback,
-                new TaskPermissions.ControlServices(cloudFormation, sdkManagement, states)).orElseThrow();
+                new TaskPermissions.ControlServices(cloudFormation, secrets, states)).orElseThrow();
     }
 
     private static TaskPermissions control(String tail, String request) throws Exception {
@@ -818,21 +818,42 @@ class TaskPermissionsTest {
         assertEquals(List.of(), control("aws-sdk:lambda:updateEventSourceMapping", "{\"UUID\":\"u-1\"}").permissions());
     }
 
+    /**
+     * The check a direct {@code DescribeSecret} gets: the secret Secrets Manager stores a name under, random suffix
+     * included; a name it stores nothing under, with the suffix open; and another account's ARN as given and as the
+     * caller's own of that name.
+     */
     @Test
-    void aSecretIsCheckedOnItsStoredArn() throws Exception {
-        SdkManagementTaskInvoker invoker = mock(SdkManagementTaskInvoker.class);
+    void aSecretIsCheckedAsADirectRequestChecksIt() throws Exception {
         String stored = "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:s-AbCdEf";
         String foreign = "arn:aws:secretsmanager:eu-west-1:444455556666:secret:o-AbCdEf";
-        when(invoker.secretArn(any(), any(), any())).thenReturn(Optional.empty());
-        when(invoker.secretArn(ACCOUNT, "s", "eu-west-1")).thenReturn(Optional.of(stored));
+        StoredResourceArns secrets = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "secretsmanager";
+            }
 
-        TaskPermissions named = control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"s\"}", null, invoker, null, false);
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return List.of("s").equals(names) ? Optional.of(stored) : Optional.empty();
+            }
+        };
+
+        TaskPermissions named = control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"s\"}", null, secrets,
+                null, false);
         assertEquals("SecretsManager.AccessDeniedException", named.deniedError());
         assertEquals(List.of(new Permission("secretsmanager:DescribeSecret", stored)), named.permissions());
-        assertEquals(List.of(new Permission("secretsmanager:DescribeSecret", foreign)),
-                control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"" + foreign + "\"}", null, invoker, null, false).permissions());
-        assertEquals(List.of(), control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"none\"}", null, invoker, null, false).permissions());
-        assertEquals(List.of(), control("aws-sdk:secretsmanager:describeSecret", "{}", null, invoker, null, false).permissions());
+        assertEquals(List.of(new Permission("secretsmanager:DescribeSecret", foreign),
+                        new Permission("secretsmanager:DescribeSecret",
+                                "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:o-AbCdEf")),
+                control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"" + foreign + "\"}", null, secrets,
+                        null, false).permissions());
+        assertEquals(List.of(new Permission("secretsmanager:DescribeSecret",
+                        "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:none-??????")),
+                control("aws-sdk:secretsmanager:describeSecret", "{\"SecretId\":\"none\"}", null, secrets, null, false)
+                        .permissions());
+        assertEquals(List.of(),
+                control("aws-sdk:secretsmanager:describeSecret", "{}", null, secrets, null, false).permissions());
     }
 
     @ParameterizedTest

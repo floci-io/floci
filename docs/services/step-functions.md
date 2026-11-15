@@ -785,7 +785,7 @@ type comes from the Service Authorization Reference:
 | `arn:aws:states:::aws-sdk:ec2:describeRegions` | `ec2:DescribeRegions` | `*` | `Ec2.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:lambda:listEventSourceMappings` | `lambda:ListEventSourceMappings` | `*` | `Lambda.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping` | `lambda:UpdateEventSourceMapping` | `event-source-mapping:<UUID>` | `Lambda.AccessDeniedException` |
-| `arn:aws:states:::aws-sdk:secretsmanager:describeSecret` | `secretsmanager:DescribeSecret` | The secret's stored ARN, suffix included | `SecretsManager.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:secretsmanager:describeSecret` | `secretsmanager:DescribeSecret` | As a direct `DescribeSecret`: the secret's stored ARN, suffix included, or `secret:<SecretId>-??????` for a name no secret goes by | `SecretsManager.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:sfn:startExecution`, `startSyncExecution` | `states:StartExecution`, `states:StartSyncExecution` | The child state machine | `Sfn.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess`, `sendTaskFailure` | `states:SendTaskSuccess`, `states:SendTaskFailure` | The activity or state machine waiting on the token | `Sfn.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:sfn:describeMapRun` | `states:DescribeMapRun` | The Map Run | `Sfn.AccessDeniedException` |
@@ -819,10 +819,10 @@ Every integration that evaluates a role is refused on its `.waitForTaskToken` fo
 task starts nothing and waits for nothing. With the permission, it calls its service and then waits on its
 token.
 
-A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, a stack,
-stack set or secret name its service does not have, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or `MapRunArn`
-that is not one, or a token naming no task. A secret or stack named by an ARN of what does not exist here is
-evaluated on that ARN, for a secret, or left to the service, for a stack. An API Floci does not serve keeps its
+A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, a stack
+or stack set name its service does not have, no `SecretId`, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or
+`MapRunArn` that is not one, or a token naming no task. A stack named by an ARN of what does not exist here is left
+to the service. A secret is evaluated as a direct `DescribeSecret` naming it is, from the generated request resources. An API Floci does not serve keeps its
 answer, whatever the role: it is "Unsupported", or CloudFormation's `UnknownAction`, and the role is not checked.
 
 An activity task is not evaluated: the CDK's own task needs no permission for it, and the worker calling

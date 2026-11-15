@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.IamEnforcementFilter;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -20,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.StreamSupport;
 
@@ -49,9 +49,9 @@ public class SecretsManagerJsonHandler {
         this.eventPublisher = eventPublisher;
     }
 
-    /** The ARN the secret {@code secretId} names is stored under, for a caller authorizing a request naming it. */
-    public Optional<String> storedArn(String accountId, String secretId, String region) {
-        return service.findArn(accountId, secretId, region);
+    /** The secrets the service finds, random suffix included, for a caller naming the resources of a request. */
+    public StoredResourceArns storedResourceArns() {
+        return service;
     }
 
     /**

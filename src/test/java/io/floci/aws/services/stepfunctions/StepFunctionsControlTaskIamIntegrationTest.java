@@ -591,13 +591,22 @@ class StepFunctionsControlTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
     }
 
+    /**
+     * A name no secret goes by is checked as a direct request naming it is, with the random suffix open: a role not
+     * allowed it is refused, and one allowed it there reaches Secrets Manager, which has no such secret.
+     */
     @Test
-    void aSecretNameThatNamesNoSecretIsLeftToSecretsManager() throws Exception {
+    void aSecretNameThatNamesNoSecretIsCheckedWithItsSuffixOpen() throws Exception {
+        String name = "no-such-" + UUID.randomUUID();
         Map<String, Object> task = new LinkedHashMap<>(Map.of("Type", "Task",
                 "Resource", "arn:aws:states:::aws-sdk:secretsmanager:describeSecret",
-                "Parameters", Map.of("SecretId", "no-such-" + UUID.randomUUID()), "End", true));
+                "Parameters", Map.of("SecretId", name), "End", true));
+        String openSuffix = "arn:aws:secretsmanager:" + REGION + ":" + ACCOUNT + ":secret:" + name + "-??????";
 
         assertFailed(terminal(start(machine("sfn-control-" + UUID.randomUUID(), task, role(STATES_TRUST, READ_ONLY)), "{}")),
+                "SecretsManager.AccessDeniedException");
+        assertFailed(terminal(start(machine("sfn-control-" + UUID.randomUUID(), task,
+                        role(STATES_TRUST, allow(openSuffix, "secretsmanager:DescribeSecret"))), "{}")),
                 "SecretsManager.ResourceNotFoundException");
     }
 
