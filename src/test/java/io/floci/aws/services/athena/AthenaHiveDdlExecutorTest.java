@@ -14,7 +14,9 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class AthenaHiveDdlExecutorTest {
@@ -33,6 +35,27 @@ class AthenaHiveDdlExecutorTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> executor.execute(AthenaHiveDdl.parse("DROP TABLE events"), "lake"));
         assertEquals("EntityNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * In an S3 Tables context catalog, DROP TABLE deletes the bucket's table and OPTIMIZE is refused as VACUUM is; in
+     * the default catalog, OPTIMIZE is not supported yet.
+     */
+    @Test
+    void optimizeIsRefusedInAnS3TablesCatalogAndNotSupportedYetInTheDefaultOne() {
+        AthenaIcebergStatements iceberg = Mockito.mock(AthenaIcebergStatements.class);
+        AthenaHiveDdlExecutor executor = new AthenaHiveDdlExecutor(Mockito.mock(GlueService.class),
+                Mockito.mock(S3Service.class), iceberg);
+
+        executor.execute(AthenaHiveDdl.parse("DROP TABLE orders"), "s3tablescatalog/lake", "sales");
+        verify(iceberg).dropS3Table("lake", "sales", "orders", false);
+        AwsException optimize = assertThrows(AwsException.class, () -> executor.execute(
+                AthenaHiveDdl.parse("OPTIMIZE orders REWRITE DATA USING BIN_PACK"), "s3tablescatalog/lake", "sales"));
+        assertTrue(optimize.getMessage().contains("not supported on S3 Tables"), optimize.getMessage());
+
+        AwsException unsupported = assertThrows(AwsException.class, () -> executor.execute(
+                AthenaHiveDdl.parse("OPTIMIZE lake.events REWRITE DATA USING BIN_PACK"), "default"));
+        assertEquals("OPTIMIZE is not supported yet", unsupported.getMessage());
     }
 
     @Test

@@ -127,7 +127,7 @@ public class GlueIcebergCatalog {
         return result;
     }
 
-    ObjectNode createNamespace(String catalog, JsonNode request) {
+    public ObjectNode createNamespace(String catalog, JsonNode request) {
         IcebergCatalogStore store = store(catalog);
         JsonNode levels = request.path("namespace");
         if (!levels.isArray() || levels.size() != 1) {
@@ -141,7 +141,7 @@ public class GlueIcebergCatalog {
         return result;
     }
 
-    ObjectNode loadNamespace(String catalog, String namespace) {
+    public ObjectNode loadNamespace(String catalog, String namespace) {
         IcebergCatalogStore store = store(catalog);
         String name = namespace(namespace);
         Map<String, String> properties = store.namespaceProperties(name);
@@ -333,7 +333,7 @@ public class GlueIcebergCatalog {
      * table's storage alone whether or not the client asked for a purge; an S3 Tables table's warehouse, its data and
      * metadata, goes with it, as S3 Tables' DeleteTable deletes it.
      */
-    void dropTable(String catalog, String namespace, String name) {
+    public void dropTable(String catalog, String namespace, String name) {
         IcebergCatalogStore store = store(catalog);
         String ns = namespace(namespace);
         store.namespaceProperties(ns);

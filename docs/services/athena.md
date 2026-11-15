@@ -178,6 +178,16 @@ Athena manages Iceberg tables through AWS Glue's Iceberg REST catalog, which Flo
 
 `CREATE TABLE AS` with `table_type = 'ICEBERG'` and `OPTIMIZE` are not supported yet.
 
+### S3 Tables catalogs
+
+A table bucket integrated with the Glue Data Catalog (see [Glue's catalogs and Amazon S3 Tables](glue.md#catalogs-and-amazon-s3-tables)) is the catalog `s3tablescatalog/<bucket>`, with its namespaces as databases. With that catalog in the query's `QueryExecutionContext` (`{"Catalog": "s3tablescatalog/<bucket>", "Database": "<namespace>"}`), or named in the query (`"s3tablescatalog/<bucket>".<namespace>.<table>`):
+
+- DDL statements run in the context catalog, naming a table `[namespace.]table` as Athena's do. `CREATE DATABASE` creates a namespace, and `CREATE TABLE ... TBLPROPERTIES ('table_type'='iceberg')` an Iceberg table in the bucket; it names no `LOCATION`, since S3 Tables decides where the table lives.
+- `SELECT`, `INSERT INTO`, `UPDATE`, `DELETE FROM` and `MERGE INTO` run in the query engine, which attaches each S3 Tables catalog the query names under that name, through Glue's Iceberg REST endpoint with a token for the calling account. A context catalog's namespace resolves names given without one. With no `Database`, the context database is Athena's `default`, so only the names the query qualifies resolve, unless the bucket has a `default` namespace. A write naming `awsdatacatalog.<database>.<table>` writes the default catalog's Iceberg table.
+- `DROP TABLE`, in the context catalog, deletes the table, data and all.
+
+As on Athena, `OPTIMIZE` and `VACUUM` are refused (S3 manages compaction and snapshots), and so are Hive DDL statements. `CREATE TABLE AS` into an S3 Tables catalog is not supported yet.
+
 ## Configuration
 
 | Property | Default | Description |
