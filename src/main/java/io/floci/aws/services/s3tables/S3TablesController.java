@@ -280,8 +280,11 @@ public class S3TablesController {
         response.put("namespace", List.of(table.getNamespace()));
         response.put("versionToken", table.getVersionToken());
         putIfNotNull(response, "metadataLocation", table.getMetadataLocation());
+        putIfNotNull(response, "warehouseLocation", table.getWarehouseLocation());
         response.put("createdAt", table.getCreatedAt());
+        response.put("createdBy", table.getOwnerAccountId());
         response.put("modifiedAt", table.getModifiedAt());
+        response.put("modifiedBy", table.getOwnerAccountId());
         response.put("ownerAccountId", table.getOwnerAccountId());
         response.put("format", table.getFormat());
         return response;
@@ -291,6 +294,7 @@ public class S3TablesController {
         Map<String, Object> response = new LinkedHashMap<>();
         putIfNotNull(response, "metadataLocation", table.getMetadataLocation());
         response.put("versionToken", table.getVersionToken());
+        putIfNotNull(response, "warehouseLocation", table.getWarehouseLocation());
         return response;
     }
 
