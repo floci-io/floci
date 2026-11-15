@@ -62,7 +62,10 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        return ReplacementCleanup.complete(resource, this::delete);
+        return ReplacementCleanup.complete(resource, (type, id, region) ->
+                CfnDeletes.safeDelete("ECR repository", id,
+                        () -> ecrService.deleteRepository(id, null, false, region),
+                        "RepositoryNotFoundException"));
     }
 
     @Override
@@ -115,30 +118,44 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
                 ? reconcileExisting(repoName, mutability, tags, region)
                 : ecrService.createRepository(repoName, null, mutability, null, null, null, tags, region);
 
-        // Both policies are updatable: a template that declares one sets it, and on the update
-        // path a template that no longer declares one deletes it, tolerating "none set".
-        if (lifecyclePolicy != null) {
-            ecrService.putLifecyclePolicy(repoName, null, lifecyclePolicy, region);
-        } else if (reusing) {
-            CfnDeletes.safeDelete("ECR lifecycle policy", repoName,
-                    () -> ecrService.deleteLifecyclePolicy(repoName, null, region),
-                    "LifecyclePolicyNotFoundException");
-        }
-        String repositoryPolicy = repositoryPolicyText(props, ctx);
-        if (repositoryPolicy != null) {
-            ecrService.setRepositoryPolicy(repoName, null, repositoryPolicy, region);
-        } else if (reusing) {
-            CfnDeletes.safeDelete("ECR repository policy", repoName,
-                    () -> ecrService.deleteRepositoryPolicy(repoName, null, region),
-                    "RepositoryPolicyNotFoundException");
+        try {
+            // Both policies are updatable: a template that declares one sets it, and on the update
+            // path a template that no longer declares one deletes it, tolerating "none set".
+            if (lifecyclePolicy != null) {
+                ecrService.putLifecyclePolicy(repoName, null, lifecyclePolicy, region);
+            } else if (reusing) {
+                CfnDeletes.safeDelete("ECR lifecycle policy", repoName,
+                        () -> ecrService.deleteLifecyclePolicy(repoName, null, region),
+                        "LifecyclePolicyNotFoundException");
+            }
+            String repositoryPolicy = repositoryPolicyText(props, ctx);
+            if (repositoryPolicy != null) {
+                ecrService.setRepositoryPolicy(repoName, null, repositoryPolicy, region);
+            } else if (reusing) {
+                CfnDeletes.safeDelete("ECR repository policy", repoName,
+                        () -> ecrService.deleteRepositoryPolicy(repoName, null, region),
+                        "RepositoryPolicyNotFoundException");
+            }
+        } catch (RuntimeException failure) {
+            // A repository this provision created and could not finish setting up is not left behind.
+            if (!reusing) {
+                try {
+                    ecrService.deleteRepository(repoName, null, true, region);
+                } catch (RuntimeException cleanupFailure) {
+                    ReplacementCleanup.recordOrphan(r, repoName, REPOSITORY, region);
+                    failure.addSuppressed(cleanupFailure);
+                }
+            }
+            throw failure;
         }
 
         r.setPhysicalId(repoName);
         r.getAttributes().put("Arn", repo.getRepositoryArn());
         r.getAttributes().put("RepositoryUri", repo.getRepositoryUri());
-        // The repository the prior physical id named is deleted once the update commits, by the
-        // forced delete below, or the new one is when a later resource fails the update. A create
-        // under an existing name fails, so a replacement here is always one this update created.
+        // The repository the prior physical id named is deleted once the update commits, but only
+        // when it is empty: EmptyOnDelete is not read, and an empty-only delete is what AWS does
+        // by default. A create under an existing name fails, so a replacement here is always one
+        // this update created.
         ReplacementCleanup.record(r, ctx, attributesBefore, replaces && !reusing);
     }
 
