@@ -7,12 +7,11 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.bedrock.model.Guardrail;
 import io.floci.aws.services.kms.KmsService;
+import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
@@ -47,14 +46,14 @@ class BedrockGuardrailLifecycleConcurrencyTest {
     }
 
     private static void overlappingWrite(Write operation) throws Exception {
-        PausedWriteStorage storage = new PausedWriteStorage();
+        ParkingStore<Guardrail> storage = new ParkingStore<>();
         ObjectMapper mapper = new ObjectMapper();
         BedrockService service = new BedrockService(storage, new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000"), mapper, mock(KmsService.class));
         ObjectNode request = mapper.createObjectNode().put("name", "lifecycle")
                 .put("blockedInputMessaging", "blocked").put("blockedOutputsMessaging", "blocked");
         Guardrail guardrail = service.createGuardrail(request, REGION);
-        storage.pause = true;
+        storage.parkNextWrite();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread writer = new Thread(() -> {
             try {
@@ -78,12 +77,12 @@ class BedrockGuardrailLifecycleConcurrencyTest {
         });
         writer.start();
         try {
-            assertTrue(storage.writeEntered.await(5, TimeUnit.SECONDS));
+            assertTrue(storage.awaitParked());
             deletion.start();
             await().atMost(Duration.ofSeconds(5)).until(() ->
                     deletion.getState() == Thread.State.BLOCKED || deletion.getState() == Thread.State.TERMINATED);
         } finally {
-            storage.releaseWrite.countDown();
+            storage.release();
             writer.join(Duration.ofSeconds(5));
             deletion.join(Duration.ofSeconds(5));
         }
@@ -97,28 +96,6 @@ class BedrockGuardrailLifecycleConcurrencyTest {
             AwsException missingVersion = assertThrows(AwsException.class,
                     () -> service.getGuardrail(guardrail.getGuardrailId(), "1", REGION));
             assertEquals("ResourceNotFoundException", missingVersion.getErrorCode());
-        }
-    }
-
-    private static final class PausedWriteStorage extends InMemoryStorage<String, Guardrail> {
-        private final CountDownLatch writeEntered = new CountDownLatch(1);
-        private final CountDownLatch releaseWrite = new CountDownLatch(1);
-        private volatile boolean pause;
-
-        @Override
-        public void put(String key, Guardrail value) {
-            if (pause) {
-                writeEntered.countDown();
-                try {
-                    if (!releaseWrite.await(5, TimeUnit.SECONDS)) {
-                        throw new IllegalStateException("Guardrail write was not released");
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException("Guardrail write interrupted", e);
-                }
-            }
-            super.put(key, value);
         }
     }
 }
