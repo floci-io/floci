@@ -695,8 +695,21 @@ public class S3Service implements Resettable, ResourceProvider {
         return Arrays.stream(S3ScratchSpace.values()).anyMatch(space -> space.matchesBucket(bucket));
     }
 
+    /** Not for authorization: it can resolve another account's bucket. Use the overload that names the account. */
     public boolean isScratchBucket(String bucketName) {
         return resolveBucket(bucketName).filter(S3Service::isScratchBucket).isPresent();
+    }
+
+    /**
+     * Whether {@code accountId} itself owns the scratch bucket. With a global bucket namespace the plain
+     * lookup falls back to another account's bucket of the same name, which a transfer session must never reach.
+     */
+    public boolean isScratchBucket(String bucketName, String accountId) {
+        return accountId != null && resolveBucketEntry(bucketName)
+                .filter(entry -> accountId.equals(entry.account()))
+                .map(AccountAwareStorageBackend.OwnedEntry::value)
+                .filter(S3Service::isScratchBucket)
+                .isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {

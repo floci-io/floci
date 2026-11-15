@@ -44,6 +44,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -75,7 +76,7 @@ public class ExternalTableMaterializer {
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
-    private static final String ICEBERG_DATA_FILES = "SELECT DISTINCT file_path FROM iceberg_metadata(%s) "
+    private static final String ICEBERG_DATA_FILES = "SELECT DISTINCT file_path FROM iceberg_metadata(%s%s) "
             + "WHERE status IN ('ADDED', 'EXISTING')";
     private static final String COPY_OPTIONS = "WITH (FORMAT csv, HEADER true, NULL '\\N')";
     public enum Outcome { NOT_EXTERNAL, CURRENT, LOADED }
@@ -256,7 +257,7 @@ public class ExternalTableMaterializer {
         try {
             Location location = Location.parse(table);
             authorizeIcebergMetadata(session.accountId(), binding, roleSession, table, location);
-            authorizeIcebergManifests(session.accountId(), binding, roleSession, table, location);
+            IcebergPin pin = authorizeIcebergManifests(session.accountId(), binding, roleSession, table, location);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
             if (holdsPartitions(table, session, backend, partitions)) {
                 return ensurePartitions(backend, session, binding, roleSession, table, location, partitions, sql,
@@ -265,7 +266,9 @@ public class ExternalTableMaterializer {
             List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
             authorizeObjects(session.accountId(), binding, roleSession, sources);
-            authorizeIcebergDataFiles(session.accountId(), binding, roleSession, table, location);
+            authorizeIcebergDataFiles(session.accountId(), binding, roleSession, table, location, pin);
+            // the data-file listing re-reads the metadata, so it only vouches for the pinned snapshot if that held still
+            verifyIcebergPin(session.accountId(), pin);
             String cacheKey = cacheKey(session, binding, tableName);
             String fingerprint = fingerprint(table, partitions, objects);
             // An Iceberg snapshot can change through its metadata or manifests while the Glue table and the
@@ -291,7 +294,7 @@ public class ExternalTableMaterializer {
                 // a load of every partition replaces what the table held, so the partitions it holds are no longer known
                 dropHeld(cacheKey);
                 dropStaged(backend, cacheKey);
-                String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature, null);
+                String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature, null, pin);
                 if (!backend.permitsCachePublication()) {
                     fingerprints.remove(cacheKey);
                     PendingLoad loaded = new PendingLoad(fingerprint, definitions);
@@ -437,7 +440,7 @@ public class ExternalTableMaterializer {
             pendingLoads.values().forEach(loads -> loads.remove(cacheKey));
             dropHeld(cacheKey);
             dropStaged(backend, cacheKey);
-            load(backend, session, binding, roleSession, table, toLoad, previousSignature, reset ? null : deletions);
+            load(backend, session, binding, roleSession, table, toLoad, previousSignature, reset ? null : deletions, null);
             LoadedPartitions loadedState = new LoadedPartitions(identity, Map.copyOf(loaded));
             if (mayRollBack) {
                 // a rollback restores the committed columns, so a changed signature cannot be trusted afterwards
@@ -624,12 +627,12 @@ public class ExternalTableMaterializer {
     /**
      * Iceberg manifests can name data files outside the table location. DuckDB performs the scan
      * with account credentials, so authorize each live data-file path as the bound role first.
-     * The scan re-reads the metadata afterwards, so a metadata object overwritten between the two
-     * steps is not covered. Before routing user queries here, pin the authorized snapshot and its
-     * file list for the scan, or enforce the role during the scan in the sidecar.
+     * The listing and the scan re-read the metadata, so both name the snapshot pinned when the manifests
+     * were authorized, and the metadata object's ETag is checked around them (see {@link #verifyIcebergPin}).
      */
     private void authorizeIcebergDataFiles(String accountId, ExternalSchemaBinding binding,
-                                           RedshiftRoleAccess.RoleSession roleSession, Table table, Location location) {
+                                           RedshiftRoleAccess.RoleSession roleSession, Table table, Location location,
+                                           IcebergPin pin) {
         if (!GlueTableResolver.isIcebergTable(table)) {
             return;
         }
@@ -638,7 +641,7 @@ public class ExternalTableMaterializer {
             throw new SpectrumSqlException("0A000", "Iceberg table \"" + table.getName()
                     + "\" has no supported metadata_location");
         }
-        String sql = ICEBERG_DATA_FILES.formatted(sqlPathLiteral(metadata));
+        String sql = ICEBERG_DATA_FILES.formatted(sqlPathLiteral(metadata), snapshotArgument(pin));
         List<Map<String, Object>> rows = duckQuery(accountId, roleSession, sql);
         for (Map<String, Object> row : rows) {
             Object value = row.get("file_path");
@@ -660,14 +663,15 @@ public class ExternalTableMaterializer {
      * Resolve and authorize both levels first, so the sidecar cannot read them using the emulator's
      * account credentials when the bound Redshift role is denied access.
      */
-    private void authorizeIcebergManifests(String accountId, ExternalSchemaBinding binding,
-                                           RedshiftRoleAccess.RoleSession roleSession, Table table, Location location) {
+    private IcebergPin authorizeIcebergManifests(String accountId, ExternalSchemaBinding binding,
+                                                 RedshiftRoleAccess.RoleSession roleSession, Table table,
+                                                 Location location) {
         if (!GlueTableResolver.isIcebergTable(table)) {
-            return;
+            return null;
         }
         String metadata = GlueTableResolver.icebergMetadataLocation(table);
         if (metadata == null || metadata.isBlank()) {
-            return;
+            return null;
         }
         S3Location metadataObjectLocation = icebergFileLocation(metadata, location);
         S3Object metadataObject = RequestScopes.callAs(accountId,
@@ -681,14 +685,22 @@ public class ExternalTableMaterializer {
         } catch (IOException exception) {
             throw new SpectrumSqlException("XX000", "Iceberg table metadata is not valid JSON");
         }
+        IcebergPin pin = new IcebergPin(metadataObjectLocation, metadataObject.getETag(), null);
         String currentSnapshotId = metadataJson.path("current-snapshot-id").asText();
         if (currentSnapshotId.isBlank() || "-1".equals(currentSnapshotId)) {
             if (metadataJson.path("snapshots").size() > 0) {
                 // the scan could pick a snapshot whose manifests were never authorized
                 throw new SpectrumSqlException("XX000", "Iceberg table metadata has snapshots but no current snapshot");
             }
-            return;
+            return pin;
         }
+        Long snapshotId;
+        try {
+            snapshotId = Long.parseLong(currentSnapshotId);
+        } catch (NumberFormatException exception) {
+            throw new SpectrumSqlException("XX000", "Iceberg table metadata has an invalid current snapshot id");
+        }
+        pin = new IcebergPin(metadataObjectLocation, metadataObject.getETag(), snapshotId);
         String manifestListPath = null;
         for (JsonNode snapshot : metadataJson.path("snapshots")) {
             if (currentSnapshotId.equals(snapshot.path("snapshot-id").asText())) {
@@ -711,6 +723,7 @@ public class ExternalTableMaterializer {
             }
             authorizeIcebergObject(accountId, binding, roleSession, icebergFileLocation(manifestPath, location));
         }
+        return pin;
     }
 
     private void authorizeIcebergObject(String accountId, ExternalSchemaBinding binding,
@@ -896,7 +909,8 @@ public class ExternalTableMaterializer {
      */
     private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                         RedshiftRoleAccess.RoleSession roleSession, Table table,
-                        List<ReadSource> sources, String loadedDefinitions, List<List<String>> deletions) {
+                        List<ReadSource> sources, String loadedDefinitions, List<List<String>> deletions,
+                        IcebergPin pin) {
         GlueTableResolver.ReadPlan plan = readPlanWithColumns(binding, table);
         String schema = quote(binding.schemaName());
         String target = schema + "." + quote(table.getName());
@@ -919,7 +933,7 @@ public class ExternalTableMaterializer {
                     iamService.registerScratchResource(roleSession.accessKeyId(), scratchArn);
                 }
                 readWithDuckDb(session.accountId(), roleSession, table, sources,
-                        config.services().redshift().spectrumMaxRows(), scratchKey);
+                        config.services().redshift().spectrumMaxRows(), scratchKey, pin);
                 long rows;
                 String resultKey = scratchKey;
                 try (InputStream csv = RequestScopes.callAs(session.accountId(),
@@ -1105,22 +1119,24 @@ public class ExternalTableMaterializer {
 
     private void readWithDuckDb(String accountId, RedshiftRoleAccess.RoleSession roleSession,
                                 Table table, List<ReadSource> sources, long maxRows,
-                                String scratchKey) {
+                                String scratchKey, IcebergPin pin) {
         Map<String, Set<String>> columnsByObject = parquetColumnsByObject(accountId, roleSession, sources);
         List<String> selects = new ArrayList<>();
         for (ReadSource source : sources) {
             if (source.partition() == null || !source.objects().isEmpty()) {
-                selects.add(readSelect(source, fileColumns(source, columnsByObject)));
+                selects.add(readSelect(source, fileColumns(source, columnsByObject), pin));
             }
         }
         if (selects.isEmpty() && GlueTableResolver.isIcebergTable(table)) {
             GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
-            selects = List.of("SELECT " + projection(plan.columns()) + " FROM " + fromClause(plan, table));
+            selects = List.of("SELECT " + projection(plan.columns()) + " FROM " + fromClause(plan, table, pin));
         }
         String query = selects.size() == 1 ? selects.getFirst()
                 : "SELECT * FROM (" + String.join(" UNION ALL ", selects) + ") AS spectrum_partitions";
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
         String outputPath = "s3://" + SCRATCH_BUCKET + "/" + scratchKey;
+        // the scan must read the metadata object that was authorized, before and after it runs
+        verifyIcebergPin(accountId, pin);
         try {
             if (s3Service.isAuthEnforced()) {
                 requireSignedSession(roleSession);
@@ -1136,6 +1152,7 @@ public class ExternalTableMaterializer {
             }
             throw exception;
         }
+        verifyIcebergPin(accountId, pin);
     }
 
     private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
@@ -1275,7 +1292,7 @@ public class ExternalTableMaterializer {
                 .map(object -> "s3://" + source.location().bucket() + "/" + object.getKey()).toList();
     }
 
-    private String readSelect(ReadSource source, Set<String> fileColumns) {
+    private String readSelect(ReadSource source, Set<String> fileColumns, IcebergPin pin) {
         GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table(), objectUris(source));
         String projection;
         if (source.partition() == null) {
@@ -1298,18 +1315,52 @@ public class ExternalTableMaterializer {
             }
             projection = String.join(", ", parts);
         }
-        return "SELECT " + projection + " FROM " + fromClause(plan, source.table());
+        return "SELECT " + projection + " FROM " + fromClause(plan, source.table(), pin);
     }
 
     /**
      * An Iceberg scan reads the same glob-escaped metadata literal that the authorization queries used,
-     * so that every step sees one path and none can match a different object.
+     * so that every step sees one path and none can match a different object. It names the authorized
+     * snapshot, so a metadata object that changes underneath cannot move the scan to another one.
      */
-    private static String fromClause(GlueTableResolver.ReadPlan plan, Table table) {
+    private static String fromClause(GlueTableResolver.ReadPlan plan, Table table, IcebergPin pin) {
         if (!plan.iceberg()) {
             return plan.fromClause();
         }
-        return "iceberg_scan(" + sqlPathLiteral(GlueTableResolver.icebergMetadataLocation(table)) + ")";
+        return "iceberg_scan(" + sqlPathLiteral(GlueTableResolver.icebergMetadataLocation(table))
+                + snapshotArgument(pin) + ")";
+    }
+
+    private static String snapshotArgument(IcebergPin pin) {
+        return pin == null || pin.snapshotId() == null ? "" : ", snapshot_from_id = " + pin.snapshotId();
+    }
+
+    /**
+     * Redshift revalidates an Iceberg root metadata file with a HEAD request and drops what it cached when
+     * the object changed. The pinned metadata is held to the same standard: a changed object fails the query
+     * instead of letting the scan run against, or publish, a snapshot that was not authorized.
+     */
+    private void verifyIcebergPin(String accountId, IcebergPin pin) {
+        if (pin == null) {
+            return;
+        }
+        S3Object current;
+        try {
+            current = RequestScopes.callAs(accountId,
+                    () -> s3Service.headObject(pin.metadata().bucket(), pin.metadata().key()));
+        } catch (AwsException exception) {
+            if ("NoSuchKey".equals(exception.getErrorCode())) {
+                throw new SpectrumSqlException("XX000", "Iceberg table metadata changed while the query was running");
+            }
+            throw exception;
+        }
+        if (!Objects.equals(pin.eTag(), current.getETag())) {
+            throw new SpectrumSqlException("XX000", "Iceberg table metadata changed while the query was running");
+        }
+    }
+
+    /** The root metadata object and the snapshot that were authorized, which the scan must not leave. */
+    private record IcebergPin(S3Location metadata, String eTag, Long snapshotId) {
     }
 
     private static String dataProjection(Column column, Set<String> fileColumns) {

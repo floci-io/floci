@@ -130,9 +130,11 @@ class ExternalTableMaterializerTest {
         S3Object icebergMetadata = new S3Object("bucket", "events/metadata/v1.json",
                 "{\"current-snapshot-id\":\"1\",\"snapshots\":[{\"snapshot-id\":\"1\","
                         .concat("\"manifest-list\":\"s3://bucket/events/metadata/snap*.avro\"}]}")
-                        .getBytes(StandardCharsets.UTF_8), "application/json");
+                        .getBytes(StandardCharsets.UTF_8), "application/json", "metadata-etag");
         when(s3.getObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
                 .thenReturn(icebergMetadata);
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"));
         when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
                 .thenReturn(new S3Service.ListObjectsResult(
                         List.of(new S3Object("bucket", "events/p1.csv", new byte[]{1}, "text/csv", "etag1")),
@@ -276,7 +278,8 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("42501"));
-        verify(duck).query(argThat(sql -> sql.contains("iceberg_metadata('s3://bucket/events/metadata/v[[]1].json')")),
+        verify(duck).query(argThat(sql -> sql.contains(
+                "iceberg_metadata('s3://bucket/events/metadata/v[[]1].json', snapshot_from_id = 1)")),
                 any(), startsWith("ASIA"), anyString(), anyString());
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
     }
@@ -679,8 +682,66 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        verify(duck).execute(argThat(sql -> sql.contains("iceberg_scan('s3://bucket/events/metadata/v[[]1].json')")),
+        verify(duck).execute(argThat(sql -> sql.contains(
+                        "iceberg_scan('s3://bucket/events/metadata/v[[]1].json', snapshot_from_id = 1)")),
                 any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesBeforeTheScan() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"), metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesDuringTheScan() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("metadata-etag"), metadataHead("metadata-etag"),
+                        metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(duck).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataChangesAfterTheDataFilesWereListed() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenReturn(metadataHead("overwritten-etag"));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+        verify(s3, times(1)).headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/")));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void failsTheQueryWhenIcebergMetadataIsDeletedDuringTheQuery() {
+        when(glue.getTable("lake", "events")).thenReturn(icebergTable("s3://bucket/events/metadata/v1.json"));
+        when(s3.headObject(eq("bucket"), argThat(key -> key.startsWith("events/metadata/"))))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+
+        SpectrumSqlException exception = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("XX000"));
+    }
+
+    private static S3Object metadataHead(String eTag) {
+        return new S3Object("bucket", "events/metadata/v1.json", new byte[0], "application/json", eTag);
     }
 
     @Test

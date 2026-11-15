@@ -1694,7 +1694,7 @@ class IamEnforcementFilterTest {
         S3Service s3Service = mock(S3Service.class);
         when(s3ServiceProvider.isResolvable()).thenReturn(true);
         when(s3ServiceProvider.get()).thenReturn(s3Service);
-        when(s3Service.isScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)).thenReturn(false);
+        when(s3Service.isScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "222233334444")).thenReturn(false);
 
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
@@ -1753,7 +1753,7 @@ class IamEnforcementFilterTest {
         S3Service s3 = mock(S3Service.class);
         when(provider.isResolvable()).thenReturn(true);
         when(provider.get()).thenReturn(s3);
-        when(s3.isScratchBucket(space.bucketName())).thenReturn(internalBucket);
+        when(s3.isScratchBucket(space.bucketName(), "222233334444")).thenReturn(internalBucket);
         return newFilterWithRealEvaluator(provider);
     }
 
