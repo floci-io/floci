@@ -308,6 +308,8 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable the Kinesis Data Streams service |
+| `FLOCI_SERVICES_KINESIS_CREATING_DELAY_MILLIS` | `0` | Optional `CREATING` status window after stream creation |
+| `FLOCI_SERVICES_KINESIS_UPDATING_DELAY_MILLIS` | `0` | Optional `UPDATING` status window after a stream change |
 
 ### Firehose
 
