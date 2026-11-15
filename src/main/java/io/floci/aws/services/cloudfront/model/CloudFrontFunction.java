@@ -3,6 +3,8 @@ package io.floci.aws.services.cloudfront.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 
 @RegisterForReflection
 public class CloudFrontFunction {
@@ -16,8 +18,12 @@ public class CloudFrontFunction {
     private String etag;
     private Instant createdTime;
     private Instant lastModifiedTime;
+    private List<String> keyValueStoreArns = new ArrayList<>();
 
     public CloudFrontFunction() {}
+
+    public List<String> getKeyValueStoreArns() { return keyValueStoreArns; }
+    public void setKeyValueStoreArns(List<String> keyValueStoreArns) { this.keyValueStoreArns = keyValueStoreArns; }
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }

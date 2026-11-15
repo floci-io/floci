@@ -72,10 +72,12 @@ public class EksOidcService implements OidcIssuerKeyLookup {
 
     /**
      * Generates and stores the cluster's signing keypair if absent, returning the stored material.
-     * Keyed by cluster name so {@code DeleteCluster} can drop it.
+     * Keyed by the cluster's storage key ({@link EksService#clusterKey(String, String)}), which
+     * carries its Region, so {@code DeleteCluster} can drop it and same-named clusters in two
+     * Regions each keep their own key.
      */
-    public synchronized ClusterOidcKey ensureKey(String clusterName, String issuer) {
-        return ensureKey(null, clusterName, issuer);
+    public synchronized ClusterOidcKey ensureKey(String clusterKey, String issuer) {
+        return ensureKey(null, clusterKey, issuer);
     }
 
     /**
@@ -83,13 +85,13 @@ public class EksOidcService implements OidcIssuerKeyLookup {
      * without a request context must pass the owning account from the cluster record, since the
      * request-scoped store would otherwise resolve to the default account.
      */
-    public synchronized ClusterOidcKey ensureKeyForAccount(String accountId, String clusterName,
+    public synchronized ClusterOidcKey ensureKeyForAccount(String accountId, String clusterKey,
                                                            String issuer) {
-        return ensureKey(accountId, clusterName, issuer);
+        return ensureKey(accountId, clusterKey, issuer);
     }
 
-    private ClusterOidcKey ensureKey(String accountId, String clusterName, String issuer) {
-        Optional<ClusterOidcKey> existing = readKey(accountId, clusterName);
+    private ClusterOidcKey ensureKey(String accountId, String clusterKey, String issuer) {
+        Optional<ClusterOidcKey> existing = readKey(accountId, clusterKey);
         if (existing.isPresent() && issuer.equals(existing.get().getIssuer())) {
             return existing.get();
         }
@@ -104,36 +106,68 @@ public class EksOidcService implements OidcIssuerKeyLookup {
                     UUID.randomUUID().toString(),
                     Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded()),
                     Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
-            writeKey(accountId, clusterName, key);
-            LOG.debugv("Generated IRSA OIDC signing key for EKS cluster {0}", clusterName);
+            writeKey(accountId, clusterKey, key);
+            LOG.debugv("Generated IRSA OIDC signing key for EKS cluster {0}", clusterKey);
             return key;
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("Failed to generate EKS OIDC signing keypair for cluster "
-                    + clusterName + ": RSA unavailable", e);
+                    + clusterKey + ": RSA unavailable", e);
         }
     }
 
-    private Optional<ClusterOidcKey> readKey(String accountId, String clusterName) {
+    private Optional<ClusterOidcKey> readKey(String accountId, String clusterKey) {
         if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
-            return aware.getForAccount(accountId, clusterName);
+            return aware.getForAccount(accountId, clusterKey);
         }
-        return keyStore.get(clusterName);
+        return keyStore.get(clusterKey);
     }
 
-    private void writeKey(String accountId, String clusterName, ClusterOidcKey key) {
+    private void writeKey(String accountId, String clusterKey, ClusterOidcKey key) {
         if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
-            aware.putForAccount(accountId, clusterName, key);
+            aware.putForAccount(accountId, clusterKey, key);
             return;
         }
-        keyStore.put(clusterName, key);
+        keyStore.put(clusterKey, key);
     }
 
-    public void deleteKey(String clusterName) {
-        keyStore.delete(clusterName);
+    public void deleteKey(String clusterKey) {
+        keyStore.delete(clusterKey);
     }
 
-    public Optional<ClusterOidcKey> findKeyByCluster(String clusterName) {
-        return keyStore.get(clusterName);
+    /**
+     * Moves the signing key of {@code accountId}'s cluster from {@code legacyKey}, the bare cluster
+     * name keys were stored under before cluster names became Regional, to {@code clusterKey}. Only
+     * a key minted for {@code issuer} moves, so a same-named cluster's key is never taken over.
+     * Keeping the key, rather than minting a new one, keeps tokens already issued verifiable. A key
+     * stored before keys were account-prefixed moves too; the issuer, a random URL minted for one
+     * cluster, is what proves it belongs to this one.
+     */
+    public synchronized void migrateLegacyKey(String accountId, String legacyKey, String clusterKey,
+                                              String issuer) {
+        if (legacyKey.equals(clusterKey) || issuer == null) {
+            return;
+        }
+        if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
+            aware.getForAccountMigratingLegacyKeys(accountId, clusterKey, List.of(legacyKey),
+                    key -> issuer.equals(key.getIssuer()));
+            return;
+        }
+        Optional<ClusterOidcKey> legacy = readKey(accountId, legacyKey);
+        if (legacy.isEmpty() || !issuer.equals(legacy.get().getIssuer())) {
+            return;
+        }
+        if (readKey(accountId, clusterKey).isEmpty()) {
+            writeKey(accountId, clusterKey, legacy.get());
+        }
+        if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
+            aware.deleteForAccount(accountId, legacyKey);
+        } else {
+            keyStore.delete(legacyKey);
+        }
+    }
+
+    public Optional<ClusterOidcKey> findKeyByCluster(String clusterKey) {
+        return keyStore.get(clusterKey);
     }
 
     @Override
@@ -162,7 +196,7 @@ public class EksOidcService implements OidcIssuerKeyLookup {
      * Mints an RS256-signed service-account token for {@code namespace}/{@code serviceAccount},
      * shaped like the projected token a pod would present to STS.
      */
-    public String mintServiceAccountToken(String clusterName, String issuer, String namespace,
+    public String mintServiceAccountToken(String clusterKey, String issuer, String namespace,
                                           String serviceAccount, String audience, Integer lifetimeSeconds) {
         if (namespace == null || namespace.isBlank()) {
             throw new AwsException("InvalidParameterException", "namespace is required", 400);
@@ -173,7 +207,7 @@ public class EksOidcService implements OidcIssuerKeyLookup {
         int lifetime = resolveLifetime(lifetimeSeconds);
         String aud = audience == null || audience.isBlank() ? STS_AUDIENCE : audience;
 
-        ClusterOidcKey key = ensureKey(clusterName, issuer);
+        ClusterOidcKey key = ensureKey(clusterKey, issuer);
         long now = Instant.now().getEpochSecond();
         long exp = now + lifetime;
         String subject = "system:serviceaccount:" + namespace + ":" + serviceAccount;

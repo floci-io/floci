@@ -3,10 +3,17 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
 import java.util.function.BiConsumer;
 
 /**
@@ -73,6 +80,26 @@ public final class CfnRollback {
     public static final String LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR = "__FlociLoadBalancerSubnetsUpdateSnapshot";
 
     /**
+     * Holds what an update that kept an ELBv2 target group changed in its registrations: the targets
+     * it registered that were not registered before, and the registrations it deregistered or
+     * registered over, so a failed stack update can put them back. Written by
+     * {@code ElbV2CfnProvisioner} between its RegisterTargets and DeregisterTargets and spent by the
+     * undo of a failed provision or by its {@code rollbackUpdate}, retained across a failed put back.
+     */
+    public static final String TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupTargetsUpdateSnapshot";
+
+    /**
+     * Holds what an update that kept an ELBv2 listener certificate resource changed on its listener:
+     * the certificates it added that the listener's list did not hold, the ones it removed, and the
+     * certificates the resource declared before, so a failed stack update can put them back. Written
+     * by {@code ElbV2CfnProvisioner} between its AddListenerCertificates and RemoveListenerCertificates
+     * and spent by the undo of a failed provision or by its {@code rollbackUpdate}, retained across a
+     * failed put back.
+     */
+    public static final String LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR =
+            "__FlociListenerCertificatesUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
@@ -127,12 +154,19 @@ public final class CfnRollback {
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
+    public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
+
     /**
      * Holds the configuration and tags a Route 53 health check carried before an in-place update
      * changed them, so a failed stack update can put them back. Written by
      * {@code Route53CfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
      */
     public static final String HEALTH_CHECK_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53HealthCheckUpdateSnapshot";
+    /**
+     * The record a record set update displaced and the record it wrote, for that update's rollback. The
+     * commit's cleanup walk reaches every resource, and the record set drops it there.
+     */
+    public static final String ROUTE53_RECORD_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53RecordUpdate";
     public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**
@@ -150,6 +184,13 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String API_DESTINATION_UPDATE_SNAPSHOT_ATTR = "__FlociApiDestinationUpdateSnapshot";
+
+    /**
+     * Holds the tags an EventBridge event bus carried, for the keys an in-place update manages,
+     * and the managed tag keys it was tracking, so a failed stack update can put them back. Written
+     * by {@code EventsCfnProvisioner} before its tag calls and spent by its {@code rollbackUpdate}.
+     */
+    public static final String EVENT_BUS_UPDATE_SNAPSHOT_ATTR = "__FlociEventBusUpdateSnapshot";
 
     /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
@@ -361,6 +402,26 @@ public final class CfnRollback {
      */
     public static final String NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR = "__FlociNetworkConnectorUpdateSnapshot";
 
+    /**
+     * Holds the mutable configuration an EFS file system carried before an in-place update changed
+     * it (throughput, backup, lifecycle, policy, protection and tags), so a failed stack update can
+     * put it back. Written by {@code EfsCfnProvisioner} before it reconciles and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String EFS_FILE_SYSTEM_UPDATE_SNAPSHOT_ATTR = "__FlociEfsFileSystemUpdateSnapshot";
+
+    /**
+     * Holds the security groups an EFS mount target carried before an in-place update changed them,
+     * so a failed stack update can put them back.
+     */
+    public static final String EFS_MOUNT_TARGET_UPDATE_SNAPSHOT_ATTR = "__FlociEfsMountTargetUpdateSnapshot";
+
+    /**
+     * Holds the tags an EFS access point carried before an in-place update changed them, so a
+     * failed stack update can put them back.
+     */
+    public static final String EFS_ACCESS_POINT_UPDATE_SNAPSHOT_ATTR = "__FlociEfsAccessPointUpdateSnapshot";
+
     private CfnRollback() {
     }
 
@@ -476,6 +537,38 @@ public final class CfnRollback {
     public static String snapshotText(JsonNode snapshot, String field) {
         JsonNode value = snapshot.get(field);
         return value == null || value.isNull() ? null : value.asText();
+    }
+
+    /**
+     * Records the tags an in-place update is about to reconcile under {@code tagKeys} and
+     * {@code tags} of {@code snapshot}: every key it manages, and the value {@code current} holds
+     * for it. A managed key the resource did not carry is listed without a value, so the rollback
+     * removes it. {@link #snapshotTagKeys} and {@link #snapshotTags} read them back.
+     */
+    public static void putTagSnapshot(ObjectNode snapshot, Collection<String> managedKeys,
+                                      Map<String, String> current) {
+        ArrayNode tagKeys = snapshot.putArray("tagKeys");
+        ObjectNode tags = snapshot.putObject("tags");
+        for (String key : new TreeSet<>(managedKeys)) {
+            tagKeys.add(key);
+            if (current.containsKey(key)) {
+                tags.put(key, current.get(key));
+            }
+        }
+    }
+
+    /** The tag keys {@link #putTagSnapshot} recorded as managed by the update. */
+    public static List<String> snapshotTagKeys(JsonNode snapshot) {
+        List<String> keys = new ArrayList<>();
+        snapshot.path("tagKeys").forEach(key -> keys.add(key.asText()));
+        return keys;
+    }
+
+    /** The tags {@link #putTagSnapshot} recorded, which are what the rollback puts back. */
+    public static Map<String, String> snapshotTags(JsonNode snapshot) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().textValue()));
+        return tags;
     }
 
     /**

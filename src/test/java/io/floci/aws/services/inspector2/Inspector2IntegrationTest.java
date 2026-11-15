@@ -192,7 +192,7 @@ class Inspector2IntegrationTest {
         organizationsService.createOrganization(managementAccountId, "ALL");
         for (String member : members) {
             Handshake handshake = organizationsService.inviteAccountToOrganization(
-                    managementAccountId, member, "ACCOUNT", null);
+                    managementAccountId, member, "ACCOUNT", null, null);
             organizationsService.acceptHandshake(member, handshake.getId());
         }
     }

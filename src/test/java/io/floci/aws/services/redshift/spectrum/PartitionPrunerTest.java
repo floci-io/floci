@@ -3,6 +3,7 @@ package io.floci.aws.services.redshift.spectrum;
 import io.floci.aws.services.glue.model.Column;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
@@ -256,6 +257,64 @@ class PartitionPrunerTest {
 
         assertThat(keeps(filter, "a"), is(true));
         assertThat(keeps(filter, "b"), is(false));
+    }
+
+    @Test
+    void readsABoundParameterLikeTheSameLiteral() {
+        Optional<PartitionPruner.Filter> string = PartitionPruner.filterFor(
+                "SELECT * FROM lake.events WHERE day = $1", "lake", "events", DAY, List.of("2026-01-02"));
+        Optional<PartitionPruner.Filter> integer = PartitionPruner.filterFor(
+                "SELECT * FROM lake.events WHERE year >= $1 AND month = $2", "lake", "events", YEAR_MONTH,
+                List.of("2021", "7"));
+        Optional<PartitionPruner.Filter> date = PartitionPruner.filterFor(
+                "SELECT * FROM lake.events WHERE dt BETWEEN $1 AND $2", "lake", "events", DATE_KEY,
+                List.of("2026-01-01", "2026-01-31"));
+
+        assertThat(keeps(string, "2026-01-02"), is(true));
+        assertThat(keeps(string, "2026-01-03"), is(false));
+        assertThat(keeps(integer, "2022", "7"), is(true));
+        assertThat(keeps(integer, "2020", "7"), is(false));
+        assertThat(keeps(date, "2026-01-15"), is(true));
+        assertThat(keeps(date, "2026-02-01"), is(false));
+    }
+
+    @Test
+    void aBoundValueCannotChangeTheShapeOfThePredicate() {
+        Optional<PartitionPruner.Filter> filter = PartitionPruner.filterFor(
+                "SELECT * FROM lake.events WHERE day = $1", "lake", "events", DAY, List.of("a' OR '1'='1"));
+
+        assertThat(keeps(filter, "a' OR '1'='1"), is(true));
+        assertThat(keeps(filter, "a"), is(false));
+        assertThat(keeps(filter, "b"), is(false));
+    }
+
+    @Test
+    void aParameterWithoutAUsableValueLeavesThePredicateOut() {
+        String sql = "SELECT * FROM lake.events WHERE day = $1";
+
+        assertThat(PartitionPruner.filterFor(sql, "lake", "events", DAY, List.of()).isPresent(), is(false));
+        assertThat(PartitionPruner.filterFor(sql, "lake", "events", DAY, Collections.singletonList(null))
+                .isPresent(), is(false));
+        assertThat(PartitionPruner.filterFor(sql, "lake", "events", DAY, List.of("a", "extra")).isPresent(), is(true));
+        assertThat(PartitionPruner.filterFor("SELECT * FROM lake.events WHERE day = $2", "lake", "events", DAY,
+                List.of("a")).isPresent(), is(false));
+    }
+
+    @Test
+    void aBoundValueTheKeyTypeCannotReadStaysOut() {
+        Optional<PartitionPruner.Filter> filter = PartitionPruner.filterFor(
+                "SELECT * FROM lake.events WHERE year = $1", "lake", "events", YEAR_MONTH, List.of("abc"));
+
+        assertThat(filter.isPresent(), is(false));
+    }
+
+    @Test
+    void findsBindParametersOnlyOutsideStringsAndQuotedNames() {
+        assertThat(PartitionPruner.hasParameters("SELECT * FROM lake.events WHERE day = $1"), is(true));
+        assertThat(PartitionPruner.hasParameters("SELECT * FROM lake.events WHERE day = '$1'"), is(false));
+        assertThat(PartitionPruner.hasParameters("SELECT * FROM lake.events WHERE day = 'a'"), is(false));
+        assertThat(PartitionPruner.hasParameters("SELECT $$1$$ FROM lake.events"), is(false));
+        assertThat(PartitionPruner.hasParameters(null), is(false));
     }
 
     @Test

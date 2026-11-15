@@ -193,6 +193,74 @@ class ApiGatewayDocumentationPartIntegrationTest {
     }
 
     @Test
+    void blankLocationFieldsAreTreatedAsAbsent() {
+        try (ApiGatewayClient client = client()) {
+            String apiId = client.createRestApi(request -> request.name("documentation-part-blank-fields")).id();
+            try {
+                CreateDocumentationPartResponse api = client.createDocumentationPart(request -> request
+                        .restApiId(apiId).location(DocumentationPartLocation.builder()
+                                .type(DocumentationPartType.API).method("").name("").path("").statusCode("").build())
+                        .properties("{}"));
+                assertEquals(DocumentationPartLocation.builder().type(DocumentationPartType.API).build(),
+                        api.location());
+                assertThrows(ConflictException.class, () -> client.createDocumentationPart(request -> request
+                        .restApiId(apiId).location(DocumentationPartLocation.builder()
+                                .type(DocumentationPartType.API).build())
+                        .properties("{}")));
+
+                CreateDocumentationPartResponse model = client.createDocumentationPart(request -> request
+                        .restApiId(apiId).location(DocumentationPartLocation.builder()
+                                .type(DocumentationPartType.MODEL).name("Example").method("").path("")
+                                .statusCode("").build())
+                        .properties("{\"title\":\"Example\"}"));
+                assertEquals(DocumentationPartLocation.builder().type(DocumentationPartType.MODEL)
+                        .name("Example").build(), model.location());
+                BadRequestException blankName = assertThrows(BadRequestException.class,
+                        () -> client.createDocumentationPart(request -> request.restApiId(apiId)
+                                .location(DocumentationPartLocation.builder().type(DocumentationPartType.MODEL)
+                                        .name("").build())
+                                .properties("{}")));
+                assertEquals("Documentation part location name is required", blankName.awsErrorDetails().errorMessage());
+
+                CreateDocumentationPartResponse response = client.createDocumentationPart(request -> request
+                        .restApiId(apiId).location(DocumentationPartLocation.builder()
+                                .type(DocumentationPartType.RESPONSE).method("POST").path("/example")
+                                .statusCode("200").name("").build())
+                        .properties("{\"description\":\"OK\"}"));
+                assertEquals(DocumentationPartLocation.builder().type(DocumentationPartType.RESPONSE)
+                        .method("POST").path("/example").statusCode("200").build(), response.location());
+
+                CreateDocumentationPartResponse header = client.createDocumentationPart(request -> request
+                        .restApiId(apiId).location(DocumentationPartLocation.builder()
+                                .type(DocumentationPartType.RESPONSE_HEADER).name("X-Request-Id").statusCode("")
+                                .build())
+                        .properties("{}"));
+                assertEquals(DocumentationPartLocation.builder().type(DocumentationPartType.RESPONSE_HEADER)
+                        .name("X-Request-Id").path("/").method("*").statusCode("*").build(), header.location());
+            } finally {
+                client.deleteRestApi(request -> request.restApiId(apiId));
+            }
+        }
+    }
+
+    @Test
+    void locationFieldInvalidForTypeIsRejected() {
+        try (ApiGatewayClient client = client()) {
+            String apiId = client.createRestApi(request -> request.name("documentation-part-invalid-field")).id();
+            try {
+                BadRequestException invalid = assertThrows(BadRequestException.class,
+                        () -> client.createDocumentationPart(request -> request.restApiId(apiId)
+                                .location(DocumentationPartLocation.builder().type(DocumentationPartType.MODEL)
+                                        .name("Example").method("GET").build())
+                                .properties("{}")));
+                assertEquals("Invalid documentation part location field", invalid.awsErrorDetails().errorMessage());
+            } finally {
+                client.deleteRestApi(request -> request.restApiId(apiId));
+            }
+        }
+    }
+
+    @Test
     void nullRequestBodyReturnsBadRequest() {
         try (ApiGatewayClient client = client()) {
             String apiId = client.createRestApi(request -> request.name("documentation-part-null-body")).id();

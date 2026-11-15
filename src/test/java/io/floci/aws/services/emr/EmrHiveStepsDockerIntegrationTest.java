@@ -26,11 +26,9 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.GZIPInputStream;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
@@ -83,7 +81,8 @@ class EmrHiveStepsDockerIntegrationTest {
 
     @Test
     void hiveAndSparkStepsShareTheClustersMetastoreServiceAndHdfs() {
-        startCluster(HIVE_AND_SPARK, "[]", null);
+        // The two steps that read what the first one made, and need nothing from each other, run at once.
+        startCluster(HIVE_AND_SPARK, "[]", null, 2);
         put("queries/load.q", """
                 create external table kv (k string, v int)
                   row format delimited fields terminated by ',' location '${INPUT}';
@@ -95,24 +94,8 @@ class EmrHiveStepsDockerIntegrationTest {
                 insert overwrite directory '${OUTPUT}' row format delimited fields terminated by ','
                   select k, v from scaled order by k;
                 select k, v from scaled order by k;
+                select k from from_spark order by k;
                 """);
-
-        assertEquals("COMPLETED", hiveStep("-f", s3Uri("queries/load.q"), "-d", "INPUT=" + s3Uri("data/rows/")));
-        // The table the first step made is in the cluster's metastore for the second.
-        String report = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
-                "-f", s3Uri("queries/report.q"), "-d", "OUTPUT=" + s3Uri("out/report/"));
-        assertEquals("COMPLETED", state(report));
-        assertEquals("a,10\nb,20\nc,30\n", objects("out/report/"));
-        assertTrue(stepLog(report, "stdout.gz").contains("a\t10\nb\t20\nc\t30\n"));
-        // Its data is in the cluster's HDFS, which a step in the Spark image reads as hdfs://.
-        String cat = addStep("command-runner.jar", "hadoop", "fs", "-cat", "hdfs:///user/hive/warehouse/scaled/*");
-        assertEquals("COMPLETED", state(cat));
-        assertEquals("a\u000110\nb\u000120\nc\u000130\n", stepLog(cat, "stdout.gz"));
-        // An hdfs:// location is the cluster's HDFS too, whose NameNode answers Hive's encryption zone lookups.
-        String pinned = addStep("command-runner.jar", "hadoop", "fs", "-cat", "hdfs:///floci/pinned/*");
-        assertEquals("COMPLETED", state(pinned));
-        assertEquals("a\nb\nc\n", stepLog(pinned, "stdout.gz"));
-        // A Spark step uses the cluster's metastore too: it reads Hive's table, and makes one a Hive step reads.
         put("jobs/catalog.py", """
                 import sys
                 from pyspark.sql import SparkSession
@@ -121,13 +104,25 @@ class EmrHiveStepsDockerIntegrationTest {
                 spark.createDataFrame([(" ".join(rows),)], ["value"]).coalesce(1).write.text(sys.argv[1])
                 spark.sql("create table from_spark stored as textfile as select upper(k) as k from scaled")
                 """);
-        assertEquals("COMPLETED", state(addStep("command-runner.jar", "spark-submit", s3Uri("jobs/catalog.py"),
-                s3Uri("out/spark/"))));
+
+        assertEquals("COMPLETED", hiveStep("-f", s3Uri("queries/load.q"), "-d", "INPUT=" + s3Uri("data/rows/")));
+        // Its data is in the cluster's HDFS, which a step in the Spark image reads as hdfs://, and so is an hdfs://
+        // location's, whose NameNode answers Hive's encryption zone lookups.
+        String cat = addStep("command-runner.jar", "hadoop", "fs", "-cat", "hdfs:///user/hive/warehouse/scaled/*",
+                "hdfs:///floci/pinned/*");
+        // A Spark step uses the cluster's metastore too: it reads Hive's table, and makes one a Hive step reads.
+        String spark = addStep("command-runner.jar", "spark-submit", s3Uri("jobs/catalog.py"), s3Uri("out/spark/"));
+        assertEquals("COMPLETED", state(cat));
+        assertEquals("a\u000110\nb\u000120\nc\u000130\na\nb\nc\n", stepLog(cat, "stdout.gz"));
+        assertEquals("COMPLETED", state(spark));
         assertEquals("a10 b20 c30\n", objects("out/spark/"));
-        String fromSpark = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
-                "-e", "select k from from_spark order by k;");
-        assertEquals("COMPLETED", state(fromSpark));
-        assertTrue(stepLog(fromSpark, "stdout.gz").contains("A\nB\nC\n"));
+        // The tables the first step and the Spark step made are in the cluster's metastore for a later Hive step.
+        String report = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
+                "-f", s3Uri("queries/report.q"), "-d", "OUTPUT=" + s3Uri("out/report/"));
+        assertEquals("COMPLETED", state(report));
+        assertEquals("a,10\nb,20\nc,30\n", objects("out/report/"));
+        String reported = stepLog(report, "stdout.gz");
+        assertTrue(reported.contains("a\t10\nb\t20\nc\t30\n") && reported.contains("A\nB\nC\n"), reported);
     }
 
     @Test
@@ -145,6 +140,26 @@ class EmrHiveStepsDockerIntegrationTest {
                 "-e", "select k from slow union all select k from quick order by k;");
         assertEquals("COMPLETED", state(both));
         assertTrue(stepLog(both, "stdout.gz").contains("q\ns\n"));
+    }
+
+    @Test
+    void aHiveStepsTezTasksRunInYarnContainersOnItsClustersPrimaryNode() {
+        startCluster(HIVE_AND_SPARK, "[]", null);
+        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getList("Instances.PrivateDnsName");
+
+        // A query that groups its rows through a shuffle, its tasks giving the hosts they ran on: the primary node,
+        // whose NodeManager runs them on a cluster without core nodes, not the step's container. Core and task nodes
+        // running a job's containers are EmrDockerRunnerDockerIntegrationTest's, as a cluster with Hive starts slower.
+        assertEquals("COMPLETED", hiveStep("-e", "create external table kv (k string, v int) row format delimited"
+                + " fields terminated by ',' location '" + s3Uri("data/rows/") + "';"
+                + " insert overwrite directory '" + s3Uri("out/tez/") + "' row format delimited fields terminated"
+                + " by ',' collection items terminated by ' ' select sum(v), count(k),"
+                + " collect_set(split(reflect('java.net.InetAddress', 'getLocalHost'), '/')[0]) from kv;"));
+        String[] fields = objects("out/tez/").trim().split(",");
+        assertEquals(List.of("6", "3"), List.of(fields[0], fields[1]), () -> String.join(",", fields));
+        List<String> hosts = List.of(fields[2].split(" "));
+        assertTrue(instances.containsAll(hosts), hosts + " among " + instances);
     }
 
     @Test
@@ -248,12 +263,7 @@ class EmrHiveStepsDockerIntegrationTest {
 
     /** A log of the step's, in the step log folder of the Management Guide's "Log locations". */
     private String stepLog(String stepId, String name) {
-        String key = "logs/" + clusterId + "/steps/" + stepId + "/" + name;
-        try (GZIPInputStream in = new GZIPInputStream(s3.getObject(request -> request.bucket(bucket).key(key)))) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        return S3TestClients.gunzipped(s3, bucket, "logs/" + clusterId + "/steps/" + stepId + "/" + name);
     }
 
     private void put(String key, String text) {

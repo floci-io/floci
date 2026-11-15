@@ -504,22 +504,15 @@ class IamTagOnCreateEnforcementIntegrationTest {
                 .body("TagList.size()", equalTo(2));
     }
 
-    /**
-     * CodeDeploy's handler reads a tag's key and value in either case, so the tagging action is checked for both,
-     * and the create's own action sees them.
-     */
+    /** CodeDeploy's modeled tags need TagResource and are visible to the create's own condition keys. */
     @Test
-    void anApplicationsTagsInEitherCaseNeedTagResource() {
+    void anApplicationsTagsNeedTagResource() {
         User user = user("tag-application");
         String application = "tag-app-" + suffix();
-        String create = "{\"applicationName\":\"" + application + "\",\"tags\":[{\"key\":\"team\",\"value\":\"red\"}]}";
+        String create = "{\"applicationName\":\"" + application + "\",\"tags\":[{\"Key\":\"team\",\"Value\":\"red\"}]}";
         user.policy(allow("codedeploy:CreateApplication"));
         refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateApplication", "1.1").body(create).post("/").then(),
                 "codedeploy:TagResource");
-        // The handler keeps a key that is a number as its text, so it needs the tagging action too.
-        refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateApplication", "1.1")
-                .body("{\"applicationName\":\"" + application + "\",\"tags\":[{\"key\":123,\"value\":\"red\"}]}")
-                .post("/").then(), "codedeploy:TagResource");
 
         user.policy("{\"Effect\":\"Allow\",\"Action\":\"codedeploy:CreateApplication\",\"Resource\":\"*\","
                 + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}," + allow("codedeploy:TagResource"));
@@ -527,14 +520,50 @@ class IamTagOnCreateEnforcementIntegrationTest {
                 .statusCode(200);
         cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.DeleteApplication")
                 .contentType("application/x-amz-json-1.1").body("{\"applicationName\":\"" + application + "\"}").post("/"));
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.UntagResource")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ResourceArn\":\"arn:aws:codedeploy:us-east-1:000000000000:application:" + application
+                        + "\",\"TagKeys\":[\"team\"]}").post("/"));
+    }
 
-        // The handler iterates an object's values as tags, so a deny on one holds however they are shaped.
-        user.policy(allow("codedeploy:CreateApplication") + "," + allow("codedeploy:TagResource")
-                + ",{\"Effect\":\"Deny\",\"Action\":\"codedeploy:CreateApplication\",\"Resource\":\"*\","
-                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
-        refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateApplication", "1.1")
-                .body("{\"applicationName\":\"" + application + "-object\",\"tags\":{\"0\":{\"key\":\"team\",\"value\":\"red\"}}}")
-                .post("/").then(), "codedeploy:CreateApplication");
+    @Test
+    void aDeploymentGroupsTagsNeedTagResource() {
+        User user = user("tag-deployment-group");
+        String application = "tag-group-app-" + suffix();
+        String group = "tag-group-" + suffix();
+        String groupArn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentgroup:"
+                + application + "/" + group;
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.DeleteApplication")
+                .contentType("application/x-amz-json-1.1").body("{\"applicationName\":\"" + application + "\"}").post("/"));
+        admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"applicationName\":\"" + application + "\"}").post("/").then().statusCode(200);
+
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.DeleteDeploymentGroup")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"applicationName\":\"" + application + "\",\"deploymentGroupName\":\"" + group + "\"}")
+                .post("/"));
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.UntagResource")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ResourceArn\":\"" + groupArn + "\",\"TagKeys\":[\"team\"]}").post("/"));
+        String create = """
+                {"applicationName":"%s","deploymentGroupName":"%s",
+                 "serviceRoleArn":"arn:aws:iam::000000000000:role/codedeploy",
+                 "tags":[{"Key":"team","Value":"red"}]}
+                """.formatted(application, group);
+        user.policy(allow("codedeploy:CreateDeploymentGroup") + "," + allow("iam:PassRole"));
+        refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateDeploymentGroup", "1.1")
+                .body(create).post("/").then(), "codedeploy:TagResource");
+
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"codedeploy:CreateDeploymentGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}},"
+                + allow("codedeploy:TagResource") + "," + allow("iam:PassRole"));
+        user.json("codedeploy", "CodeDeploy_20141006.CreateDeploymentGroup", "1.1")
+                .body(create).post("/").then().statusCode(200);
+        admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.ListTagsForResource")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ResourceArn\":\"" + groupArn + "\"}").post("/").then().statusCode(200)
+                .body("Tags.find { it.Key == 'team' }.Value", equalTo("red"));
     }
 
     @Test
@@ -568,6 +597,76 @@ class IamTagOnCreateEnforcementIntegrationTest {
     /** A {@code CreateKey} body whose {@code Tags} is an object, its one member named as its structure's key. */
     private static String keyTaggedByObject(String team) {
         return "{\"Tags\":{\"team\":{\"TagKey\":\"team\",\"TagValue\":\"" + team + "\"}}}";
+    }
+
+    /**
+     * A hub enabled with tags needs {@code securityhub:TagResource} on the hub, {@code hub/default} in the Region the
+     * request is signed for, and {@code EnableSecurityHub} is checked with the tags it carries; one enabled with none
+     * needs {@code EnableSecurityHub} alone. Each enable is in a Region of its own, as a hub is enabled once.
+     */
+    @Test
+    void aHubEnabledWithTagsNeedsTagResourceOnTheHub() {
+        User user = user("tag-hub");
+        String region = "ap-southeast-2";
+        String hub = "arn:aws:securityhub:" + region + ":" + ACCOUNT + ":hub/default";
+        user.policy(allow("securityhub:EnableSecurityHub"));
+        refusedRest(user.rest("securityhub", region).body(hub("blue")).post("/accounts").then(),
+                "securityhub:TagResource");
+
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"securityhub:EnableSecurityHub\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\"}}},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"securityhub:TagResource\",\"Resource\":\"" + hub + "\"}");
+        refusedRest(user.rest("securityhub", region).body(hub("red")).post("/accounts").then(),
+                "securityhub:EnableSecurityHub");
+        refusedRest(user.rest("securityhub", "ap-northeast-3").body(hub("blue")).post("/accounts").then(),
+                "securityhub:TagResource");
+        user.rest("securityhub", region).body(hub("blue")).post("/accounts").then().statusCode(200);
+        admin("securityhub", region).get("/tags/{arn}", hub).then().statusCode(200).body("Tags.team", equalTo("blue"));
+
+        user.policy(allow("securityhub:EnableSecurityHub"));
+        user.rest("securityhub", "ap-southeast-1").body(hub(null)).post("/accounts").then().statusCode(200);
+    }
+
+    /**
+     * A detector created with tags needs {@code guardduty:TagResource}, on {@code *} as the detector's id is one
+     * GuardDuty mints, and {@code CreateDetector} is checked with the tags it carries; one created with none needs
+     * {@code CreateDetector} alone.
+     */
+    @Test
+    void aDetectorCreatedWithTagsNeedsTagResource() {
+        User user = user("tag-detector");
+        String region = "ap-southeast-2";
+        user.policy(allow("guardduty:CreateDetector"));
+        refusedRest(user.rest("guardduty", region).body(detector("blue")).post("/detector").then(),
+                "guardduty:TagResource");
+
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"guardduty:CreateDetector\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\"}}},"
+                + allow("guardduty:TagResource"));
+        refusedRest(user.rest("guardduty", region).body(detector("red")).post("/detector").then(),
+                "guardduty:CreateDetector");
+        String tagged = user.rest("guardduty", region).body(detector("blue")).post("/detector").then().statusCode(200)
+                .extract().path("detectorId");
+        cleanup.register(() -> admin("guardduty", region).delete("/detector/{id}", tagged));
+        admin("guardduty", region).get("/detector/{id}", tagged).then().statusCode(200)
+                .body("tags.team", equalTo("blue"));
+        admin("guardduty", region).delete("/detector/{id}", tagged).then().statusCode(200);
+
+        user.policy(allow("guardduty:CreateDetector"));
+        String untagged = user.rest("guardduty", region).body(detector(null)).post("/detector").then()
+                .statusCode(200).extract().path("detectorId");
+        cleanup.register(() -> admin("guardduty", region).delete("/detector/{id}", untagged));
+    }
+
+    /** An {@code EnableSecurityHub} body tagging the hub with the {@code team} given, or with no tags. */
+    private static String hub(String team) {
+        return team == null ? "{\"EnableDefaultStandards\":false}"
+                : "{\"EnableDefaultStandards\":false,\"Tags\":{\"team\":\"" + team + "\"}}";
+    }
+
+    /** A {@code CreateDetector} body tagging the detector with the {@code team} given, or with no tags. */
+    private static String detector(String team) {
+        return team == null ? "{\"enable\":true}" : "{\"enable\":true,\"tags\":{\"team\":\"" + team + "\"}}";
     }
 
     /** A {@code CreateAnalyzer} body tagging the analyzer with the {@code team} given, or with no tags. */
@@ -680,6 +779,10 @@ class IamTagOnCreateEnforcementIntegrationTest {
         return given().header("Authorization", auth(ADMIN, service));
     }
 
+    private static RequestSpecification admin(String service, String region) {
+        return given().header("Authorization", auth(ADMIN, region, service));
+    }
+
     private static String suffix() {
         return Long.toString(System.nanoTime(), 36);
     }
@@ -705,6 +808,10 @@ class IamTagOnCreateEnforcementIntegrationTest {
 
         RequestSpecification rest(String service) {
             return given().header("Authorization", auth(accessKeyId, service)).contentType("application/json");
+        }
+
+        RequestSpecification rest(String service, String region) {
+            return given().header("Authorization", auth(accessKeyId, region, service)).contentType("application/json");
         }
 
         RequestSpecification cbor(String service) {

@@ -63,8 +63,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.isUpdate() && resource.getAttributes().containsKey(SNAPSHOT_ATTR)) {
             try {
                 rollbackUpdate(resource);
-                ctx = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(), ctx.stackName(),
-                        resource.getPhysicalId(), ctx.progress(), ctx.priorProperties());
+                ctx = ctx.withPriorPhysicalId(resource.getPhysicalId());
                 resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR);
                 resource.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
             } catch (RuntimeException failure) {
@@ -137,8 +136,7 @@ public class SchedulerScheduleCfnProvisioner implements CfnResourceProvisioner {
             priorIdentity = CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore)
                     ? ctx.priorPhysicalId() : address(priorGroup, ctx.priorPhysicalId());
         }
-        ProvisionContext cleanupContext = new ProvisionContext(ctx.engine(), ctx.region(), ctx.accountId(),
-                ctx.stackName(), priorIdentity, ctx.progress(), ctx.priorProperties());
+        ProvisionContext cleanupContext = ctx.withPriorPhysicalId(priorIdentity);
         ReplacementCleanup.record(cleanupResource(resource), cleanupContext, attributesBefore);
         if (moveSnapshot != null) {
             moveSnapshot.put("destinationCreated", true);

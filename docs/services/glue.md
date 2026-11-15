@@ -31,7 +31,7 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 |--------|-------------|
 | CreateDatabase | Creates a database in the local Glue Data Catalog. |
 | GetDatabase | Returns a stored Data Catalog database. |
-| GetDatabases | Lists databases in the local Glue Data Catalog. |
+| GetDatabases | Lists databases in pages using `MaxResults` and `NextToken`. |
 | DeleteDatabase | Deletes a database from the local Glue Data Catalog. |
 
 #### Tables
@@ -40,22 +40,26 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 |--------|-------------|
 | CreateTable | Creates a table definition in the local Glue Data Catalog. |
 | GetTable | Returns a stored table definition and resolves schema references when possible. |
-| GetTables | Lists table definitions for a database. |
+| GetTables | Lists table definitions for a database in pages using `MaxResults` and `NextToken`. |
 | UpdateTable | Replaces a table definition; the previous version is archived unless `SkipArchive` is set. |
 | DeleteTable | Deletes a table definition from a database. |
 | BatchDeleteTable | Deletes several tables of a database, reporting the missing ones in `Errors`. |
-| GetTableVersions | Lists the current and archived versions of a table, newest first. |
+| GetTableVersions | Lists the current and archived versions of a table, newest first, in pages using `MaxResults` and `NextToken`. |
 | GetTableVersion | Returns one version by `VersionId`, or the current version when none is given. |
 | DeleteTableVersion | Deletes an archived version; the current version cannot be deleted, as on AWS. |
 | BatchDeleteTableVersion | Deletes several archived versions, reporting the ones not deleted in `Errors`. |
 | SearchTables | Searches every table of the catalog by `SearchText` (substring, or exact when quoted), property `Filters` (string keys use the tokenised match of the API reference, time keys honour `Comparator`, other keys read table parameters) and `SortCriteria`, paged by `MaxResults` and `NextToken`. |
+
+`BatchDeleteTable` requires `TablesToDelete` with 0 to 100 names. Missing or oversized lists
+fail with `InvalidInputException` before any table is deleted. Valid batches keep their per-table
+`Errors` response.
 
 #### Partitions
 
 | Action | Description |
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
-| GetPartitions | Lists partitions stored for a Data Catalog table. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
+| GetPartitions | Lists partitions stored for a Data Catalog table in pages using `MaxResults` and `NextToken`. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
 | BatchDeletePartition | Deletes up to 25 partitions, reporting the ones not found in `Errors`. |
 | CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
 | GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
@@ -328,6 +332,25 @@ ARN `arn:aws:glue:<region>:<account>:dataQualityRuleset/<name>`.
 
 Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
 
+## Iceberg REST endpoint
+
+Floci serves AWS Glue's [Iceberg REST endpoint](https://docs.aws.amazon.com/glue/latest/dg/connect-glu-iceberg-rest.html) at `/iceberg` on the Floci endpoint (`https://glue.<region>.amazonaws.com/iceberg` on AWS), signed for the `glue` service. An Iceberg REST catalog client (Spark's `SparkCatalog` with `type=rest`, PyIceberg, Trino) uses it as it uses AWS's: the warehouse is the account id, and the path prefix is `/v1/catalogs/{catalog}`, where `{catalog}` is `:` (the caller's default catalog) or the caller's account id.
+
+```python
+spark = (SparkSession.builder
+    .config("spark.sql.catalog.glue", "org.apache.iceberg.spark.SparkCatalog")
+    .config("spark.sql.catalog.glue.type", "rest")
+    .config("spark.sql.catalog.glue.uri", "http://localhost:4566/iceberg")
+    .config("spark.sql.catalog.glue.warehouse", "000000000000")
+    .config("spark.sql.catalog.glue.rest.sigv4-enabled", "true")
+    .config("spark.sql.catalog.glue.rest.signing-name", "glue")
+    .getOrCreate())
+```
+
+The operations are the twelve AWS lists: `GetConfig`, `ListNamespaces`, `CreateNamespace`, `LoadNamespaceMetadata`, `UpdateNamespaceProperties`, `DeleteNamespace`, `ListTables`, `CreateTable`, `LoadTable`, `TableExists`, `UpdateTable` and `DeleteTable`. A namespace is a Glue database (single-level, as on AWS); its `location` and `comment` properties are the database's `LocationUri` and `Description`. A table is a Glue table whose `Parameters.table_type` is `ICEBERG` and whose `Parameters.metadata_location` names its current metadata file in S3. The writer writes data files and manifests itself. Each commit checks the request's requirements, applies its updates, writes the next metadata file beside the last one (`<location>/metadata/00001-<uuid>.metadata.json`), and moves `metadata_location` to it, with `previous_metadata_location` set to the old one. If the Glue table changed since the commit's base, the commit is refused with `CommitFailedException` (409). A commit that fails after writing its metadata file (Glue refuses it, or it was not the last commit) removes that file again. Because every commit lands on the Glue table, Spark's `GlueCatalog` and Athena read each committed snapshot. A staged create (`stage-create`) creates nothing until its commit (`assert-create`), the way Spark and DuckDB create tables. A table with no location takes its namespace's location plus its name. `DeleteTable` drops the Glue table and leaves its files in S3.
+
+Not yet: IAM policies are not checked on this endpoint, so under IAM enforcement it answers only the account's root credentials and refuses IAM principals (`ForbiddenException`, 403) rather than let them through unchecked. Other accounts' catalogs and nested catalogs (`s3tablescatalog/<bucket>`) are not served. DuckDB signs SigV4 catalog requests only over HTTPS, so DuckDB attaches this endpoint with SigV4 only when Floci serves TLS (`floci.tls.enabled`).
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -437,3 +460,5 @@ aws glue list-schema-versions \
   --schema-id RegistryName=local-registry,SchemaName=orders \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+Catalog pagination for GetDatabases, GetTables, GetPartitions and GetTableVersions uses opaque continuation cursors ordered by database name, table name, partition values and descending version number respectively. Removing the last returned item or inserting items before its cursor does not invalidate continuation. Table schema references are resolved for the selected page.

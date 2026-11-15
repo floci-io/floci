@@ -18,6 +18,7 @@ import io.floci.aws.services.codedeploy.model.DeploymentConfig;
 import io.floci.aws.services.codedeploy.model.DeploymentGroup;
 import io.floci.aws.services.codedeploy.model.OnPremisesInstance;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.model.CreateTaskSetRequest;
 import io.floci.aws.services.ecs.model.TaskSet;
@@ -36,6 +37,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -347,7 +349,7 @@ public class CodeDeployService {
 
         if (tags != null && !tags.isEmpty()) {
             String arn = applicationArn(region, name);
-            applyTags(arn, tags);
+            tagResource(arn, tags);
         }
         return app;
     }
@@ -424,7 +426,7 @@ public class CodeDeployService {
 
     public DeploymentGroup createDeploymentGroup(String region, String appName, String groupName,
                                                   String deploymentConfigName, String serviceRoleArn,
-                                                  Map<String, Object> fields) {
+                                                  Map<String, Object> fields, List<Map<String, String>> tags) {
         getApplication(region, appName);
         Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
         Map<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
@@ -442,6 +444,9 @@ public class CodeDeployService {
         applyGroupFields(group, fields);
         groupStore.put(groupName, group);
         persistRegion(deploymentGroups, region);
+        if (tags != null && !tags.isEmpty()) {
+            tagResource(deploymentGroupArn(region, appName, groupName), tags);
+        }
         return group;
     }
 
@@ -465,14 +470,25 @@ public class CodeDeployService {
         Map<String, DeploymentGroup> groupStore = deploymentGroupsFor(region)
                 .computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
 
+        if (newGroupName != null && !newGroupName.equals(currentGroupName)
+                && groupStore.containsKey(newGroupName)) {
+            throw new AwsException("DeploymentGroupAlreadyExistsException",
+                    "Deployment group already exists: " + newGroupName, 400);
+        }
+
         if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
         if (serviceRoleArn != null) { group.setServiceRoleArn(serviceRoleArn); }
         applyGroupFields(group, fields);
 
         if (newGroupName != null && !newGroupName.equals(currentGroupName)) {
+            String oldArn = deploymentGroupArn(region, appName, currentGroupName);
             groupStore.remove(currentGroupName);
             group.setDeploymentGroupName(newGroupName);
             groupStore.put(newGroupName, group);
+            Map<String, String> groupTags = tags.remove(oldArn);
+            if (groupTags != null) {
+                tags.put(deploymentGroupArn(region, appName, newGroupName), groupTags);
+            }
         }
         persistRegion(deploymentGroups, region);
         return group;
@@ -486,6 +502,7 @@ public class CodeDeployService {
             throw new AwsException("DeploymentGroupDoesNotExistException",
                     "Deployment group does not exist: " + groupName, 400);
         }
+        tags.remove(deploymentGroupArn(region, appName, groupName));
         persistRegion(deploymentGroups, region);
     }
 
@@ -758,7 +775,8 @@ public class CodeDeployService {
                                                  List<Map<String, String>> tagFilters) {
         return onPremisesFor(region).values().stream()
                 .filter(i -> registrationStatus == null || registrationStatus.equals(i.getRegistrationStatus()))
-                .filter(i -> tagFilters == null || tagFilters.isEmpty() || matchesTagFilters(i.getTags(), tagFilters))
+                .filter(i -> tagFilters == null || tagFilters.isEmpty()
+                        || matchesTagFilters(i.getTags(), tagFilters, TagFilterMatchMode.ALL))
                 .map(OnPremisesInstance::getInstanceName)
                 .collect(Collectors.toList());
     }
@@ -1076,17 +1094,11 @@ public class CodeDeployService {
         // EC2 instances by tag filters
         List<Map<String, String>> ec2TagFilters = group.getEc2TagFilters();
         if (ec2TagFilters != null && !ec2TagFilters.isEmpty()) {
-            Map<String, List<String>> filters = new java.util.LinkedHashMap<>();
-            for (Map<String, String> filter : ec2TagFilters) {
-                String key = filter.get("Key");
-                String value = filter.get("Value");
-                if (key != null && value != null) {
-                    filters.computeIfAbsent("tag:" + key, k -> new ArrayList<>()).add(value);
-                }
-            }
             try {
-                ec2Service.describeInstances(region, null, filters).stream()
+                ec2Service.describeInstances(region, List.of(), Map.of()).stream()
                         .flatMap(r -> r.getInstances().stream())
+                        .filter(inst -> matchesTagFilters(ec2TagMaps(inst.getTags()),
+                                ec2TagFilters, TagFilterMatchMode.ANY))
                         .map(inst -> inst.getInstanceId())
                         .filter(id -> id != null)
                         .forEach(instanceIds::add);
@@ -1100,7 +1112,7 @@ public class CodeDeployService {
         if (onPremFilters != null && !onPremFilters.isEmpty()) {
             onPremisesFor(region).values().stream()
                     .filter(inst -> "Registered".equals(inst.getRegistrationStatus()))
-                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters))
+                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters, TagFilterMatchMode.ANY))
                     .map(OnPremisesInstance::getInstanceName)
                     .forEach(instanceIds::add);
         }
@@ -1117,18 +1129,46 @@ public class CodeDeployService {
         return instanceIds;
     }
 
+    private List<Map<String, String>> ec2TagMaps(List<Tag> tags) {
+        if (tags == null) { return List.of(); }
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Tag tag : tags) {
+            Map<String, String> fields = new HashMap<>();
+            fields.put("Key", tag.getKey());
+            fields.put("Value", tag.getValue());
+            result.add(fields);
+        }
+        return result;
+    }
+
+    private enum TagFilterMatchMode { ALL, ANY }
+
     private boolean matchesTagFilters(List<Map<String, String>> instanceTags,
-                                       List<Map<String, String>> filters) {
+                                       List<Map<String, String>> filters, TagFilterMatchMode mode) {
+        boolean hasApplicableFilter = false;
         for (Map<String, String> filter : filters) {
             String key = filter.get("Key");
             String value = filter.get("Value");
-            if (key == null) { continue; }
-            boolean found = instanceTags.stream()
-                    .anyMatch(t -> key.equals(t.get("Key"))
-                            && (value == null || value.equals(t.get("Value"))));
-            if (!found) { return false; }
+            String type = filter.get("Type");
+            if (key == null && type == null) { continue; }
+            hasApplicableFilter = true;
+            boolean found = instanceTags.stream().anyMatch(tag -> {
+                if ("VALUE_ONLY".equals(type)) {
+                    return value != null && value.equals(tag.get("Value"));
+                }
+                if ("KEY_ONLY".equals(type)) {
+                    return key != null && key.equals(tag.get("Key"));
+                }
+                if ("KEY_AND_VALUE".equals(type) && value == null) {
+                    return false;
+                }
+                return key != null && key.equals(tag.get("Key"))
+                        && (value == null || value.equals(tag.get("Value")));
+            });
+            if (mode == TagFilterMatchMode.ANY && found) { return true; }
+            if (mode == TagFilterMatchMode.ALL && !found) { return false; }
         }
-        return true;
+        return mode == TagFilterMatchMode.ALL || !hasApplicableFilter;
     }
 
     private AppSpecInfo parseAppSpec(Map<String, Object> revision) {
@@ -1914,15 +1954,5 @@ public class CodeDeployService {
         if (val instanceof Map<?, ?> m) {
             setter.accept(group, (Map<String, Object>) m);
         }
-    }
-
-    private void applyTags(String arn, List<Map<String, String>> tagList) {
-        Map<String, String> tagMap = tags.computeIfAbsent(arn, k -> new ConcurrentHashMap<>());
-        for (Map<String, String> t : tagList) {
-            String key = t.containsKey("Key") ? t.get("Key") : t.get("key");
-            String value = t.containsKey("Value") ? t.get("Value") : t.get("value");
-            if (key != null) { tagMap.put(key, value != null ? value : ""); }
-        }
-        tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 }

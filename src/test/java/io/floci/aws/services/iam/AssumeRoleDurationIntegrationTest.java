@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -11,7 +12,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.Role;
@@ -44,10 +44,10 @@ class AssumeRoleDurationIntegrationTest {
     void signedDurationLimits(String callerKind, int maximum, int requested, boolean allowed) throws Exception {
         String policy = "{\"Statement\":{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}}";
         try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "duration-", "admin", policy);
-             IamClient admin = IamClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                     .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
-                             user.accessKeyId(), user.secretAccessKey()))).build();
-             StsClient issuer = client(AwsBasicCredentials.create(user.accessKeyId(), user.secretAccessKey()))) {
+             IamClient admin = AwsTestClients.create(IamClient.builder(),
+                     user.accessKeyId(), user.secretAccessKey(), Region.US_EAST_1, endpoint);
+             StsClient issuer = AwsTestClients.create(StsClient.builder(),
+                     user.accessKeyId(), user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
             Role role = admin.createRole(b -> b.roleName("duration-" + UUID.randomUUID()).path("/teams/duration/")
                     .maxSessionDuration(maximum).assumeRolePolicyDocument("{\"Statement\":{\"Effect\":\"Allow\","
                             + "\"Principal\":{\"AWS\":\"" + ACCOUNT + "\"},\"Action\":\"sts:AssumeRole\"}}")).role();
@@ -66,7 +66,7 @@ class AssumeRoleDurationIntegrationTest {
                     caller = AwsSessionCredentials.create(source.accessKeyId(), source.secretAccessKey(),
                             source.sessionToken());
                 }
-                try (StsClient sts = client(caller)) {
+                try (StsClient sts = AwsTestClients.create(StsClient.builder(), caller, Region.US_EAST_1, endpoint)) {
                     AssumeRoleRequest.Builder request = AssumeRoleRequest.builder().roleArn(role.arn())
                             .roleSessionName("duration-check");
                     if (requested != 0) {
@@ -105,10 +105,5 @@ class AssumeRoleDurationIntegrationTest {
                 }
             }
         }
-    }
-
-    private StsClient client(AwsCredentials credentials) {
-        return StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(credentials)).build();
     }
 }

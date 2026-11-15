@@ -253,6 +253,53 @@ class CognitoCustomSrpAuthTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void undeclaredNewPasswordAttributesPreservePasswordAndSession(boolean custom, boolean admin) throws Exception {
+        temporaryPassword = true;
+        service.adminSetUserPassword(pool.getId(), USERNAME, PASSWORD, false);
+        service.addCustomAttributes(pool.getId(), List.of(
+                Map.of("Name", "declared", "AttributeDataType", "String", "Mutable", true)));
+        Map<String, Object> challenge;
+        if (custom) {
+            Map<String, Object> started = start(admin);
+            challenge = respond(admin, client.getClientId(), "PASSWORD_VERIFIER", started, proof(started));
+        } else {
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH"));
+            Map<String, String> parameters = Map.of("USERNAME", USERNAME, "PASSWORD", PASSWORD);
+            challenge = admin
+                    ? service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                            parameters, Map.of())
+                    : service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH", parameters);
+        }
+        assertEquals("NEW_PASSWORD_REQUIRED", challenge.get("ChallengeName"));
+        String originalHash = service.adminGetUser(pool.getId(), USERNAME).getPasswordHash();
+        Map<String, String> responses = new HashMap<>(Map.of("USERNAME", USERNAME, "NEW_PASSWORD", "Changed1234!",
+                "userAttributes.custom:undeclared", "invalid", "userAttributes.custom:declared", "valid"));
+
+        AwsException error = assertThrows(AwsException.class, () -> respond(admin, client.getClientId(),
+                "NEW_PASSWORD_REQUIRED", challenge, responses));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Attribute does not exist in the schema"));
+        assertEquals(originalHash, service.adminGetUser(pool.getId(), USERNAME).getPasswordHash());
+        assertEquals("FORCE_CHANGE_PASSWORD", service.adminGetUser(pool.getId(), USERNAME).getUserStatus());
+        assertFalse(service.adminGetUser(pool.getId(), USERNAME).getAttributes().containsKey("custom:undeclared"));
+        assertFalse(service.adminGetUser(pool.getId(), USERNAME).getAttributes().containsKey("custom:declared"));
+
+        responses.remove("userAttributes.custom:undeclared");
+        Map<String, Object> next = respond(admin, client.getClientId(), "NEW_PASSWORD_REQUIRED", challenge, responses);
+        if (custom) {
+            assertEquals("CUSTOM_CHALLENGE", next.get("ChallengeName"));
+        } else {
+            assertNotNull(next.get("AuthenticationResult"));
+        }
+        assertEquals("valid", service.adminGetUser(pool.getId(), USERNAME).getAttributes().get("custom:declared"));
+        assertEquals("CONFIRMED", service.adminGetUser(pool.getId(), USERNAME).getUserStatus());
+        assertNotEquals(originalHash, service.adminGetUser(pool.getId(), USERNAME).getPasswordHash());
+        assertDenied(() -> respond(admin, client.getClientId(), "NEW_PASSWORD_REQUIRED", challenge, responses));
+    }
+
     @Test
     void rejectedCustomResponseDoesNotReplaceClientMetadata() throws Exception {
         Map<String, Object> started = start(false);

@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -31,7 +32,7 @@ class EksWorkerAuthenticationIntegrationTest {
         String profileArn = "arn:aws:iam::" + account + ":instance-profile/" + name;
         given().header("Authorization", auth(account, "iam"))
                 .formParam("Action", "CreateRole").formParam("RoleName", name).formParam("Path", "/path/")
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
         given().header("Authorization", auth(account, "iam"))
                 .formParam("Action", "CreateInstanceProfile").formParam("InstanceProfileName", name)
                 .post("/").then().statusCode(200);

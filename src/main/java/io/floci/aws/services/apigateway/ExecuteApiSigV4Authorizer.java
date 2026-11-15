@@ -2,6 +2,7 @@ package io.floci.aws.services.apigateway;
 
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.auth.CredentialScope;
 import io.floci.aws.core.common.auth.SessionTokenCheck;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
@@ -118,7 +119,7 @@ public class ExecuteApiSigV4Authorizer {
 
     private Result verify(String httpMethod, HttpHeaders headers, UriInfo uriInfo, byte[] body,
                           String signedRequestPath) throws Exception {
-        MultivaluedMap<String, String> queryParameters = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParameters = ResteasyRequests.queryParameters(uriInfo);
         String authorization = headers == null ? null : headers.getHeaderString(HttpHeaders.AUTHORIZATION);
         boolean presigned = SigV4SignedRequest.ALGORITHM.equals(queryParameters.getFirst("X-Amz-Algorithm"));
 

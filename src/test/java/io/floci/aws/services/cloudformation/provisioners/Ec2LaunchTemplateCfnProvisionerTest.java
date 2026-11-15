@@ -11,6 +11,8 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.LaunchTemplate;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.InOrder;
@@ -34,6 +36,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -273,6 +276,22 @@ class Ec2LaunchTemplateCfnProvisionerTest {
 
         // Second rollback without snapshot should return false
         assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"launchTemplateVersionDoesNotExist", "unexpectedError", "InternalError"})
+    void rollbackOnlyToleratesAnAlreadyDeletedVersion(String code) {
+        StackResource resource = resource("Lt");
+        resource.getAttributes().put("LatestVersionNumber", "2");
+        resource.getAttributes().put(CfnRollback.LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR,
+                "{\"region\":\"us-east-1\",\"launchTemplateId\":\"lt-test\","
+                        + "\"createdVersion\":\"2\",\"priorLatestVersion\":\"1\",\"priorDefaultVersion\":\"1\"}");
+        doThrow(new AwsException(code, "Deletion failed", 400)).when(ec2)
+                .deleteLaunchTemplateVersion("us-east-1", "lt-test", "2");
+        boolean alreadyGone = "launchTemplateVersionDoesNotExist".equals(code);
+        assertEquals(alreadyGone, provisioner.rollbackUpdate(resource));
+        assertEquals(alreadyGone ? "1" : "2", resource.getAttributes().get("LatestVersionNumber"));
+        verify(ec2).deleteLaunchTemplateVersion("us-east-1", "lt-test", "2");
     }
 
     @Test

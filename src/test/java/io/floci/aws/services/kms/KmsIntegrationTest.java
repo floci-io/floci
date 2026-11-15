@@ -37,6 +37,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -2578,6 +2579,24 @@ class KmsIntegrationTest {
                         .formatted(pair.getString("PrivateKeyCiphertextBlob")))
                 .then().statusCode(200).extract().path("Plaintext");
         assertEquals(pair.getString("PrivateKeyPlaintext"), plaintext);
+    }
+
+    @Test
+    void createAliasOnExistingNameReturnsAlreadyExistsAndKeepsTheFirstTarget() {
+        String first = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String second = createKeyArn("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT");
+        String alias = "alias/dup-" + UUID.randomUUID();
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, first))
+                .then().statusCode(200);
+
+        callKms("CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, second))
+                .then().statusCode(400)
+                .body("__type", equalTo("AlreadyExistsException"))
+                .body("message", containsString(":alias/dup-"));
+
+        callKms("DescribeKey", "{\"KeyId\":\"%s\"}".formatted(alias))
+                .then().statusCode(200)
+                .body("KeyMetadata.Arn", equalTo(first));
     }
 
     @Test

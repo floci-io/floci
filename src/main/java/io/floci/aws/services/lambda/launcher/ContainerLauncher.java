@@ -13,6 +13,7 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
+import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -21,6 +22,7 @@ import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.LambdaLayerService;
 import io.floci.aws.services.lambda.LambdaLogDestinations;
 import io.floci.aws.services.lambda.model.ContainerState;
+import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
@@ -460,6 +462,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     COPY_MAX_ATTEMPTS, COPY_RETRY_BACKOFF_MS);
         }
 
+        // AWS runs an image as its own user, not the image's USER; init fails when that user
+        // cannot enter the working directory.
+        if ("Image".equals(fn.getPackageType())) {
+            List<String> mountPaths = fn.getFileSystemConfigs() == null ? List.of()
+                    : fn.getFileSystemConfigs().stream().map(LambdaFileSystemConfig::getLocalMountPath).toList();
+            WorkingDirectoryAccess.requireLambdaUserCanEnter(dockerClient, containerId, mountPaths);
+        }
+
         // Now start the container with code in place
         joinVpcNetwork(fn, containerId, lambdaAccountId, lambdaRegion);
         lifecycleManager.startCreated(containerId, spec);
@@ -559,11 +569,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         if (architectures.size() != 1) {
             return Optional.empty();
         }
-        return switch (architectures.getFirst()) {
-            case "arm64" -> Optional.of("linux/arm64");
-            case "x86_64" -> Optional.of("linux/amd64");
-            default -> Optional.empty();
-        };
+        return Optional.ofNullable(DockerPlatforms.forArchitecture(architectures.getFirst()));
     }
 
     private Optional<String> requestedDockerPlatform(LambdaFunction fn, LambdaDockerFlags dockerFlags) {

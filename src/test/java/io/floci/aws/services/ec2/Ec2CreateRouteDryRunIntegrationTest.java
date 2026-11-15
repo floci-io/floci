@@ -17,6 +17,7 @@ import java.net.URI;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -34,7 +35,7 @@ class Ec2CreateRouteDryRunIntegrationTest {
                 RouteFixture fixture = new RouteFixture(client)) {
             List<Route> before = fixture.routes();
             CreateRouteRequest request = fixture.request().gatewayId(fixture.gatewayId).dryRun(true).build();
-            assertError("DryRunOperation", 412, () -> client.createRoute(request));
+            assertAwsError("DryRunOperation", 412, () -> client.createRoute(request));
             assertEquals(before, fixture.routes());
             assertTrue(client.createRoute(request.toBuilder().dryRun(false).build()).returnValue());
             assertEquals(before.size() + 1, fixture.routes().size());
@@ -46,7 +47,7 @@ class Ec2CreateRouteDryRunIntegrationTest {
         try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint);
                 RouteFixture fixture = new RouteFixture(client)) {
             List<Route> before = fixture.routes();
-            assertError("DryRunOperation", 412, () -> client.createRoute(fixture.request()
+            assertAwsError("DryRunOperation", 412, () -> client.createRoute(fixture.request()
                     .natGatewayId("nat-0123456789abcdef0").dryRun(true).build()));
             assertEquals(before, fixture.routes());
         }
@@ -60,10 +61,8 @@ class Ec2CreateRouteDryRunIntegrationTest {
             List<Route> before = fixture.routes();
             try (Ec2Client caller = AwsTestClients.create(Ec2Client.builder(), user.accessKeyId(),
                     user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
-                Ec2Exception error = assertThrows(Ec2Exception.class, () -> caller.createRoute(fixture.request()
+                assertAwsError("UnauthorizedOperation", 403, () -> caller.createRoute(fixture.request()
                         .gatewayId(fixture.gatewayId).dryRun(true).build()));
-                assertEquals(403, error.statusCode());
-                assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
             }
             assertEquals(before, fixture.routes());
         }
@@ -101,20 +100,12 @@ class Ec2CreateRouteDryRunIntegrationTest {
                     user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
             List<Route> before = fixture.routes();
             CreateRouteRequest request = fixture.request().gatewayId(fixture.gatewayId).dryRun(true).build();
-            assertError("DryRunOperation", 412, () -> caller.createRoute(request));
+            assertAwsError("DryRunOperation", 412, () -> caller.createRoute(request));
             SignedIamUsers.iam(endpoint, "DeleteUserPolicy", Map.of("UserName", user.name(), "PolicyName", "route"))
                     .then().statusCode(200);
-            Ec2Exception denied = assertThrows(Ec2Exception.class, () -> caller.createRoute(request));
-            assertEquals(403, denied.statusCode());
-            assertEquals("UnauthorizedOperation", denied.awsErrorDetails().errorCode());
+            assertAwsError("UnauthorizedOperation", 403, () -> caller.createRoute(request));
             assertEquals(before, fixture.routes());
         }
-    }
-
-    private static void assertError(String code, int status, Runnable request) {
-        Ec2Exception error = assertThrows(Ec2Exception.class, request::run);
-        assertEquals(status, error.statusCode());
-        assertEquals(code, error.awsErrorDetails().errorCode());
     }
 
     private static final class RouteFixture implements AutoCloseable {

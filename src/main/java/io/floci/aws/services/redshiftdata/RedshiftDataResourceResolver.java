@@ -6,8 +6,11 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.DatabaseSecretCredentials;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.redshift.RedshiftCredentialBroker;
+import io.floci.aws.services.redshift.RedshiftIamDbUserResolver;
 import io.floci.aws.services.redshift.RedshiftService;
+import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.proxy.CopyStatementParser;
 import io.floci.aws.services.redshift.spectrum.SpectrumSession;
@@ -35,6 +38,18 @@ class RedshiftDataResourceResolver {
     private final RedshiftCredentialBroker credentialBroker;
     private final RegionResolver regionResolver;
     private final RedshiftServerlessService serverlessService;
+    private final RedshiftIamDbUserResolver iamDbUserResolver;
+    private final RequestContext requestContext;
+
+    RedshiftDataResourceResolver(RedshiftService redshiftService,
+                                 SecretsManagerService secretsManagerService,
+                                 ObjectMapper objectMapper,
+                                 RedshiftCredentialBroker credentialBroker,
+                                 RegionResolver regionResolver,
+                                 RedshiftServerlessService serverlessService) {
+        this(redshiftService, secretsManagerService, objectMapper, credentialBroker,
+                regionResolver, serverlessService, null, null);
+    }
 
     @Inject
     RedshiftDataResourceResolver(RedshiftService redshiftService,
@@ -42,13 +57,17 @@ class RedshiftDataResourceResolver {
                                  ObjectMapper objectMapper,
                                  RedshiftCredentialBroker credentialBroker,
                                  RegionResolver regionResolver,
-                                 RedshiftServerlessService serverlessService) {
+                                 RedshiftServerlessService serverlessService,
+                                 RedshiftIamDbUserResolver iamDbUserResolver,
+                                 RequestContext requestContext) {
         this.redshiftService = redshiftService;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
         this.credentialBroker = credentialBroker;
         this.regionResolver = regionResolver;
         this.serverlessService = serverlessService;
+        this.iamDbUserResolver = iamDbUserResolver;
+        this.requestContext = requestContext;
     }
 
     /** The ARN of the serverless workgroup a request names by its name or ARN, as {@link #resolve} reads it. */
@@ -96,9 +115,12 @@ class RedshiftDataResourceResolver {
         String host = hasProxy ? "127.0.0.1" : workgroup.host();
         int port = hasProxy ? proxyPort : workgroup.port();
         if (!hasText(request, "SecretArn")) {
+            String iamUser = resolveIamDbUser();
+            String backendKey = accountId + ":" + RedshiftServerlessRuntime.backendId(region, workgroup.workgroupName());
+            DbIdentity identity = new DbIdentity(iamUser, true, List.of());
             return new DatabaseTarget(workgroup.arn(), host, port, database,
                     workgroup.masterUsername(), workgroup.masterPassword(), spectrum, null,
-                    workgroup.masterUsername(), workgroup.workgroupName());
+                    iamUser, workgroup.workgroupName(), identity, backendKey);
         }
         String secretArn = request.get("SecretArn").asText();
         DatabaseSecretCredentials creds = secretCredentials(secretArn, region);
@@ -108,6 +130,14 @@ class RedshiftDataResourceResolver {
         }
         return new DatabaseTarget(workgroup.arn(), host, port, database,
                 user, creds.password(), spectrum, null, user, workgroup.workgroupName());
+    }
+
+    private String resolveIamDbUser() {
+        if (iamDbUserResolver == null) {
+            return "IAMR:floci";
+        }
+        String accessKeyId = requestContext == null ? null : requestContext.getAccessKeyId();
+        return iamDbUserResolver.resolveDbUserForAccessKey(accessKeyId);
     }
 
     private boolean isManagedAdminSecret(String secretArn, String managedSecretArn, String region) {
@@ -161,15 +191,16 @@ class RedshiftDataResourceResolver {
         if (dbUser.equals(cluster.getMasterUsername())) {
             return target(clusterArn(clusterId, region), cluster, database, dbUser, cluster.getMasterPassword(), needsProxy);
         }
-        boolean liveCredential = credentialBroker
-                .resolve(regionResolver.getAccountId(), clusterId, dbUser)
-                .isPresent();
-        if (liveCredential) {
-            // The minted DbUser is nominal: connect as the cluster master.
+        Optional<TempCredential> liveCredential = credentialBroker
+                .resolve(regionResolver.getAccountId(), clusterId, dbUser);
+        if (liveCredential.isPresent()) {
+            TempCredential cred = liveCredential.get();
             DatabaseTarget backend = target(clusterArn(clusterId, region), cluster, database,
                     cluster.getMasterUsername(), cluster.getMasterPassword(), needsProxy);
+            DbIdentity identity = new DbIdentity(cred.databaseRole(), cred.autoCreate(), cred.dbGroups());
+            String backendKey = regionResolver.getAccountId() + ":" + clusterId;
             return new DatabaseTarget(backend.arn(), backend.host(), backend.port(), backend.database(), backend.user(),
-                    backend.password(), backend.spectrum(), cluster, dbUser);
+                    backend.password(), backend.spectrum(), cluster, dbUser, null, identity, backendKey);
         }
         throw validation("DbUser " + dbUser + " has no active credentials; call GetClusterCredentials first.");
     }
@@ -252,11 +283,23 @@ class RedshiftDataResourceResolver {
         return value == null || value.isNull() ? null : value.asText();
     }
 
+    record DbIdentity(String role, boolean autoCreate, List<String> dbGroups) {
+        DbIdentity {
+            dbGroups = dbGroups == null ? List.of() : List.copyOf(dbGroups);
+        }
+    }
+
     record DatabaseTarget(String arn, String host, int port, String database, String user, String password,
-                          SpectrumSession spectrum, Cluster cluster, String auditUser, String workgroupName) {
+                          SpectrumSession spectrum, Cluster cluster, String auditUser, String workgroupName,
+                          DbIdentity dbIdentity, String backendKey) {
+        DatabaseTarget(String arn, String host, int port, String database, String user, String password,
+                       SpectrumSession spectrum, Cluster cluster, String auditUser, String workgroupName) {
+            this(arn, host, port, database, user, password, spectrum, cluster, auditUser, workgroupName, null, null);
+        }
+
         DatabaseTarget(String arn, String host, int port, String database, String user, String password,
                        SpectrumSession spectrum, Cluster cluster, String auditUser) {
-            this(arn, host, port, database, user, password, spectrum, cluster, auditUser, null);
+            this(arn, host, port, database, user, password, spectrum, cluster, auditUser, null, null, null);
         }
 
         DatabaseTarget(String arn, String host, int port, String database, String user, String password,

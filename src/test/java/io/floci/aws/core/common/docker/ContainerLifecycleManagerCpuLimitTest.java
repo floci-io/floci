@@ -121,6 +121,29 @@ class ContainerLifecycleManagerCpuLimitTest {
         assertEquals(16_000_000_000L, hostConfig.getNanoCPUs());
     }
 
+    @Test
+    void aDnsNameIsTheContainersHostNameAndItsAliasOnItsNetwork() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
+        ContainerSpec spec = new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class))
+                .newContainer("app:latest").withDnsName("ip-10-1-0-1.ec2.internal").build();
+        DockerClient dockerClient = mock(DockerClient.class);
+        stubDaemonCpuCount(dockerClient, EIGHT_CPU_HOST);
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("app:latest")).thenReturn(createCmd);
+        CreateContainerResponse response = mock(CreateContainerResponse.class);
+        when(response.getId()).thenReturn("app-id");
+        when(createCmd.exec()).thenReturn(response);
+        ImageCacheService imageCacheService = mock(ImageCacheService.class);
+        when(imageCacheService.ensureImageExists(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        new ContainerLifecycleManager(dockerClient, imageCacheService, mock(ContainerDetector.class), config)
+                .create(spec);
+
+        verify(createCmd).withHostName("ip-10-1-0-1.ec2.internal");
+        verify(createCmd).withAliases("ip-10-1-0-1.ec2.internal");
+    }
+
     private static HostConfig createHostConfig(Integer hostCpus,
                                                UnaryOperator<ContainerBuilder.Builder> customizer) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);

@@ -15,6 +15,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.latestSms;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
@@ -451,13 +452,6 @@ class CognitoMessageMfaIntegrationTest {
                  "ChallengeResponses":{"USERNAME":"%s","%s":"%s"}}
                 """.formatted(clientId, challengeName, challenge.path("Session").asText(), user.username(), key,
                 value);
-    }
-
-    private static String latestSms(String phone) throws Exception {
-        JsonNode messages = JSON.readTree(given().queryParam("phone", phone).get("/_aws/sns")
-                .then().statusCode(200).extract().asString()).path("messages");
-        assertTrue(messages.isArray() && !messages.isEmpty(), "an SMS should have been sent to " + phone);
-        return messages.get(messages.size() - 1).path("Message").asText();
     }
 
     /** The newest message to {@code recipient}: {@code /_aws/ses?email=} filters by sender, so match the recipient here. */

@@ -61,6 +61,9 @@ public class WebIdentityTrustPolicyEvaluator {
             LOG.warnv("Failed to parse web-identity trust policy: {0}", e.getMessage());
             return false;
         }
+        if (!TrustPolicyStatements.wellFormed(statements)) {
+            return false;
+        }
 
         boolean allow = false;
         if (statements.isArray()) {
@@ -92,7 +95,7 @@ public class WebIdentityTrustPolicyEvaluator {
         if (!conditionsSatisfied(stmt.get("Condition"), issuerKeyPrefix, claims)) {
             return Match.NO_MATCH;
         }
-        return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+        return TrustPolicyStatements.denies(stmt) ? Match.DENY : Match.ALLOW;
     }
 
     /**

@@ -10,7 +10,7 @@ import java.util.Map;
  */
 public class PolicyStatement {
 
-    private final String effect;            // "Allow" or "Deny"
+    private final String effect;            // "Allow", "Deny", or neither, which states nothing
     private final Map<String, List<String>> principals;    // Principal patterns by type; null when not set
     private final Map<String, List<String>> notPrincipals; // NotPrincipal patterns by type; null when not set
     private final List<String> actions;     // IAM action patterns; null when notActions is set
@@ -24,6 +24,8 @@ public class PolicyStatement {
     // statements from many documents are evaluated as one list, so each carries its own. Null
     // when the document has no Version element, which is the 2008-10-17 default.
     private final String version;
+    // The statement's Sid, for naming it in a decision record. Never used in matching. Null when absent.
+    private final String sid;
 
     public PolicyStatement(String effect,
                            Map<String, List<String>> principals,
@@ -34,6 +36,20 @@ public class PolicyStatement {
                            List<String> notResources,
                            Map<String, Map<String, List<String>>> conditions,
                            String version) {
+        this(effect, principals, notPrincipals, actions, notActions, resources, notResources, conditions,
+                version, null);
+    }
+
+    public PolicyStatement(String effect,
+                           Map<String, List<String>> principals,
+                           Map<String, List<String>> notPrincipals,
+                           List<String> actions,
+                           List<String> notActions,
+                           List<String> resources,
+                           List<String> notResources,
+                           Map<String, Map<String, List<String>>> conditions,
+                           String version,
+                           String sid) {
         this.effect = effect;
         this.principals = principals;
         this.notPrincipals = notPrincipals;
@@ -43,6 +59,7 @@ public class PolicyStatement {
         this.notResources = notResources;
         this.conditions = conditions;
         this.version = version;
+        this.sid = sid;
     }
 
     /** Without a version, {@code ${...}} stays literal text, as it does under 2008-10-17. */
@@ -69,7 +86,15 @@ public class PolicyStatement {
     public List<String> getNotResources()  { return notResources; }
     public Map<String, Map<String, List<String>>> getConditions() { return conditions; }
     public String getVersion()             { return version; }
+    public String getSid()                 { return sid; }
 
-    public boolean isDeny()  { return "Deny".equalsIgnoreCase(effect); }
-    public boolean isAllow() { return "Allow".equalsIgnoreCase(effect); }
+    /**
+     * Whether the statement states that effect. The two words are compared as written, the IAM
+     * User Guide saying of the element that "The {@code Effect} value is case sensitive", so a
+     * statement whose effect is spelled in another case names neither of them and states nothing.
+     * It is the comparison the write validator of this package makes of a document on its way in.
+     */
+    public boolean isDeny()  { return "Deny".equals(effect); }
+
+    public boolean isAllow() { return "Allow".equals(effect); }
 }

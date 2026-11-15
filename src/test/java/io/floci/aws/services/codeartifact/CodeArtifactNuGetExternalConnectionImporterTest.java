@@ -1,10 +1,13 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
@@ -58,7 +61,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
                 List.of(new ExternalConnection("public:nuget-org", "nuget", "AVAILABLE")));
         when(service.describeRepository(REGION, DOMAIN, OWNER, REPOSITORY)).thenReturn(repository);
         when(service.isUpstreamRetentionBlocked(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString())).thenReturn(false);
+                any(), anyString(),
+                eq("EXTERNAL_UPSTREAM"))).thenReturn(false);
         when(service.currentContainerBackedPackageFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString())).thenReturn(42L);
         when(service.currentContainerBackedVersionFence(anyString(), anyString(), anyString(), anyString(),
@@ -66,7 +70,7 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         // Unstubbed by default: the claim succeeds, matching the common case of a first or
         // same-connection retry. Tests for a conflicting claim override this per call.
         when(service.claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyString(), anyLong()))
+                any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong()))
                 .thenReturn(new CodeArtifactService.RetainedVersionOriginClaimOutcome(true, EPISODE_ID));
         // Unstubbed by default: BaGetter does not have the version yet, matching the controller's
         // own pre-check always calling tryImport only on a miss. Tests for the already-retained
@@ -78,21 +82,20 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         // CodeArtifactService method (see its own javadoc for why), so this mock is what every
         // test configures instead.
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
     }
 
     @Test
     void importsFromExternalConnectionWhenNotFoundLocally() {
-        when(externalConnectionClient.fetchPackage("public:nuget-org", PACKAGE_ID, VERSION))
-                .thenReturn(Optional.of(new NuGetExternalConnectionClient.FetchedAsset(NUPKG_CONTENT)));
+        stubFetchPackage(PACKAGE_ID, VERSION, NUPKG_CONTENT);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
         assertTrue(imported);
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("nuget"),
                 isNull(), eq(PACKAGE_ID), eq(VERSION), eq(99L), eq(42L), eq(EPISODE_ID), eq(REPO_ID),
-                eq("widget.1.0.0.nupkg"), eq(NUPKG_CONTENT), any());
+                eq("widget.1.0.0.nupkg"), eq((long) NUPKG_CONTENT.length), any());
         verify(service).ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, DOMAIN, OWNER, REPOSITORY,
                 "nuget", null, PACKAGE_ID, 42L, REPO_ID);
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
@@ -109,25 +112,26 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyString(), anyLong());
+                anyString(), any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong());
     }
 
     @Test
     void returnsFalseWhenUpstreamRetentionIsBlocked() {
-        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null, PACKAGE_ID))
+        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null, PACKAGE_ID,
+                "EXTERNAL_UPSTREAM"))
                 .thenReturn(true);
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
         assertFalse(imported);
         verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyString(), anyLong());
+                anyString(), any(), anyString(), anyString(), anyString(), eq(RetentionOriginKind.EXTERNAL_CONNECTION), anyLong());
     }
 
     @Test
     void returnsFalseWithoutFinishingWhenTheClaimIsRefused() {
         when(service.claimRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null, PACKAGE_ID,
-                VERSION, "public:nuget-org", 42L))
+                VERSION, "public:nuget-org", RetentionOriginKind.EXTERNAL_CONNECTION, 42L))
                 .thenReturn(new CodeArtifactService.RetainedVersionOriginClaimOutcome(false, 0L));
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
@@ -149,10 +153,10 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
         assertTrue(imported);
-        verify(externalConnectionClient, never()).fetchPackage(anyString(), anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchPackage(anyString(), anyString(), anyString(), any());
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                anyString(), any(), any());
+                anyString(), anyLong(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, true);
     }
@@ -173,7 +177,7 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchPackage(anyString(), anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchPackage(anyString(), anyString(), anyString(), any());
         verify(service, never()).ensureRetainedPackageOriginDefaultIfCurrentRepository(anyString(), anyString(),
                 anyString(), anyString(), anyString(), any(), anyString(), anyLong(), anyString());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
@@ -182,23 +186,23 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
 
     @Test
     void returnsFalseAndFinishesWhenTheRealRepositoryDoesNotHaveIt() {
-        when(externalConnectionClient.fetchPackage("public:nuget-org", PACKAGE_ID, VERSION))
-                .thenReturn(Optional.empty());
+        when(externalConnectionClient.fetchPackage(eq("public:nuget-org"), eq(PACKAGE_ID), eq(VERSION),
+                any(Path.class))).thenReturn(Optional.empty());
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
         assertFalse(imported);
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                anyString(), any(), any());
+                anyString(), anyLong(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, false);
     }
 
     @Test
     void aFetchThatThrowsIsTreatedLikeAMissingPackageRatherThanPropagating() {
-        when(externalConnectionClient.fetchPackage("public:nuget-org", PACKAGE_ID, VERSION))
-                .thenThrow(new IllegalStateException("public repository unreachable"));
+        when(externalConnectionClient.fetchPackage(eq("public:nuget-org"), eq(PACKAGE_ID), eq(VERSION),
+                any(Path.class))).thenThrow(new IllegalStateException("public repository unreachable"));
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
@@ -209,10 +213,9 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
 
     @Test
     void returnsFalseAndDoesNotRecordADefaultWhenTheFenceMovedDuringTheWrite() {
-        when(externalConnectionClient.fetchPackage("public:nuget-org", PACKAGE_ID, VERSION))
-                .thenReturn(Optional.of(new NuGetExternalConnectionClient.FetchedAsset(NUPKG_CONTENT)));
+        stubFetchPackage(PACKAGE_ID, VERSION, NUPKG_CONTENT);
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(false, false));
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
@@ -222,5 +225,31 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
                 anyString(), anyString(), anyString(), any(), anyString(), anyLong(), anyString());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, false);
+    }
+
+    /**
+     * {@code fetchPackage}'s real, streamed signature takes the destination {@link Path} to
+     * write to, generated fresh by the importer itself for every real call, so a test fixture
+     * can't name it in advance the way it could the old {@code byte[]}-returning method: this
+     * answers whatever path the importer actually passes by writing {@code content} straight to
+     * it, the same real effect the real method has.
+     */
+    private void stubFetchPackage(String packageId, String version, byte[] content) {
+        when(externalConnectionClient.fetchPackage(eq("public:nuget-org"), eq(packageId), eq(version),
+                any(Path.class))).thenAnswer(invocation -> {
+                    Path destination = invocation.getArgument(3);
+                    Files.write(destination, content);
+                    return Optional.of(new NuGetExternalConnectionClient.FetchedFile(content.length));
+                });
+    }
+
+    /** An upstream deleted since a search order named it has no connection to fetch through. */
+    @Test
+    void aDeletedRepositoryHasNoExternalConnection() {
+        when(service.describeRepository(REGION, DOMAIN, OWNER, "deleted"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Repository 'deleted' not found.", 404));
+
+        assertFalse(importer.hasExternalConnection(REGION, DOMAIN, OWNER, "deleted"));
+        assertTrue(importer.hasExternalConnection(REGION, DOMAIN, OWNER, REPOSITORY));
     }
 }

@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -17,6 +18,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -94,6 +96,32 @@ class StackSetServiceDeleteFailureTest {
         // RetainStacks=true must never invoke the underlying stack delete.
         Mockito.verify(cfnService, Mockito.never())
                 .deleteStack(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void resourceDeleteFailureRetainsFailedInstanceAndStackSet() {
+        when(cfnService.deleteStack(anyString(), anyString(), anyString()))
+                .thenThrow(new IllegalStateException("Termination protection is enabled"));
+
+        assertThrows(AwsException.class, () -> service.deleteStackSetWithInstances(SET));
+
+        List<StackInstance> remaining = service.listStackInstances(SET, null, null);
+        assertEquals(1, remaining.size());
+        assertEquals("INOPERABLE", remaining.get(0).getStatus());
+        assertEquals("FAILED", remaining.get(0).getDetailedStatus());
+        assertEquals(SET, service.describeStackSet(SET).getStackSetName());
+    }
+
+    @Test
+    void resourceDeleteRemovesInstancesAndToleratesRepeatedDelete() {
+        when(cfnService.deleteStack(anyString(), anyString(), anyString()))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        service.deleteStackSetWithInstances(SET);
+        service.deleteStackSetWithInstances(SET);
+
+        AwsException missing = assertThrows(AwsException.class, () -> service.describeStackSet(SET));
+        assertEquals("StackSetNotFoundException", missing.getErrorCode());
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

@@ -105,6 +105,50 @@ class DynamoDbRequestShapesTest {
         assertAccepted("NoSuchOperation", "{\"TableName\":5}");
     }
 
+    @Test
+    void searchVectorsNamesTheLineAndByteColumnOfTheBodyAsSent() {
+        assertSearchVectorsRejected("{\n  \"TableName\": \"sv-probe-absent-table\",\n  \"IndexName\": null,\n"
+                + "  \"SearchVector\": [{\"N\": \"1\"}],\n  \"TopK\": 1\n}",
+                "SerializationException", "invalid type: null, expected a string at line 3 column 19");
+        assertSearchVectorsRejected("{\"X\":\"\u65e5\u672c\",\"IndexName\":null,\"TableName\":\"sv-probe-absent-table\","
+                + "\"SearchVector\":[{\"N\":\"1\"}],\"TopK\":1}",
+                "SerializationException", "invalid type: null, expected a string at line 1 column 30");
+        assertSearchVectorsRejected("{\"X\":\"\\u65e5\\u672c\",\"IndexName\":null,\"TableName\":\"sv-probe-absent-table\","
+                + "\"SearchVector\":[{\"N\":\"1\"}],\"TopK\":1}",
+                "SerializationException", "invalid type: null, expected a string at line 1 column 36");
+        assertSearchVectorsRejected("{\n  \"IndexName\": \"vix\",\n  \"SearchVector\": [{\"N\": \"1\"}],\n  \"TopK\": 1\n}",
+                "ValidationException", "missing field `TableName` at line 5 column 1");
+        assertSearchVectorsRejected("\n{\"IndexName\":\"vix\",\"SearchVector\":[{\"N\":\"1\"}],\"TopK\":1}",
+                "ValidationException", "missing field `TableName` at line 2 column 55");
+        assertSearchVectorsRejected("{\"X\":\"\u65e5\u672c\",\"IndexName\":\"vix\",\"SearchVector\":[{\"N\":\"1\"}],\"TopK\":1}",
+                "ValidationException", "missing field `TableName` at line 1 column 68");
+        assertSearchVectorsRejected("{\"X\":\"\\u65e5\",\"IndexName\":\"vix\",\"SearchVector\":[{\"N\":\"1\"}],\"TopK\":1}",
+                "ValidationException", "missing field `TableName` at line 1 column 68");
+    }
+
+    @Test
+    void searchVectorsRefusesABlankBodyAtItsEnd() {
+        assertSearchVectorsRejected("", "ValidationException", "EOF while parsing a value at line 1 column 0");
+        assertSearchVectorsRejected("  ", "ValidationException", "EOF while parsing a value at line 1 column 2");
+        assertSearchVectorsRejected("\t", "ValidationException", "EOF while parsing a value at line 1 column 1");
+        assertSearchVectorsRejected("\n", "ValidationException", "EOF while parsing a value at line 2 column 0");
+        assertSearchVectorsRejected(" \n  ", "ValidationException", "EOF while parsing a value at line 2 column 2");
+    }
+
+    @Test
+    void searchVectorsWithEveryRequiredMemberIsLeftToTheOperation() {
+        String body = "{\"TableName\":\"t\",\"IndexName\":\"vix\",\"SearchVector\":[{\"N\":\"1\"}],\"TopK\":1}";
+        assertDoesNotThrow(() -> DynamoDbRequestShapes.check("SearchVectors", json(body), body));
+    }
+
+    private static void assertSearchVectorsRejected(String body, String type, String message) {
+        AwsException error = assertThrows(AwsException.class, () -> DynamoDbRequestShapes.check("SearchVectors",
+                body.isBlank() ? MAPPER.createObjectNode() : json(body), body));
+        assertEquals(type, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(message, error.getMessage());
+    }
+
     private static void assertRejected(String action, String body, String message) {
         AwsException error = assertThrows(AwsException.class, () -> DynamoDbRequestShapes.check(action, json(body)));
         assertEquals("SerializationException", error.getErrorCode());

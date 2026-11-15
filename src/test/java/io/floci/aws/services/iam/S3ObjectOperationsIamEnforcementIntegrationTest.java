@@ -134,7 +134,8 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
     @Test
     void restoringAnObjectNeedsRestoreObject() {
         Fixture f = new Fixture("restore", false);
-        f.seed("a/archived");
+        f.admin().header("x-amz-storage-class", "GLACIER").header("x-amz-tagging", "env=a")
+                .body("id,name\n1,one\n").when().put(f.path("a/archived")).then().statusCode(200);
 
         f.policy(f.allow("s3:GetObject", "s3:PutObject"));
         denied(f.restore("a/archived"), "s3:RestoreObject");
@@ -267,6 +268,54 @@ class S3ObjectOperationsIamEnforcementIntegrationTest {
         assertEquals(200, slash.statusCode(), slash.body());
         assertEquals("slash", slash.body());
         denied(f.user().when().get(f.path("doc")).then(), "s3:GetObject");
+    }
+
+    @Test
+    void aKeyOfOnlySlashesIsCheckedAsTheObjectItNames() {
+        // PUT /bucket// writes the key "/". Collapsed to the bucket's path, it ran CreateBucket, checked as that.
+        Fixture f = new Fixture("slash-only", false);
+        f.policy(f.allowOnBucket("s3:CreateBucket", "s3:ListBucket", "s3:DeleteBucket"));
+        rawDenied(f.raw("PUT", "/", null, f.accessKeyId, Map.of(), "slash"), "s3:PutObject");
+
+        f.policy("{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:GetObject\",\"s3:DeleteObject\"],"
+                + "\"Resource\":\"arn:aws:s3:::" + f.bucket + "//\"}");
+        assertEquals(200, f.raw("PUT", "/", null, f.accessKeyId, Map.of(), "slash").statusCode());
+        assertEquals("slash", f.raw("GET", "/", null, f.accessKeyId, Map.of(), null).body());
+        assertEquals(204, f.raw("DELETE", "/", null, f.accessKeyId, Map.of(), null).statusCode());
+    }
+
+    @Test
+    void aKeyThatStartsWithASlashIsCheckedAsTheObjectItNames() {
+        // PUT /bucket//email.txt writes the key "/email.txt". Read from the collapsed path, it was
+        // checked on arn:aws:s3:::bucket/email.txt, the other object.
+        Fixture f = new Fixture("leading-slash", false);
+        f.policy("{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:GetObject\",\"s3:DeleteObject\"],"
+                + "\"Resource\":\"arn:aws:s3:::" + f.bucket + "/email.txt\"}");
+        rawDenied(f.raw("PUT", "/email.txt", null, f.accessKeyId, Map.of(), "slash"), "s3:PutObject");
+
+        f.policy("{\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\",\"s3:GetObject\",\"s3:DeleteObject\"],"
+                + "\"Resource\":\"arn:aws:s3:::" + f.bucket + "//*\"}");
+        assertEquals(200, f.raw("PUT", "/email.txt", null, f.accessKeyId, Map.of(), "slash").statusCode());
+        assertEquals("slash", f.raw("GET", "/email.txt", null, f.accessKeyId, Map.of(), null).body());
+        assertEquals(204, f.raw("DELETE", "/email.txt", null, f.accessKeyId, Map.of(), null).statusCode());
+    }
+
+    @Test
+    void aBucketSubresourceFlociDoesNotServeIsCheckedAsTheOperationItNames() {
+        // DELETE ?metadataTable fell through to deleting the bucket, and was checked as s3:DeleteBucket.
+        Fixture f = new Fixture("metadata-table", false);
+        f.policy(f.allowOnBucket("s3:DeleteBucket"));
+        denied(f.user().queryParam("metadataTable", "").when().delete("/" + f.bucket).then(),
+                "s3:DeleteBucketMetadataTableConfiguration");
+        // POST ?metadataTable, which no IAM rule mapped, went unchecked.
+        denied(f.user().queryParam("metadataTable", "").when().post("/" + f.bucket).then(),
+                "s3:CreateBucketMetadataTableConfiguration");
+
+        f.policy(f.allowOnBucket("s3:DeleteBucketMetadataTableConfiguration",
+                "s3:CreateBucketMetadataTableConfiguration"));
+        f.user().queryParam("metadataTable", "").when().delete("/" + f.bucket).then().statusCode(501);
+        f.user().queryParam("metadataTable", "").when().post("/" + f.bucket).then().statusCode(501);
+        f.admin().when().head("/" + f.bucket).then().statusCode(200);
     }
 
     @Test

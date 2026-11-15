@@ -60,27 +60,14 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
     private static final int STOP_TIMEOUT_SECONDS = 0;
     // No source gives a bootstrap action a time limit: it runs until it ends, or its cluster does.
     private static final int NO_TIMEOUT = Integer.MAX_VALUE;
-    // The sudo an action finds first on its PATH: its options are dropped, as the action already runs as root,
-    // and its command, with any NAME=value before it, runs as it is.
-    static final String SUDO = String.join("\n",
-            "#!/bin/bash",
-            "while [ $# -gt 0 ]; do",
-            "  case \"$1\" in",
-            "    -u|-g|-C|-D|-p|-r|-t|-T|-U) shift 2 ;;",
-            "    --) shift; break ;;",
-            "    -*) shift ;;",
-            "    *) break ;;",
-            "  esac",
-            "done",
-            "exec env \"$@\"");
-    // What each action runs as root: $1 is its script, and the rest that script's arguments. The JVMs it starts
-    // trust Floci's CA once the container has its trust store.
+    private static final int NODE_INFO_TIMEOUT_SECONDS = 60;
+    // What each action runs as root, with the sudo a step has too (see EmrServerlessSparkRunner.SUDO), whose options
+    // the action, already root, has no need of: $1 is its script, and the rest that script's arguments. The JVMs it
+    // starts trust Floci's CA once the container has its trust store.
     private static final String ACTION_COMMAND = String.join("\n",
             ContainerCaBundle.JAVA_TRUST_SHELL_LINE,
             "mkdir -p /tmp/floci-bin",
-            "cat > /tmp/floci-bin/sudo <<'SUDO'",
-            SUDO,
-            "SUDO",
+            EmrServerlessSparkRunner.SUDO_FILE,
             "chmod 755 /tmp/floci-bin/sudo",
             "export PATH=\"/tmp/floci-bin:$PATH\" HOME=/home/hadoop",
             "cd /home/hadoop",
@@ -93,8 +80,11 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
             "exit $code");
     // Run once every action has: what only the actions needed goes before the image is kept, the trust store
     // included, which each step's container gets afresh.
+    // The primary node's files, which say which node it is, go too, so a node started from the image writes its own.
     private static final String CLEANUP_COMMAND = "rm -f /tmp/floci-bin/sudo /tmp/floci-bootstrap-action-* "
-            + ContainerCaBundle.JAVA_TRUST_STORE_PATH + "; rmdir /tmp/floci-bin";
+            + ContainerCaBundle.JAVA_TRUST_STORE_PATH + " " + EmrServerlessSparkRunner.INSTANCE_FILE + " "
+            + EmrServerlessSparkRunner.EXTRA_INSTANCE_DATA_FILE + "; rmdir /tmp/floci-bin;"
+            + " rmdir /mnt/var/lib/info /mnt/var/lib/instance-controller 2>/dev/null";
 
     // The bootstraps inside run(); a stop for one not here comes after its container has gone, and is dropped.
     private final ContainerLaunches launches = new ContainerLaunches();
@@ -129,16 +119,25 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
                     bootstrap.clusterId() + "-bootstrap");
             String image = EmrServerlessSparkRunner.image(bootstrap.imageTemplate(), bootstrap.releaseLabel());
             Map<String, String> labels = labels(bootstrap);
-            ContainerSpec spec = containerBuilder.newContainer(image)
+            ContainerBuilder.Builder container = containerBuilder.newContainer(image)
                     .withName(ContainerStorageHelper.dockerName(config,
                             SERVICE + "-" + bootstrap.clusterId() + "-bootstrap"))
                     .withUser("root")
                     .withEntrypoint(List.of("sleep", "infinity"))
-                    .withDockerNetwork(Optional.ofNullable(bootstrap.dockerNetwork()))
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLabels(labels)
-                    .build();
+                    .withLabels(labels);
+            if (bootstrap.metadataNetwork() != null) {
+                // On its cluster's network, where the relay answers its address as the primary node's metadata, and on
+                // its steps' too, where it reaches Floci.
+                container.withDockerNetwork(Optional.of(bootstrap.metadataNetwork()))
+                        .withLinkLocalIp(bootstrap.metadataAddress())
+                        .withJoinedNetwork(containerBuilder.resolveDockerNetwork(
+                                Optional.ofNullable(bootstrap.dockerNetwork())).orElse(null));
+            } else {
+                container.withDockerNetwork(Optional.ofNullable(bootstrap.dockerNetwork()));
+            }
+            ContainerSpec spec = container.build();
             String containerId = lifecycleManager.createAndStart(spec).containerId();
             launch.started(containerId);
             // In before the first action, for the actions' JVMs to find it. Not through the spec: the container is
@@ -149,6 +148,8 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
             if (launch.stopRequested() || cancelled.getAsBoolean()) {
                 return Outcome.halted();
             }
+            // The actions run on the primary node, whose files say so, as the Management Guide's own action reads them.
+            writeNodeInfo(containerId);
             List<String> env = awsEnv.sdkBaselineEnv(bootstrap.region(), Optional.empty(), credentials,
                     bootstrap.accountId());
             for (int number = 1; number <= bootstrap.actions().size(); number++) {
@@ -178,6 +179,17 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
             }
             credentials.ifPresent(session -> roleCredentials.unregister(bootstrap.accountId(),
                     session.accessKeyId()));
+        }
+    }
+
+    private void writeNodeInfo(String containerId) {
+        ContainerExec.Result written = ContainerExec.run(lifecycleManager.getDockerClient(), containerId,
+                new String[] {"env", EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE + "=MASTER", "bash", "-c",
+                        EmrServerlessSparkRunner.NODE_INFO}, NODE_INFO_TIMEOUT_SECONDS);
+        if (written.exitCode() != 0) {
+            String why = written.stderr().strip();
+            throw new IllegalStateException("Could not write the primary node's "
+                    + EmrServerlessSparkRunner.INSTANCE_FILE + (why.isEmpty() ? "" : ": " + why));
         }
     }
 

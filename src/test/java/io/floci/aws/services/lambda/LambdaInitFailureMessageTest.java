@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.services.lambda.launcher.LambdaInitException;
 import org.junit.jupiter.api.Test;
 
 import java.net.SocketException;
@@ -42,5 +43,20 @@ class LambdaInitFailureMessageTest {
 
         assertThat(LambdaExecutorService.initFailureMessage(e, false),
                 equalTo("Failed to start Lambda container: connect failed"));
+    }
+
+    @Test
+    void aRuntimeInitFailureKeepsItsTypeAndMessage() {
+        Exception e = new IllegalStateException("launch failed",
+                new LambdaInitException("Runtime.InvalidEntrypoint", "cannot enter /home/nonroot"));
+
+        assertThat(LambdaExecutorService.initFailureType(e), equalTo("Runtime.InvalidEntrypoint"));
+        assertThat(LambdaExecutorService.initFailureMessage(e, true), equalTo("cannot enter /home/nonroot"));
+    }
+
+    @Test
+    void otherFailuresAreLambdaInitErrors() {
+        assertThat(LambdaExecutorService.initFailureType(new IllegalStateException("image pull failed")),
+                equalTo("Lambda.InitError"));
     }
 }

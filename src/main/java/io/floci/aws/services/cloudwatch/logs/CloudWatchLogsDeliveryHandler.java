@@ -32,7 +32,7 @@ class CloudWatchLogsDeliveryHandler {
     }
 
     Response handle(String action, JsonNode request, String region) {
-        CloudWatchLogsDeliveryRequestShapes.check(action, request);
+        CloudWatchLogsRequestShapes.check(action, request);
         return switch (action) {
             case "PutDeliverySource" -> putDeliverySource(request, region);
             case "GetDeliverySource" -> wrapped("deliverySource",

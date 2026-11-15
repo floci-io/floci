@@ -2,6 +2,7 @@ package io.floci.aws.services.codedeploy;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -43,7 +44,8 @@ class CodeDeployServicePersistenceTest {
         first.createApplication(REGION, "web-app", "Server",
                 List.of(Map.of("Key", "team", "Value", "platform")));
         first.createDeploymentGroup(REGION, "web-app", "prod-group",
-                "CodeDeployDefault.OneAtATime", "arn:aws:iam::000000000000:role/cd", null);
+                "CodeDeployDefault.OneAtATime", "arn:aws:iam::000000000000:role/cd", null,
+                List.of(Map.of("Key", "owner", "Value", "release")));
         first.createDeploymentConfig(REGION, "custom-cfg",
                 Map.of("type", "HOST_COUNT", "value", 1), "Server", null, null);
         first.registerOnPremisesInstance(REGION, "onprem-1",
@@ -67,6 +69,10 @@ class CodeDeployServicePersistenceTest {
                 .stream().collect(Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
         assertEquals("prod", appTags.get("env"));   // tagResource
         assertEquals("platform", appTags.get("team")); // createApplication tags
+        Map<String, String> groupTags = reloaded.listTagsForResource(
+                first.deploymentGroupArn(REGION, "web-app", "prod-group")).stream()
+                .collect(Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
+        assertEquals("release", groupTags.get("owner"));
     }
 
     @Test
@@ -76,8 +82,8 @@ class CodeDeployServicePersistenceTest {
         CodeDeployService first = serviceWithStorage(storage);
         first.createApplication(REGION, "keep-app", "Server", null);
         first.createApplication(REGION, "drop-app", "Server", null);
-        first.createDeploymentGroup(REGION, "keep-app", "g1", null, "arn:r", null);
-        first.createDeploymentGroup(REGION, "keep-app", "g2", null, "arn:r", null);
+        first.createDeploymentGroup(REGION, "keep-app", "g1", null, "arn:r", null, null);
+        first.createDeploymentGroup(REGION, "keep-app", "g2", null, "arn:r", null, null);
         first.deleteApplication(REGION, "drop-app");
         first.deleteDeploymentGroup(REGION, "keep-app", "g2");
         String arn = first.applicationArn(REGION, "keep-app");
@@ -94,6 +100,66 @@ class CodeDeployServicePersistenceTest {
                 .collect(Collectors.toMap(t -> t.get("Key"), t -> t.get("Value")));
         assertEquals("prod", tags.get("env"));
         assertTrue(!tags.containsKey("team"), "untagged key must not reappear after restart");
+    }
+
+    @Test
+    void taggedDeploymentGroupKeepsTagsWhenRenamed() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        CodeDeployService service = serviceWithStorage(storage);
+        service.createApplication(REGION, "rename-app", "Server", null);
+        service.createDeploymentGroup(REGION, "rename-app", "old-group", null, "arn:r", null, null);
+        String originalArn = service.deploymentGroupArn(REGION, "rename-app", "old-group");
+        service.tagResource(originalArn, List.of(Map.of("Key", "team", "Value", "red")));
+
+        service.updateDeploymentGroup(REGION, "rename-app", "old-group", "new-group", null, null, null);
+
+        CodeDeployService reloaded = serviceWithStorage(storage);
+        String renamedArn = reloaded.deploymentGroupArn(REGION, "rename-app", "new-group");
+        assertEquals(List.of(Map.of("Key", "team", "Value", "red")), reloaded.listTagsForResource(renamedArn));
+        assertEquals(List.of(), reloaded.listTagsForResource(originalArn));
+    }
+
+    @Test
+    void renamingDeploymentGroupToExistingNamePreservesBothGroupsAndTags() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        CodeDeployService service = serviceWithStorage(storage);
+        service.createApplication(REGION, "rename-conflict-app", "Server", null);
+        DeploymentGroup source = service.createDeploymentGroup(REGION, "rename-conflict-app", "source",
+                null, "arn:source-role", null, List.of(Map.of("Key", "team", "Value", "red")));
+        DeploymentGroup destination = service.createDeploymentGroup(REGION, "rename-conflict-app", "destination",
+                null, "arn:destination-role", null, List.of(Map.of("Key", "team", "Value", "blue")));
+        String sourceArn = service.deploymentGroupArn(REGION, "rename-conflict-app", "source");
+        String destinationArn = service.deploymentGroupArn(REGION, "rename-conflict-app", "destination");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateDeploymentGroup(
+                REGION, "rename-conflict-app", "source", "destination", null, "arn:changed-role", null));
+
+        assertEquals("DeploymentGroupAlreadyExistsException", error.getErrorCode());
+        CodeDeployService reloaded = serviceWithStorage(storage);
+        assertEquals(source.getDeploymentGroupId(),
+                reloaded.getDeploymentGroup(REGION, "rename-conflict-app", "source").getDeploymentGroupId());
+        assertEquals(destination.getDeploymentGroupId(),
+                reloaded.getDeploymentGroup(REGION, "rename-conflict-app", "destination").getDeploymentGroupId());
+        assertEquals("arn:source-role",
+                reloaded.getDeploymentGroup(REGION, "rename-conflict-app", "source").getServiceRoleArn());
+        assertEquals(List.of(Map.of("Key", "team", "Value", "red")), reloaded.listTagsForResource(sourceArn));
+        assertEquals(List.of(Map.of("Key", "team", "Value", "blue")), reloaded.listTagsForResource(destinationArn));
+    }
+
+    @Test
+    void deletedDeploymentGroupDoesNotLeaveTagsForRecreatedName() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        CodeDeployService service = serviceWithStorage(storage);
+        service.createApplication(REGION, "recreate-app", "Server", null);
+        service.createDeploymentGroup(REGION, "recreate-app", "group", null, "arn:r", null, null);
+        String arn = service.deploymentGroupArn(REGION, "recreate-app", "group");
+        service.tagResource(arn, List.of(Map.of("Key", "team", "Value", "red")));
+
+        service.deleteDeploymentGroup(REGION, "recreate-app", "group");
+        service.createDeploymentGroup(REGION, "recreate-app", "group", null, "arn:r", null, null);
+
+        CodeDeployService reloaded = serviceWithStorage(storage);
+        assertEquals(List.of(), reloaded.listTagsForResource(arn));
     }
 
     private static CodeDeployService serviceWithStorage(StorageFactory storage) {

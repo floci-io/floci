@@ -67,6 +67,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -99,6 +101,7 @@ import java.util.function.Function;
 import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -125,6 +128,12 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
+
+    /**
+     * The suffix S3 Tables gives the bucket behind each table's warehouse. Such a bucket is the table's
+     * storage, not a general purpose bucket, so it is left out of {@code ListBuckets} as on AWS.
+     */
+    public static final String TABLE_WAREHOUSE_BUCKET_SUFFIX = "--table-s3";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
@@ -286,6 +295,8 @@ public class S3Service implements Resettable, ResourceProvider {
     private final IamService iamService;
     private final boolean globalBucketNamespace;
     private final IamPolicyEvaluator policyEvaluator;
+    private final Clock clock;
+    private final long restoreCompletionDelaySeconds;
 
     @Inject
     public S3Service(StorageFactory storageFactory, EmulatorConfig config,
@@ -295,7 +306,7 @@ public class S3Service implements Resettable, ResourceProvider {
                      Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
                      RegionResolver regionResolver,
                      ObjectMapper objectMapper,
-                     IamService iamService) {
+                     IamService iamService, Clock clock) {
         this(
                 storageFactory.create("s3", "s3-buckets.json",
                         new TypeReference<Map<String, Bucket>>() {
@@ -316,8 +327,21 @@ public class S3Service implements Resettable, ResourceProvider {
                 regionResolver,
                 config.effectiveBaseUrl(), objectMapper,
                 config.services().s3().enforceAuth(), config.services().iam().enforcementEnabled(), iamService,
-                config.services().s3().globalBucketNamespace()
+                config.services().s3().globalBucketNamespace(), clock,
+                config.services().s3().restoreCompletionDelaySeconds()
         );
+    }
+
+    public S3Service(StorageFactory storageFactory, EmulatorConfig config,
+                     SqsService sqsService, SnsService snsService,
+                     Instance<LambdaService> lambdaServiceProvider,
+                     EventBridgeService eventBridgeService,
+                     Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
+                     RegionResolver regionResolver,
+                     ObjectMapper objectMapper,
+                     IamService iamService) {
+        this(storageFactory, config, sqsService, snsService, lambdaServiceProvider,
+                eventBridgeService, s3UpdatedEvent, regionResolver, objectMapper, iamService, Clock.systemUTC());
     }
 
     /**
@@ -329,6 +353,15 @@ public class S3Service implements Resettable, ResourceProvider {
         this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
                 dataRoot, inMemory, null, null, null, null, null, null, null,
                 null, "http://localhost:4566", new ObjectMapper(), false, false, null, false);
+    }
+
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              Path dataRoot, boolean inMemory, Clock clock, long restoreCompletionDelaySeconds) {
+        this(bucketStore, objectStore, defaultAnnotationStore(), defaultAccountPublicAccessBlockStore(),
+                dataRoot, inMemory, null, null, null, null, null, null, null,
+                null, "http://localhost:4566", new ObjectMapper(), false, false, null, false,
+                clock, restoreCompletionDelaySeconds);
     }
 
     S3Service(StorageBackend<String, Bucket> bucketStore,
@@ -402,6 +435,26 @@ public class S3Service implements Resettable, ResourceProvider {
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper,
                       boolean enforceAuth, boolean enforceIam, IamService iamService,
                       boolean globalBucketNamespace) {
+        this(bucketStore, objectStore, annotationStore, accountPublicAccessBlockStore,
+                dataRoot, inMemory, sqsService, snsService, lambdaService, lambdaServiceProvider,
+                lambdaInvoker, eventBridgeService, s3UpdatedEvent, regionResolver, baseUrl,
+                objectMapper, enforceAuth, enforceIam, iamService, globalBucketNamespace,
+                Clock.systemUTC(), 0);
+    }
+
+    private S3Service(StorageBackend<String, Bucket> bucketStore,
+                      StorageBackend<String, S3Object> objectStore,
+                      AccountAwareStorageBackend<ObjectAnnotation> annotationStore,
+                      AccountAwareStorageBackend<String> accountPublicAccessBlockStore,
+                      Path dataRoot, boolean inMemory, SqsService sqsService, SnsService snsService,
+                      LambdaService lambdaService,
+                      Instance<LambdaService> lambdaServiceProvider,
+                      LambdaInvoker lambdaInvoker,
+                      EventBridgeService eventBridgeService,
+                      Event<S3ObjectUpdatedEvent> s3UpdatedEvent,
+                      RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper,
+                      boolean enforceAuth, boolean enforceIam, IamService iamService,
+                      boolean globalBucketNamespace, Clock clock, long restoreCompletionDelaySeconds) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
         this.annotationStore = annotationStore;
@@ -423,6 +476,8 @@ public class S3Service implements Resettable, ResourceProvider {
         this.iamService = iamService;
         this.globalBucketNamespace = globalBucketNamespace;
         this.policyEvaluator = new IamPolicyEvaluator(objectMapper);
+        this.clock = clock;
+        this.restoreCompletionDelaySeconds = Math.max(0, restoreCompletionDelaySeconds);
         if (!inMemory) {
             try {
                 Files.createDirectories(dataRoot);
@@ -621,6 +676,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
                 .filter(bucket -> !isScratchBucket(bucket))
+                .filter(bucket -> !bucket.getName().endsWith(TABLE_WAREHOUSE_BUCKET_SUFFIX))
                 .toList();
     }
 
@@ -630,7 +686,7 @@ public class S3Service implements Resettable, ResourceProvider {
                     "max-buckets must be between 1 and " + MAX_LIST_BUCKETS + ".", 400);
         }
         return Pagination.paginate(listBuckets(), Bucket::getName,
-                maxBuckets == null ? MAX_LIST_BUCKETS : maxBuckets, continuationToken,
+                maxBuckets == null ? Integer.MAX_VALUE : maxBuckets, continuationToken,
                 "buckets:" + ownerId(),
                 token -> new AwsException("InvalidArgument", "The continuation token provided is incorrect.", 400));
     }
@@ -639,8 +695,21 @@ public class S3Service implements Resettable, ResourceProvider {
         return Arrays.stream(S3ScratchSpace.values()).anyMatch(space -> space.matchesBucket(bucket));
     }
 
+    /** Not for authorization: it can resolve another account's bucket. Use the overload that names the account. */
     public boolean isScratchBucket(String bucketName) {
         return resolveBucket(bucketName).filter(S3Service::isScratchBucket).isPresent();
+    }
+
+    /**
+     * Whether {@code accountId} itself owns the scratch bucket. With a global bucket namespace the plain
+     * lookup falls back to another account's bucket of the same name, which a transfer session must never reach.
+     */
+    public boolean isScratchBucket(String bucketName, String accountId) {
+        return accountId != null && resolveBucketEntry(bucketName)
+                .filter(entry -> accountId.equals(entry.account()))
+                .map(AccountAwareStorageBackend.OwnedEntry::value)
+                .filter(S3Service::isScratchBucket)
+                .isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {
@@ -1253,7 +1322,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public void authorizeSignedListBucket(String accessKeyId, String sessionToken, String bucketName, String prefix) {
         authorizeBucketRead(bucketName, "s3:ListBucket", new RequestAuthorization(true, accessKeyId, sessionToken),
-                Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
+                S3ConditionKeys.listing(prefix));
     }
 
     /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
@@ -1306,7 +1375,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() ->
                         new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+        String resourceArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision decision =
                 S3PublicAccessEvaluator.principalPolicyDecision(
                         objectMapper,
@@ -1332,7 +1401,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization,
                              Map<String, List<String>> requestConditions) {
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
+        String bucketArn = S3ResourceArns.bucket(bucketPartition(bucketName), bucketName);
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization, requestConditions);
     }
 
@@ -1360,7 +1429,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
+            String bucketArn = S3ResourceArns.bucket(bucketPartition(bucketName), bucketName);
             authorizeSignedBucketPolicy(bucketName, null, action, bucketArn, requestAuthorization, null);
             return;
         }
@@ -1374,7 +1443,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, null);
         }
 
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
+        String bucketArn = S3ResourceArns.bucket(bucketPartition(bucketName), bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -1392,7 +1461,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * the action's version counterpart (see {@link S3ObjectActions#forVersion}), as IAM checks it.
      */
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+        String objectArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         authorizeS3Read(bucketName, key, versionId, S3ObjectActions.forVersion(action, versionId), objectArn,
                 authorization, null);
     }
@@ -1450,7 +1519,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+            String objectArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
             authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization, requestConditions);
             return;
         }
@@ -1461,7 +1530,7 @@ public class S3Service implements Resettable, ResourceProvider {
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
 
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+        String objectArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, objectArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -3882,10 +3951,34 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /** Replaces the tags of the bucket a control-plane tagging ARN names, in the partition it names. */
     public void putBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> tags != null ? tags : new HashMap<>());
+    }
+
+    public void mergeBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> {
+            Map<String, String> updated = new HashMap<>(existing);
+            updated.putAll(tags);
+            return updated;
+        });
+    }
+
+    public void removeBucketTagsForAccount(String accountId, String bucketName, List<String> tagKeys) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> {
+            Map<String, String> updated = new HashMap<>(existing);
+            tagKeys.forEach(updated::remove);
+            return updated;
+        });
+    }
+
+    private void updateBucketTaggingForAccount(String accountId, String bucketName,
+                                               UnaryOperator<Map<String, String>> update) {
         Bucket bucket = bucketForAccount(accountId, bucketName);
-        bucket.setTags(tags != null ? tags : new HashMap<>());
-        writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
-        LOG.debugv("Put tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
+        synchronized (bucket) {
+            Map<String, String> existing = bucket.getTags() != null ? bucket.getTags() : Map.of();
+            bucket.setTags(update.apply(existing));
+            writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
+        }
+        LOG.debugv("Updated tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
     }
 
     /**
@@ -4065,7 +4158,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         try {
             authorizeGetObject(bucket, cfg.getErrorDocument(), null, authorization);
-            return new WebsiteResolution.ErrorDocument(getObject(bucket, cfg.getErrorDocument()), responseStatus);
+            S3Object object = getObject(bucket, cfg.getErrorDocument());
+            requireArchivedObjectReadable(object);
+            return new WebsiteResolution.ErrorDocument(object, responseStatus);
         } catch (AwsException e) {
             if (!isWebsiteErrorDocumentTrigger(e)) {
                 throw e;
@@ -4080,16 +4175,12 @@ public class S3Service implements Resettable, ResourceProvider {
      * attempting at all.
      */
     public static boolean isWebsiteErrorDocumentTrigger(AwsException e) {
-        return "NoSuchKey".equals(e.getErrorCode()) || "AccessDenied".equals(e.getErrorCode());
+        return "NoSuchKey".equals(e.getErrorCode()) || "AccessDenied".equals(e.getErrorCode())
+                || "InvalidObjectState".equals(e.getErrorCode());
     }
 
     public void deleteBucketTagging(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
-        bucket.setTags(new java.util.HashMap<>());
-        bucketStore.put(bucketName, bucket);
-        LOG.debugv("Deleted tags from bucket: {0}", bucketName);
+        putBucketTagging(bucketName, Map.of());
     }
 
     // --- Metrics Configurations ---
@@ -6798,10 +6889,127 @@ public class S3Service implements Resettable, ResourceProvider {
                 .build();
     }
 
-    public void restoreObject(String bucketName, String key, String versionId, String restoreXml) {
-        // Validation only - stub implementation
-        getObject(bucketName, key, versionId);
-        LOG.infov("Restored object: {0}/{1} (stub)", bucketName, key);
+    public record RestoreStatus(boolean inProgress, Instant expiryDate) { }
+
+    public RestoreStatus restoreStatus(S3Object object) {
+        return restoreStatus(object, clock.instant());
+    }
+
+    public void requireArchivedObjectReadable(S3Object object) {
+        if ("GLACIER".equals(object.getStorageClass()) || "DEEP_ARCHIVE".equals(object.getStorageClass())) {
+            RestoreStatus restore = restoreStatus(object);
+            if (restore == null || restore.inProgress()) {
+                throw new AwsException("InvalidObjectState",
+                        "The operation is not valid for the object's storage class", 403,
+                        Map.of("StorageClass", object.getStorageClass()));
+            }
+        }
+    }
+
+    private static RestoreStatus restoreStatus(S3Object object, Instant now) {
+        Instant completedAt = object.getRestoreCompletionAt();
+        Instant expiresAt = object.getRestoreExpiryAt();
+        if (completedAt == null || expiresAt == null || !now.isBefore(expiresAt)) {
+            return null;
+        }
+        return now.isBefore(completedAt)
+                ? new RestoreStatus(true, null)
+                : new RestoreStatus(false, expiresAt);
+    }
+
+    /** Returns true for a newly started restore, false when extending a completed restore. */
+    public boolean restoreObject(String bucketName, String key, String versionId, String restoreXml) {
+        AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket",
+                        "The specified bucket does not exist.", 404));
+        synchronized (ownedBucket.value()) {
+            S3Object object = copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
+            int days = restoreDays(restoreXml, object.getStorageClass());
+            if (!"GLACIER".equals(object.getStorageClass()) && !"DEEP_ARCHIVE".equals(object.getStorageClass())) {
+                throw new AwsException("ObjectAlreadyInActiveTierError",
+                        "This operation is not valid for objects in the active storage tier.", 403);
+            }
+
+            Instant now = clock.instant();
+            RestoreStatus status = restoreStatus(object, now);
+            if (status != null && status.inProgress()) {
+                throw new AwsException("RestoreAlreadyInProgress", "Object restore is already in progress.", 409);
+            }
+            boolean started = status == null;
+            try {
+                Instant completedAt = started ? now.plusSeconds(restoreCompletionDelaySeconds) : now;
+                Instant expiration = completedAt.plus(days, ChronoUnit.DAYS);
+                Instant midnight = expiration.truncatedTo(ChronoUnit.DAYS);
+                object.setRestoreCompletionAt(completedAt);
+                // S3 rounds the temporary copy's expiry up to the next UTC midnight.
+                object.setRestoreExpiryAt(expiration.equals(midnight)
+                        ? midnight : midnight.plus(1, ChronoUnit.DAYS));
+            } catch (DateTimeException | ArithmeticException e) {
+                throw malformedRestoreRequest();
+            }
+            putObjectMetadataForAccount(ownedBucket.account(), bucketName, key, object);
+            return started;
+        }
+    }
+
+    private static int restoreDays(String restoreXml, String storageClass) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(restoreXml);
+        if (root == null || !"RestoreRequest".equals(root.name()) || !root.text().isEmpty()
+                || root.count("Days") != 1
+                || root.count("Type") != 0 || root.count("SelectParameters") != 0
+                || root.count("OutputLocation") != 0 || root.count("Tier") > 1
+                || root.count("GlacierJobParameters") > 1 || root.count("Description") > 1
+                || root.children().stream().anyMatch(child -> !Set.of("Days", "Tier",
+                        "GlacierJobParameters", "Description").contains(child.name()))) {
+            throw malformedRestoreRequest();
+        }
+        XmlParser.XmlElement daysElement = root.child("Days");
+        if (!daysElement.children().isEmpty()) {
+            throw malformedRestoreRequest();
+        }
+        XmlParser.XmlElement tier = root.child("Tier");
+        boolean expedited = tier != null && "Expedited".equals(tier.text());
+        if (tier != null) {
+            validateRestoreTier(tier);
+        }
+        XmlParser.XmlElement glacierJobParameters = root.child("GlacierJobParameters");
+        if (glacierJobParameters != null) {
+            if (!glacierJobParameters.text().isEmpty() || glacierJobParameters.children().size() != 1
+                    || glacierJobParameters.count("Tier") != 1) {
+                throw malformedRestoreRequest();
+            }
+            XmlParser.XmlElement glacierTier = glacierJobParameters.child("Tier");
+            validateRestoreTier(glacierTier);
+            expedited |= "Expedited".equals(glacierTier.text());
+        }
+        XmlParser.XmlElement description = root.child("Description");
+        if (description != null && !description.children().isEmpty()) {
+            throw malformedRestoreRequest();
+        }
+        if ("DEEP_ARCHIVE".equals(storageClass) && expedited) {
+            throw new AwsException("InvalidArgument",
+                    "Expedited retrievals are not supported for S3 Glacier Deep Archive.", 400);
+        }
+        try {
+            int days = Integer.parseInt(daysElement.text());
+            if (days > 0) {
+                return days;
+            }
+        } catch (NumberFormatException ignored) {
+            // Fall through to the same protocol error as non-positive Days.
+        }
+        throw malformedRestoreRequest();
+    }
+
+    private static void validateRestoreTier(XmlParser.XmlElement tier) {
+        if (!tier.children().isEmpty() || !Set.of("Standard", "Bulk", "Expedited").contains(tier.text())) {
+            throw malformedRestoreRequest();
+        }
+    }
+
+    private static AwsException malformedRestoreRequest() {
+        return new AwsException("MalformedXML",
+                "The XML you provided was not well-formed or did not validate against our published schema.", 400);
     }
 
     private static String defaultAclXml(String ownerAccount, String displayName) {
@@ -7605,6 +7813,11 @@ public class S3Service implements Resettable, ResourceProvider {
      * {@code globalBucketNamespace} is enabled, otherwise account-scoped.
      */
     private Optional<S3Object> resolveObject(String storeKey) {
+        String numericBucket = numericBucketName(storeKey);
+        if (numericBucket != null) {
+            return resolveBucketEntry(numericBucket)
+                    .flatMap(bucket -> resolveObjectForAccount(bucket.account(), storeKey));
+        }
         if (globalBucketNamespace && objectStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
@@ -7618,9 +7831,44 @@ public class S3Service implements Resettable, ResourceProvider {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
             return typed.getForAccount(accountId, storeKey)
-                    .or(() -> typed.getLegacyForAccount(accountId, storeKey));
+                    .or(() -> typed.getLegacyForAccount(accountId, storeKey))
+                    .or(() -> migrateNumericBucketObject(typed, accountId, storeKey));
         }
         return objectStore.get(storeKey);
+    }
+
+    private Optional<S3Object> migrateNumericBucketObject(
+            AccountAwareStorageBackend<S3Object> objects, String accountId, String storeKey) {
+        String bucketName = numericBucketName(storeKey);
+        if (bucketName == null || !accountId.equals(objects.defaultAccountId())) {
+            return Optional.empty();
+        }
+        AccountAwareStorageBackend.OwnedEntry<Bucket> bucket = resolveBucketEntry(bucketName).orElse(null);
+        if (bucket == null || !accountId.equals(bucket.account())
+                || !bucketName.equals(bucket.value().getName())) {
+            return Optional.empty();
+        }
+        synchronized (bucket.value()) {
+            // A numeric bucket can look like an account prefix. Only the stored S3 identity
+            // distinguishes its legacy object from another account's unrelated scoped entry.
+            return objects.getForAccountMigratingLegacyKeys(accountId, storeKey, List.of(),
+                    object -> matchesStoredObjectKey(bucketName, storeKey, object));
+        }
+    }
+
+    private static String numericBucketName(String storeKey) {
+        if (!AccountAwareStorageBackend.hasAccountPrefix(storeKey)) {
+            return null;
+        }
+        return storeKey.substring(0, 12);
+    }
+
+    private boolean matchesStoredObjectKey(String bucketName, String storeKey, S3Object object) {
+        if (!bucketName.equals(object.getBucketName()) || object.getKey() == null) {
+            return false;
+        }
+        return storeKey.equals(objectKey(bucketName, object.getKey()))
+                || storeKey.equals(versionedKey(bucketName, object.getKey(), storedVersionId(object)));
     }
 
     private void putObjectForAccount(String accountId, String storeKey, S3Object object) {

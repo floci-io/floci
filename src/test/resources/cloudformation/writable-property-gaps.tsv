@@ -49,7 +49,6 @@ AWS::ApiGatewayV2::Deployment	StageName	accepted and ignored
 AWS::ApiGatewayV2::Integration	ContentHandlingStrategy	accepted and ignored
 AWS::ApiGatewayV2::Integration	CredentialsArn	accepted and ignored
 AWS::ApiGatewayV2::Integration	Description	accepted and ignored
-AWS::ApiGatewayV2::Integration	IntegrationSubtype	accepted and ignored
 AWS::ApiGatewayV2::Integration	PassthroughBehavior	accepted and ignored
 AWS::ApiGatewayV2::Integration	ResponseParameters	accepted and ignored
 AWS::ApiGatewayV2::Integration	TlsConfig	accepted and ignored
@@ -130,6 +129,10 @@ AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning i
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
 AWS::CloudFormation::CustomResource	ServiceTimeout	accepted and ignored
+AWS::CloudFormation::StackSet	AdministrationRoleARN	accepted and ignored; local StackSets deploy without assuming an administration role
+AWS::CloudFormation::StackSet	CallAs	accepted and ignored; local StackSets do not model delegated administrator authorization
+AWS::CloudFormation::StackSet	ExecutionRoleName	accepted and ignored; local StackSets deploy without assuming an execution role
+AWS::CloudFormation::StackSet	OperationPreferences	accepted and ignored; explicit StackSet deployments execute locally without scheduling preferences
 AWS::CloudFront::Distribution	Tags	accepted and ignored
 AWS::CloudFront::Function	FunctionMetadata	accepted and ignored
 AWS::CloudTrail::Trail	AggregationConfigurations	accepted and ignored
@@ -137,6 +140,7 @@ AWS::CloudTrail::Trail	CloudWatchLogsLogGroupArn	accepted and ignored
 AWS::CloudTrail::Trail	CloudWatchLogsRoleArn	accepted and ignored
 AWS::CloudTrail::Trail	InsightSelectors	accepted and ignored
 AWS::CloudTrail::Trail	KMSKeyId	accepted and ignored
+AWS::CloudTrail::Trail	RecursiveLogging	accepted and ignored
 AWS::CloudTrail::Trail	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ActionConfiguration	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
@@ -153,7 +157,6 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
-AWS::DynamoDB::GlobalTable	BillingMode	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -165,7 +168,6 @@ AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
 AWS::DynamoDB::GlobalTable	WarmThroughput	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteProvisionedThroughputSettings	accepted and ignored
-AWS::DynamoDB::Table	BillingMode	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
 AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
@@ -251,7 +253,6 @@ AWS::EC2::VPCEndpoint	ServiceNetworkArn	accepted and ignored
 AWS::EC2::VPCEndpoint	ServiceRegion	accepted and ignored
 AWS::EC2::VPCEndpoint	Tags	accepted and ignored
 AWS::ECR::Repository	EmptyOnDelete	accepted and ignored
-AWS::ECR::Repository	EncryptionConfiguration	accepted and ignored
 AWS::ECR::Repository	ImageScanningConfiguration	accepted and ignored
 AWS::ECR::Repository	ImageTagMutabilityExclusionFilters	accepted and ignored
 AWS::ECS::CapacityProvider	ClusterName	accepted and ignored
@@ -286,7 +287,10 @@ AWS::ECS::TaskDefinition	PidMode	accepted and ignored
 AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
 AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
 AWS::ECS::TaskDefinition	Tags	accepted and ignored
+AWS::ECS::TaskDefinition	TrustedExecutionConfiguration	accepted and ignored
 AWS::ECS::TaskDefinition	Volumes	accepted and ignored
+AWS::EFS::FileSystem	BypassPolicyLockoutSafetyCheck	Floci's EFS service applies a file system policy without a lockout check, so there is nothing to bypass
+AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS replication, so the destination file system is not created
 AWS::EKS::Cluster	AccessConfig	accepted and ignored
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
@@ -333,6 +337,21 @@ AWS::ElastiCache::CacheCluster	PreferredAvailabilityZones	accepted and ignored, 
 AWS::ElastiCache::CacheCluster	SnapshotArns	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	SnapshotName	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	TransitEncryptionEnabled	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	AutoMinorVersionUpgrade	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	DataTieringEnabled	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	Durability	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	GlobalReplicationGroupId	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	IpDiscovery	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	LogDeliveryConfigurations	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	NetworkType	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	NodeGroupConfiguration	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	NotificationTopicArn	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	PreferredCacheClusterAZs	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	PreferredMaintenanceWindow	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	PrimaryClusterId	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshotArns	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshotName	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshottingClusterId	accepted and ignored, a warning is logged
 AWS::ElastiCache::ServerlessCache	FinalSnapshotName	accepted and ignored
 AWS::ElasticLoadBalancingV2::Listener	AlpnPolicy	accepted and ignored
 AWS::ElasticLoadBalancingV2::Listener	ListenerAttributes	accepted and ignored
@@ -348,10 +367,8 @@ AWS::ElasticLoadBalancingV2::LoadBalancer	LoadBalancerAttributes	accepted and ig
 AWS::ElasticLoadBalancingV2::LoadBalancer	MinimumLoadBalancerCapacity	accepted and ignored
 AWS::ElasticLoadBalancingV2::TargetGroup	TargetControlPort	accepted and ignored
 AWS::ElasticLoadBalancingV2::TargetGroup	TargetGroupAttributes	accepted and ignored
-AWS::ElasticLoadBalancingV2::TargetGroup	Targets	accepted and ignored
 AWS::Events::Archive	KmsKeyIdentifier	documented as ignored (docs/services/cloudformation.md, EventBridge)
 AWS::Events::EventBus	DeadLetterConfig	rejected with a ValidationError, not supported by Floci
-AWS::Events::EventBus	EventSourceName	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	KmsKeyIdentifier	rejected with a ValidationError, not supported by Floci
 AWS::Events::EventBus	LogConfig	rejected with a ValidationError, not supported by Floci
 AWS::IAM::ManagedPolicy	Description	accepted and ignored
@@ -402,11 +419,13 @@ AWS::Lambda::EventSourceMapping	Queues	accepted and ignored
 AWS::Lambda::EventSourceMapping	SelfManagedKafkaEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	TumblingWindowInSeconds	documented as ignored (docs/services/cloudformation.md, Lambda)
+AWS::Lambda::Function	AcceleratorConfig	accepted and ignored
 AWS::Lambda::Function	CapacityProviderConfig	accepted and ignored
 AWS::Lambda::Function	FunctionScalingConfig	accepted and ignored
 AWS::Lambda::Function	KmsKeyArn	accepted and ignored
 AWS::Lambda::Function	PublishToLatestPublished	accepted and ignored
 AWS::Lambda::Function	RecursiveLoop	accepted and ignored
+AWS::Lambda::Function	RuntimeConfig	accepted and ignored
 AWS::Lambda::Function	RuntimeManagementConfig	accepted and ignored
 AWS::Lambda::Function	SnapStart	accepted and ignored
 AWS::Lambda::Function	TenancyConfig	accepted and ignored
@@ -416,6 +435,7 @@ AWS::Lambda::MicrovmImage	CpuConfigurations	accepted and ignored
 AWS::Lambda::MicrovmImage	EgressNetworkConnectors	accepted and ignored
 AWS::Lambda::MicrovmImage	EnvironmentVariables	accepted and ignored
 AWS::Lambda::MicrovmImage	Hooks	accepted and ignored
+AWS::Lambda::MicrovmImage	KmsKeyIdentifier	accepted and ignored; local MicroVM image builds do not model KMS encryption
 AWS::Lambda::MicrovmImage	Logging	accepted and ignored
 AWS::Lambda::MicrovmImage	Resources	accepted and ignored
 AWS::Lambda::MicrovmImage	Tags	accepted and ignored
@@ -532,14 +552,12 @@ AWS::RDS::DBInstance	SourceDBInstanceAutomatedBackupsArn	accepted and ignored
 AWS::RDS::DBInstance	SourceDBInstanceIdentifier	accepted and ignored
 AWS::RDS::DBInstance	SourceDbiResourceId	accepted and ignored
 AWS::RDS::DBInstance	SourceRegion	accepted and ignored
-AWS::RDS::DBInstance	StorageEncrypted	accepted and ignored
 AWS::RDS::DBInstance	StorageThroughput	accepted and ignored
 AWS::RDS::DBInstance	StorageType	accepted and ignored
 AWS::RDS::DBInstance	Tags	accepted and ignored
 AWS::RDS::DBInstance	Timezone	accepted and ignored
 AWS::RDS::DBInstance	UseDefaultProcessorFeatures	accepted and ignored
 AWS::RDS::DBInstance	UseLatestRestorableTime	accepted and ignored
-AWS::RDS::DBInstance	VPCSecurityGroups	accepted and ignored
 AWS::RDS::DBParameterGroup	Parameters	accepted and ignored
 AWS::RDS::DBParameterGroup	Tags	accepted and ignored
 AWS::RDS::DBProxyTargetGroup	Tags	accepted and ignored
@@ -595,19 +613,15 @@ AWS::RedshiftServerless::Workgroup	SnapshotArn	documented as ignored (docs/servi
 AWS::RedshiftServerless::Workgroup	SnapshotName	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
 AWS::RedshiftServerless::Workgroup	SnapshotOwnerAccount	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
 AWS::RedshiftServerless::Workgroup	Workgroup	accepted and ignored
-AWS::Route53::HostedZone	DelegationSetId	accepted and ignored
 AWS::Route53::HostedZone	HostedZoneFeatures	accepted and ignored
 AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
 AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored
 AWS::Route53::RecordSet	Comment	accepted and ignored
 AWS::Route53::RecordSet	GeoLocation	accepted and ignored
-AWS::Route53::RecordSet	MultiValueAnswer	accepted and ignored
 AWS::S3::Bucket	AbacStatus	accepted and ignored
 AWS::S3::Bucket	AccelerateConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AccessControl	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AnalyticsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
-AWS::S3::Bucket	BucketNamePrefix	accepted and ignored
-AWS::S3::Bucket	BucketNamespace	accepted and ignored
 AWS::S3::Bucket	IntelligentTieringConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	InventoryConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	LoggingConfiguration	silently dropped, as the S3CfnProvisioner javadoc records

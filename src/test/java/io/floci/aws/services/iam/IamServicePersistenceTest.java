@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.floci.aws.services.iam.InlinePolicyTestHelper.policyWithNonWhitespaceLength;
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,7 +49,7 @@ class IamServicePersistenceTest {
     @Test
     void roleInlinePolicyQuotaUsesPersistedAggregateAfterRestart(@TempDir Path directory) {
         IamService first = newService(directory);
-        first.createRole("R", "/", "{}", null, 0, null);
+        first.createRole("R", "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         String firstPolicy = policyWithNonWhitespaceLength(6_000);
         String secondPolicy = policyWithNonWhitespaceLength(4_000);
         first.putRolePolicy("R", "first", firstPolicy);

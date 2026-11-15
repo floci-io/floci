@@ -141,7 +141,8 @@ class RedshiftServerlessAdminSecretsServiceTest {
         assertSame(failure, assertThrows(IllegalStateException.class, () -> update(null, null, true)));
         verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics",
                 ORIGINAL_PASSWORD, GENERATED_PASSWORD);
-        verify(runtime).restoreMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics", ORIGINAL_PASSWORD);
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics", null,
+                ORIGINAL_PASSWORD);
         verify(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
         assertSame(previous, service.getNamespace(NAME, REGION));
         assertNull(previous.getAdminPasswordSecretArn());
@@ -190,7 +191,8 @@ class RedshiftServerlessAdminSecretsServiceTest {
         assertSame(failure, assertThrows(IllegalStateException.class,
                 () -> update(null, ORIGINAL_PASSWORD, false)));
         verify(secrets, never()).deleteSecret(any(), any(), anyBoolean(), any());
-        verify(runtime).restoreMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics", GENERATED_PASSWORD);
+        verify(runtime).changeMasterPassword(ACCOUNT, REGION, WORKGROUP, "admin", "analytics", null,
+                GENERATED_PASSWORD);
         assertSame(previous, service.getNamespace(NAME, REGION));
         assertEquals(SECRET_ARN, previous.getAdminPasswordSecretArn());
     }
@@ -287,7 +289,6 @@ class RedshiftServerlessAdminSecretsServiceTest {
         assertEquals(ORIGINAL_PASSWORD, current.getAdminUserPassword());
         assertNull(current.getAdminPasswordSecretArn());
         verify(runtime, never()).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
-        verify(runtime, never()).restoreMasterPassword(any(), any(), any(), any(), any(), any());
         verify(secrets, never()).deleteSecret(any(), any(), anyBoolean(), any());
     }
 
@@ -319,10 +320,6 @@ class RedshiftServerlessAdminSecretsServiceTest {
             backendPassword.set(invocation.getArgument(6, String.class));
             return null;
         }).when(runtime).changeMasterPassword(any(), any(), any(), any(), any(), any(), any());
-        doAnswer(invocation -> {
-            backendPassword.set(invocation.getArgument(5, String.class));
-            return null;
-        }).when(runtime).restoreMasterPassword(any(), any(), any(), any(), any(), any());
         AwsException failure = new AwsException("InvalidRequestException", "Secret has replicas", 400);
         doThrow(failure).when(secrets).deleteSecret(SECRET_ARN, null, true, REGION);
 

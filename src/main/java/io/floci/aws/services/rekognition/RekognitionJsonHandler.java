@@ -8,6 +8,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 /**
  * JSON 1.1 handler for Amazon Rekognition API operations.
  * Dispatches X-Amz-Target: RekognitionService.* actions to {@link RekognitionService}.
@@ -19,37 +20,55 @@ public class RekognitionJsonHandler {
     private static final Logger LOG = Logger.getLogger(RekognitionJsonHandler.class);
     private final RekognitionService rekognitionService;
     private final RekognitionImageValidator imageValidator;
+    private final RekognitionCollectionService collectionService;
     @Inject
-    public RekognitionJsonHandler(RekognitionService rekognitionService, RekognitionImageValidator imageValidator) {
+    public RekognitionJsonHandler(RekognitionService rekognitionService, RekognitionImageValidator imageValidator,
+                                  RekognitionCollectionService collectionService) {
         this.rekognitionService = rekognitionService;
         this.imageValidator = imageValidator;
+        this.collectionService = collectionService;
     }
     /**
      * Dispatches Rekognition actions received via the AwsJson11Controller.
-     * Only sync image-analysis actions are implemented; face-collection persistence
-     * (CreateCollection/IndexFaces/SearchFaces), custom-model training (Projects/
+     * Sync image-analysis and face collections are implemented; custom-model training (Projects/
      * Datasets/ProjectVersions), live video (StreamProcessor), async video jobs
      * (the Start and Get pairs for Celebrity/Content/Face/Label/Person/Segment/Text
      * detection), and Face Liveness sessions are out of scope.
      */
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("Rekognition action: {0}", action);
-        return switch (action) {
-            case "DetectLabels" -> rekognitionService.detectLabels(validImage(action, request, region));
-            case "DetectFaces" -> rekognitionService.detectFaces(validImage(action, request, region));
-            case "DetectText" -> rekognitionService.detectText(validImage(action, request, region));
-            case "CompareFaces" -> {
+        Supplier<Response> operation = switch (action) {
+            case "CreateCollection" -> () -> Response.ok(collectionService.createCollection(request, region)).build();
+            case "DeleteCollection" -> () -> Response.ok(collectionService.deleteCollection(request, region)).build();
+            case "DescribeCollection" -> () -> Response.ok(collectionService.describeCollection(request, region)).build();
+            case "ListCollections" -> () -> Response.ok(collectionService.listCollections(request, region)).build();
+            case "IndexFaces" -> () -> Response.ok(collectionService.indexFaces(request, region,
+                    validImage(action, request, region))).build();
+            case "ListFaces" -> () -> Response.ok(collectionService.listFaces(request, region)).build();
+            case "DeleteFaces" -> () -> Response.ok(collectionService.deleteFaces(request, region)).build();
+            case "SearchFaces" -> () -> Response.ok(collectionService.searchFaces(request, region)).build();
+            case "SearchFacesByImage" -> () -> Response.ok(collectionService.searchFacesByImage(request, region,
+                    validImage(action, request, region))).build();
+            case "DetectLabels" -> () -> rekognitionService.detectLabels(validImage(action, request, region));
+            case "DetectFaces" -> () -> rekognitionService.detectFaces(validImage(action, request, region));
+            case "DetectText" -> () -> rekognitionService.detectText(validImage(action, request, region));
+            case "CompareFaces" -> () -> {
                 String sourceKey = requireImage(request, "SourceImage");
                 requireImage(request, "TargetImage");
                 imageValidator.validate(action, request, region, "SourceImage", "TargetImage");
-                yield rekognitionService.compareFaces(sourceKey);
-            }
-            case "DetectModerationLabels" -> rekognitionService.detectModerationLabels(validImage(action, request, region));
-            default -> Response.status(400)
+                return rekognitionService.compareFaces(sourceKey);
+            };
+            case "DetectModerationLabels" -> () -> rekognitionService.detectModerationLabels(validImage(action, request, region));
+            default -> null;
+        };
+        if (operation == null) {
+            return Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: RekognitionService." + action))
                     .build();
-        };
+        }
+        RekognitionRequestShapes.check(action, request);
+        return operation.get();
     }
     /** The image's mock-response key, once the image has the shape and content Rekognition accepts. */
     private String validImage(String action, JsonNode request, String region) {

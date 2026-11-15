@@ -78,7 +78,7 @@ public class BedrockAgentCoreControlController {
             String version = String.valueOf(runtime.getLatestVersion());
 
             ObjectNode out = objectMapper.createObjectNode();
-            out.put("agentRuntimeArn", service.arn(runtime, version, region));
+            out.put("agentRuntimeArn", service.arn(runtime, region));
             out.put("agentRuntimeId", runtime.getAgentRuntimeId());
             out.put("agentRuntimeVersion", version);
             putInstant(out, "createdAt", runtime.getCreatedAt());
@@ -125,7 +125,7 @@ public class BedrockAgentCoreControlController {
             String v = snap.getVersion();
 
             ObjectNode out = objectMapper.createObjectNode();
-            out.put("agentRuntimeArn", service.arn(runtime, v, region));
+            out.put("agentRuntimeArn", service.arn(runtime, region));
             out.put("agentRuntimeId", runtime.getAgentRuntimeId());
             out.put("agentRuntimeName", runtime.getAgentRuntimeName());
             out.put("agentRuntimeVersion", v);
@@ -181,7 +181,7 @@ public class BedrockAgentCoreControlController {
             String version = String.valueOf(runtime.getLatestVersion());
 
             ObjectNode out = objectMapper.createObjectNode();
-            out.put("agentRuntimeArn", service.arn(runtime, version, region));
+            out.put("agentRuntimeArn", service.arn(runtime, region));
             out.put("agentRuntimeId", runtime.getAgentRuntimeId());
             out.put("agentRuntimeVersion", version);
             putInstant(out, "createdAt", runtime.getCreatedAt());
@@ -339,8 +339,8 @@ public class BedrockAgentCoreControlController {
     private ObjectNode endpointResponse(AgentRuntime runtime, AgentRuntimeEndpoint endpoint,
                                         String region, boolean full) {
         ObjectNode node = objectMapper.createObjectNode();
-        node.put("agentRuntimeArn", service.arn(runtime, endpoint.getTargetVersion(), region));
-        node.put("agentRuntimeEndpointArn", service.endpointArn(endpoint, region));
+        node.put("agentRuntimeArn", service.arn(runtime, region));
+        node.put("agentRuntimeEndpointArn", service.endpointArn(runtime.getAgentRuntimeId(), endpoint, region));
         node.put("agentRuntimeId", runtime.getAgentRuntimeId());
         node.put("endpointName", endpoint.getName());
         node.put("status", endpoint.getStatus());
@@ -364,7 +364,7 @@ public class BedrockAgentCoreControlController {
 
     private ObjectNode summary(AgentRuntime runtime, String version, String region) {
         ObjectNode node = objectMapper.createObjectNode();
-        node.put("agentRuntimeArn", service.arn(runtime, version, region));
+        node.put("agentRuntimeArn", service.arn(runtime, region));
         node.put("agentRuntimeId", runtime.getAgentRuntimeId());
         node.put("agentRuntimeName", runtime.getAgentRuntimeName());
         node.put("agentRuntimeVersion", version);
@@ -378,7 +378,7 @@ public class BedrockAgentCoreControlController {
 
     private ObjectNode versionSummary(AgentRuntime runtime, AgentRuntimeVersion snap, String region) {
         ObjectNode node = objectMapper.createObjectNode();
-        node.put("agentRuntimeArn", service.arn(runtime, snap.getVersion(), region));
+        node.put("agentRuntimeArn", service.arn(runtime, region));
         node.put("agentRuntimeId", runtime.getAgentRuntimeId());
         node.put("agentRuntimeName", runtime.getAgentRuntimeName());
         node.put("agentRuntimeVersion", snap.getVersion());

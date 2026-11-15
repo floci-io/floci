@@ -42,6 +42,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
+import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -316,6 +317,29 @@ class AutoScalingStandbyTest {
         assertEquals("InService", lifecycle("i-replacement-1"));
         assertEquals("Standby", lifecycle("i-a"));
         assertEquals(1, launches.get());
+    }
+
+    /**
+     * An instance leaves an elbv2 traffic source as it enters standby and joins it again as it comes back into
+     * service, as it does a target group attached as one.
+     */
+    @Test
+    void anElbV2TrafficSourceIsLeftInStandbyAndJoinedAgainOnTheWayBack() {
+        String source = "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/source/0123456789abcdef";
+        AutoScalingGroup group = group();
+        group.getTrafficSourceTypeByIdentifier().put(source, "elbv2");
+        service.saveAutoScalingGroupIfPresent(group);
+
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        assertEquals("Standby", lifecycle("i-a"));
+        verify(elbV2).deregisterTargets(eq(REGION), eq(source), onlyTarget("i-a"));
+        clearInvocations(elbV2);
+
+        ok(exitStandby("i-a"));
+        reconciler.reconcile(group());
+        assertEquals("InService", lifecycle("i-a"));
+        verify(elbV2).registerTargets(eq(REGION), eq(source), onlyTarget("i-a"));
     }
 
     @Test
@@ -783,7 +807,9 @@ class AutoScalingStandbyTest {
             doThrow(failure).doNothing().when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
         }
 
-        List<LogRecord> records = LogCapture.capture(AutoScalingReconciler.class,
+        // Target groups are registered through AutoScalingService.registerWithTargetGroups, which logs there.
+        List<LogRecord> records = LogCapture.capture(
+                classicFailure ? AutoScalingReconciler.class : AutoScalingService.class,
                 () -> reconciler.reconcile(group()));
 
         List<LogRecord> warnings = records.stream()

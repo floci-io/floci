@@ -5,6 +5,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.s3.S3ConditionKeys;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.PutObjectOptions;
 import io.floci.aws.services.s3.model.S3Object;
@@ -80,7 +82,18 @@ public final class S3CopySimulator {
     }
 
     record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
-                     IamService iamService, RedshiftRoleAccess.RoleSession roleSession) {
+                     IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
+                     String expectedETag, String versionId) {
+        S3Object readObject(String key) {
+            S3Object object = versionId != null
+                    ? s3.getObject(spec.bucket(), key, versionId)
+                    : s3.getObject(spec.bucket(), key);
+            if (expectedETag != null && (object == null || !expectedETag.equals(object.getETag()))) {
+                throw new S3TransferException(SQLSTATE_INTERNAL,
+                        "S3 object s3://" + spec.bucket() + "/" + key + " changed during COPY", null);
+            }
+            return object;
+        }
     }
 
     interface UnloadCollector extends AutoCloseable {
@@ -98,14 +111,29 @@ public final class S3CopySimulator {
 
     public static final class S3TransferException extends RuntimeException {
         private final String sqlState;
+        private final Map<Character, String> fields;
 
         public S3TransferException(String sqlState, String message, Throwable cause) {
+            this(sqlState, message, cause, Map.of());
+        }
+
+        S3TransferException(String sqlState, String message, Throwable cause, Map<Character, String> fields) {
             super(message, cause);
             this.sqlState = sqlState;
+            this.fields = Map.copyOf(fields);
+        }
+
+        Map<Character, String> fields() {
+            return fields;
         }
 
         public String sqlState() {
             return sqlState;
+        }
+
+        /** Syntax or unsupported-feature states: retrying the same job cannot succeed until the job is fixed. */
+        public static boolean isJobFailure(String sqlState) {
+            return sqlState != null && (sqlState.startsWith("42") || "0A000".equals(sqlState));
         }
     }
 
@@ -121,12 +149,26 @@ public final class S3CopySimulator {
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                  String clusterAccountId, List<String> associatedRoleArns) {
         return asKeyAccount(spec, s3, iamService,
-                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns));
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, false, null, null));
+    }
+
+    static CopyInput prepareObjectCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                       String clusterAccountId, List<String> associatedRoleArns) {
+        return prepareObjectCopy(spec, s3, iamService, clusterAccountId, associatedRoleArns, null, null);
+    }
+
+    static CopyInput prepareObjectCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                       String clusterAccountId, List<String> associatedRoleArns,
+                                       String expectedETag, String versionId) {
+        return asKeyAccount(spec, s3, iamService,
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, true,
+                        expectedETag, versionId));
     }
 
     private static CopyInput prepareCopyScoped(CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                                IamService iamService, String clusterAccountId,
-                                               List<String> associatedRoleArns) {
+                                               List<String> associatedRoleArns, boolean exactObject,
+                                               String expectedETag, String versionId) {
         requireDefaultIamRole(spec);
         RedshiftRoleAccess.RoleSession roleSession = resolveCopySession(spec, s3, iamService, clusterAccountId,
                 associatedRoleArns);
@@ -134,10 +176,10 @@ public final class S3CopySimulator {
             try {
                 if (spec.manifest()) {
                     authorizeCopyObject(spec, s3, iamService, roleSession, spec.keyOrPrefix());
-                } else {
+                } else if (!exactObject) {
                     if (roleSession != null) {
                         RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
-                                "s3:ListBucket", copyBucketArn(spec, s3), Map.of("s3:prefix", List.of(spec.keyOrPrefix())));
+                                "s3:ListBucket", copyBucketArn(spec, s3), S3ConditionKeys.listing(spec.keyOrPrefix()));
                         s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
                                 spec.keyOrPrefix());
                     } else {
@@ -151,7 +193,7 @@ public final class S3CopySimulator {
 
             List<String> keys;
             try {
-                keys = resolveKeys(spec, s3);
+                keys = exactObject ? List.of(spec.keyOrPrefix()) : resolveKeys(spec, s3);
             } catch (AwsException e) {
                 throw new S3TransferException(SQLSTATE_INTERNAL,
                         "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
@@ -169,7 +211,7 @@ public final class S3CopySimulator {
                 throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                         "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
             }
-            return new CopyInput(spec, List.copyOf(keys), s3, iamService, roleSession);
+            return new CopyInput(spec, List.copyOf(keys), s3, iamService, roleSession, expectedETag, versionId);
         } catch (RuntimeException e) {
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
             throw e;
@@ -199,8 +241,7 @@ public final class S3CopySimulator {
         if (spec.iamRoleArn() != null) {
             return RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket());
         }
-        return AwsArnUtils.Arn.global(s3.bucketPartition(spec.bucket()), "s3", "",
-                spec.bucket()).toString();
+        return S3ResourceArns.bucket(s3.bucketPartition(spec.bucket()), spec.bucket());
     }
 
     private static String copyObjectArn(CopyStatementParser.S3CopyFrom spec, S3Service s3, String key) {
@@ -252,8 +293,7 @@ public final class S3CopySimulator {
         String account = keyAccount(input.spec(), input.s3(), input.iamService());
         try {
             RequestScopes.callAsChecked(account, () -> {
-                streamObjects(input.spec(), discoveredColumns, columnMaxBytes, columnKinds, input.s3(),
-                        input.iamService(), input.roleSession(), input.keys(), backendOut);
+                streamObjects(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut);
                 return null;
             });
         } catch (IOException | RuntimeException e) {
@@ -536,7 +576,7 @@ public final class S3CopySimulator {
                 : spec.columns().stream().map(S3CopySimulator::normalizeColumnName).toList();
     }
 
-    private static String normalizeColumnName(String identifier) {
+    static String normalizeColumnName(String identifier) {
         if (identifier != null && identifier.length() >= 2
                 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
             return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
@@ -564,10 +604,10 @@ public final class S3CopySimulator {
         return value.replace("'", "''");
     }
 
-    private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns,
+    private static void streamObjects(CopyInput input, List<String> discoveredColumns,
                                       List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
-                                      S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
-                                      List<String> keys, OutputStream backendOut) throws IOException {
+                                      OutputStream backendOut) throws IOException {
+        CopyStatementParser.S3CopyFrom spec = input.spec();
         if (spec.transforms().truncateColumns() && columnMaxBytes == null) {
             // Extended Query fixes the statement at Parse time, so there is no catalog round trip to
             // learn column lengths; same limitation and remedy as FORMAT AS JSON 'auto'.
@@ -581,9 +621,10 @@ public final class S3CopySimulator {
                             + "available over the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
         byte[] buffer = new byte[CHUNK];
+        List<String> keys = input.keys();
         for (int i = 0; i < keys.size(); i++) {
-            authorizeCopyObject(spec, s3, iamService, roleSession, keys.get(i));
-            S3Object object = s3.getObject(spec.bucket(), keys.get(i));
+            authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), keys.get(i));
+            S3Object object = input.readObject(keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             InputStream rawIn = new ByteArrayInputStream(data);
             try (InputStream in = CopySourceInputStream.open(rawIn, spec.gzip())) {
@@ -677,10 +718,18 @@ public final class S3CopySimulator {
         }
     }
 
-    record ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind) {
+    record ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind, Integer scale, String typeOid) {
+        ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind) {
+            this(name, maxBytes, kind, null, null);
+        }
+
         ColumnInfo(String name, Integer maxBytes) {
             this(name, maxBytes, CopyRecordTransformer.ColumnKind.OTHER);
         }
+    }
+
+    static List<Integer> alignScales(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog) {
+        return align(spec, catalog, ColumnInfo::scale);
     }
 
     /** Positional max character length per COPY column; null entries mean no limit. */
@@ -756,7 +805,9 @@ public final class S3CopySimulator {
     static String columnInfoQuery(CopyStatementParser.S3CopyFrom spec) {
         // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
         return "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
-                + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
+                + "THEN a.atttypmod - 4 END, a.atttypid, "
+                + "CASE WHEN a.atttypid = 1700 AND a.atttypmod >= 4 "
+                + "THEN (((a.atttypmod - 4) & 2047) # 1024) - 1024 END FROM pg_catalog.pg_attribute a "
                 + "WHERE a.attrelid = to_regclass(" + PostgresWire.quoteLiteral(spec.targetTable()) + ") "
                 + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
                 + "ORDER BY a.attnum";
@@ -766,7 +817,8 @@ public final class S3CopySimulator {
         Integer maxBytes = values.size() >= 2 && values.get(1) != null
                 ? Integer.valueOf(values.get(1)) : null;
         String typeOid = values.size() >= 3 ? values.get(2) : null;
-        return new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid));
+        Integer scale = values.size() >= 4 && values.get(3) != null ? Integer.valueOf(values.get(3)) : null;
+        return new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid), scale, typeOid);
     }
 
     private static List<ColumnInfo> discoverColumnInfo(Socket client, Socket backend,

@@ -25,10 +25,13 @@ import io.floci.aws.services.ssoadmin.model.RegionMetadata;
 import io.floci.aws.services.ssoadmin.model.SsoApplication;
 import io.floci.aws.services.ssoadmin.model.SsoInstance;
 import io.floci.aws.services.ssoadmin.model.TrustedTokenIssuer;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +50,8 @@ class SsoAdminServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private SsoAdminService service;
+    private SsoPermissionSetRoleProvisioner roleProvisioner;
+    private final MutableClock clock = new MutableClock();
     private IdentityStoreService identityStoreService;
     private OrganizationsService organizationsService;
     private InMemoryStorage<String, ApplicationAccessScope> applicationAccessScopes;
@@ -56,6 +61,7 @@ class SsoAdminServiceTest {
 
     @BeforeEach
     void setUp() {
+        roleProvisioner = Mockito.mock(SsoPermissionSetRoleProvisioner.class, Mockito.RETURNS_MOCKS);
         identityStoreService = Mockito.mock(IdentityStoreService.class);
         organizationsService = Mockito.mock(OrganizationsService.class);
         applicationAccessScopes = new InMemoryStorage<>();
@@ -90,9 +96,9 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, String>(),
                 identityStoreService,
                 organizationsService,
-                new SsoAdminRequestContext(),
                 ACCOUNT_ID,
-                "us-east-1");
+                "us-east-1",
+                clock, roleProvisioner);
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
     }
 
@@ -328,6 +334,21 @@ class SsoAdminServiceTest {
         recreate.put("ClientToken", "replacement-instance-token");
         SsoInstance replacement = emptyService.createInstance(recreate, ACCOUNT_ID, "us-west-2");
         assertFalse(replacement.instanceArn().equals(instance.instanceArn()));
+    }
+
+    @Test
+    void deletingAnInstanceCleansUpItsProvisionedTargetRoles() {
+        PermissionSet permissionSet = service.createPermissionSet(mapper.createObjectNode()
+                .put("InstanceArn", service.getInstanceArn()).put("Name", "Provisioned"));
+        service.provisionPermissionSet(mapper.createObjectNode()
+                .put("InstanceArn", service.getInstanceArn()).put("PermissionSetArn", permissionSet.arn())
+                .put("TargetType", "AWS_ACCOUNT").put("TargetId", "210987654321"));
+
+        service.deleteInstance(mapper.createObjectNode().put("InstanceArn", service.getInstanceArn()), ACCOUNT_ID);
+
+        Mockito.verify(roleProvisioner).remove(Mockito.argThat(provisioning ->
+                permissionSet.arn().equals(provisioning.permissionSetArn())
+                        && "210987654321".equals(provisioning.accountId())), Mockito.eq("us-east-1"));
     }
 
     @Test
@@ -1588,41 +1609,6 @@ class SsoAdminServiceTest {
                 () -> accountInstanceService.listAssignmentsForPrincipal(accountInstanceRequest, ACCOUNT_ID));
     }
 
-    /**
-     * A {@code ProvisionPermissionSet} for {@code ALL_PROVISIONED_ACCOUNTS} provisions the permission set to the
-     * accounts its permission check found it provisioned to, not to one another request provisioned it to in between:
-     * a permission set change then leaves that account not provisioned, and this request was not checked on it.
-     */
-    @Test
-    void allProvisionedAccountsAreTheOnesThePermissionCheckFound() {
-        PermissionSet permissionSet = createPermissionSet("PinnedAccounts");
-        service.createAssignment(assignmentRequest(permissionSet.arn()));
-        assertEquals(List.of("arn:aws:sso:::account/" + ACCOUNT_ID),
-                service.through("PermissionSetArn", permissionSet.arn(), "us-east-1"));
-
-        ObjectNode other = assignmentRequest(permissionSet.arn());
-        other.put("TargetId", "222222222222");
-        service.createAssignment(other);
-        service.attachPolicy(service.getInstanceArn(), permissionSet.arn(), "arn:aws:iam::aws:policy/ReadOnlyAccess");
-        ObjectNode all = mapper.createObjectNode();
-        all.put("InstanceArn", service.getInstanceArn());
-        all.put("PermissionSetArn", permissionSet.arn());
-        all.put("TargetType", "ALL_PROVISIONED_ACCOUNTS");
-        service.provisionPermissionSet(all);
-
-        assertEquals(List.of(ACCOUNT_ID), accountsProvisioned(permissionSet.arn(), "LATEST_PERMISSION_SET_PROVISIONED"));
-        assertEquals(List.of("222222222222"),
-                accountsProvisioned(permissionSet.arn(), "LATEST_PERMISSION_SET_NOT_PROVISIONED"));
-    }
-
-    private List<String> accountsProvisioned(String permissionSetArn, String status) {
-        ObjectNode request = mapper.createObjectNode();
-        request.put("InstanceArn", service.getInstanceArn());
-        request.put("PermissionSetArn", permissionSetArn);
-        request.put("ProvisioningStatus", status);
-        return service.listAccountsForProvisionedPermissionSet(request).items();
-    }
-
     @Test
     void provisionPermissionSetSupportsSingleAndAllProvisionedAccounts() {
         PermissionSet permissionSet = createPermissionSet("ProvisionAdmins");
@@ -1957,9 +1943,9 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, String>(),
                 identityStoreService,
                 organizationsService,
-                new SsoAdminRequestContext(),
                 "999999999999",
-                defaultRegion);
+                defaultRegion,
+                Clock.systemUTC(), Mockito.mock(SsoPermissionSetRoleProvisioner.class, Mockito.RETURNS_MOCKS));
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {
@@ -1986,6 +1972,39 @@ class SsoAdminServiceTest {
         request.put("Name", name);
         request.put("ClientToken", clientToken);
         return service.createApplication(request, ACCOUNT_ID, "us-east-1");
+    }
+
+    @Test
+    void permissionSetKeepsItsExactCreationTimeAcrossUpdates() {
+        PermissionSet permissionSet = createPermissionSet("ClockedAdmins");
+        long created = service.createdDateEpochMillis(permissionSet);
+
+        // Advance well past float precision at epoch-second scale (128 s) so a reset would show.
+        clock.advance(Duration.ofMinutes(5));
+        ObjectNode update = mapper.createObjectNode();
+        update.put("InstanceArn", service.getInstanceArn());
+        update.put("PermissionSetArn", permissionSet.arn());
+        update.put("Description", "updated");
+        update.put("SessionDuration", "PT2H");
+        service.updatePermissionSet(update);
+
+        PermissionSet updated = service.getPermissionSet(service.getInstanceArn(), permissionSet.arn());
+        assertEquals(created, service.createdDateEpochMillis(updated));
+    }
+
+    @Test
+    void permissionSetPersistedWithoutCreationTimeReportsItsInstanceCreationTime() {
+        PermissionSet stored = createPermissionSet("LegacyAdmins");
+        PermissionSet legacy = new PermissionSet(stored.arn(), stored.name(), stored.description(),
+                stored.sessionDuration(), stored.managedPolicies(), stored.customerManagedPolicies(),
+                stored.inlinePolicy(), stored.permissionsBoundary(), stored.tags(), null);
+        long instanceCreated = instances.scan(key -> true).stream()
+                .filter(instance -> instance.instanceArn().equals(service.getInstanceArn()))
+                .findFirst().orElseThrow().createdDateEpochMillis();
+
+        assertEquals(instanceCreated, service.createdDateEpochMillis(legacy));
+        // Stable: the same value on every read, unlike a time assigned when the record is loaded.
+        assertEquals(service.createdDateEpochMillis(legacy), service.createdDateEpochMillis(legacy));
     }
 
     private PermissionSet createPermissionSet(String name) {

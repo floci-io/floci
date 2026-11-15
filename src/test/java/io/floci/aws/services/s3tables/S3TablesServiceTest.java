@@ -5,23 +5,28 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3tables.model.S3Table;
 import io.floci.aws.services.s3tables.model.TableBucket;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class S3TablesServiceTest {
     private static final String ACCOUNT_ID = "000000000000";
@@ -29,17 +34,55 @@ class S3TablesServiceTest {
     private static final String BUCKET = "unit-test-table-bucket";
 
     private S3TablesService service;
+    private S3Service s3Service;
+    private AccountAwareStorageBackend<TableBucket> store;
 
     @BeforeEach
     void setUp() {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
+            @SuppressWarnings("unchecked")
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                     TypeReference<Map<String, V>> typeReference) {
-                return AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+                store = Mockito.spy(AccountAwareStorageBackend.<TableBucket>inMemory(ACCOUNT_ID));
+                return (AccountAwareStorageBackend<V>) store;
             }
         };
-        service = new S3TablesService(storageFactory, new RegionResolver(REGION, ACCOUNT_ID));
+        s3Service = Mockito.mock(S3Service.class);
+        Mockito.when(s3Service.listObjectsWithPrefixes(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.anyInt(),
+                Mockito.any(), Mockito.any())).thenReturn(new S3Service.ListObjectsResult(List.of(), List.of(), false, null));
+        Mockito.when(s3Service.listObjectVersions(Mockito.anyString(), Mockito.any(), Mockito.any(), Mockito.anyInt(),
+                Mockito.any(), Mockito.any())).thenReturn(new S3Service.ListVersionsResult(List.of(), List.of(), false, null, null));
+        service = new S3TablesService(storageFactory, new RegionResolver(REGION, ACCOUNT_ID), s3Service);
+    }
+
+    @Test
+    void listingAndUpdatingATableFromBeforeWarehousesGiveItOne() {
+        String arn = service.createTableBucket(BUCKET, null, null, Map.of(), REGION).getArn();
+        service.createNamespace(arn, List.of("analytics"), REGION);
+        S3Table legacy = createTable(arn, "analytics", "events");
+        legacy.setWarehouseLocation(null);
+
+        S3Table listed = service.listTables(arn, "analytics", null, REGION).getFirst();
+        listed.setWarehouseLocation(null);
+        S3Table updated = service.updateTableMetadataLocation(arn, "analytics", "events", "s3://w/m.json",
+                listed.getVersionToken(), REGION);
+
+        assertTrue(updated.getWarehouseLocation().matches("s3://[0-9a-f-]{36}--table-s3"), updated.getWarehouseLocation());
+        Mockito.verify(s3Service, Mockito.times(3)).createBucket(Mockito.endsWith("--table-s3"), Mockito.eq(REGION));
+    }
+
+    @Test
+    void aFailedSaveTakesTheNewTableAndItsWarehouseBackOut() {
+        String arn = service.createTableBucket(BUCKET, null, null, Map.of(), REGION).getArn();
+        service.createNamespace(arn, List.of("analytics"), REGION);
+        Mockito.doThrow(new IllegalStateException("disk full")).when(store).put(Mockito.anyString(), Mockito.any());
+
+        assertThrows(IllegalStateException.class, () -> createTable(arn, "analytics", "events"));
+
+        Mockito.verify(s3Service).deleteBucket(Mockito.endsWith("--table-s3"));
+        Mockito.doCallRealMethod().when(store).put(Mockito.anyString(), Mockito.any());
+        assertEquals(List.of(), service.listTables(arn, "analytics", null, REGION));
     }
 
     @Test
@@ -90,18 +133,35 @@ class S3TablesServiceTest {
     }
 
     @Test
+    void tablesOfOneNameInTwoNamespacesHaveTheirOwnArnsEndingInAMintedId() {
+        String arn = createBucketWithNamespace("analytics");
+        service.createNamespace(arn, List.of("staging"), REGION);
+
+        S3Table analytics = createTable(arn, "analytics", "events");
+        S3Table staging = createTable(arn, "staging", "events");
+
+        assertTrue(analytics.getArn().matches(Pattern.quote(arn) + "/table/[0-9a-f-]{36}"), analytics.getArn());
+        assertNotEquals(analytics.getArn(), staging.getArn());
+        assertEquals("staging", service.getTableByArn(staging.getArn(), REGION).getNamespace());
+        assertEquals(Optional.of(analytics.getArn()), service.tableArn(arn, "analytics", "events", REGION));
+        assertEquals(Optional.empty(), service.tableArn(arn, "analytics", "missing", REGION));
+        assertError("NotFoundException", () -> service.getTableByArn(arn + "/table/unknown", REGION));
+    }
+
+    @Test
     void renameMovesTableAndRotatesItsVersionToken() {
         String arn = createBucketWithNamespace("analytics");
         service.createNamespace(arn, List.of("reporting"), REGION);
         S3Table created = createTable(arn, "analytics", "events");
         String originalToken = created.getVersionToken();
+        String tableArn = created.getArn();
 
         S3Table renamed = service.renameTable(arn, "analytics", "events", "reporting", "daily_events",
                 originalToken, REGION);
 
         assertEquals("reporting", renamed.getNamespace());
         assertEquals("daily_events", renamed.getName());
-        assertEquals(arn + "/table/daily_events", renamed.getArn());
+        assertEquals(tableArn, renamed.getArn(), "a rename keeps the table's id, so its ARN");
         assertNotEquals(originalToken, renamed.getVersionToken());
         assertError("NotFoundException", () -> service.getTable(arn, "analytics", "events", REGION));
         assertEquals(renamed, service.getTable(arn, "reporting", "daily_events", REGION));

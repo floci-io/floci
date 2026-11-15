@@ -30,7 +30,7 @@ public final class RequestConstraintCheck {
         AwsException type(String path, String type);
 
         /** {@code size} (a length, a count or a number's value) is outside {@code min}..{@code max}. */
-        AwsException bounds(String path, String type, Long min, Long max, long size);
+        AwsException bounds(String path, String type, Long min, Long max, Number size);
 
         /** A string does not match the shape's {@code pattern}. */
         AwsException pattern(String path, String pattern);
@@ -40,6 +40,48 @@ public final class RequestConstraintCheck {
 
         /** The structure member at {@code path} is required but missing or null. */
         AwsException required(String path);
+    }
+
+    /** Standard member-constraint messages, using the service's error code and HTTP 400. */
+    public static Messages standardMessages(String errorCode) {
+        return new Messages() {
+            @Override
+            public AwsException type(String path, String type) {
+                return invalid(path, "Member must be a " + type);
+            }
+
+            @Override
+            public AwsException bounds(String path, String type, Long min, Long max, Number size) {
+                boolean fractional = "float".equals(type) || "double".equals(type);
+                String measure = fractional || "integer".equals(type) || "long".equals(type) ? "value" : "length";
+                boolean below = min != null && (fractional ? size.doubleValue() < min : size.longValue() < min);
+                return below
+                        ? invalid(path, "Member must have " + measure + " greater than or equal to " + min)
+                        : invalid(path, "Member must have " + measure + " less than or equal to " + max);
+            }
+
+            @Override
+            public AwsException pattern(String path, String pattern) {
+                return invalid(path, "must satisfy regular expression '" + pattern + "'");
+            }
+
+            @Override
+            public AwsException enumValue(String path, List<String> values) {
+                return invalid(path, "Member must satisfy enum value set: " + values);
+            }
+
+            @Override
+            public AwsException required(String path) {
+                return invalid(path, "Member must not be null");
+            }
+
+            private AwsException invalid(String path, String rule) {
+                int dot = path.indexOf('.');
+                String member = (dot < 0 ? "" : path.substring(dot + 1)).replace("[]", "");
+                return new AwsException(errorCode,
+                        "Invalid parameter at '" + member + "' failed to satisfy constraint: '" + rule + "'", 400);
+            }
+        };
     }
 
     private final JsonNode model;
@@ -66,9 +108,19 @@ public final class RequestConstraintCheck {
         return new RequestConstraintCheck(model, messages);
     }
 
+    /** Whether the vendored model declares an input for {@code operation}. */
+    public boolean hasOperation(String operation) {
+        return model.path("operations").has(operation);
+    }
+
     /** Checks {@code request}, the body of {@code operation}, against the operation's input shape. */
     public void check(String operation, JsonNode request) {
         checkValue(model.path("operations").path(operation).asText(), request, operation);
+    }
+
+    /** Whether the model holds the input shape of {@code operation}. */
+    public boolean holds(String operation) {
+        return model.path("operations").has(operation);
     }
 
     /** Checks one modeled value without treating it as a whole request. */
@@ -95,15 +147,18 @@ public final class RequestConstraintCheck {
             case "list" -> value.isArray();
             case "string" -> value.isTextual();
             case "boolean" -> value.isBoolean();
-            case "integer", "long" -> value.isIntegralNumber() && value.canConvertToLong();
+            case "integer" -> value.isIntegralNumber() && value.canConvertToInt();
+            case "long" -> value.isIntegralNumber() && value.canConvertToLong();
+            case "float", "double" -> value.isNumber();
             default -> false;
         };
         if (!validType) {
             throw messages.type(path, type);
         }
-        long size = switch (type) {
+        Number size = switch (type) {
             case "string" -> value.textValue().codePointCount(0, value.textValue().length());
             case "integer", "long" -> value.longValue();
+            case "float", "double" -> value.doubleValue();
             default -> value.size();
         };
         checkBounds(shape, path, type, size);
@@ -151,10 +206,17 @@ public final class RequestConstraintCheck {
         }
     }
 
-    private void checkBounds(JsonNode shape, String path, String type, long size) {
+    private void checkBounds(JsonNode shape, String path, String type, Number size) {
         Long min = shape.has("min") ? shape.get("min").asLong() : null;
         Long max = shape.has("max") ? shape.get("max").asLong() : null;
-        if (min != null && size < min || max != null && size > max) {
+        boolean outside;
+        if ("float".equals(type) || "double".equals(type)) {
+            double number = size.doubleValue();
+            outside = !Double.isFinite(number) || min != null && number < min || max != null && number > max;
+        } else {
+            outside = min != null && size.longValue() < min || max != null && size.longValue() > max;
+        }
+        if (outside) {
             throw messages.bounds(path, type, min, max, size);
         }
     }

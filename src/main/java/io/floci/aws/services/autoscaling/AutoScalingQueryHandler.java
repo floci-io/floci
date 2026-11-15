@@ -2,6 +2,9 @@ package io.floci.aws.services.autoscaling;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryBooleans;
+import io.floci.aws.core.common.AwsQueryLists;
+import io.floci.aws.core.common.AwsQueryLists.IndexedMember;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.SmithyValidationErrors;
@@ -520,7 +523,7 @@ public class AutoScalingQueryHandler {
         for (int i = 0; i < tags.size(); i++) {
             if (tags.get(i).propagateAtLaunch() == null) {
                 throw new AwsException("ValidationError",
-                        "Tags.member." + (i + 1) + ".PropagateAtLaunch is required", 400);
+                        tags.get(i).prefix() + ".PropagateAtLaunch is required", 400);
             }
         }
         for (TagRequest tag : tags) {
@@ -1747,33 +1750,34 @@ public class AutoScalingQueryHandler {
     private ParsedTags parseTags(MultivaluedMap<String, String> p) {
         Map<String, String> tags = new LinkedHashMap<>();
         Map<String, Boolean> propagateAtLaunch = new LinkedHashMap<>();
-        for (int i = 1; ; i++) {
-            String key = p.getFirst("Tags.member." + i + ".Key");
-            if (key == null) { break; }
-            String value = p.getFirst("Tags.member." + i + ".Value");
-            tags.put(key, value != null ? value : "");
-            String flag = p.getFirst("Tags.member." + i + ".PropagateAtLaunch");
-            propagateAtLaunch.put(key, flag == null || Boolean.parseBoolean(flag));
+        for (TagRequest tag : parseTagRequests(p)) {
+            tags.put(tag.key(), tag.value());
+            propagateAtLaunch.put(tag.key(), tag.propagateAtLaunch() == null || tag.propagateAtLaunch());
         }
         return new ParsedTags(tags, propagateAtLaunch);
     }
 
     private List<TagRequest> parseTagRequests(MultivaluedMap<String, String> p) {
         List<TagRequest> result = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String key = p.getFirst("Tags.member." + i + ".Key");
-            if (key == null) { break; }
-            String resourceId = p.getFirst("Tags.member." + i + ".ResourceId");
-            String resourceType = p.getFirst("Tags.member." + i + ".ResourceType");
-            String value = p.getFirst("Tags.member." + i + ".Value");
-            String flag = p.getFirst("Tags.member." + i + ".PropagateAtLaunch");
-            Boolean propagateAtLaunch = flag == null ? null : Boolean.parseBoolean(flag);
-            result.add(new TagRequest(resourceId, resourceType, key, value != null ? value : "", propagateAtLaunch));
+        for (IndexedMember member : AwsQueryLists.members(p, "Tags", null)) {
+            String prefix = member.prefix();
+            String flag = p.getFirst(prefix + ".PropagateAtLaunch");
+            Boolean propagateAtLaunch = flag == null ? null : AwsQueryBooleans.parse(flag);
+            String key = p.getFirst(prefix + ".Key");
+            if (key == null) {
+                throw new AwsException("ValidationError", prefix + ".Key is required", 400);
+            }
+            String resourceId = p.getFirst(prefix + ".ResourceId");
+            String resourceType = p.getFirst(prefix + ".ResourceType");
+            String value = p.getFirst(prefix + ".Value");
+            result.add(new TagRequest(prefix, resourceId, resourceType, key,
+                    value != null ? value : "", propagateAtLaunch));
         }
         return result;
     }
 
-    private record TagRequest(String resourceId, String resourceType, String key, String value, Boolean propagateAtLaunch) {}
+    private record TagRequest(String prefix, String resourceId, String resourceType,
+                              String key, String value, Boolean propagateAtLaunch) {}
 
     private record ParsedTags(Map<String, String> tags, Map<String, Boolean> propagateAtLaunch) {}
 

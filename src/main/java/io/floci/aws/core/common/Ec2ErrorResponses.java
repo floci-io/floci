@@ -14,6 +14,11 @@ public final class Ec2ErrorResponses {
     }
 
     static boolean isEc2QueryRequest(ContainerRequestContext ctx) {
+        return isEc2QueryRequest(ctx, true);
+    }
+
+    /** Error decoding cannot inspect the form again while rendering that same failure. */
+    static boolean isEc2QueryRequest(ContainerRequestContext ctx, boolean inspectForm) {
         if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
                 || claim.protocol() != WireProtocol.AWS_QUERY) {
             return false;
@@ -21,15 +26,13 @@ public final class Ec2ErrorResponses {
         if (claim.service() != null) {
             return "ec2".equals(claim.service().externalKey());
         }
-        try {
-            String action = AwsQueryServiceResolver.action(RequestBodyReader.formField(ctx, "Action"),
-                    RequestBodyReader.formField(ctx, "Operation"));
-            return action != null && "ec2".equals(AwsQueryController.inferServiceFromAction(action,
-                    RequestBodyReader.formField(ctx, "Version")));
-        } catch (IllegalArgumentException ignored) {
-            // A malformed form cannot identify a service; retain the generic protocol error.
+        if (!inspectForm) {
             return false;
         }
+        String action = AwsQueryServiceResolver.action(RequestBodyReader.formField(ctx, "Action"),
+                RequestBodyReader.formField(ctx, "Operation"));
+        return action != null && "ec2".equals(AwsQueryController.inferServiceFromAction(action,
+                RequestBodyReader.formField(ctx, "Version")));
     }
 
     public static Response authFailure() {

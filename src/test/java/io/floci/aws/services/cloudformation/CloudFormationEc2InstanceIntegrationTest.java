@@ -383,36 +383,27 @@ class CloudFormationEc2InstanceIntegrationTest {
         String stackName = "cfn-ec2-lt-profile-" + Long.toString(System.nanoTime(), 36);
         try (CloudFormationClient cloudFormation = AwsTestClients.create(CloudFormationClient.builder(), "test",
                 Region.of(REGION))) {
-            cloudFormation.createStack(request -> request.stackName(stackName)
-                    .templateBody(launchTemplateProfileStack("First", false)));
-            try {
-                Stack created = CfnStackWaits.awaitStatus(cloudFormation, stackName, "CREATE_COMPLETE");
-                String instanceId = CfnStackWaits.output(created, "InstanceId");
-                assertInstanceProfile(instanceId, CfnStackWaits.output(created, "FirstArn"));
+            Stack created = CfnStackWaits.createStack(cloudFormation, stackName,
+                    launchTemplateProfileStack("First", false), "CREATE_COMPLETE");
+            String instanceId = CfnStackWaits.output(created, "InstanceId");
+            assertInstanceProfile(instanceId, CfnStackWaits.output(created, "FirstArn"));
 
-                // A template version naming another profile gives the same instance that profile, a
-                // failed update puts it back, and a version naming none leaves the instance without one.
-                Stack changed = updateStack(cloudFormation, stackName, launchTemplateProfileStack("Second", false),
-                        "UPDATE_COMPLETE");
-                assertEquals(instanceId, CfnStackWaits.output(changed, "InstanceId"));
-                assertInstanceProfile(instanceId, CfnStackWaits.output(changed, "SecondArn"));
-                Stack rolledBack = updateStack(cloudFormation, stackName, launchTemplateProfileStack("First", true),
-                        "UPDATE_ROLLBACK_COMPLETE");
-                assertInstanceProfile(instanceId, CfnStackWaits.output(rolledBack, "SecondArn"));
-                Stack cleared = updateStack(cloudFormation, stackName, launchTemplateProfileStack(null, false),
-                        "UPDATE_COMPLETE");
-                assertEquals(instanceId, CfnStackWaits.output(cleared, "InstanceId"));
-                assertInstanceProfile(instanceId, null);
-            } finally {
-                CfnStackWaits.deleteStack(stackName, CFN_AUTH);
-            }
+            // A template version naming another profile gives the same instance that profile, a
+            // failed update puts it back, and a version naming none leaves the instance without one.
+            Stack changed = CfnStackWaits.updateStack(cloudFormation, stackName,
+                    launchTemplateProfileStack("Second", false), "UPDATE_COMPLETE");
+            assertEquals(instanceId, CfnStackWaits.output(changed, "InstanceId"));
+            assertInstanceProfile(instanceId, CfnStackWaits.output(changed, "SecondArn"));
+            Stack rolledBack = CfnStackWaits.updateStack(cloudFormation, stackName,
+                    launchTemplateProfileStack("First", true), "UPDATE_ROLLBACK_COMPLETE");
+            assertInstanceProfile(instanceId, CfnStackWaits.output(rolledBack, "SecondArn"));
+            Stack cleared = CfnStackWaits.updateStack(cloudFormation, stackName,
+                    launchTemplateProfileStack(null, false), "UPDATE_COMPLETE");
+            assertEquals(instanceId, CfnStackWaits.output(cleared, "InstanceId"));
+            assertInstanceProfile(instanceId, null);
+        } finally {
+            CfnStackWaits.deleteStack(stackName, CFN_AUTH);
         }
-    }
-
-    private static Stack updateStack(CloudFormationClient cloudFormation, String stackName, String template,
-                                     String expectedStatus) {
-        cloudFormation.updateStack(request -> request.stackName(stackName).templateBody(template));
-        return CfnStackWaits.awaitStatus(cloudFormation, stackName, expectedStatus);
     }
 
     /**
@@ -423,10 +414,7 @@ class CloudFormationEc2InstanceIntegrationTest {
     private static String launchTemplateProfileStack(String profile, boolean laterFails) {
         String member = profile == null ? "" : """
                 , "IamInstanceProfile": {"Name": {"Ref": "%s"}}""".formatted(profile);
-        String later = !laterFails ? "" : """
-                ,
-                  "Later": {"Type": "AWS::EC2::Instance", "DependsOn": "Server", "Properties": {"LaunchTemplate": {
-                    "LaunchTemplateId": "lt-0123456789abcdef0", "Version": "1"}}}""";
+        String later = laterFails ? CfnStackWaits.failingResourceAfter("Server") : "";
         return """
                 {"Resources": {
                   "Role": {"Type": "AWS::IAM::Role", "Properties": {"AssumeRolePolicyDocument": {

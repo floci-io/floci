@@ -15,6 +15,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Proper tokenizer/parser/evaluator for DynamoDB filter expressions and key condition expressions.
@@ -83,7 +84,9 @@ final class ExpressionEvaluator {
 
             if (isDigit(c)) {
                 int start = i;
-                while (i < len && isDigit(expression.charAt(i))) {
+                i++;
+                // DynamoDB reads a leading 0 as a number of its own, so a[01] fails on "1".
+                while (c != '0' && i < len && isDigit(expression.charAt(i))) {
                     i++;
                 }
                 tokens.add(new Token(TokenType.NUMBER, expression.substring(start, i), start));
@@ -216,14 +219,8 @@ final class ExpressionEvaluator {
             return advance();
         }
 
-        // DynamoDB quotes the text from the token before the failing one through the token after it.
         private IllegalArgumentException syntaxError() {
-            Token token = peek();
-            int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
-            int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
-            String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
-            return new IllegalArgumentException(
-                    "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to)));
+            return new IllegalArgumentException(syntaxErrorDetail(expression, tokens, pos));
         }
 
         Expr parseExpression() {
@@ -383,6 +380,15 @@ final class ExpressionEvaluator {
         }
     }
 
+    // DynamoDB quotes the text from the token before the failing one through the token after it.
+    static String syntaxErrorDetail(String expression, List<Token> tokens, int pos) {
+        Token token = tokens.get(pos);
+        int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
+        int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
+        String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
+        return "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to));
+    }
+
     // ── Parse helper ──
 
     static Expr parse(String expression) {
@@ -531,6 +537,9 @@ final class ExpressionEvaluator {
                 for (String segment : path.segments()) {
                     if (segment.startsWith("#") && (names == null || !names.has(segment))) {
                         throw undefinedName(exprType, segment);
+                    }
+                    if (DynamoDbReservedWords.isReserved(segment)) {
+                        throw DynamoDbReservedWords.reservedWord(exprType, segment);
                     }
                 }
             }
@@ -751,6 +760,7 @@ final class ExpressionEvaluator {
     // ── Evaluator ──
 
     private static final String DOT_ESCAPE = "\uFF0E";
+    private static final Pattern LIST_INDEX_SEGMENT = Pattern.compile("\\[\\d+\\]");
 
     /**
      * Evaluates a parsed expression against a DynamoDB item.
@@ -1089,7 +1099,7 @@ final class ExpressionEvaluator {
         for (int i = 0; i < segments.size(); i++) {
             if (current == null) return null;
             String segment = segments.get(i);
-            if (segment.matches("\\[\\d+\\]")) {
+            if (LIST_INDEX_SEGMENT.matcher(segment).matches()) {
                 // List index navigation
                 int idx = Integer.parseInt(segment.substring(1, segment.length() - 1));
                 JsonNode listNode = current.has("L") ? current.get("L") : (current.isArray() ? current : null);

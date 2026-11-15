@@ -19,8 +19,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -88,11 +90,8 @@ public class EcsLoadBalancerRegistrar {
         if (taskArn == null || registered.size() == planned.size()) {
             return;
         }
-        if (registered.isEmpty()) {
-            ledger.delete(taskArn);
-        } else {
-            ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
-        }
+        // An empty record, rather than none, tells targetsHealthy the task has targets that never registered.
+        ledger.put(taskArn, new EcsRegisteredTargets(region, List.copyOf(registered)));
     }
 
     /**
@@ -100,17 +99,53 @@ public class EcsLoadBalancerRegistrar {
      * with no record registered nothing, as when none of its containers had a reachable binding.
      * Only a task without an ARN, which {@link #registerTask} cannot record, falls back to the
      * targets its containers resolve to now.
+     *
+     * @return how long the deregistered targets drain: the longest
+     *         {@code deregistration_delay.timeout_seconds} of their target groups, during which
+     *         AWS keeps the task running for the requests already in flight
      */
-    public void deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+    public Duration deregisterTask(EcsTask task, EcsServiceModel svc, String region) {
+        List<Duration> drains = new ArrayList<>();
         if (task.getTaskArn() == null) {
-            forEachTarget(task, svc, (tgArn, td) -> deregister(region, tgArn, td));
-            return;
+            forEachTarget(task, svc, (tgArn, td) -> drains.add(deregister(region, tgArn, td)));
+        } else {
+            Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
+            if (recorded.isPresent()) {
+                drains.addAll(deregister(recorded.get()));
+                ledger.delete(task.getTaskArn());
+            }
         }
-        Optional<EcsRegisteredTargets> recorded = ledger.get(task.getTaskArn());
-        if (recorded.isPresent()) {
-            deregister(recorded.get());
-            ledger.delete(task.getTaskArn());
+        return drains.stream().max(Comparator.naturalOrder()).orElse(Duration.ZERO);
+    }
+
+    /**
+     * Whether every target {@link #registerTask} recorded for the task reports {@code healthy}. A
+     * task with no load-balanced container has nothing to wait for; one whose targets failed to
+     * register, or whose health cannot be read, is not healthy yet.
+     */
+    public boolean targetsHealthy(EcsTask task) {
+        Optional<EcsRegisteredTargets> recorded = task.getTaskArn() == null
+                ? Optional.empty() : ledger.get(task.getTaskArn());
+        if (recorded.isEmpty()) {
+            return true;
         }
+        List<EcsRegisteredTargets.Target> targets = recorded.get().targets();
+        if (targets == null || targets.isEmpty()) {
+            return false;
+        }
+        for (EcsRegisteredTargets.Target target : targets) {
+            try {
+                List<TargetHealth> health = elbV2Service.describeTargetHealth(recorded.get().region(),
+                        target.targetGroupArn(), List.of(target.toDescription()));
+                if (health.isEmpty() || health.stream().anyMatch(th -> !"healthy".equals(th.getState()))) {
+                    return false;
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not read the health of {0}: {1}", target.targetGroupArn(), e.getMessage());
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -175,22 +210,36 @@ public class EcsLoadBalancerRegistrar {
         }
     }
 
-    private void deregister(EcsRegisteredTargets recorded) {
+    private List<Duration> deregister(EcsRegisteredTargets recorded) {
+        List<Duration> drains = new ArrayList<>();
         if (recorded.targets() == null) {
-            return;
+            return drains;
         }
         for (EcsRegisteredTargets.Target target : recorded.targets()) {
-            deregister(recorded.region(), target.targetGroupArn(), target.toDescription());
+            drains.add(deregister(recorded.region(), target.targetGroupArn(), target.toDescription()));
         }
+        return drains;
     }
 
-    private void deregister(String region, String tgArn, TargetDescription td) {
+    /** @return the target group's deregistration delay, or zero when the target could not be deregistered */
+    private Duration deregister(String region, String tgArn, TargetDescription td) {
         try {
             elbV2Service.deregisterTargets(region, tgArn, List.of(td));
             LOG.infov("Deregistered ECS task target {0}:{1} from target group {2}",
                     td.getId(), td.getPort(), tgArn);
         } catch (Exception e) {
             LOG.warnv("Could not deregister ECS target from {0}: {1}", tgArn, e.getMessage());
+            return Duration.ZERO;
+        }
+        String delay = null;
+        try {
+            delay = elbV2Service.describeTargetGroupAttributes(region, tgArn)
+                    .get("deregistration_delay.timeout_seconds");
+            return delay == null ? Duration.ZERO : Duration.ofSeconds(Long.parseLong(delay));
+        } catch (Exception e) {
+            LOG.warnv("Not draining target group {0}: could not read its deregistration delay {1}: {2}",
+                    tgArn, delay, e.getMessage());
+            return Duration.ZERO;
         }
     }
 

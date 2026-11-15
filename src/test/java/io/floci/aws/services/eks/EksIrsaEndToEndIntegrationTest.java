@@ -18,6 +18,7 @@ import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
@@ -112,7 +113,7 @@ class EksIrsaEndToEndIntegrationTest {
     }
 
     private PrivateKey clusterSigningKey() throws Exception {
-        String encoded = oidcService.ensureKey(CLUSTER, issuer).getPrivateKey();
+        String encoded = oidcService.ensureKey(EksService.clusterKey("us-east-1", CLUSTER), issuer).getPrivateKey();
         return KeyFactory.getInstance("RSA")
                 .generatePrivate(new PKCS8EncodedKeySpec(Base64.getDecoder().decode(encoded)));
     }
@@ -265,6 +266,9 @@ class EksIrsaEndToEndIntegrationTest {
         .then()
             .statusCode(200)
             .body("issuer", equalTo(issuer))
+            // The key route names the cluster's Region: a verifier follows it without context.
+            .body("jwks_uri", endsWith(
+                    "/_floci/eks/clusters/" + CLUSTER + "/oidc/keys?region=us-east-1"))
             .body("id_token_signing_alg_values_supported[0]", equalTo("RS256"));
 
         given()

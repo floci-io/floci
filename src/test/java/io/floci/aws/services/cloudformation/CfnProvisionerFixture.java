@@ -68,6 +68,7 @@ import io.floci.aws.services.cloudformation.provisioners.Ec2VpcGatewayAttachment
 import io.floci.aws.services.cloudformation.provisioners.EcrCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EcsCapacityCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EcsCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.EfsCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.EksCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ElastiCacheServerlessCfnProvisioner;
@@ -139,6 +140,7 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.FlowLogService;
 import io.floci.aws.services.ecr.EcrService;
 import io.floci.aws.services.ecs.EcsService;
+import io.floci.aws.services.efs.EfsService;
 import io.floci.aws.services.eks.EksService;
 import io.floci.aws.services.elasticache.ElastiCacheMemcachedService;
 import io.floci.aws.services.elasticache.ElastiCacheServerlessService;
@@ -183,6 +185,8 @@ import io.floci.aws.services.wafv2.WafV2Service;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Builds {@link CfnResourceDispatcher} for tests without a wall of positional nulls.
@@ -201,6 +205,13 @@ import java.util.List;
 final class CfnProvisionerFixture {
 
     private CfnProvisionerFixture() {
+    }
+
+    /** The template engine a provisioner test hands to {@code provision}: fixed account and stack, no outputs. */
+    static CloudFormationTemplateEngine engine(ObjectMapper mapper, String region, Map<String, Boolean> conditions) {
+        return new CloudFormationTemplateEngine("000000000000", region, "test-stack", "stack/id",
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                (Function<String, String>) name -> null);
     }
 
     static Builder builder() {
@@ -237,6 +248,7 @@ final class CfnProvisionerFixture {
         private CustomResourceResponseStore customResourceResponseStore;
         private ContainerReachableEndpoint reachableEndpoint;
         private EcsService ecsService;
+        private EfsService efsService;
         private ElbV2Service elbV2Service;
         private StepFunctionsService stepFunctionsService;
         private BatchService batchService;
@@ -414,6 +426,9 @@ final class CfnProvisionerFixture {
             if (ecsService != null) {
                 discovered.add(new EcsCapacityCfnProvisioner(ecsService));
                 discovered.add(new EcsCfnProvisioner(ecsService));
+            }
+            if (efsService != null) {
+                discovered.add(new EfsCfnProvisioner(efsService));
             }
             if (apiGatewayService != null) {
                 discovered.add(new ApiGatewayAccountCfnProvisioner(apiGatewayService));
@@ -698,6 +713,11 @@ final class CfnProvisionerFixture {
 
         public Builder ecs(EcsService v) {
             this.ecsService = v;
+            return this;
+        }
+
+        public Builder efs(EfsService v) {
+            this.efsService = v;
             return this;
         }
 

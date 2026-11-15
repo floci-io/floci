@@ -1,6 +1,10 @@
 package io.floci.aws.services.ecs;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -23,6 +27,9 @@ import io.floci.aws.services.ecs.model.ServiceRevision;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
@@ -299,13 +306,14 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertTrue(deployment.getStatusReason().contains("Rollback"));
     }
 
-    @Test
-    void rollbackRestoresTheMostRecentSuccessfulRevision() {
+    @ParameterizedTest
+    @ValueSource(strings = {"LATEST", "1.3.0"})
+    void rollbackRestoresTheMostRecentSuccessfulRevision(String requestedVersion) {
         EcsEventPublisher publisher = mock(EcsEventPublisher.class);
         EcsService service = newService(new InMemoryStorageFactory(), null, publisher);
         healthy = true;
-        String successfulDeploymentId = createService(service, "cb-rollback", 1, breaker(true, true))
-                .getDeploymentId();
+        String successfulDeploymentId = createServiceWithDeploymentConfiguration(service, "cb-rollback", 1,
+                Map.of("deploymentCircuitBreaker", breaker(true, true)), requestedVersion).getDeploymentId();
         service.reconcileServices();
         service.reconcileServices();
         EcsTask original = runningTasks(service).getFirst();
@@ -325,6 +333,12 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertNotNull(rollingBack.getRollbackReason());
         assertEquals(originalTaskDefinition,
                 service.serviceByArn(rollingBack.getServiceArn()).getTaskDefinition());
+        assertEquals(requestedVersion, service.describeServices("cb-rollback-cluster", List.of("cb-rollback"), REGION)
+                .getFirst().getPlatformVersion());
+        ServiceRevision restoredRevision = service.describeServiceRevisions(
+                List.of(rollingBack.getRollbackTargetServiceRevisionArn())).getFirst();
+        assertEquals("LATEST".equals(requestedVersion) ? "1.4.0" : requestedVersion,
+                restoredRevision.getPlatformVersion());
         assertEquals("IN_PROGRESS", liveDeployment(service, "cb-rollback").getRolloutState());
         assertEquals(deploymentOf(service, "cb-rollback", successfulDeploymentId)
                 .getTargetServiceRevisionArn(), rollingBack.getRollbackTargetServiceRevisionArn());
@@ -651,8 +665,10 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals("COMPLETED", liveDeployment(after, "cb-completed-restart").getRolloutState());
     }
 
-    @Test
-    void aRollbackAfterRestartUsesThePersistedSuccessfulRevision() {
+    @ParameterizedTest
+    @CsvSource({"LATEST,false,LATEST", "1.3.0,false,1.3.0", "LATEST,true,1.4.0", "1.3.0,true,1.3.0"})
+    void aRollbackAfterRestartUsesThePersistedSuccessfulRevision(String requestedVersion, boolean legacy,
+                                                                String expectedVersion) throws JsonProcessingException {
         InMemoryStorageFactory storage = new InMemoryStorageFactory();
         CloudWatchMetricsService metricsService = mock(CloudWatchMetricsService.class);
         MetricAlarm alarm = new MetricAlarm();
@@ -664,9 +680,15 @@ class EcsServiceDeploymentCircuitBreakerTest {
         healthy = true;
         EcsServiceModel model = createServiceWithDeploymentConfiguration(before, "cb-rollback-restart", 1,
                 Map.of("alarms", Map.of("enable", true, "rollback", true,
-                        "alarmNames", List.of("restart-rollback-alarm"))));
+                        "alarmNames", List.of("restart-rollback-alarm"))), requestedVersion);
         before.reconcileServices();
         String successfulTaskDefinition = model.getTaskDefinition();
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        ObjectNode snapshot = mapper.valueToTree(model.getLastSuccessfulServiceRevision());
+        if (legacy) {
+            snapshot.remove("requestedPlatformVersion");
+        }
+        model.setLastSuccessfulServiceRevision(mapper.treeToValue(snapshot, ServiceRevision.class));
 
         TaskDefinition next = registerTaskDef(before, "cb-rollback-restart-fam", "app:next");
         String failedId = before.updateService("cb-rollback-restart-cluster", "cb-rollback-restart",
@@ -678,6 +700,8 @@ class EcsServiceDeploymentCircuitBreakerTest {
         ServiceDeployment failed = deploymentOf(after, "cb-rollback-restart", failedId);
         assertEquals("ROLLBACK_IN_PROGRESS", failed.getStatus());
         assertEquals(successfulTaskDefinition, after.serviceByArn(model.getServiceArn()).getTaskDefinition());
+        assertEquals(expectedVersion, after.describeServices("cb-rollback-restart-cluster",
+                List.of("cb-rollback-restart"), REGION).getFirst().getPlatformVersion());
         ServiceRevision recoveredRevision = after.describeServiceRevisions(
                 List.of(failed.getTargetServiceRevisionArn())).getFirst();
         assertEquals(1, recoveredRevision.getContainerImages().size(),
@@ -707,6 +731,13 @@ class EcsServiceDeploymentCircuitBreakerTest {
     private static EcsServiceModel createServiceWithDeploymentConfiguration(EcsService service, String name,
                                                                             int desiredCount,
                                                                             Map<String, Object> deploymentConfiguration) {
+        return createServiceWithDeploymentConfiguration(service, name, desiredCount, deploymentConfiguration, null);
+    }
+
+    private static EcsServiceModel createServiceWithDeploymentConfiguration(EcsService service, String name,
+                                                                            int desiredCount,
+                                                                            Map<String, Object> deploymentConfiguration,
+                                                                            String platformVersion) {
         service.createCluster(name + "-cluster", REGION);
         registerTaskDef(service, name + "-fam", "app:1");
         CreateServiceRequest request = new CreateServiceRequest();
@@ -715,6 +746,7 @@ class EcsServiceDeploymentCircuitBreakerTest {
         request.setTaskDefinition(name + "-fam");
         request.setDesiredCount(desiredCount);
         request.setLaunchType(LaunchType.FARGATE);
+        request.setPlatformVersion(platformVersion);
         request.setDeploymentConfiguration(deploymentConfiguration);
         return service.createService(request, REGION);
     }

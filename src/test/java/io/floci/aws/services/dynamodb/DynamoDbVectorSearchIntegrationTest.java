@@ -13,6 +13,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -1003,6 +1005,38 @@ class DynamoDbVectorSearchIntegrationTest {
             """),
                 "Invalid ProjectionExpression: An expression attribute name used in the document "
                 + "path is not defined; attribute name: #undef");
+    }
+
+    @ParameterizedTest
+    @Order(45)
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"sv-probe-absent-table","IndexName":null,"SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 53
+            {"TableName":null,"IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 17
+            {"TableName":"sv-probe-absent-table","IndexName":"vix","SearchVector":null,"TopK":1} | SerializationException | invalid type: null, expected a sequence at line 1 column 74
+            {"TableName":"sv-probe-absent-table","IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":null} | SerializationException | invalid type: null, expected i32 at line 1 column 93
+            {"TopK":null,"IndexName":null,"TableName":"sv-probe-absent-table","SearchVector":[{"N":"1"}]} | SerializationException | invalid type: null, expected i32 at line 1 column 12
+            {"Foo":1,"TableName":"sv-probe-absent-table","IndexName":null,"SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 61
+            {"IndexName":null,"SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 17
+            {"TableName":null,"IndexName":1,"SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 17
+            {"IndexName":null,"TableName":"sv-probe-absent-table","SearchVector":[{"N":"1"}],"TopK":"1"} | SerializationException | invalid type: null, expected a string at line 1 column 17
+            {"TableName":"a\\u0062","IndexName":null,"SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 39
+            {"TableName": "sv-probe-absent-table", "IndexName": null, "SearchVector": [{"N": "1"}], "TopK": 1} | SerializationException | invalid type: null, expected a string at line 1 column 56
+            {"TableName" : null ,"IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 19
+            {"X":{"a":[1,2,{"b":"c"}]},"TableName":null,"IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":1} | SerializationException | invalid type: null, expected a string at line 1 column 43
+            {"IndexName":"ab","SearchVector":[{"N":"1"}],"TopK":1} | ValidationException | missing field `TableName` at line 1 column 54
+            {"IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":0} | ValidationException | missing field `TableName` at line 1 column 55
+            {"IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":1,"ReturnConsumedCapacity":"BOGUS"} | ValidationException | missing field `TableName` at line 1 column 88
+            {"IndexName":"vix","SearchVector":[{"N":"1"}]} | ValidationException | missing field `TableName` at line 1 column 46
+            {"IndexName": "vix", "SearchVector": [{"N": "1"}], "TopK": 1} | ValidationException | missing field `TableName` at line 1 column 61
+            `{"IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":1}   ` | ValidationException | missing field `TableName` at line 1 column 55
+            {"IndexName":"vix","TopK":1} | ValidationException | missing field `SearchVector` at line 1 column 28
+            {} | ValidationException | missing field `IndexName` at line 1 column 2
+            """)
+    void searchVectorsRejectsANullRequiredMemberBeforeAnOmittedOne(String body, String type, String message) {
+        call("SearchVectors", body)
+                .statusCode(400)
+                .body("__type", equalTo(type))
+                .body("message", equalTo(message));
     }
 
 }

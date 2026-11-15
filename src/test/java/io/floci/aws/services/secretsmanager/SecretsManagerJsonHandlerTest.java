@@ -297,6 +297,7 @@ class SecretsManagerJsonHandlerTest {
     private void createSecret(String name) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("Name", name);
+        req.put("SecretString", "value");
         handler.handle("CreateSecret", req, REGION);
     }
 
@@ -1885,5 +1886,23 @@ class SecretsManagerJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("CreateSecret", req, REGION));
         assertThat(ex.getErrorCode(), is("InvalidParameterException"));
+    }
+
+    @Test
+    void listSecretsAllFilterSplitsValueIntoWords() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "database");
+        createReq.put("Description", "production credentials");
+        handler.handle("CreateSecret", createReq, REGION);
+        ObjectNode otherReq = MAPPER.createObjectNode();
+        otherReq.put("Name", "unrelated");
+        handler.handle("CreateSecret", otherReq, REGION);
+
+        ObjectNode listReq = MAPPER.createObjectNode();
+        listReq.putArray("Filters").addObject().put("Key", "all").putArray("Values").add("database production");
+        ObjectNode listed = (ObjectNode) handler.handle("ListSecrets", listReq, REGION).getEntity();
+
+        assertThat(listed.get("SecretList").size(), is(1));
+        assertThat(listed.get("SecretList").get(0).get("Name").asText(), is("database"));
     }
 }

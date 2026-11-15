@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -129,6 +130,214 @@ class GlueViewDdlBuilderTest {
         String ddl = ddlFor(tableWithColumns("t", "s3://b/", List.of(column("we\"ird")), null));
 
         assertTrue(ddl.contains("\"we\"\"ird\" AS \"we\"\"ird\""), ddl);
+    }
+
+    private static Column column(String name, String type) {
+        Column c = column(name);
+        c.setType(type);
+        return c;
+    }
+
+    private Table projectingParquetTable(String location, Map<String, String> parameters) {
+        Table table = createTable("events", location, "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat");
+        table.getStorageDescriptor().setColumns(List.of(column("id")));
+        table.setPartitionKeys(List.of(column("region", "string"), column("dt", "date")));
+        table.setParameters(parameters);
+        return table;
+    }
+
+    /**
+     * A template of bare values, one folder per key. The files hold no partition columns, so each
+     * value comes from the object's path, through the template, as Athena maps it; without this the
+     * view selects columns nothing defines and DuckDB rejects it.
+     */
+    @Test
+    void templatedPartitionKeysAreTakenFromTheObjectPath() {
+        String ddl = ddlFor(projectingParquetTable("s3://b/data/", Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://b/data/${region}/${dt}/")));
+
+        String regex = "'^s3://b/data/([^/]+)/([^/]+)/'";
+        assertEquals("CREATE SCHEMA IF NOT EXISTS \"audit\";\n"
+                + "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT \"id\" AS \"id\", "
+                + "regexp_extract(\"$path\", " + regex + ", 1) AS \"region\", "
+                + "TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS DATE) AS \"dt\" "
+                + "FROM read_parquet('s3://b/data/*/*/**', union_by_name = true, hive_partitioning = false, "
+                + "filename = '$path') "
+                + "WHERE regexp_matches(\"$path\", " + regex + ") "
+                + "AND TRY_CAST(regexp_extract(\"$path\", " + regex + ", 2) AS DATE) IS NOT NULL;\n", ddl);
+    }
+
+    /** RE2 has no backreferences, so a repeated placeholder's occurrences are compared in the view. */
+    @Test
+    void repeatedPlaceholderMustHoldTheSameValueAtEachOccurrence() {
+        String ddl = ddlFor(projectingParquetTable("s3://b/repeat/", Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://b/repeat/${region}/${dt}/${region}/")));
+
+        String regex = "'^s3://b/repeat/([^/]+)/([^/]+)/([^/]+)/'";
+        assertTrue(ddl.contains("regexp_extract(\"$path\", " + regex + ", 1) = "
+                + "regexp_extract(\"$path\", " + regex + ", 3)"), ddl);
+    }
+
+    /**
+     * A template omitting a partition key leaves that key with nothing to bind to, and one view
+     * failing to bind fails the whole batch. Athena fails only queries on the table, so the table
+     * gets no view and its neighbours are still built.
+     */
+    @Test
+    void tableWhoseTemplateOmitsAPartitionKeyGetsNoViewAndLeavesOthersBuilt() {
+        Table incomplete = projectingParquetTable("s3://b/missing/", Map.of("projection.enabled", "true",
+                "storage.location.template", "s3://b/missing/${region}/"));
+        Table healthy = tableWithColumns("healthy", "s3://b/healthy/", List.of(column("id")), null);
+        Database db = createDatabase("audit");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+        when(glueService.getTables("audit")).thenReturn(List.of(incomplete, healthy));
+
+        String ddl = builder.build(null);
+
+        assertFalse(ddl.contains("\"events\""), ddl);
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"audit\".\"healthy\""), ddl);
+    }
+
+    /** An Iceberg table reads through its metadata, so a template omitting a key costs it no view. */
+    @Test
+    void icebergTableWithAnIncompleteTemplateKeepsItsView() {
+        Table table = icebergTable("orders", "s3://bucket/warehouse/orders",
+                "s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json");
+        table.setPartitionKeys(List.of(column("region", "string"), column("dt", "date")));
+        Map<String, String> parameters = new HashMap<>(table.getParameters());
+        parameters.put("projection.enabled", "true");
+        parameters.put("storage.location.template", "s3://bucket/warehouse/orders/${region}/");
+        table.setParameters(parameters);
+
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains("CREATE OR REPLACE VIEW \"audit\".\"orders\" AS SELECT \"region\" AS \"region\", "
+                + "\"dt\" AS \"dt\" FROM iceberg_scan('s3://bucket/warehouse/orders/metadata/00001-abc.metadata.json');\n"),
+                ddl);
+    }
+
+    /** The default column=value layout is left to DuckDB's Hive partitioning, as before. */
+    @Test
+    void defaultLayoutStillReadsPartitionValuesThroughHivePartitioning() {
+        String ddl = ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true")));
+
+        assertEquals("CREATE SCHEMA IF NOT EXISTS \"audit\";\n"
+                + "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT \"id\" AS \"id\", "
+                + "\"region\" AS \"region\", \"dt\" AS \"dt\" "
+                + "FROM read_parquet('s3://b/hive/region=*/dt=*/**', union_by_name = true);\n", ddl);
+    }
+
+    private Table headerlessTsvTable(String name, String location) {
+        Table table = createTable(name, location, "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+                "org.apache.hadoop.mapred.TextInputFormat");
+        table.getStorageDescriptor().getSerdeInfo().setParameters(Map.of("field.delim", "\t"));
+        table.getStorageDescriptor().setColumns(List.of(column("id", "bigint"), column("name", "string")));
+        table.setPartitionKeys(List.of(column("dt", "string")));
+        return table;
+    }
+
+    @Test
+    void headerlessDelimitedTextIsReadWithItsDelimiterColumnNamesAndTypes() {
+        String ddl = ddlFor(headerlessTsvTable("events", "s3://lake/events/"));
+
+        assertTrue(ddl.contains("read_csv('s3://lake/events/**', header = false, delim = '\t', quote = '', "
+                + "nullstr = '\\N', auto_detect = false, null_padding = true, strict_mode = false, "
+                + "columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}, hive_types_autocast = false)"), ddl);
+        assertTrue(ddl.contains("SELECT TRY_CAST(\"id\" AS BIGINT) AS \"id\", \"name\" AS \"name\", \"dt\" AS \"dt\" FROM"), ddl);
+        assertFalse(ddl.contains("read_csv_auto"), ddl);
+    }
+
+    @Test
+    void delimitedTextPartitionKeysTakeTheirDeclaredTypesToo() {
+        Table table = headerlessTsvTable("events", "s3://lake/events/");
+        table.setPartitionKeys(List.of(column("year", "int")));
+
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains("TRY_CAST(\"year\" AS INTEGER) AS \"year\""), ddl);
+    }
+
+    @Test
+    void delimitedTextWithALocationTemplateAlsoReadsItsObjectPaths() {
+        Table table = headerlessTsvTable("events", "s3://lake/events/");
+        table.setParameters(Map.of("projection.enabled", "true", "projection.dt.type", "injected",
+                "storage.location.template", "s3://lake/events/${dt}/"));
+
+        String ddl = ddlFor(table);
+
+        assertTrue(ddl.contains("columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}, hive_partitioning = false, filename = '"),
+                ddl);
+    }
+
+    @Test
+    void onlyTheTablesAQueryNamesGetViews() {
+        Database db = createDatabase("lake");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+        when(glueService.getTables("lake")).thenReturn(List.of(
+                headerlessTsvTable("events", "s3://lake/events/"),
+                createTable("broken", "s3://lake/broken/", "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                        null),
+                createTable("events_daily", "s3://lake/daily/", "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                        null)));
+
+        String ddl = builder.build("lake", "SELECT count(*) FROM \"lake\".\"EVENTS\" WHERE name = 'broken_x'");
+
+        assertTrue(ddl.contains("VIEW \"lake\".\"events\" AS"), ddl);
+        // A qualified reference resolves in its database, not through the context's unqualified names.
+        assertFalse(ddl.contains("VIEW \"events\" AS"), ddl);
+        assertFalse(ddl.contains("\"broken\""), ddl);
+        assertFalse(ddl.contains("events_daily"), ddl);
+        assertTrue(ddl.contains("CREATE SCHEMA IF NOT EXISTS \"lake\""), ddl);
+    }
+
+    @Test
+    void queriesThatListTablesStillGetEveryView() {
+        Database db = createDatabase("lake");
+        when(glueService.getDatabases()).thenReturn(List.of(db));
+        when(glueService.getTables("lake")).thenReturn(List.of(headerlessTsvTable("events", "s3://lake/events/")));
+
+        assertTrue(builder.build("lake", "SELECT table_name FROM information_schema.tables").contains("\"events\""));
+        assertTrue(builder.build("lake", "  show tables").contains("\"events\""));
+        assertTrue(builder.build("lake", "-- listing\nSHOW TABLES").contains("\"events\""));
+        assertTrue(builder.build("lake", "/* listing */ SHOW COLUMNS IN other").contains("\"events\""));
+        assertTrue(builder.build("lake", null).contains("\"events\""));
+    }
+
+    private static final String PARQUET_SERDE = "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe";
+
+    @Test
+    void aTableIsNamedByItsDatabaseAndNameNotByTextThatOnlyLooksLikeIt() {
+        when(glueService.getDatabases()).thenReturn(List.of(createDatabase("good"), createDatabase("bad")));
+        when(glueService.getTables("good")).thenReturn(List.of(headerlessTsvTable("events", "s3://lake/events/")));
+        when(glueService.getTables("bad")).thenReturn(List.of(
+                createTable("events", "s3://lake/bad/", PARQUET_SERDE, null),
+                createTable("broken", "s3://lake/broken/", PARQUET_SERDE, null)));
+
+        // The namesake in another database, and a name only a literal, a comment or a qualified column holds.
+        String ddl = builder.build("good", "SELECT e.broken, 'bad.broken' FROM good.events e -- bad.events\n"
+                + "/* broken */ WHERE e.name <> 'x'");
+
+        assertTrue(ddl.contains("VIEW \"good\".\"events\" AS"), ddl);
+        assertFalse(ddl.contains("VIEW \"bad\".\"events\""), ddl);
+        assertFalse(ddl.contains("\"broken\""), ddl);
+        // Unqualified, a table resolves in the context database alone.
+        String unqualified = builder.build("good", "SELECT * FROM events");
+        assertTrue(unqualified.contains("VIEW \"events\" AS"), unqualified);
+        assertFalse(unqualified.contains("VIEW \"bad\".\"events\""), unqualified);
+    }
+
+    @Test
+    void aQuotedReferenceIsDecodedBeforeItNamesATable() {
+        when(glueService.getDatabases()).thenReturn(List.of(createDatabase("lake")));
+        when(glueService.getTables("lake")).thenReturn(List.of(headerlessTsvTable("a\"b", "s3://lake/ab/")));
+
+        String ddl = builder.build("lake", "SELECT * FROM \"lake\" . \"A\"\"B\"");
+
+        assertTrue(ddl.contains("VIEW \"lake\".\"a\"\"b\" AS"), ddl);
+        assertEquals(List.of(List.of("select"), List.of("lake", "a\"b")),
+                GlueViewDdlBuilder.references("SELECT * FROM \"lake\" . \"A\"\"B\"").stream()
+                        .filter(name -> !name.getFirst().equals("from")).toList());
     }
 
     @Test

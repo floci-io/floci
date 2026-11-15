@@ -8,6 +8,7 @@ import io.floci.aws.core.common.CsvParser;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.athena.model.CreateWorkGroupConfigurationRequest;
@@ -35,6 +36,7 @@ import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.smallrye.common.vertx.VertxContext;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -62,6 +64,8 @@ import java.util.regex.Pattern;
 public class AthenaService {
 
     private static final Logger LOG = Logger.getLogger(AthenaService.class);
+    private static final Pattern DECIMAL_TYPE = Pattern.compile("DECIMAL\\((\\d+),\\s*(\\d+)\\)",
+            Pattern.CASE_INSENSITIVE);
     public static final String DEFAULT_CATALOG = "AwsDataCatalog";
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
@@ -97,6 +101,7 @@ public class AthenaService {
     private final StorageBackend<String, QueryExecution> queryStore;
     private final StorageBackend<String, WorkGroup> workGroupStore;
     private final StorageBackend<String, DataCatalog> dataCatalogStore;
+    private final StorageBackend<String, List<String>> resultColumnTypeStore;
     private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
@@ -104,6 +109,7 @@ public class AthenaService {
     private final Vertx vertx;
     private final GlueViewDdlBuilder ddlBuilder;
     private final RegionResolver regionResolver;
+    private final AthenaHiveDdlExecutor hiveDdlExecutor;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
@@ -120,6 +126,8 @@ public class AthenaService {
                 new TypeReference<>() {});
         this.dataCatalogStore = storageFactory.create("athena", "data-catalogs.json",
                 new TypeReference<>() {});
+        this.resultColumnTypeStore = storageFactory.create("athena", "query-result-column-types.json",
+                new TypeReference<>() {});
         this.duckClient = duckClient;
         this.glueService = glueService;
         this.s3Service = s3Service;
@@ -127,6 +135,7 @@ public class AthenaService {
         this.vertx = vertx;
         this.ddlBuilder = ddlBuilder;
         this.regionResolver = regionResolver;
+        this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service);
     }
 
     public String startQueryExecution(String query,
@@ -142,6 +151,16 @@ public class AthenaService {
         }
 
         boolean createDatabaseStatement = CREATE_DATABASE_PREFIX_PATTERN.matcher(statementText(query)).find();
+        // Hive DDL runs against the Glue catalog, not the query engine. A statement that starts like one but
+        // does not parse fails the query with the parser's reason rather than reaching DuckDB.
+        AthenaHiveDdl.Statement hiveDdl = null;
+        AwsException invalidHiveDdl = null;
+        try {
+            hiveDdl = AthenaHiveDdl.parse(query);
+        } catch (AwsException e) {
+            invalidHiveDdl = e;
+        }
+        boolean hiveDdlStatement = hiveDdl != null || invalidHiveDdl != null;
         // AWS reports the result CSV object itself as the OutputLocation, not a
         // directory prefix — the same key is written and returned to the client.
         // Statements that do not return rows must not be wrapped in a result COPY.
@@ -153,11 +172,27 @@ public class AthenaService {
                 : null;
 
         QueryExecution execution = new QueryExecution(id, query, workGroup, resolvedResult, resolvedContext);
-        if (createDatabaseStatement) {
+        if (createDatabaseStatement || hiveDdlStatement) {
             execution.setStatementType("DDL");
         }
         execution.getStatus().setState(QueryExecutionState.RUNNING);
         queryStore.put(id, execution);
+
+        if (hiveDdlStatement) {
+            try {
+                if (invalidHiveDdl != null) {
+                    throw invalidHiveDdl;
+                }
+                List<String> rows = hiveDdlExecutor.execute(hiveDdl, database);
+                if (outputLocation != null) {
+                    writeSingleColumnResult(id, outputLocation, "partition", rows);
+                }
+                markSucceeded(id, execution);
+            } catch (Exception e) {
+                markFailed(id, execution, e);
+            }
+            return id;
+        }
 
         if (createDatabaseStatement) {
             try {
@@ -179,24 +214,38 @@ public class AthenaService {
             return id;
         }
 
-        // Submit async — caller gets the ID immediately while execution runs in background
-        vertx.executeBlocking(() -> {
-            // Athena rejects a query that leaves an injected partition column unconstrained. It fails
-            // the query rather than the submission, which is what throwing here produces.
-            PartitionProjection.assertInjectedColumnsFiltered(query, tablesForProjectionCheck(database));
-            String setupDdl = ddlBuilder.build(database);
-            if (outputLocation != null) {
-                ensureOutputBucket(outputLocation);
-            }
-            duckClient.execute(query, setupDdl, outputLocation);
-            return null;
-        }).onSuccess(v -> {
+        // Submit async: the caller gets the ID immediately while execution runs in the background. The
+        // query outlives this request and must not share its CDI context, so it runs in a context of its
+        // own, as ReplayDispatcher runs a replay, as the account and in the Region it was started in: they
+        // decide the Glue catalog it reads and the stores its record and result column types go to.
+        String accountId = regionResolver.getAccountId();
+        String region = regionResolver.getRegion();
+        VertxContext.createNewDuplicatedContext(vertx.getOrCreateContext()).executeBlocking(() ->
+                RequestScopes.callAsChecked(accountId, region, () -> {
+                    // Athena fails a query that reads a table with an incomplete location template, or that
+                    // leaves an injected partition column unconstrained. It fails the query rather than the
+                    // submission, which is what throwing here produces.
+                    List<Table> projectionTables = tablesForProjectionCheck(database);
+                    PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
+                    PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
+                    String setupDdl = TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query);
+                    String duckQuery = TrinoSqlCompatibility.translate(query);
+                    if (outputLocation != null) {
+                        ensureOutputBucket(outputLocation);
+                    }
+                    duckClient.execute(duckQuery, setupDdl, outputLocation, accountId);
+                    if (outputLocation != null) {
+                        resultColumnTypeStore.put(id, describeColumnTypes(duckQuery, setupDdl, accountId));
+                    }
+                    return null;
+                })
+        ).onSuccess(v -> RequestScopes.runAs(accountId, region, () -> {
             markSucceeded(id, execution);
             LOG.infov("Query {0} succeeded", id);
-        }).onFailure(e -> {
+        })).onFailure(e -> RequestScopes.runAs(accountId, region, () -> {
             markFailed(id, execution, e);
             LOG.warnv("Query {0} failed: {1}", id, e.getMessage());
-        });
+        }));
 
         return id;
     }
@@ -318,7 +367,7 @@ public class AthenaService {
         workGroupStore.put(workGroupKey(region, workGroup.getName()), workGroup);
     }
 
-    public void deleteWorkGroup(String name, String region) {
+    void removeWorkGroup(String name, String region) {
         workGroupStore.delete(workGroupKey(region, name));
     }
 
@@ -536,13 +585,15 @@ public class AthenaService {
             throw new AwsException("InvalidRequestException", "Query has not succeeded yet", 400);
         }
 
-        if (config.services().athena().mock()
+        // DDL rows (SHOW PARTITIONS) come from the Glue catalog, not the query engine, so mock mode keeps them.
+        if (config.services().athena().mock() && !"DDL".equals(execution.getStatementType())
                 || execution.getResultConfiguration() == null
                 || execution.getResultConfiguration().getOutputLocation() == null) {
             return new ResultSet(List.of(), new ResultSet.ResultSetMetadata(List.of()));
         }
 
-        return readResultsFromS3(execution.getResultConfiguration().getOutputLocation(), id);
+        List<String> columnTypes = resultColumnTypeStore.get(id).orElse(List.of());
+        return readResultsFromS3(execution.getResultConfiguration().getOutputLocation(), id, columnTypes);
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
@@ -933,6 +984,23 @@ public class AthenaService {
                         "WorkGroup " + name + " is not found.", 400));
     }
 
+    /**
+     * Refuses a metadata read of a data catalog whose metadata is not the account's Glue Data Catalog, which Floci
+     * reads them from: a catalog of another type, or a Glue one registered for another account's catalog. Athena
+     * answers {@code MetadataException} when it cannot read a catalog's metastore, and {@code InvalidRequestException}
+     * for one it does not hold.
+     */
+    public void requireGlueCatalog(String region, String name) {
+        if (DEFAULT_CATALOG.equals(name)) {
+            return;
+        }
+        DataCatalog catalog = requireDataCatalog(region, name);
+        String catalogId = catalog.getParameters() == null ? null : catalog.getParameters().get("catalog-id");
+        if (!"GLUE".equals(catalog.getType()) || (catalogId != null && !catalogId.equals(regionResolver.getAccountId()))) {
+            throw new AwsException("MetadataException", "Unable to read the metadata of data catalog " + name + ".", 400);
+        }
+    }
+
     private DataCatalog requireDataCatalog(String region, String name) {
         return dataCatalogStore.get(catalogKey(region, name))
                 .orElseThrow(() -> new AwsException("InvalidRequestException",
@@ -1082,6 +1150,18 @@ public class AthenaService {
         }
     }
 
+    /** Writes {@code rows} as a one-column result CSV, the shape the query engine writes, typed varchar. */
+    private void writeSingleColumnResult(String id, String outputLocation, String column, List<String> rows) {
+        ensureOutputBucket(outputLocation);
+        StringBuilder csv = new StringBuilder(column).append('\n');
+        for (String row : rows) {
+            csv.append('"').append(row.replace("\"", "\"\"")).append("\"\n");
+        }
+        s3Service.putObject(extractBucket(outputLocation), extractKey(outputLocation),
+                csv.toString().getBytes(StandardCharsets.UTF_8), "text/csv", null);
+        resultColumnTypeStore.put(id, List.of("VARCHAR"));
+    }
+
     private void ensureOutputBucket(String s3Path) {
         String bucket = extractBucket(s3Path);
         if (bucket != null) {
@@ -1091,7 +1171,65 @@ public class AthenaService {
         }
     }
 
-    private ResultSet readResultsFromS3(String outputLocation, String queryId) {
+    /**
+     * The DuckDB type of each result column, in order. The result CSV carries only the column names,
+     * so the types come from DuckDB describing the same query, as the account that ran it. The query has already succeeded, so a
+     * failure here only costs the types: its columns are reported as varchar.
+     */
+    private List<String> describeColumnTypes(String query, String setupDdl, String accountId) {
+        try {
+            return duckClient.query("DESCRIBE " + query, setupDdl, accountId).stream()
+                    .map(column -> String.valueOf(column.get("column_type")))
+                    .toList();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not describe the result columns of {0}; reporting them as varchar", query);
+            return List.of();
+        }
+    }
+
+    private static ResultSet.ColumnInfo columnInfo(String name, String duckType) {
+        ResultSet.ColumnInfo column = new ResultSet.ColumnInfo(DEFAULT_CATALOG, "", "", name, athenaType(duckType));
+        Matcher decimal = DECIMAL_TYPE.matcher(duckType.trim());
+        if (decimal.matches()) {
+            column.setPrecision(Integer.parseInt(decimal.group(1)));
+            column.setScale(Integer.parseInt(decimal.group(2)));
+        }
+        return column;
+    }
+
+    static String athenaType(String duckType) {
+        String type = duckType.toUpperCase(Locale.ROOT).trim();
+        if (type.endsWith("[]")) {
+            return "array";
+        }
+        int parameters = type.indexOf('(');
+        return switch (parameters < 0 ? type : type.substring(0, parameters)) {
+            // DuckDB widens COUNT_IF and SUM over a BIGINT to HUGEINT, where Trino keeps BIGINT.
+            // TODO: Athena (engine v3) fails a sum past BIGINT's range with NUMERIC_VALUE_OUT_OF_RANGE;
+            // DuckDB's HUGEINT holds it, so floci returns the out-of-range value typed bigint instead.
+            // Casting HUGEINT result columns back to BIGINT would make DuckDB fail the query too.
+            case "BIGINT", "HUGEINT", "UBIGINT" -> "bigint";
+            case "INTEGER" -> "integer";
+            case "SMALLINT" -> "smallint";
+            case "TINYINT" -> "tinyint";
+            case "DOUBLE" -> "double";
+            case "FLOAT" -> "float";
+            case "DECIMAL" -> "decimal";
+            case "BOOLEAN" -> "boolean";
+            case "DATE" -> "date";
+            case "TIMESTAMP", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS" -> "timestamp";
+            case "TIMESTAMP WITH TIME ZONE" -> "timestamp with time zone";
+            case "TIME" -> "time";
+            case "TIME WITH TIME ZONE" -> "time with time zone";
+            case "BLOB" -> "varbinary";
+            case "STRUCT" -> "row";
+            case "MAP" -> "map";
+            case "JSON" -> "json";
+            default -> "varchar";
+        };
+    }
+
+    private ResultSet readResultsFromS3(String outputLocation, String queryId, List<String> columnTypes) {
         try {
             String bucket = extractBucket(outputLocation);
             String prefix = extractKey(outputLocation);
@@ -1109,14 +1247,14 @@ public class AthenaService {
                 return emptyResultSet();
             }
 
-            return parseCsv(csv.get().getData());
+            return parseCsv(csv.get().getData(), columnTypes);
         } catch (Exception e) {
             LOG.warnv("Could not read query results for {0}: {1}", queryId, e.getMessage());
             return emptyResultSet();
         }
     }
 
-    private ResultSet parseCsv(byte[] data) {
+    private ResultSet parseCsv(byte[] data, List<String> columnTypes) {
         List<ResultSet.Row> rows = new ArrayList<>();
         List<ResultSet.ColumnInfo> columns = new ArrayList<>();
 
@@ -1129,8 +1267,8 @@ public class AthenaService {
             }
 
             String[] headers = CsvParser.parseLine(headerLine).toArray(String[]::new);
-            for (String h : headers) {
-                columns.add(new ResultSet.ColumnInfo(DEFAULT_CATALOG, "", "", h, "varchar"));
+            for (int i = 0; i < headers.length; i++) {
+                columns.add(columnInfo(headers[i], i < columnTypes.size() ? columnTypes.get(i) : "VARCHAR"));
             }
 
             // Header row is included in GetQueryResults per AWS spec

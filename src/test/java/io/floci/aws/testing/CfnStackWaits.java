@@ -5,6 +5,7 @@ import io.restassured.path.xml.element.Node;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.DeleteStackRequest;
 import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 
@@ -128,15 +129,60 @@ public final class CfnStackWaits {
     public static Stack awaitStatus(CloudFormationClient client, String stackName, String expectedStatus) {
         DescribeStacksRequest request = DescribeStacksRequest.builder().stackName(stackName).build();
         return await("Stack " + stackName + " to reach " + expectedStatus)
-                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).until(() -> {
-                    List<Stack> stacks = client.describeStacks(request).stacks();
-                    if (stacks.isEmpty()) {
-                        fail("DescribeStacks " + stackName + " returned no stacks");
-                    }
-                    return stacks.getFirst();
-                }, stack -> hasExpectedStatus(stackName, expectedStatus,
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50))
+                .until(() -> describeStack(client, request),
+                        stack -> hasExpectedStatus(stackName, expectedStatus,
                         new StackState(stack.stackStatusAsString(),
                                 stack.stackStatusReason() == null ? "" : stack.stackStatusReason())));
+    }
+
+    /** Creates {@code stackName} from {@code template} through the SDK and waits for {@code expectedStatus}. */
+    public static Stack createStack(CloudFormationClient client, String stackName, String template,
+                                    String expectedStatus) {
+        client.createStack(request -> request.stackName(stackName).templateBody(template));
+        return awaitStatus(client, stackName, expectedStatus);
+    }
+
+    /** Updates {@code stackName} to {@code template} through the SDK and waits for {@code expectedStatus}. */
+    public static Stack updateStack(CloudFormationClient client, String stackName, String template,
+                                    String expectedStatus) {
+        client.updateStack(request -> request.stackName(stackName).templateBody(template));
+        return awaitStatus(client, stackName, expectedStatus);
+    }
+
+    /** Waits for prior work, deletes through the SDK, and follows the retained stack id until deletion completes. */
+    public static void deleteStack(CloudFormationClient client, String stackName) {
+        DescribeStacksRequest request = DescribeStacksRequest.builder().stackName(stackName).build();
+        Stack stack = await("Stack " + stackName + " to finish before cleanup")
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50))
+                .until(() -> describeStack(client, request),
+                        current -> TERMINAL.contains(current.stackStatusAsString()));
+        if ("DELETE_COMPLETE".equals(stack.stackStatusAsString())) {
+            return;
+        }
+        String stackId = stack.stackId();
+        client.deleteStack(DeleteStackRequest.builder().stackName(stackId).build());
+        awaitStatus(client, stackId, "DELETE_COMPLETE");
+    }
+
+    private static Stack describeStack(CloudFormationClient client, DescribeStacksRequest request) {
+        List<Stack> stacks = client.describeStacks(request).stacks();
+        if (stacks.isEmpty()) {
+            fail("DescribeStacks " + request.stackName() + " returned no stacks");
+        }
+        return stacks.getFirst();
+    }
+
+    /**
+     * A resource to append to a template's {@code Resources}, after the one named {@code logicalId}:
+     * an instance that names a launch template that does not exist, so it fails once that resource
+     * is done, and an update that changed it rolls back.
+     */
+    public static String failingResourceAfter(String logicalId) {
+        return """
+                ,
+                  "Later": {"Type": "AWS::EC2::Instance", "DependsOn": "%s", "Properties": {"LaunchTemplate": {
+                    "LaunchTemplateId": "lt-0123456789abcdef0", "Version": "1"}}}""".formatted(logicalId);
     }
 
     /** The value of {@code stack}'s output {@code key}; fails when the stack has no such output. */

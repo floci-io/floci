@@ -57,6 +57,7 @@ public class Instance {
     private String stateReasonMessage;
     private String region;
     private String ownerId;
+    private String reservationId;
     private List<Tag> tags = new ArrayList<>();
 
     private String rootVolumeId;
@@ -230,6 +231,9 @@ public class Instance {
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
+
+    public String getReservationId() { return reservationId; }
+    public void setReservationId(String reservationId) { this.reservationId = reservationId; }
 
     public String getOwnerId() { return ownerId; }
     public void setOwnerId(String ownerId) { this.ownerId = ownerId; }

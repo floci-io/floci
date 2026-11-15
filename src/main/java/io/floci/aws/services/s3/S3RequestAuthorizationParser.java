@@ -1,6 +1,7 @@
 package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.auth.SigV4aSignature;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -32,7 +33,7 @@ final class S3RequestAuthorizationParser {
     }
 
     static boolean isSigned(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        return isSigned(httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters());
+        return isSigned(httpHeaders.getHeaderString("Authorization"), ResteasyRequests.queryParameters(uriInfo));
     }
 
     static boolean isSigned(String authorization, MultivaluedMap<String, String> queryParameters) {
@@ -57,7 +58,7 @@ final class S3RequestAuthorizationParser {
     }
 
     static S3Service.RequestAuthorization parse(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        return parse(httpHeaders.getHeaderString("Authorization"), uriInfo.getQueryParameters(),
+        return parse(httpHeaders.getHeaderString("Authorization"), ResteasyRequests.queryParameters(uriInfo),
                 httpHeaders.getHeaderString("X-Amz-Security-Token"));
     }
 

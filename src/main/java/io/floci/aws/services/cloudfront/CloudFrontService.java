@@ -26,6 +26,7 @@ import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.floci.aws.services.cloudfront.model.Invalidation;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
+import io.floci.aws.services.cloudfront.model.KeyValueStore;
 import io.floci.aws.services.cloudfront.model.MonitoringSubscription;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.services.cloudfront.model.OriginAccessControl;
@@ -75,6 +76,31 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final List<String> OAC_SIGNING_BEHAVIORS =
             List.of("always-amz-auth", "never", "always", "no-override");
     private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
+    private static final int MAX_FUNCTIONS_PER_KEY_VALUE_STORE = 100;
+    /**
+     * The security policies {@code MinimumProtocolVersion} admits, the enumeration its shape
+     * declares. {@code SSLv3} is the only one below {@code TLSv1}, which is why the floor the
+     * member states for {@code sni-only} and the pair {@code InvalidProtocolSettings} names are
+     * the same rule.
+     */
+    private static final Set<String> MINIMUM_PROTOCOL_VERSIONS = Set.of("SSLv3", "TLSv1",
+            "TLSv1_2016", "TLSv1.1_2016", "TLSv1.2_2018", "TLSv1.2_2019", "TLSv1.2_2021",
+            "TLSv1.2_2025", "TLSv1.3_2025");
+    /** The values {@code SSLSupportMethod} admits, the enumeration its shape declares. */
+    private static final Set<String> SSL_SUPPORT_METHODS = Set.of("sni-only", "vip", "static-ip");
+    /**
+     * The forms a member declared {@code boolean} can carry, XML giving such a value as
+     * {@code true}, {@code false}, {@code 1} or {@code 0}.
+     */
+    private static final Map<String, Boolean> XML_BOOLEANS =
+            Map.of("true", true, "1", true, "false", false, "0", false);
+    /**
+     * The security policy a distribution on the CloudFront domain name ends up on, whatever it
+     * asked for: {@code MinimumProtocolVersion}'s own entry says that when
+     * {@code CloudFrontDefaultCertificate} is true CloudFront "automatically sets the security
+     * policy to TLSv1 regardless of the value that you set here".
+     */
+    static final String DEFAULT_CERTIFICATE_PROTOCOL_VERSION = "TLSv1";
     private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
     private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
     private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
@@ -141,6 +167,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final RegionResolver regionResolver;
     private final IamService iamService;
     private final CertificateReferenceResolver certificates;
+    private final CloudFrontKeyValueStoreService keyValueStores;
     private final String configuredDomainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
@@ -155,14 +182,17 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final Pattern lambdaOriginHost;
 
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
-        this(factory, config, regionResolver, null, null);
+        this(factory, config, regionResolver, null, null,
+                new CloudFrontKeyValueStoreService(factory, regionResolver));
     }
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
-                             IamService iamService, CertificateReferenceResolver certificates) {
+                             IamService iamService, CertificateReferenceResolver certificates,
+                             CloudFrontKeyValueStoreService keyValueStores) {
         this.iamService = iamService;
         this.certificates = certificates;
+        this.keyValueStores = keyValueStores;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -213,6 +243,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
         validateOriginAccessControls(dist.getConfig());
+        validateViewerCertificateSettings(dist.getConfig(), DistributionWrite.CREATE);
+        applyDefaultCertificateProtocolVersion(dist.getConfig());
         return whileCertificatesHeld(dist.getConfig(), () -> {
             validateViewerCertificate(dist.getConfig());
             String id = generateDistributionId();
@@ -248,6 +280,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
         validateOriginAccessControls(updated.getConfig());
+        validateViewerCertificateSettings(updated.getConfig(), DistributionWrite.UPDATE);
+        applyDefaultCertificateProtocolVersion(updated.getConfig());
         return whileCertificatesHeld(updated.getConfig(), () -> {
             validateViewerCertificate(updated.getConfig());
             updated.setId(id);
@@ -291,11 +325,19 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     private static String acmCertificateArn(DistributionConfig config) {
+        return viewerCertificateMember(config, "ACMCertificateArn");
+    }
+
+    /**
+     * A member of the viewer certificate, or null when it is absent or blank. An element left empty
+     * reaches this protocol as a blank value, so a member carried blank carries no value.
+     */
+    private static String viewerCertificateMember(DistributionConfig config, String member) {
         if (config == null || config.getViewerCertificate() == null) {
             return null;
         }
-        String certificateArn = config.getViewerCertificate().get("ACMCertificateArn");
-        return certificateArn == null || certificateArn.isBlank() ? null : certificateArn;
+        String value = config.getViewerCertificate().get(member);
+        return value == null || value.isBlank() ? null : value;
     }
 
     /**
@@ -306,11 +348,155 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * Server Certificates in {@code docs/services/iam.md}.
      */
     private static String iamCertificateId(DistributionConfig config) {
-        if (config == null || config.getViewerCertificate() == null) {
-            return null;
+        return viewerCertificateMember(config, "IAMCertificateId");
+    }
+
+    /**
+     * Whether the request claims the certificate CloudFront serves its own domain name with. The
+     * member is declared {@code boolean} in the model and reaches this protocol as text, so it is
+     * held to the four forms XML gives a boolean, {@code true}, {@code false}, {@code 1} and
+     * {@code 0}, rather than read for the word {@code true} alone. Anything else answers the
+     * {@code InvalidArgument} this service answers a member outside its shape with, which is
+     * Floci's reading: CloudFront models no error for a malformed document, and taking the value
+     * for false instead would let a request dodge every rule this member governs, the refusals
+     * beside a named certificate and the security policy it is overridden to alike. An absent
+     * member, or one carried blank, leaves the distribution on a certificate of its own.
+     */
+    private static boolean cloudFrontDefaultCertificate(DistributionConfig config) {
+        String claimed = viewerCertificateMember(config, "CloudFrontDefaultCertificate");
+        if (claimed == null) {
+            return false;
         }
-        String certificateId = config.getViewerCertificate().get("IAMCertificateId");
-        return certificateId == null || certificateId.isBlank() ? null : certificateId;
+        Boolean parsed = XML_BOOLEANS.get(claimed.strip().toLowerCase(Locale.ROOT));
+        if (parsed == null) {
+            throw new AwsException("InvalidArgument",
+                    "The CloudFrontDefaultCertificate specified is not valid.", 400);
+        }
+        return parsed;
+    }
+
+    /**
+     * Which distribution write is being validated. The two differ in one answer, the code the
+     * {@code SSLv3} with {@code sni-only} pair is refused with, which is the code the operation
+     * declares: {@code CreateDistribution}, {@code CreateDistributionWithTags} and
+     * {@code CopyDistribution} declare {@code InvalidProtocolSettings}, where
+     * {@code UpdateDistribution} has never declared it in any version of this API and has declared
+     * {@code InvalidMinimumProtocolVersion} since 2015. Where no sentence settles which a caller
+     * gets, the declared code is what a typed SDK can map: an undeclared one reaches such a caller
+     * as a generic error, its deserializer carrying no case for it.
+     */
+    private enum DistributionWrite {
+        CREATE("InvalidProtocolSettings"),
+        UPDATE("InvalidMinimumProtocolVersion");
+
+        private final String protocolPairCode;
+
+        DistributionWrite(String protocolPairCode) {
+            this.protocolPairCode = protocolPairCode;
+        }
+    }
+
+    /**
+     * The two enumerations the viewer certificate declares, and the one pair it admits apart but
+     * not together. A {@code MinimumProtocolVersion} outside its set is published:
+     * {@code InvalidMinimumProtocolVersion}, "The minimum protocol version specified is not
+     * valid.", is modelled on both distribution writes and its own sentence names this case. An
+     * {@code SSLSupportMethod} outside its set has no code of its own, so it reads here as the
+     * {@code InvalidArgument} this service already answers a member outside its shape with.
+     * {@code SSLv3} alongside {@code sni-only} is published as well, by
+     * {@code InvalidProtocolSettings}, whose sentence names that pair and nothing else, and it is
+     * the same rule as the floor {@code MinimumProtocolVersion} states for SNI, "you must specify
+     * TLSv1 or higher". That code is declared on the two creates and the copy and never on the
+     * update, so the code this refusal answers is the write's own, as {@link DistributionWrite}
+     * sets out. The sentence stays the pair's published one either way, which keeps the two causes
+     * the update answers under one code apart. The pair is read for a distribution on a certificate
+     * of its own alone: on the CloudFront certificate the security policy is replaced with
+     * {@code TLSv1} "regardless of the value that you set here", so the value that would make the
+     * pair is discarded and refusing the request for it would contradict the override. Both
+     * enumerations are read either way, a member outside the set its shape declares being outside
+     * its shape whatever the distribution is on.
+     */
+    private static void validateViewerCertificateProtocols(DistributionConfig config,
+                                                           boolean defaultCertificate,
+                                                           DistributionWrite write) {
+        String protocolVersion = viewerCertificateMember(config, "MinimumProtocolVersion");
+        if (protocolVersion != null && !MINIMUM_PROTOCOL_VERSIONS.contains(protocolVersion)) {
+            throw new AwsException("InvalidMinimumProtocolVersion",
+                    "The minimum protocol version specified is not valid.", 400);
+        }
+        String sslSupportMethod = viewerCertificateMember(config, "SSLSupportMethod");
+        if (sslSupportMethod != null && !SSL_SUPPORT_METHODS.contains(sslSupportMethod)) {
+            throw new AwsException("InvalidArgument",
+                    "The SSLSupportMethod specified is not valid.", 400);
+        }
+        if (!defaultCertificate && "SSLv3".equals(protocolVersion)
+                && "sni-only".equals(sslSupportMethod)) {
+            throw new AwsException(write.protocolPairCode,
+                    "You cannot specify SSLv3 as the minimum protocol version if you only want to "
+                            + "support only clients that support Server Name Indication (SNI).", 400);
+        }
+    }
+
+    /**
+     * The rules the viewer certificate's own entry states about the certificate it names, and
+     * nothing else here holds a caller to. Its location is set "in one of the following fields
+     * (not both)", {@code ACMCertificateArn} or {@code IAMCertificateId}; a certificate named in
+     * either one "must also specify values for MinimumProtocolVersion and SSLSupportMethod"; and a
+     * request that sets {@code CloudFrontDefaultCertificate} is told to "leave all other fields
+     * empty", so a certificate named beside it contradicts the request's own claim. None of the
+     * three refusals has a published code: {@code InvalidArgument} and
+     * {@code InvalidMinimumProtocolVersion} are modelled on the distribution writes as well and no
+     * sentence says which a caller gets, and the Developer Guide page enumerating what
+     * {@code InvalidViewerCertificate} answers reaches none of these cases. So all three read here
+     * as the certificate the request carries not being valid, which is what
+     * {@code InvalidViewerCertificate} is documented for. The readings are set out in
+     * {@code docs/services/cloudfront.md}. The members are held to their shape first, the claim
+     * itself and then the protocol members, and all of it runs before the certificate is looked
+     * up, so a request breaking a rule is refused for the rule rather than for a certificate
+     * nothing matches.
+     */
+    private static void validateViewerCertificateSettings(DistributionConfig config,
+                                                          DistributionWrite write) {
+        boolean defaultCertificate = cloudFrontDefaultCertificate(config);
+        validateViewerCertificateProtocols(config, defaultCertificate, write);
+        String certificateArn = acmCertificateArn(config);
+        String certificateId = iamCertificateId(config);
+        if (certificateArn != null && certificateId != null) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "You must specify a value for ACMCertificateArn or IAMCertificateId, not both.", 400);
+        }
+        if (certificateArn == null && certificateId == null) {
+            return;
+        }
+        if (defaultCertificate) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "You cannot specify ACMCertificateArn or IAMCertificateId when "
+                            + "CloudFrontDefaultCertificate is true.", 400);
+        }
+        if (viewerCertificateMember(config, "MinimumProtocolVersion") == null
+                || viewerCertificateMember(config, "SSLSupportMethod") == null) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "You must specify values for MinimumProtocolVersion and SSLSupportMethod.", 400);
+        }
+    }
+
+    /**
+     * The one rule in this group that replaces a value instead of refusing the request.
+     * {@code MinimumProtocolVersion}'s entry says that when {@code CloudFrontDefaultCertificate} is
+     * true CloudFront "automatically sets the security policy to TLSv1 regardless of the value that
+     * you set here", so the policy a request asks for there is overwritten and the config reads
+     * back the one the distribution is really on. The parsed map is replaced rather than written
+     * to, a caller inside this JVM being free to hand in one that cannot be.
+     */
+    private static void applyDefaultCertificateProtocolVersion(DistributionConfig config) {
+        if (config == null || !cloudFrontDefaultCertificate(config)
+                || DEFAULT_CERTIFICATE_PROTOCOL_VERSION.equals(
+                        config.getViewerCertificate().get("MinimumProtocolVersion"))) {
+            return;
+        }
+        Map<String, String> viewerCertificate = new LinkedHashMap<>(config.getViewerCertificate());
+        viewerCertificate.put("MinimumProtocolVersion", DEFAULT_CERTIFICATE_PROTOCOL_VERSION);
+        config.setViewerCertificate(viewerCertificate);
     }
 
     private void validateViewerCertificate(DistributionConfig config) {
@@ -1678,6 +1864,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public synchronized CloudFrontFunction createFunction(CloudFrontFunction fn) {
         validateFunctionRuntime(fn.getRuntime());
+        validateKeyValueStoreAssociations(fn);
         // The bare name holds the DEVELOPMENT stage, and the LIVE stage of releases before
         // stage-aware keys.
         if (functionStore.get(fn.getName()).isPresent()
@@ -1710,6 +1897,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public synchronized CloudFrontFunction updateFunction(String name, String ifMatch,
                                                           CloudFrontFunction updated) {
         validateFunctionRuntime(updated.getRuntime());
+        updated.setName(name);
+        validateKeyValueStoreAssociations(updated);
         CloudFrontFunction existing = describeFunction(name, null);
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -1789,6 +1978,72 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
     }
 
+    private void validateKeyValueStoreAssociations(CloudFrontFunction fn) {
+        List<String> arns = fn.getKeyValueStoreArns();
+        if (arns == null || arns.isEmpty()) {
+            return;
+        }
+        if (arns.size() > 1) {
+            throw new AwsException("InvalidArgument",
+                    "A function can be associated with at most one key value store.", 400);
+        }
+        if ("cloudfront-js-1.0".equals(fn.getRuntime())) {
+            throw new AwsException("InvalidArgument",
+                    "A key value store can only be associated with a cloudfront-js-2.0 function.", 400);
+        }
+        for (String arn : arns) {
+            if (keyValueStores.findByArn(arn).isEmpty()) {
+                throw new AwsException("EntityNotFound", "The specified KeyValueStore does not exist.", 404);
+            }
+            long otherFunctions = functionStore.scan(key -> true).stream()
+                    .filter(other -> !other.getName().equals(fn.getName())
+                            && other.getKeyValueStoreArns() != null
+                            && other.getKeyValueStoreArns().contains(arn))
+                    .map(CloudFrontFunction::getName)
+                    .distinct()
+                    .count();
+            if (otherFunctions >= MAX_FUNCTIONS_PER_KEY_VALUE_STORE) {
+                throw new AwsException("TooManyFunctionsAssociatedToKeyValueStore",
+                        "A key value store can be associated with at most " + MAX_FUNCTIONS_PER_KEY_VALUE_STORE
+                                + " functions.", 400);
+            }
+        }
+    }
+
+    // ── Key value stores ──────────────────────────────────────────────────────
+
+    public KeyValueStore createKeyValueStore(String name, String comment, boolean hasImportSource) {
+        if (hasImportSource) {
+            throw new AwsException("InvalidArgument", "ImportSource is not supported.", 400);
+        }
+        return keyValueStores.create(name, comment);
+    }
+
+    public KeyValueStore describeKeyValueStore(String name) {
+        return keyValueStores.describe(name);
+    }
+
+    public List<KeyValueStore> listKeyValueStores(String marker, int maxItems, String status) {
+        return keyValueStores.list(marker, maxItems, status);
+    }
+
+    public KeyValueStore updateKeyValueStore(String name, String ifMatch, String comment) {
+        return keyValueStores.update(name, ifMatch, comment);
+    }
+
+    public synchronized void deleteKeyValueStore(String name, String ifMatch) {
+        KeyValueStore existing = keyValueStores.describe(name);
+        boolean inUse = functionStore.scan(key -> true).stream()
+                .anyMatch(fn -> fn.getKeyValueStoreArns() != null
+                        && fn.getKeyValueStoreArns().contains(existing.getArn()));
+        if (inUse) {
+            throw new AwsException("CannotDeleteEntityWhileInUse",
+                    "Cannot delete KeyValueStore " + name + " because it is associated with a function", 409);
+        }
+        keyValueStores.delete(name, ifMatch);
+        tagStore.delete(existing.getArn());
+    }
+
     private static AwsException invalidFunctionStage(String stage) {
         return new AwsException("InvalidArgument",
                 "The parameter Stage must be DEVELOPMENT or LIVE: " + stage, 400);
@@ -1802,6 +2057,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         copy.setFunctionCode(source.getFunctionCode());
         copy.setRuntime(source.getRuntime());
         copy.setComment(source.getComment());
+        copy.setKeyValueStoreArns(source.getKeyValueStoreArns() == null
+                ? new ArrayList<>() : new ArrayList<>(source.getKeyValueStoreArns()));
         copy.setEtag(source.getEtag());
         copy.setCreatedTime(source.getCreatedTime());
         copy.setLastModifiedTime(source.getLastModifiedTime());

@@ -17,9 +17,13 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.elasticache.model.CacheCluster;
 import software.amazon.awssdk.services.elasticache.model.CacheSubnetGroupNotFoundException;
 import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
+import software.amazon.awssdk.services.elasticache.model.Endpoint;
+import software.amazon.awssdk.services.elasticache.model.ReplicationGroup;
+import software.amazon.awssdk.services.elasticache.model.ReplicationGroupNotFoundException;
 import software.amazon.awssdk.services.elasticache.model.UserGroupNotFoundException;
 
 import java.net.URI;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -216,6 +220,25 @@ class ElastiCacheCfnIntegrationTest {
     }
 
     @Test
+    void userGroupCanListTheBuiltInDefaultUser() {
+        String stack = "elasticache-cfn-builtin-member-it";
+        cloudFormation(stack, "CreateStack", """
+            {"Resources": {"UserGroup": {"Type": "AWS::ElastiCache::UserGroup",
+              "Properties": {"UserGroupId": "cfn-it-builtin-members", "Engine": "redis",
+                             "UserIds": ["default"]}}}}
+            """);
+        describeStacks(stack, "CREATE_COMPLETE");
+
+        try (ElastiCacheClient client = client()) {
+            assertEquals(List.of("default"), client.describeUserGroups(r -> r.userGroupId("cfn-it-builtin-members"))
+                    .userGroups().getFirst().userIds());
+        }
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
     void cacheClusterExposesEndpoints() throws Exception {
         Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the cache data plane");
         cloudFormation(DATA_STACK, "CreateStack", DATA_TEMPLATE);
@@ -236,6 +259,68 @@ class ElastiCacheCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(DATA_STACK);
     }
 
+
+    @Test
+    void replicationGroupWithBuiltInDefaultUserExposesEndpoints() throws Exception {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the cache data plane");
+        String stack = "elasticache-cfn-replication-group-it";
+        // the property shapes a Serverless Framework template sends: a numeric EngineVersion, string scalars
+        cloudFormation(stack, "CreateStack", """
+            {
+              "Resources": {
+                "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.74.0.0/16"}},
+                "Subnet": {"Type": "AWS::EC2::Subnet",
+                           "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.74.0.0/24"}},
+                "SecurityGroup": {"Type": "AWS::EC2::SecurityGroup",
+                                  "Properties": {"GroupDescription": "cache", "VpcId": {"Ref": "Vpc"}}},
+                "SubnetGroup": {"Type": "AWS::ElastiCache::SubnetGroup",
+                                "Properties": {"Description": "example", "SubnetIds": [{"Ref": "Subnet"}]}},
+                "AppUser": {"Type": "AWS::ElastiCache::User",
+                            "Properties": {"UserId": "cfn-it-rg-app", "UserName": "cfn-it-rg-app", "Engine": "redis",
+                                           "AccessString": "on ~* +@all",
+                                           "AuthenticationMode": {"Type": "password",
+                                                                  "Passwords": ["example-password-0123456789"]}}},
+                "UserGroup": {"Type": "AWS::ElastiCache::UserGroup",
+                              "Properties": {"UserGroupId": "cfn-it-rg-users", "Engine": "redis",
+                                             "UserIds": ["default", {"Ref": "AppUser"}]}},
+                "Redis": {"Type": "AWS::ElastiCache::ReplicationGroup",
+                          "Properties": {"ReplicationGroupId": "cfn-it-rg", "ReplicationGroupDescription": "cache",
+                                         "Engine": "redis", "EngineVersion": 7.1, "Port": 6379,
+                                         "CacheNodeType": "cache.t3.micro", "NumCacheClusters": "1",
+                                         "AutomaticFailoverEnabled": "false",
+                                         "SecurityGroupIds": [{"Ref": "SecurityGroup"}],
+                                         "CacheSubnetGroupName": {"Ref": "SubnetGroup"},
+                                         "UserGroupIds": [{"Ref": "UserGroup"}],
+                                         "TransitEncryptionEnabled": true}}
+              },
+              "Outputs": {
+                "Ref": {"Value": {"Ref": "Redis"}},
+                "Address": {"Value": {"Fn::GetAtt": ["Redis", "PrimaryEndPoint.Address"]}},
+                "Port": {"Value": {"Fn::GetAtt": ["Redis", "PrimaryEndPoint.Port"]}},
+                "ReadPorts": {"Value": {"Fn::Join": [",", {"Fn::GetAtt": ["Redis", "ReadEndPoint.Ports.List"]}]}}
+              }
+            }
+            """);
+        String stacks = describeStacks(stack, "CREATE_COMPLETE");
+
+        assertEquals("cfn-it-rg", outputValue(stacks, "Ref"));
+        try (ElastiCacheClient client = client()) {
+            ReplicationGroup group = client.describeReplicationGroups(r -> r.replicationGroupId("cfn-it-rg"))
+                    .replicationGroups().getFirst();
+            Endpoint primary = group.nodeGroups().getFirst().primaryEndpoint();
+            assertEquals(primary.address(), outputValue(stacks, "Address"));
+            assertEquals(String.valueOf(primary.port()), outputValue(stacks, "Port"));
+            assertEquals(String.valueOf(primary.port()), outputValue(stacks, "ReadPorts"));
+            assertEquals(List.of("cfn-it-rg-users"), group.userGroupIds());
+            assertTrue(group.transitEncryptionEnabled());
+
+            cloudFormation(stack, "DeleteStack", null);
+            CfnStackWaits.awaitStackDeleted(stack);
+
+            assertThrows(ReplicationGroupNotFoundException.class,
+                    () -> client.describeReplicationGroups(r -> r.replicationGroupId("cfn-it-rg")));
+        }
+    }
 
     private static void cloudFormation(String stack, String action, String templateBody) {
         RequestSpecification request = given()

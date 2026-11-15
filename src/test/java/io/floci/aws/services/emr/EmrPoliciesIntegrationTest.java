@@ -180,4 +180,34 @@ class EmrPoliciesIntegrationTest {
         emr("PutBlockPublicAccessConfiguration", "{\"BlockPublicAccessConfiguration\":{}}")
                 .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
     }
+
+    @Test
+    @Order(8)
+    void anEndedClustersPoliciesCannotBeChangedNorItsManagedScalingPolicyRead() {
+        String core = ",\"InstanceGroupId\":\"" + coreGroupId + "\"";
+        emr("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}")
+                .then().statusCode(200);
+        emr("PutAutoScalingPolicy", cluster() + core + ",\"AutoScalingPolicy\":" + AUTO_SCALING + "}")
+                .then().statusCode(200);
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
+
+        assertShutDown("GetManagedScalingPolicy", cluster() + "}");
+        assertShutDown("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}");
+        assertShutDown("RemoveManagedScalingPolicy", cluster() + "}");
+        assertShutDown("PutAutoTerminationPolicy", cluster() + ",\"AutoTerminationPolicy\":{\"IdleTimeout\":3600}}");
+        assertShutDown("RemoveAutoTerminationPolicy", cluster() + "}");
+        assertShutDown("PutAutoScalingPolicy", cluster() + core + ",\"AutoScalingPolicy\":" + AUTO_SCALING + "}");
+        assertShutDown("RemoveAutoScalingPolicy", cluster() + core + "}");
+
+        emr("ListInstanceGroups", cluster() + "}").then().statusCode(200)
+                .body("InstanceGroups.find { it.Id == '" + coreGroupId + "' }.AutoScalingPolicy.Constraints.MaxCapacity",
+                        equalTo(4));
+    }
+
+    private static void assertShutDown(String action, String body) {
+        emr(action, body).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(
+                        "A job flow that is shutting down, terminated, or finished may not be modified."));
+    }
 }

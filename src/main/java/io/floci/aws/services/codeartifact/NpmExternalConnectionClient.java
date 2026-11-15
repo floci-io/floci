@@ -1,15 +1,19 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -114,32 +118,95 @@ public class NpmExternalConnectionClient {
     /** Fetches {@code namespace}/{@code packageName}/{@code version}'s one real tarball. */
     public Optional<FetchedAsset> fetchTarball(String externalConnectionName, String namespace, String packageName,
             String version) {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        boolean fetched = fetchTarball(externalConnectionName, namespace, packageName, version,
+                in -> in.transferTo(buffer));
+        return fetched ? Optional.of(new FetchedAsset(buffer.toByteArray())) : Optional.empty();
+    }
+
+    /** One real tarball's size, fetched straight to {@code destination} without ever being held
+     * whole in memory. */
+    public record FetchedFile(long size) {}
+
+    /**
+     * {@link #fetchTarball(String, String, String, String)}'s own streamed sibling, for a
+     * tarball too large to ever hold as one {@code byte[]} (~2 GiB, the JVM array limit): the
+     * confirmed-live response streamed straight to {@code destination} instead of into a
+     * resident array. Capped at {@code CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES} during the
+     * copy itself, via {@link AssetDigestingInputStream}, rather than downloaded in full and
+     * checked only afterward: the real registry's own tarball size is otherwise unbounded, so
+     * without this an oversized one would still be fully pulled across the network and written to
+     * local disk before ever being rejected.
+     */
+    public Optional<FetchedFile> fetchTarball(String externalConnectionName, String namespace, String packageName,
+            String version, Path destination) {
+        long[] size = new long[1];
+        boolean fetched = fetchTarball(externalConnectionName, namespace, packageName, version,
+                in -> size[0] = AssetDigestingInputStream.copyCapped(in, destination,
+                        CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES));
+        return fetched ? Optional.of(new FetchedFile(size[0])) : Optional.empty();
+    }
+
+    private interface BodyConsumer {
+        void accept(InputStream body) throws IOException;
+    }
+
+    private boolean fetchTarball(String externalConnectionName, String namespace, String packageName,
+            String version, BodyConsumer consumer) {
         String baseUrl = baseUrls.get(externalConnectionName);
         if (baseUrl == null) {
-            return Optional.empty();
+            return false;
         }
         URI uri = SidecarUriUtils.combine(URI.create(baseUrl), tarballPath(namespace, packageName, version));
-        return send(uri, "*/*", namespace, packageName);
+        return sendToConsumer(uri, "*/*", namespace, packageName, consumer);
     }
 
     private Optional<FetchedAsset> send(URI uri, String accept, String namespace, String packageName) {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        boolean fetched = sendToConsumer(uri, accept, namespace, packageName, in -> in.transferTo(buffer));
+        return fetched ? Optional.of(new FetchedAsset(buffer.toByteArray())) : Optional.empty();
+    }
+
+    /** The one real fetch every public method here shares: every redirect/host decision npm's
+     * fixed, single-base-URL registry needs none of, but the digest-once/stream-once discipline
+     * still matters for {@link #fetchTarball(String, String, String, String, Path)}. Also shares
+     * the worst-case download timeout with the small packument fetches that go through this same
+     * method: the real tarball this can fetch is up to 5 GB, and its real size isn't known until
+     * the response itself arrives, so a flat, small timeout sized for metadata alone would cancel
+     * a legitimately large, still-in-progress download.
+     */
+    private boolean sendToConsumer(URI uri, String accept, String namespace, String packageName,
+            BodyConsumer consumer) {
+        HttpResponse<InputStream> response;
         try {
             HttpRequest request = HttpRequest.newBuilder(uri)
-                    .timeout(Duration.ofSeconds(20))
+                    .timeout(SidecarUriUtils.maxTransferTimeout())
                     .header("Accept", accept)
                     .GET()
                     .build();
-            HttpResponse<byte[]> response = httpClient.send(request, BodyHandlers.ofByteArray());
-            return response.statusCode() == 200 ? Optional.of(new FetchedAsset(response.body())) : Optional.empty();
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            return Optional.empty();
+            return false;
         } catch (IOException e) {
             LOG.warnv("Could not fetch {0} {1} from the public npm registry: {2}", namespace, packageName,
                     e.getMessage());
-            return Optional.empty();
+            return false;
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            return false;
+        }
+        try (InputStream body = response.body()) {
+            consumer.accept(body);
+            return true;
+        } catch (IOException e) {
+            LOG.warnv("Could not read {0} {1} from the public npm registry: {2}", namespace, packageName,
+                    e.getMessage());
+            return false;
         }
     }
+
 
     /**
      * The real registry's single-package resource path: a bare, percent-encoded package name, or

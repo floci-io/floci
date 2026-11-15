@@ -95,6 +95,8 @@ public class PipesTargetInvoker {
         }
 
         JsonNode tp = pipe.getTargetParameters();
+        // A target's dynamic parameters read the event as it arrived, never what the template renders.
+        String event = payload;
         if (tp != null && tp.has("InputTemplate")) {
             payload = applyInputTemplate(tp.get("InputTemplate").asText(), payload);
         }
@@ -106,7 +108,7 @@ public class PipesTargetInvoker {
         } else if (targetArn.contains(":sns:")) {
             invokeSns(targetArn, payload, region);
         } else if (targetArn.contains(":events:")) {
-            invokeEventBridge(targetArn, payload, region, tp);
+            invokeEventBridge(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":states:")) {
             invokeStepFunctions(targetArn, payload, region);
         } else {
@@ -144,12 +146,15 @@ public class PipesTargetInvoker {
             if (resp.isEmpty() || "null".equals(resp)) {
                 return null;
             }
-            // AWS also skips the target when the enrichment returns an empty object {} or empty
-            // array []; only a non-empty array such as [{}] invokes the target (with an
-            // empty-payload element). Parse so whitespace variants ({ }, [ ]) are handled too.
+            // AWS also skips the target when the enrichment returns an empty string "", an empty
+            // object {} or an empty array []; only a non-empty array such as [{}] invokes the target
+            // (with an empty-payload element). Parse so whitespace variants ({ }, [ ]) are handled too.
             try {
                 JsonNode node = objectMapper.readTree(resp);
-                if ((node.isObject() || node.isArray()) && node.isEmpty()) {
+                boolean empty = node.isTextual()
+                        ? node.asText().isEmpty()
+                        : node.isContainerNode() && node.isEmpty();
+                if (empty) {
                     return null;
                 }
             } catch (JsonProcessingException e) {
@@ -205,7 +210,7 @@ public class PipesTargetInvoker {
         LOG.debugv("Pipe delivered to SNS: {0}", arn);
     }
 
-    private void invokeEventBridge(String arn, String payload, String region, JsonNode tp) {
+    private void invokeEventBridge(String arn, String payload, String region, JsonNode tp, String event) {
         String busName = AwsArnUtils.resourceIfArnFor(arn, "events")
                 .filter(resource -> resource.startsWith("event-bus/"))
                 .map(resource -> resource.substring("event-bus/".length()))
@@ -216,10 +221,11 @@ public class PipesTargetInvoker {
         if (tp != null) {
             JsonNode ebParams = tp.path("EventBridgeEventBusParameters");
             if (ebParams.has("Source")) {
-                source = ebParams.get("Source").asText();
+                source = resolveDynamicParameter(ebParams.get("Source").asText(), event, "target parameter Source");
             }
             if (ebParams.has("DetailType")) {
-                detailType = ebParams.get("DetailType").asText();
+                detailType = resolveDynamicParameter(ebParams.get("DetailType").asText(), event,
+                        "target parameter DetailType");
             }
         }
         Map<String, Object> entry = Map.of(
@@ -278,7 +284,7 @@ public class PipesTargetInvoker {
                 null, sqls, text(parameters, "StatementName"),
                 parameters.path("WithEvent").isBoolean() ? parameters.get("WithEvent").asBoolean() : null);
         redshiftSubmitter.submit(targetArn, statement, pipe.getRoleArn(), account, targetRegion,
-                value -> resolveRedshiftParameter(value, payload),
+                value -> resolveDynamicParameter(value, payload, "Redshift target path"),
                 permissions -> redshiftTargetAuthorizer.refusal(
                         PIPES_PRINCIPAL, pipe.getRoleArn(), account, pipe.getArn(), permissions));
         LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
@@ -289,14 +295,24 @@ public class PipesTargetInvoker {
         return node.isTextual() ? node.asText() : null;
     }
 
-    private String resolveRedshiftParameter(String value, String payload) {
+    /**
+     * A dynamic target parameter's value: as written, or where the whole value is a JSON path, what
+     * that path names in {@code payload}, a JSON string as its text. A path naming nothing fails the
+     * delivery, named as {@code what}, so nothing reaches the target under a literal or empty value.
+     */
+    private String resolveDynamicParameter(String value, String payload, String what) {
         if (value == null || !DYNAMIC_PARAMETER_PATH.matcher(value).matches()) {
             return value;
         }
         String extracted = extractJsonPath(value, payload);
         if (extracted == null) {
-            throw new AwsException("ValidationException", "Cannot resolve Redshift target path: " + value, 400);
+            throw new AwsException("ValidationException", "Cannot resolve " + what + ": " + value, 400);
         }
+        return unquoted(extracted);
+    }
+
+    /** The text of a JSON string as {@link #extractJsonPath} gives it; any other JSON as it is. */
+    private String unquoted(String extracted) {
         try {
             JsonNode node = objectMapper.readTree(extracted);
             return node.isTextual() ? node.asText() : node.toString();
@@ -307,6 +323,10 @@ public class PipesTargetInvoker {
 
     String applyInputTemplate(String template, String payload) {
         Matcher m = TEMPLATE_PLACEHOLDER.matcher(template);
+        // A template that is one placeholder substitutes a string verbatim: <$.Detail> naming a serialized
+        // object puts that object on the bus, where added quotes would be refused as MalformedDetail.
+        boolean wholeTemplate = m.matches();
+        m.reset();
         String ingestionTime = objectMapper.valueToTree(Instant.now().toString()).toString();
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
@@ -317,6 +337,8 @@ public class PipesTargetInvoker {
                     : extractJsonPath(jsonPath, payload);
             if (value == null) {
                 value = quoted ? "" : objectMapper.valueToTree("").toString();
+            } else if (wholeTemplate) {
+                value = unquoted(value);
             } else if (quoted && value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
                 // A JSON string placeholder already has quotes from extractJsonPath. The
                 // surrounding template quotes must remain the only pair of quotes.
@@ -379,14 +401,13 @@ public class PipesTargetInvoker {
             JsonNode current = objectMapper.readTree(json);
             String previousSegment = null;
             JsonNode container = null;
-            JsonNode outer = null;
             boolean sourceFieldDecoded = false;
             for (String segment : segments) {
                 // AWS Pipes parses an encoded source body when traversing into it.
                 if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                     try {
                         JsonNode decoded = objectMapper.readTree(
-                                decodedSourceText(previousSegment, current.asText(), container, outer));
+                                decodedSourceText(previousSegment, current.asText(), container));
                         if (decoded != null && (decoded.isObject() || decoded.isArray())) {
                             current = decoded;
                         }
@@ -401,7 +422,6 @@ public class PipesTargetInvoker {
                 if (next.isMissingNode() || next.isNull()) {
                     return null;
                 }
-                outer = container;
                 container = current;
                 current = next;
                 previousSegment = segment;
@@ -409,7 +429,7 @@ public class PipesTargetInvoker {
             if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                 // SQS bodies commonly contain a JSON document as a string. Pipes input
                 // transformation resolves that document when the body itself is selected.
-                String text = decodedSourceText(previousSegment, current.asText(), container, outer);
+                String text = decodedSourceText(previousSegment, current.asText(), container);
                 try {
                     JsonNode decoded = objectMapper.readTree(text);
                     if (decoded != null && (decoded.isObject() || decoded.isArray())) {
@@ -439,10 +459,9 @@ public class PipesTargetInvoker {
      * is not base64.
      *
      * @param container the object that holds {@code field}
-     * @param outer the object that holds {@code container}
      */
-    private static String decodedSourceText(String field, String text, JsonNode container, JsonNode outer) {
-        if (!isBase64SourceField(field, container, outer)) {
+    public static String decodedSourceText(String field, String text, JsonNode container) {
+        if (!isBase64SourceField(field, container)) {
             return text;
         }
         try {
@@ -453,10 +472,9 @@ public class PipesTargetInvoker {
         }
     }
 
-    private static boolean isBase64SourceField(String field, JsonNode container, JsonNode outer) {
+    private static boolean isBase64SourceField(String field, JsonNode container) {
         if ("data".equals(field)) {
-            return outer != null && "aws:kinesis".equals(outer.path("eventSource").asText())
-                    && outer.path("kinesis") == container;
+            return container != null && "aws:kinesis".equals(container.path("eventSource").asText());
         }
         if ("key".equals(field) || "value".equals(field)) {
             return container != null && isKafkaEventSource(container.path("eventSource").asText());

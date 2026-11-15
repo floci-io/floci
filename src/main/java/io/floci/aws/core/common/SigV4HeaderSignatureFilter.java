@@ -214,18 +214,13 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         String token = ctx.getHeaderString("X-Amz-Security-Token");
         ServiceDescriptor queryService = null;
         if (presigned) {
-            try {
+            if (token == null) {
+                token = RequestBodyReader.formField(ctx, "X-Amz-Security-Token");
                 if (token == null) {
-                    token = RequestBodyReader.formField(ctx, "X-Amz-Security-Token");
-                    if (token == null) {
-                        token = query.getFirst("X-Amz-Security-Token");
-                    }
+                    token = query.getFirst("X-Amz-Security-Token");
                 }
-                queryService = queryService(ctx, resource);
-            } catch (IllegalArgumentException error) {
-                incompleteSignature(ctx, resource, "Cannot read presigned request form parameters.");
-                return;
             }
+            queryService = queryService(ctx, resource);
         }
         Optional<String> secretKey = resolveSecretKey(scope.accessKeyId(), token);
         if (secretKey.isEmpty()) {

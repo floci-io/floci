@@ -42,12 +42,28 @@ public interface BootstrapRunner {
      * (null for none), each action's in a folder of its own named by its number.
      */
     record Bootstrap(String clusterId, String accountId, String region, String releaseLabel, String imageTemplate,
-                     String dockerNetwork, String role, List<Action> actions, String logFolder) {
+                     String dockerNetwork, String role, List<Action> actions, String logFolder,
+                     String metadataNetwork, String metadataAddress) {
+
+        Bootstrap(String clusterId, String accountId, String region, String releaseLabel, String imageTemplate,
+                  String dockerNetwork, String role, List<Action> actions, String logFolder) {
+            this(clusterId, accountId, region, releaseLabel, imageTemplate, dockerNetwork, role, actions, logFolder,
+                    null, null);
+        }
 
         /** This bootstrap, run in {@code image}. */
         Bootstrap inImage(String image) {
             return new Bootstrap(clusterId, accountId, region, releaseLabel, image, dockerNetwork, role, actions,
-                    logFolder);
+                    logFolder, metadataNetwork, metadataAddress);
+        }
+
+        /**
+         * This bootstrap, its container on {@code network}, its cluster's own, at {@code address}, a link-local one,
+         * where its cluster's instance metadata relay answers it as the primary node, and on its steps' network too.
+         */
+        Bootstrap onMetadata(String network, String address) {
+            return new Bootstrap(clusterId, accountId, region, releaseLabel, imageTemplate, dockerNetwork, role,
+                    actions, logFolder, network, address);
         }
     }
 

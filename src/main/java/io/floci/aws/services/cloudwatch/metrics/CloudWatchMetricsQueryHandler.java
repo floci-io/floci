@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudwatch.metrics;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
@@ -66,6 +67,8 @@ public class CloudWatchMetricsQueryHandler {
             case "PutCompositeAlarm" -> handlePutCompositeAlarm(params, region);
             case "DescribeAlarms" -> handleDescribeAlarms(params, region);
             case "DeleteAlarms" -> handleDeleteAlarms(params, region);
+            case "DisableAlarmActions" -> handleAlarmActions(params, region, false);
+            case "EnableAlarmActions" -> handleAlarmActions(params, region, true);
             case "SetAlarmState" -> handleSetAlarmState(params, region);
             case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(params, region);
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
@@ -333,6 +336,18 @@ public class CloudWatchMetricsQueryHandler {
         }
         metricsService.deleteAlarms(alarmNames, region);
         return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAlarms", null)).build();
+    }
+
+    private Response handleAlarmActions(MultivaluedMap<String, String> params, String region, boolean enabled) {
+        List<AwsQueryLists.IndexedMember> members = AwsQueryLists.members(params, "AlarmNames", null);
+        List<String> names = new ArrayList<>();
+        for (AwsQueryLists.IndexedMember member : members) {
+            names.add(params.getFirst(member.prefix()));
+        }
+        boolean supplied = params.containsKey("AlarmNames") || !members.isEmpty();
+        metricsService.setAlarmActionsEnabled(supplied ? names : null, enabled, region);
+        String action = enabled ? "EnableAlarmActions" : "DisableAlarmActions";
+        return Response.ok(AwsQueryResponse.envelopeNoResult(action, null)).build();
     }
 
     private Response handleSetAlarmState(MultivaluedMap<String, String> params, String region) {

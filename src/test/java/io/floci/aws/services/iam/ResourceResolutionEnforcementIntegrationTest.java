@@ -5,6 +5,7 @@ import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.EnforcementFixtures.UserCredentials;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
+import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
@@ -25,6 +27,10 @@ import java.util.List;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.isEmptyOrNullString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -230,6 +236,191 @@ class ResourceResolutionEnforcementIntegrationTest {
                 assertEquals(List.of(tag("Owner", "vpc")), admin.describeVpcs(r -> r.vpcIds(vpc)).vpcs().getFirst().tags());
             }
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ec2:ResourceTag", "aws:ResourceTag", "exact-arn"})
+    void instanceLifecyclePermissionsAllowOnlyTheDevelopmentInstance(String scope) {
+        try (Ec2Client admin = ec2Admin()) {
+            String development = instance(admin);
+            String production = instance(admin);
+            String untagged = instance(admin);
+            admin.createTags(r -> r.resources(development).tags(tag("Env", "development")));
+            admin.createTags(r -> r.resources(production).tags(tag("Env", "production")));
+            String resource = "exact-arn".equals(scope) ? instanceArn(development) : "*";
+            String condition = "exact-arn".equals(scope) ? "" :
+                    ",\"Condition\":{\"StringEquals\":{\"" + scope + "/Env\":\"development\"}}";
+            UserCredentials keys = lifecycleGroupUser(policy(lifecycleAllow(resource, condition)));
+            try (Ec2Client caller = ec2Caller(keys)) {
+                caller.stopInstances(r -> r.instanceIds(development));
+                assertState(admin, development, "stopped");
+                caller.startInstances(r -> r.instanceIds(development));
+                assertState(admin, development, "running");
+                for (String blocked : List.of(production, untagged)) {
+                    for (List<String> targets : List.of(List.of(blocked), List.of(development, blocked),
+                            List.of(blocked, development))) {
+                        denied(() -> caller.stopInstances(r -> r.instanceIds(targets)));
+                        assertState(admin, development, "running");
+                        assertState(admin, blocked, "running");
+                        admin.stopInstances(r -> r.instanceIds(development, blocked));
+                        denied(() -> caller.startInstances(r -> r.instanceIds(targets)));
+                        assertState(admin, development, "stopped");
+                        assertState(admin, blocked, "stopped");
+                        admin.startInstances(r -> r.instanceIds(development, blocked));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    void instanceLifecycleBatchesPairEachArnWithItsOwnTags() {
+        try (Ec2Client admin = ec2Admin()) {
+            String first = instance(admin);
+            String second = instance(admin);
+            admin.createTags(r -> r.resources(first).tags(tag("Env", "first")));
+            admin.createTags(r -> r.resources(second).tags(tag("Env", "second")));
+            String statements = lifecycleAllow(instanceArn(first),
+                    ",\"Condition\":{\"StringEquals\":{\"ec2:ResourceTag/Env\":\"first\"}}") + ","
+                    + lifecycleAllow(instanceArn(second),
+                    ",\"Condition\":{\"StringEquals\":{\"ec2:ResourceTag/Env\":\"second\"}}");
+            try (Ec2Client caller = ec2Caller(lifecycleGroupUser(policy(statements)))) {
+                caller.stopInstances(r -> r.instanceIds(first, second, first));
+                assertState(admin, first, "stopped");
+                assertState(admin, second, "stopped");
+                caller.startInstances(r -> r.instanceIds(second, first, second));
+                assertState(admin, first, "running");
+                assertState(admin, second, "running");
+                admin.createTags(r -> r.resources(second).tags(tag("Env", "first")));
+                denied(() -> caller.stopInstances(r -> r.instanceIds(first, second)));
+                assertState(admin, first, "running");
+                assertState(admin, second, "running");
+            }
+        }
+    }
+
+    @Test
+    void groupExplicitDenyBlocksInstanceLifecycleBeforeAnyMutation() {
+        try (Ec2Client admin = ec2Admin()) {
+            String first = instance(admin);
+            String second = instance(admin);
+            String statements = lifecycleAllow("*", "") + "," + """
+                    {"Effect":"Deny","Action":["ec2:StartInstances","ec2:StopInstances"],"Resource":"%s"}
+                    """.formatted(instanceArn(second));
+            try (Ec2Client caller = ec2Caller(lifecycleGroupUser(policy(statements)))) {
+                denied(() -> caller.stopInstances(r -> r.instanceIds(first, second)));
+                assertState(admin, first, "running");
+                assertState(admin, second, "running");
+                admin.stopInstances(r -> r.instanceIds(first, second));
+                denied(() -> caller.startInstances(r -> r.instanceIds(second, first)));
+                assertState(admin, first, "stopped");
+                assertState(admin, second, "stopped");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"RebootInstances", "TerminateInstances"})
+    void generatedLifecycleActionsHonorInstanceTagsAndExplicitDeny(String operation) {
+        try (Ec2Client admin = ec2Admin()) {
+            String development = instance(admin);
+            String production = instance(admin);
+            admin.createTags(r -> r.resources(development).tags(tag("Env", "development")));
+            admin.createTags(r -> r.resources(production).tags(tag("Env", "development")));
+            String statements = """
+                    {"Effect":"Allow","Action":"ec2:%s","Resource":"*",
+                     "Condition":{"StringEquals":{"ec2:ResourceTag/Env":"development"}}},
+                    {"Effect":"Deny","Action":"ec2:%s","Resource":"%s"}
+                    """.formatted(operation, operation, instanceArn(production));
+            try (Ec2Client caller = ec2Caller(lifecycleGroupUser(policy(statements)))) {
+                for (List<String> targets : List.of(List.of(development, production),
+                        List.of(production, development))) {
+                    denied(() -> invokeLifecycle(caller, operation, targets));
+                    assertState(admin, development, "running");
+                    assertState(admin, production, "running");
+                }
+                admin.deleteTags(r -> r.resources(development).tags(tag("Env", null)));
+                denied(() -> invokeLifecycle(caller, operation, List.of(development)));
+                assertState(admin, development, "running");
+                admin.createTags(r -> r.resources(development).tags(tag("Env", "development")));
+                invokeLifecycle(caller, operation, List.of(development));
+                assertState(admin, development, "TerminateInstances".equals(operation) ? "terminated" : "running");
+                assertState(admin, production, "running");
+            }
+        }
+    }
+
+    private static void invokeLifecycle(Ec2Client client, String operation, List<String> ids) {
+        if ("TerminateInstances".equals(operation)) {
+            client.terminateInstances(r -> r.instanceIds(ids));
+        } else {
+            client.rebootInstances(r -> r.instanceIds(ids));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"StartInstances", "StopInstances"})
+    void malformedLifecycleFormsReturnClientErrorsBeforeAnyMutation(String operation) {
+        try (Ec2Client admin = ec2Admin()) {
+            String id = instance(admin);
+            boolean starting = "StartInstances".equals(operation);
+            if (starting) {
+                admin.stopInstances(r -> r.instanceIds(id));
+            }
+            String originalState = starting ? "stopped" : "running";
+            UserCredentials keys = lifecycleGroupUser(policy(lifecycleAllow("*", "")));
+            AwsRequestSigner signer = AwsRequestSigner.signedAs(keys.accessKeyId(), keys.secretAccessKey(), "ec2");
+            String prefix = "Action=" + operation + "&Version=2016-11-15&";
+            for (String malformed : List.of("InstanceId.1=%ZZ", "InstanceId.1=%", "InstanceId.1=%A",
+                    "InstanceId.1=" + id + "&InstanceId.2=%ZZ", "InstanceId.1=" + id + "&%ZZ=value")) {
+                given().filter(signer).contentType("application/x-www-form-urlencoded")
+                        .body(prefix + malformed)
+                        .post("/").then().statusCode(404).contentType("application/xml")
+                        .body("Response.Errors.Error.Code", equalTo("MalformedQueryString"))
+                        .body("Response.RequestID", not(isEmptyOrNullString()));
+                assertState(admin, id, originalState);
+            }
+            given().filter(signer).contentType("application/x-www-form-urlencoded")
+                    .body(prefix + "InstanceId.1=" + id + "&Extra=%25ZZ")
+                    .post("/").then().statusCode(200);
+            assertState(admin, id, starting ? "running" : "stopped");
+        }
+    }
+
+    @Test
+    void malformedAssumeRoleEncodingReturnsAQueryClientError() {
+        UserCredentials keys = user("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                 "Action":"sts:AssumeRole","Resource":"*"}]}
+                """);
+        given().filter(AwsRequestSigner.signedAs(keys.accessKeyId(), keys.secretAccessKey(), "sts"))
+                .contentType("application/x-www-form-urlencoded")
+                .body("Action=AssumeRole&Version=2011-06-15&RoleArn=arn%3Aaws%ZZ&RoleSessionName=repro")
+                .post("/").then().statusCode(404).contentType("application/xml")
+                .body("ErrorResponse.Error.Code", equalTo("MalformedQueryString"));
+    }
+
+    private UserCredentials lifecycleGroupUser(String policy) {
+        String name = "lifecycle-" + suffix();
+        UserCredentials keys = EnforcementFixtures.createUser(cleanup, baseUri.getPort(), auth(ACCOUNT, "iam"), name);
+        try (IamClient admin = AwsTestClients.create(IamClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            admin.createGroup(r -> r.groupName(name));
+            cleanup.register(() -> EnforcementFixtures.removeGroup(baseUri.getPort(), auth(ACCOUNT, "iam"), name));
+            admin.putGroupPolicy(r -> r.groupName(name).policyName("lifecycle").policyDocument(policy));
+            admin.addUserToGroup(r -> r.groupName(name).userName(name));
+        }
+        return keys;
+    }
+
+    private static String lifecycleAllow(String resource, String condition) {
+        return """
+                {"Effect":"Allow","Action":["ec2:StartInstances","ec2:StopInstances"],"Resource":"%s"%s}
+                """.formatted(resource, condition);
+    }
+
+    private static void assertState(Ec2Client admin, String id, String expected) {
+        assertEquals(expected, admin.describeInstances(r -> r.instanceIds(id)).reservations().getFirst()
+                .instances().getFirst().state().nameAsString());
     }
 
     private UserCredentials user(String policy) {

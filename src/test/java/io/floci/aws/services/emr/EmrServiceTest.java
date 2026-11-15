@@ -1,12 +1,18 @@
 package io.floci.aws.services.emr;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -18,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
 import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
 import static io.floci.aws.services.emr.EmrServiceFixture.step;
+import static io.floci.aws.services.emr.EmrServiceFixture.stepStates;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -34,6 +41,34 @@ class EmrServiceTest {
 
     private static final String SHUT_DOWN =
             "A job flow that is shutting down, terminated, or finished may not be modified.";
+    private static final String MANAGED_SCALING =
+            "{\"ComputeLimits\":{\"UnitType\":\"Instances\",\"MinimumCapacityUnits\":1,\"MaximumCapacityUnits\":5}}";
+    private static final String AUTO_TERMINATION = "{\"IdleTimeout\":3600}";
+    private static final String AUTO_SCALING = "{\"Constraints\":{\"MinCapacity\":1,\"MaxCapacity\":4},"
+            + "\"Rules\":[{\"Name\":\"scale-out\",\"Action\":{},\"Trigger\":{}}]}";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * A tag call's {@code ResourceId} is the cluster the tag handlers find by it: one in the request's Region, or one
+     * stored with no Region, which they find in any.
+     */
+    @Test
+    void aTagCallsResourceIdIsTheClusterTheTagHandlersFind() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 0);
+        EmrService service = fixture.service;
+        EmrCluster cluster = service.runJobFlow(cluster("tagged", true), REGION);
+
+        assertEquals(List.of(cluster.getClusterArn()), service.through("ResourceId", cluster.getId(), REGION));
+        assertEquals(List.of(), service.through("ResourceId", cluster.getId(), "eu-west-1"));
+        assertEquals(List.of(), service.through("ResourceId", "j-UNKNOWN", REGION));
+
+        AccountAwareStorageBackend<EmrCluster> clusters = fixture.storage.create("emr", "emr-clusters.json",
+                new TypeReference<Map<String, EmrCluster>>() {});
+        EmrCluster regionless = clusters.get(cluster.getId()).orElseThrow();
+        regionless.setRegion(null);
+        clusters.put(cluster.getId(), regionless);
+        assertEquals(List.of(cluster.getClusterArn()), service.through("ResourceId", cluster.getId(), "eu-west-1"));
+    }
 
     @Test
     void aClusterIsStartingThenBootstrappingUntilItIsReady() {
@@ -89,10 +124,10 @@ class EmrServiceTest {
         EmrStep b = cluster.getSteps().get(1);
 
         assertEquals("RUNNING", service.describeCluster(id).getState());
-        assertEquals(List.of("PENDING", "RUNNING"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("PENDING", "RUNNING"), stepStates(service.listSteps(id, null, null)));
         assertEquals(List.of(b.getId()), ids(service.listSteps(id, List.of("PENDING"), null)));
         fixture.clock.advance(Duration.ofSeconds(60));
-        assertEquals(List.of("RUNNING", "COMPLETED"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("RUNNING", "COMPLETED"), stepStates(service.listSteps(id, null, null)));
         assertEquals(a.getStartDateTime().plusSeconds(60), a.getEndDateTime());
         assertEquals(a.getEndDateTime(), b.getStartDateTime());
         fixture.clock.advance(Duration.ofSeconds(60));
@@ -112,15 +147,15 @@ class EmrServiceTest {
         parallel.setStepConcurrencyLevel(2);
         String id = service.runJobFlow(parallel, REGION).getId();
 
-        assertEquals(List.of("PENDING", "RUNNING", "RUNNING"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("PENDING", "RUNNING", "RUNNING"), stepStates(service.listSteps(id, null, null)));
         fixture.clock.advance(Duration.ofSeconds(10));
         service.modifyCluster(id, 3);
-        assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), stepStates(service.listSteps(id, null, null)));
         // Lowering the level lets the steps already running complete.
         service.modifyCluster(id, 1);
         fixture.clock.advance(Duration.ofSeconds(60));
 
-        assertEquals(List.of("COMPLETED", "COMPLETED", "COMPLETED"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("COMPLETED", "COMPLETED", "COMPLETED"), stepStates(service.listSteps(id, null, null)));
         assertEquals("WAITING", service.describeCluster(id).getState());
     }
 
@@ -192,7 +227,7 @@ class EmrServiceTest {
         List<EmrService.CancelStepInfo> infos = service.cancelSteps(cluster.getId(), List.of(b.getId()));
 
         assertEquals(List.of(new EmrService.CancelStepInfo(b.getId(), "SUBMITTED", null)), infos);
-        assertEquals(List.of("CANCELLED", "RUNNING"), states(service.listSteps(cluster.getId(), null, null)));
+        assertEquals(List.of("CANCELLED", "RUNNING"), stepStates(service.listSteps(cluster.getId(), null, null)));
         assertEquals("CANCELLED b", fixture.states().get(fixture.states().size() - 1));
     }
 
@@ -207,7 +242,7 @@ class EmrServiceTest {
         List<EmrService.CancelStepInfo> infos = service.cancelSteps(cluster.getId(), List.of(a.getId()));
 
         assertEquals(List.of(new EmrService.CancelStepInfo(a.getId(), "SUBMITTED", null)), infos);
-        assertEquals(List.of("RUNNING", "CANCELLED"), states(service.listSteps(cluster.getId(), null, null)));
+        assertEquals(List.of("RUNNING", "CANCELLED"), stepStates(service.listSteps(cluster.getId(), null, null)));
         assertEquals(a.getEndDateTime(), cluster.getSteps().get(1).getStartDateTime());
         assertEquals(List.of("CANCELLED a", "RUNNING b"),
                 fixture.states().subList(fixture.states().size() - 2, fixture.states().size()));
@@ -250,7 +285,7 @@ class EmrServiceTest {
         assertEquals("TERMINATING", terminating.getState());
         assertEquals("USER_REQUEST", terminating.getStateChangeReasonCode());
         assertNull(terminating.getEndDateTime());
-        assertEquals(List.of("CANCELLED", "CANCELLED"), states(service.listSteps(id, null, null)));
+        assertEquals(List.of("CANCELLED", "CANCELLED"), stepStates(service.listSteps(id, null, null)));
         assertEquals("RUNNING", service.listInstanceGroups(id).get(0).getState());
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.addJobFlowSteps(id, List.of(step("late"))));
@@ -338,6 +373,91 @@ class EmrServiceTest {
     }
 
     @Test
+    void aClusterShuttingDownKeepsItsSettingsAndPolicies() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 30);
+        EmrService service = fixture.service;
+        EmrCluster withGroup = cluster("settings", true);
+        withGroup.getInstanceGroups().add(group("CORE", 2));
+        EmrCluster cluster = service.runJobFlow(withGroup, REGION);
+        String id = cluster.getId();
+        String groupId = cluster.getInstanceGroups().get(0).getId();
+        service.putManagedScalingPolicy(id, json(MANAGED_SCALING));
+        service.putAutoTerminationPolicy(id, json(AUTO_TERMINATION));
+        service.putAutoScalingPolicy(id, groupId, json(AUTO_SCALING));
+        service.terminateJobFlows(List.of(id));
+        EmrCluster before = service.describeCluster(id);
+        List<Executable> changes = List.of(
+                () -> service.setTerminationProtection(List.of(id), true),
+                () -> service.setVisibleToAllUsers(List.of(id), !before.isVisibleToAllUsers()),
+                () -> service.setKeepJobFlowAliveWhenNoSteps(List.of(id), false),
+                () -> service.setUnhealthyNodeReplacement(List.of(id), true),
+                () -> service.putManagedScalingPolicy(id, json(MANAGED_SCALING)),
+                () -> service.removeManagedScalingPolicy(id),
+                () -> service.putAutoTerminationPolicy(id, json(AUTO_TERMINATION)),
+                () -> service.removeAutoTerminationPolicy(id),
+                () -> service.putAutoScalingPolicy(id, groupId, json(AUTO_SCALING)),
+                () -> service.removeAutoScalingPolicy(id, groupId));
+
+        AwsException modifying = assertThrows(AwsException.class, () -> service.modifyCluster(id, 4));
+        List<AwsException> refusals = changes.stream()
+                .map(change -> assertThrows(AwsException.class, change))
+                .toList();
+
+        assertEquals("TERMINATING", before.getState());
+        assertShutDown(modifying);
+        for (AwsException refused : refusals) {
+            assertEquals("ValidationException", refused.getErrorCode());
+            assertEquals(SHUT_DOWN, refused.getMessage());
+        }
+        EmrCluster after = service.describeCluster(id);
+        assertEquals(before.getStepConcurrencyLevel(), after.getStepConcurrencyLevel());
+        assertEquals(before.isTerminationProtected(), after.isTerminationProtected());
+        assertEquals(before.isVisibleToAllUsers(), after.isVisibleToAllUsers());
+        assertEquals(before.isKeepJobFlowAliveWhenNoSteps(), after.isKeepJobFlowAliveWhenNoSteps());
+        assertEquals(before.isAutoTerminate(), after.isAutoTerminate());
+        assertEquals(before.isUnhealthyNodeReplacement(), after.isUnhealthyNodeReplacement());
+        assertEquals(json(MANAGED_SCALING).toString(), after.getManagedScalingPolicy());
+        assertEquals(json(AUTO_TERMINATION).toString(), after.getAutoTerminationPolicy());
+        assertEquals(json(AUTO_SCALING).toString(), after.getInstanceGroups().get(0).getAutoScalingPolicy());
+    }
+
+    @Test
+    void aClusterShuttingDownHasNoManagedScalingPolicyToRead() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 30);
+        EmrService service = fixture.service;
+        String id = service.runJobFlow(cluster("scaled", true), REGION).getId();
+        service.putManagedScalingPolicy(id, json(MANAGED_SCALING));
+        service.terminateJobFlows(List.of(id));
+
+        AwsException reading = assertThrows(AwsException.class, () -> service.getManagedScalingPolicy(id));
+
+        assertEquals("TERMINATING", service.describeCluster(id).getState());
+        assertEquals("ValidationException", reading.getErrorCode());
+        assertEquals(SHUT_DOWN, reading.getMessage());
+    }
+
+    @Test
+    void tagsChangeUntilTheClusterHasEnded() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 30);
+        EmrService service = fixture.service;
+        String id = service.runJobFlow(cluster("tagged", true), REGION).getId();
+        service.terminateJobFlows(List.of(id));
+        service.addTags(id, Map.of("team", "data", "stage", "test"));
+        service.removeTags(id, List.of("stage"));
+        fixture.clock.advance(Duration.ofSeconds(30));
+
+        AwsException adding = assertThrows(AwsException.class, () -> service.addTags(id, Map.of("owner", "me")));
+        AwsException removing = assertThrows(AwsException.class, () -> service.removeTags(id, List.of("team")));
+
+        assertEquals("TERMINATED", service.describeCluster(id).getState());
+        for (AwsException refused : List.of(adding, removing)) {
+            assertEquals("InvalidRequestException", refused.getErrorCode());
+            assertEquals("Tags cannot be modified on terminated clusters.", refused.getMessage());
+        }
+        assertEquals(Map.of("team", "data"), service.describeCluster(id).getTags());
+    }
+
+    @Test
     void listingClustersByStateFindsThemAsTheyStandNow() {
         EmrServiceFixture fixture = new EmrServiceFixture(10, 0, 0);
         EmrService service = fixture.service;
@@ -368,23 +488,26 @@ class EmrServiceTest {
         EmrService service = fixture.service;
         EmrCluster read = cluster("read", true, step("only"));
         read.getInstanceGroups().add(group("CORE", 2));
-        read.getInstanceFleets().add(fleet("TASK", 2));
         EmrCluster created = service.runJobFlow(read, REGION);
         String id = created.getId();
         String stepId = created.getSteps().get(0).getId();
+        // A cluster has instance groups or fleets, never both, so the fleet is another cluster's.
+        EmrCluster fleets = cluster("fleets", true, step("only"));
+        fleets.getInstanceFleets().add(fleet("TASK", 2));
+        String fleetsId = service.runJobFlow(fleets, REGION).getId();
 
         List<EmrCluster> clusters = List.of(service.describeCluster(id),
                 service.listClusters(REGION, null, null, null).get(0), service.getClusterForInstances(id));
         List<EmrStep> steps = List.of(service.describeStep(id, stepId), service.listSteps(id, null, null).get(0));
         EmrInstanceGroup group = service.listInstanceGroups(id).get(0);
-        EmrInstanceFleet fleet = service.listInstanceFleets(id).get(0);
+        EmrInstanceFleet fleet = service.listInstanceFleets(fleetsId).get(0);
         fixture.pass(Duration.ofSeconds(60));
-        service.terminateJobFlows(List.of(id));
+        service.terminateJobFlows(List.of(id, fleetsId));
         fixture.pass(Duration.ofSeconds(30));
 
         assertEquals("TERMINATED", service.describeCluster(id).getState());
         assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), clusters.stream().map(EmrCluster::getState).toList());
-        assertEquals(List.of("RUNNING", "RUNNING"), states(steps));
+        assertEquals(List.of("RUNNING", "RUNNING"), stepStates(steps));
         assertNull(steps.get(0).getEndDateTime());
         assertEquals(2, group.getRunningInstanceCount());
         assertEquals(2, fleet.getProvisionedOnDemandCapacity());
@@ -437,6 +560,14 @@ class EmrServiceTest {
         assertEquals(Map.of("ErrorCode", "MODIFY_INSTANCE_FLEET_OF_RUNNING_JOBFLOW_ONLY"), refused.getExtendedData());
     }
 
+    private static JsonNode json(String text) {
+        try {
+            return MAPPER.readTree(text);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException(text, e);
+        }
+    }
+
     private static EmrInstanceGroup group(String type, int count) {
         EmrInstanceGroup group = new EmrInstanceGroup();
         group.setInstanceGroupType(type);
@@ -453,9 +584,6 @@ class EmrServiceTest {
     }
 
     /** ListSteps' states, newest step first, as it lists them. */
-    private static List<String> states(List<EmrStep> steps) {
-        return steps.stream().map(EmrStep::getState).toList();
-    }
 
     private static List<String> ids(List<EmrStep> steps) {
         return steps.stream().map(EmrStep::getId).toList();

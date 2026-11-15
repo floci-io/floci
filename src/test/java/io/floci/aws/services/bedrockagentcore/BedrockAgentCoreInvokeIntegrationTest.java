@@ -12,7 +12,7 @@ import static org.hamcrest.Matchers.equalTo;
 class BedrockAgentCoreInvokeIntegrationTest {
 
     private static final String ARN =
-            "arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/abcdef12-3456-7890-abcd-ef1234567890:1";
+            "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test-AbCdEfGhIj";
     private static final String SESSION_ID = "session-0000000000000000000000000000abc";
     private static final String SESSION_HEADER = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id";
 

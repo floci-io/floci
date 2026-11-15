@@ -1,5 +1,6 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.core.common.ResteasyRequests;
 import jakarta.ws.rs.core.UriInfo;
 
 /**
@@ -25,7 +26,7 @@ final class S3RequestParser {
      * {@code "tagging"} with naive {@code String.contains()}).
      */
     static boolean hasQueryParam(UriInfo uriInfo, String param) {
-        if (uriInfo.getQueryParameters().containsKey(param)) return true;
+        if (ResteasyRequests.queryParameters(uriInfo).containsKey(param)) return true;
         String query = uriInfo.getRequestUri().getQuery();
         return hasQueryParamInString(query, param);
     }

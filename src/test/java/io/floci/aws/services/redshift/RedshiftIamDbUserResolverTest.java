@@ -74,4 +74,12 @@ class RedshiftIamDbUserResolverTest {
 
         assertEquals("IAMR:floci", resolver.resolveDbUser(null));
     }
+
+    @Test
+    void resolveDbUserForAccessKeyMapsArnDirectly() {
+        when(iamService.resolveCallerArn("ASIA999"))
+                .thenReturn(Optional.of("arn:aws:sts::000000000000:assumed-role/AnalyticsRole/s1"));
+
+        assertEquals("IAMR:AnalyticsRole", resolver.resolveDbUserForAccessKey("ASIA999"));
+    }
 }

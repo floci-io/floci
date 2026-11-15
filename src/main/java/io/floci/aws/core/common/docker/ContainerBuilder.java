@@ -10,6 +10,7 @@ import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Volume;
 import com.github.dockerjava.api.model.VolumesFrom;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.config.NetworkExposureGuard;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,8 +19,11 @@ import jakarta.inject.Inject;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Fluent builder for constructing {@link ContainerSpec} instances.
@@ -40,6 +44,9 @@ import java.util.Optional;
 public class ContainerBuilder {
 
     private static final String HOST_DOCKER_INTERNAL = "host.docker.internal";
+
+    /** The registry host an image names before its first {@code /}, a name or a bracketed IPv6 address, and a port. */
+    private static final Pattern REGISTRY_HOST = Pattern.compile("(\\[[^\\]/]+\\]|[^/:\\[]+)(?::[0-9]+)?/");
 
     private final EmulatorConfig config;
     private final DockerHostResolver dockerHostResolver;
@@ -101,18 +108,39 @@ public class ContainerBuilder {
                         : Optional.empty());
     }
 
+    /**
+     * The reference an image is launched under: {@code floci.docker.image-registry-base} in front of it, unless it is
+     * already under that base, is an image id, or is in a registry on the Docker host's loopback (Floci's own ECR
+     * among them), which no mirror holds.
+     */
     public String resolveImage(String image) {
         return resolveImage(image, configuredImageRegistryBase(config));
     }
 
     static String resolveImage(String image, Optional<String> imageRegistryBase) {
-        if (image == null || image.isBlank() || ImageCacheService.isImageId(image)) {
+        if (image == null || image.isBlank() || ImageCacheService.isImageId(image) || inLoopbackRegistry(image)) {
             return image;
         }
         return normalizeImageRegistryBase(imageRegistryBase)
                 .filter(base -> !image.startsWith(base + "/"))
                 .map(base -> base + "/" + image)
                 .orElse(image);
+    }
+
+    /**
+     * Whether an image is in a registry on the Docker host's loopback: {@code localhost}, a {@code .localhost} name,
+     * Floci's {@code localhost.floci.io} alias or a loopback address in any spelling, with or without a port. Floci's
+     * ECR hands its images out, and rewrites AWS-shaped ECR URIs to, {@code localhost:<port>/<account>/<region>/<repo>}
+     * or {@code <account>.dkr.ecr.<region>.localhost[.floci.io]:<port>/<repo>}.
+     */
+    private static boolean inLoopbackRegistry(String image) {
+        Matcher registry = REGISTRY_HOST.matcher(image);
+        if (!registry.lookingAt()) {
+            return false;
+        }
+        String host = registry.group(1).toLowerCase(Locale.ROOT);
+        return host.endsWith(".localhost") || host.equals("localhost.floci.io") || host.endsWith(".localhost.floci.io")
+                || NetworkExposureGuard.isLoopback(host);
     }
 
     private static Optional<String> configuredImageRegistryBase(EmulatorConfig config) {
@@ -201,6 +229,8 @@ public class ContainerBuilder {
         private Long memorySwapBytes;
         private Long memorySwappiness;
         private boolean javaTrustStore;
+        private String dnsName;
+        private final List<String> joinedNetworks = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -402,6 +432,26 @@ public class ContainerBuilder {
         public Builder withLinkLocalIp(String ip) {
             if (ip != null && !ip.isBlank() && !linkLocalIps.contains(ip.trim())) {
                 linkLocalIps.add(ip.trim());
+            }
+            return this;
+        }
+
+        /**
+         * Gives the container {@code name} as its host name and as its alias on the user-defined network it joins at
+         * creation, so the other containers there reach it by that name.
+         */
+        public Builder withDnsName(String name) {
+            this.dnsName = name;
+            return this;
+        }
+
+        /**
+         * Joins the container to {@code network} too, a user-defined network, before it starts, with no alias of its
+         * own there, so it reaches the containers on that network from its first moment.
+         */
+        public Builder withJoinedNetwork(String network) {
+            if (network != null && !network.isBlank() && !joinedNetworks.contains(network)) {
+                joinedNetworks.add(network);
             }
             return this;
         }
@@ -822,7 +872,9 @@ public class ContainerBuilder {
                     init,
                     new LinuxOptions(List.copyOf(capAdd), List.copyOf(capDrop), List.copyOf(devices),
                             shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness),
-                    javaTrustStore
+                    javaTrustStore,
+                    dnsName,
+                    List.copyOf(joinedNetworks)
             );
         }
     }

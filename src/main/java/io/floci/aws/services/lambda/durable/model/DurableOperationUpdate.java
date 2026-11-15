@@ -18,5 +18,6 @@ public record DurableOperationUpdate(String id,
                                      Integer callbackTimeoutSeconds,
                                      Integer callbackHeartbeatTimeoutSeconds,
                                      String chainedFunctionName,
-                                     String chainedTenantId) {
+                                     String chainedTenantId,
+                                     String chainedTraceHeader) {
 }

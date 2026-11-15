@@ -6,6 +6,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
+import software.amazon.awssdk.services.cloudformation.model.DeleteStackRequest;
 import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
 import software.amazon.awssdk.services.cloudformation.model.DescribeStacksResponse;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
@@ -76,6 +77,41 @@ class CfnStackWaitsTest {
 
         assertEquals("DescribeStacks " + NAME + " returned no stacks", failure.getMessage());
         verify(client).describeStacks(REQUEST);
+    }
+
+    @Test
+    void sdkDeleteWaitsForPriorWorkAndFollowsTheRetainedId() {
+        String stackId = "arn:aws:cloudformation:us-east-1:123456789012:stack/waiter-stack/id";
+        DescribeStacksRequest byId = DescribeStacksRequest.builder().stackName(stackId).build();
+        when(client.describeStacks(REQUEST)).thenReturn(
+                response(Stack.builder().stackId(stackId).stackStatus("UPDATE_IN_PROGRESS").build()),
+                response(Stack.builder().stackId(stackId).stackStatus("UPDATE_COMPLETE").build()));
+        when(client.describeStacks(byId)).thenReturn(
+                response(Stack.builder().stackId(stackId).stackStatus("DELETE_IN_PROGRESS").build()),
+                response(Stack.builder().stackId(stackId).stackStatus("DELETE_COMPLETE").build()));
+
+        CfnStackWaits.deleteStack(client, NAME);
+
+        verify(client, times(2)).describeStacks(REQUEST);
+        verify(client).deleteStack(DeleteStackRequest.builder().stackName(stackId).build());
+        verify(client, times(2)).describeStacks(byId);
+    }
+
+    @Test
+    void sdkDeleteReportsTheBackingResourceFailureWithoutPollingAgain() {
+        String stackId = "arn:aws:cloudformation:us-east-1:123456789012:stack/waiter-stack/id";
+        DescribeStacksRequest byId = DescribeStacksRequest.builder().stackName(stackId).build();
+        when(client.describeStacks(REQUEST)).thenReturn(
+                response(Stack.builder().stackId(stackId).stackStatus("CREATE_COMPLETE").build()));
+        when(client.describeStacks(byId)).thenReturn(
+                response(Stack.builder().stackId(stackId).stackStatus("DELETE_FAILED")
+                        .stackStatusReason("Version has an alias").build()));
+
+        AssertionError failure = assertThrows(AssertionError.class, () -> CfnStackWaits.deleteStack(client, NAME));
+
+        assertEquals("Stack " + stackId + " reached DELETE_FAILED instead of DELETE_COMPLETE: Version has an alias",
+                failure.getMessage());
+        verify(client).describeStacks(byId);
     }
 
     private static DescribeStacksResponse response(Stack stack) {

@@ -208,6 +208,30 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void queryStringLongerThanTheAwsLimitIsRejected() {
+        String group = "search/query-length";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        putRaw(service, group, stream, BASE_MS + 1000, "{\"type\":\"B\",\"id\":\"b1\"}");
+        putRaw(service, group, stream, BASE_MS + 2000, "{\"type\":\"C\",\"id\":\"c1\"}");
+
+        // The deepest nesting and the longest dotted field that fit in AWS's 10000-character limit still parse.
+        String nested = "fields id | filter " + "a=1 or (".repeat(1100) + "type = 'B'" + ")".repeat(1100);
+        assertEquals(List.of("b1"), rowsFor(group, nested).stream().map(row -> row.get("id")).toList());
+        assertEquals(List.of(), idsFor(group, "a" + ".a".repeat(4900) + " = 1"));
+        // AWS counts code points: 4990 emoji are 9980 UTF-16 units but leave the query under the limit.
+        assertEquals(List.of(), idsFor(group, "id = '" + "\uD83D\uDE00".repeat(4990) + "'"));
+
+        long startSec = BASE_MS / 1000 - 10;
+        String tooLong = "fields id" + " ".repeat(10_000 - 8);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.startQuery(List.of(group), startSec, startSec + 86400, tooLong, null, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'queryString' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 10000", ex.getMessage());
+    }
+
+    @Test
     void filterValueContainingEqualsIsNotMisparsed() {
         String group = "connectors/equals";
         String stream = "s-1";
@@ -497,9 +521,34 @@ class CloudWatchLogsInsightsQueryTest {
         // '>=', '<=' and '=~' used to lose their comparison character to the equality scan, leaving a
         // dead field ("level >") that silently matched nothing. None of these is supported: each one
         // must now fail the whole query rather than silently drop the filter and return every row.
+        // The same holds for '||', 'and', 'not' and leftover text after a value: each fails rather
+        // than degrading silently into a different comparison.
         for (String expr : List.of("level >= 'INFO'", "level <= 'INFO'", "level =~ /INFO/", ">= 'INFO'",
                 "level > 'INFO'", "level < 'INFO'", "level like /INFO/", "level not like /INFO/",
-                "level in ['INFO']")) {
+                "level in ['INFO']",
+                "level = 'INFO' || level = 'ERROR'",
+                "level = 'INFO' || level = 'ERROR' | sort @timestamp desc",
+                "(level = 'INFO' || level = 'ERROR')",
+                "level = 'INFO' or level = 'ERROR' ||",
+                "level = 'INFO' || sort @timestamp desc",
+                "level = 'INFO' or",
+                "level = 'INFO' and level = 'ERROR'",
+                "not level = 'INFO'",
+                "level = 'INFO' or level like /E/",
+                "level like /a=b/",
+                "level != INFO=oops",
+                "level = INFO=oops",
+                "level = 'INFO\\' or level = 'ERROR'",
+                "`level` = 'INFO'",
+                "1+1 = 2 or level = 'ERROR'",
+                "level. = 'INFO'",
+                "level = 'INFO' x",
+                "(level = 'INFO'",
+                "level = 'INFO",
+                "level = INFO",
+                "level = web-db",
+                "level = 1+1",
+                "level != 1+1 or level = 'ERROR'")) {
             CloudWatchLogsService.QueryState state = startQueryFor(group, "fields @message | filter " + expr);
             assertEquals("Failed", state.status(), "unsupported operator must fail the query: " + expr);
             assertTrue(state.rows().isEmpty(), "a failed query exposes no rows: " + expr);
@@ -551,6 +600,20 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void emptyStageFailsTheQuery() {
+        String group = "search/empty-stage";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "one");
+
+        for (String query : List.of("", "   ", "fields @message |", "fields @message | | sort @timestamp desc")) {
+            CloudWatchLogsService.QueryState state = startQueryFor(group, query);
+            assertEquals("Failed", state.status(), "an empty stage must fail the query: '" + query + "'");
+            assertTrue(state.rows().isEmpty(), "a failed query exposes no rows: '" + query + "'");
+        }
+    }
+
+    @Test
     void supportedFilterOperatorsStillParse() {
         String group = "search/query-equality";
         String stream = "s-1";
@@ -566,6 +629,75 @@ class CloudWatchLogsInsightsQueryTest {
         // A '>=' inside the quoted value is not an operator — the real '=' still wins.
         assertEquals("REQ>=42",
                 rowsFor(group, "fields params.id | filter params.id = 'REQ>=42'").get(0).get("params.id"));
+    }
+
+    @Test
+    void bareNumberComparesAsANumber() {
+        String group = "search/query-number";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        // These events and the expected ids below were observed on AWS with the same queries.
+        putRaw(service, group, stream, BASE_MS + 1000, "{\"n\":2,\"id\":\"a1\"}");
+        putRaw(service, group, stream, BASE_MS + 2000, "{\"n\":3,\"id\":\"b1\"}");
+        putRaw(service, group, stream, BASE_MS + 3000, "{\"n\":2.0,\"id\":\"d1\"}");
+
+        for (String filter : List.of("n = 2", "n = 2.0", "n = 02", "n == 2")) {
+            assertEquals(List.of("a1", "d1"), idsFor(group, filter), filter);
+        }
+        assertEquals(List.of(), idsFor(group, "n = -2"), "n = -2");
+        assertEquals(List.of("b1"), idsFor(group, "n != 2"), "n != 2");
+    }
+
+    @Test
+    void orFilterKeepsRowsMatchingEitherComparison() {
+        String group = "search/query-or";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        // These events and the expected ids below were observed on AWS with the same queries.
+        putRaw(service, group, stream, BASE_MS + 1000, "{\"type\":\"A\",\"level\":\"INFO\",\"id\":\"a1\"}");
+        putRaw(service, group, stream, BASE_MS + 2000, "{\"type\":\"B\",\"level\":\"INFO\",\"id\":\"b1\"}");
+        putRaw(service, group, stream, BASE_MS + 3000, "{\"type\":\"C\",\"level\":\"INFO\",\"id\":\"c1\"}");
+        putRaw(service, group, stream, BASE_MS + 4000, "{\"type\":\"A|B\",\"level\":\"INFO\",\"id\":\"p1\"}");
+        putRaw(service, group, stream, BASE_MS + 5000, "{\"type\":\"A\",\"level\":\"WARN\",\"id\":\"a2\"}");
+        putRaw(service, group, stream, BASE_MS + 6000,
+                "{\"type\":\"A or B\",\"color\":\"red\",\"order\":\"first\",\"id\":\"o1\"}");
+
+        assertEquals(List.of("a1", "a2"), idsFor(group, "type = 'A'"), "type = 'A'");
+        assertEquals(List.of("b1"), idsFor(group, "type = 'B'"), "type = 'B'");
+        assertEquals(List.of("p1"), idsFor(group, "type = 'A|B'"), "type = 'A|B'");
+        assertEquals(List.of("o1"), idsFor(group, "type = 'A or B'"), "type = 'A or B'");
+        assertEquals(List.of("c1", "o1"), idsFor(group, "color = 'red' or type = 'C'"),
+                "color = 'red' or type = 'C'");
+        assertEquals(List.of("c1", "o1"), idsFor(group, "order = 'first' or type = 'C'"),
+                "order = 'first' or type = 'C'");
+
+        for (String filter : List.of(
+                "type = 'A' or type = 'B'",
+                "type = 'A' OR type = 'B'",
+                "type = 'A' Or type = 'B'",
+                "type='A'or type='B'",
+                "type = \"A\" or type = \"B\"",
+                "type == 'A' or type == 'B'",
+                "(type = 'A' or type = 'B')",
+                "(type = 'A') or (type = 'B')",
+                "((type = 'A') or type = 'B')",
+                "(type='A')or(type='B')")) {
+            assertEquals(List.of("a1", "a2", "b1"), idsFor(group, filter), filter);
+        }
+
+        assertEquals(List.of("a1", "a2", "b1", "c1"), idsFor(group, "type = 'A' or type = 'B' or type = 'C'"),
+                "type = 'A' or type = 'B' or type = 'C'");
+        assertEquals(List.of("a1", "a2", "b1", "c1"), idsFor(group, "type = 'A' or (type = 'B' or type = 'C')"),
+                "type = 'A' or (type = 'B' or type = 'C')");
+        assertEquals(List.of("a2", "b1", "c1", "o1", "p1"), idsFor(group, "type != 'A' or level = 'WARN'"),
+                "type != 'A' or level = 'WARN'");
+        assertEquals(List.of("b1"), idsFor(group, "(type = 'A)' or type = 'B')"), "(type = 'A)' or type = 'B')");
+
+        List<String> sortedDesc = rowsFor(group, "fields id | filter type = 'A' or type = 'B' | sort @timestamp desc")
+                .stream().map(row -> row.get("id")).toList();
+        assertEquals(List.of("a2", "b1", "a1"), sortedDesc, "type = 'A' or type = 'B' | sort @timestamp desc");
+        assertEquals(List.of("a1", "b1"), idsFor(group, "type = 'A' or type = 'B' | filter level = 'INFO'"),
+                "type = 'A' or type = 'B' | filter level = 'INFO'");
     }
 
     @Test
@@ -688,6 +820,11 @@ class CloudWatchLogsInsightsQueryTest {
                 service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION));
         assertEquals("Complete", state.status());
         return state.rows();
+    }
+
+    /** The {@code id} of each row {@code fields id | filter <filter>} returns, sorted. */
+    private List<String> idsFor(String group, String filter) {
+        return rowsFor(group, "fields id | filter " + filter).stream().map(row -> row.get("id")).sorted().toList();
     }
 
     /** Run {@code query} over the full window on the default service and return its final state. */

@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 @ApplicationScoped
 public class ConfigServiceJsonHandler {
@@ -39,46 +40,48 @@ public class ConfigServiceJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
-        return switch (action) {
-            case "PutConfigRule" -> putConfigRule(request, region);
-            case "DeleteConfigRule" -> deleteConfigRule(request, region);
-            case "DescribeConfigRules" -> describeConfigRules(request, region);
-            case "DescribeComplianceByConfigRule" -> describeComplianceByConfigRule(request, region);
-            case "DescribeComplianceByResource" -> describeComplianceByResource(request, region);
-            case "DescribeConfigRuleEvaluationStatus" -> describeConfigRuleEvaluationStatus(request, region);
-            case "StartConfigRulesEvaluation" -> startConfigRulesEvaluation(request, region);
-            case "PutEvaluations" -> putEvaluations(request, region);
-            case "PutExternalEvaluation" -> putExternalEvaluation(request, region);
-            case "DeleteEvaluationResults" -> deleteEvaluationResults(request, region);
-            case "GetComplianceDetailsByConfigRule" -> getComplianceDetailsByConfigRule(request, region);
-            case "GetComplianceDetailsByResource" -> getComplianceDetailsByResource(request, region);
-            case "GetComplianceSummaryByConfigRule" -> getComplianceSummaryByConfigRule(region);
-            case "GetComplianceSummaryByResourceType" -> getComplianceSummaryByResourceType(request, region);
-            case "PutConformancePack" -> putConformancePack(request, region);
-            case "DeleteConformancePack" -> deleteConformancePack(request, region);
-            case "DescribeConformancePacks" -> describeConformancePacks(request, region);
-            case "DescribeConformancePackStatus" -> describeConformancePackStatus(request, region);
-            case "PutConfigurationRecorder" -> putConfigurationRecorder(request, region);
-            case "DescribeConfigurationRecorders" -> describeConfigurationRecorders(request, region);
-            case "DeleteConfigurationRecorder" -> deleteConfigurationRecorder(request, region);
-            case "StartConfigurationRecorder" -> startConfigurationRecorder(request, region);
-            case "StopConfigurationRecorder" -> stopConfigurationRecorder(request, region);
-            case "DescribeConfigurationRecorderStatus" -> describeConfigurationRecorderStatus(request, region);
-            case "PutDeliveryChannel" -> putDeliveryChannel(request, region);
-            case "DescribeDeliveryChannels" -> describeDeliveryChannels(request, region);
-            case "DeleteDeliveryChannel" -> deleteDeliveryChannel(request, region);
-            case "PutRetentionConfiguration" -> putRetentionConfiguration(request, region);
-            case "DescribeRetentionConfigurations" -> describeRetentionConfigurations(request, region);
-            case "DeleteRetentionConfiguration" -> deleteRetentionConfiguration(request, region);
-            case "PutAggregationAuthorization" -> putAggregationAuthorization(request, region);
-            case "DescribeAggregationAuthorizations" -> describeAggregationAuthorizations(request, region);
-            case "DeleteAggregationAuthorization" -> deleteAggregationAuthorization(request, region);
-            case "TagResource" -> tagResource(request, region);
-            case "UntagResource" -> untagResource(request, region);
-            case "ListTagsForResource" -> listTagsForResource(request, region);
+        Callable<Response> operation = switch (action) {
+            case "PutConfigRule" -> () -> putConfigRule(request, region);
+            case "DeleteConfigRule" -> () -> deleteConfigRule(request, region);
+            case "DescribeConfigRules" -> () -> describeConfigRules(request, region);
+            case "DescribeComplianceByConfigRule" -> () -> describeComplianceByConfigRule(request, region);
+            case "DescribeComplianceByResource" -> () -> describeComplianceByResource(request, region);
+            case "DescribeConfigRuleEvaluationStatus" -> () -> describeConfigRuleEvaluationStatus(request, region);
+            case "StartConfigRulesEvaluation" -> () -> startConfigRulesEvaluation(request, region);
+            case "PutEvaluations" -> () -> putEvaluations(request, region);
+            case "PutExternalEvaluation" -> () -> putExternalEvaluation(request, region);
+            case "DeleteEvaluationResults" -> () -> deleteEvaluationResults(request, region);
+            case "GetComplianceDetailsByConfigRule" -> () -> getComplianceDetailsByConfigRule(request, region);
+            case "GetComplianceDetailsByResource" -> () -> getComplianceDetailsByResource(request, region);
+            case "GetComplianceSummaryByConfigRule" -> () -> getComplianceSummaryByConfigRule(region);
+            case "GetComplianceSummaryByResourceType" -> () -> getComplianceSummaryByResourceType(request, region);
+            case "PutConformancePack" -> () -> putConformancePack(request, region);
+            case "DeleteConformancePack" -> () -> deleteConformancePack(request, region);
+            case "DescribeConformancePacks" -> () -> describeConformancePacks(request, region);
+            case "DescribeConformancePackStatus" -> () -> describeConformancePackStatus(request, region);
+            case "PutConfigurationRecorder" -> () -> putConfigurationRecorder(request, region);
+            case "DescribeConfigurationRecorders" -> () -> describeConfigurationRecorders(request, region);
+            case "DeleteConfigurationRecorder" -> () -> deleteConfigurationRecorder(request, region);
+            case "StartConfigurationRecorder" -> () -> startConfigurationRecorder(request, region);
+            case "StopConfigurationRecorder" -> () -> stopConfigurationRecorder(request, region);
+            case "DescribeConfigurationRecorderStatus" -> () -> describeConfigurationRecorderStatus(request, region);
+            case "PutDeliveryChannel" -> () -> putDeliveryChannel(request, region);
+            case "DescribeDeliveryChannels" -> () -> describeDeliveryChannels(request, region);
+            case "DeleteDeliveryChannel" -> () -> deleteDeliveryChannel(request, region);
+            case "PutRetentionConfiguration" -> () -> putRetentionConfiguration(request, region);
+            case "DescribeRetentionConfigurations" -> () -> describeRetentionConfigurations(request, region);
+            case "DeleteRetentionConfiguration" -> () -> deleteRetentionConfiguration(request, region);
+            case "PutAggregationAuthorization" -> () -> putAggregationAuthorization(request, region);
+            case "DescribeAggregationAuthorizations" -> () -> describeAggregationAuthorizations(request, region);
+            case "DeleteAggregationAuthorization" -> () -> deleteAggregationAuthorization(request, region);
+            case "TagResource" -> () -> tagResource(request, region);
+            case "UntagResource" -> () -> untagResource(request, region);
+            case "ListTagsForResource" -> () -> listTagsForResource(request, region);
             default -> throw new AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
+        ConfigRequestShapes.check(action, request);
+        return operation.call();
     }
 
     // --- Config Rules ---
@@ -86,7 +89,7 @@ public class ConfigServiceJsonHandler {
     private Response putConfigRule(JsonNode req, String region) throws Exception {
         JsonNode ruleNode = req.path("ConfigRule");
         ConfigRule rule = ruleNode.isObject() ? mapper.treeToValue(ruleNode, ConfigRule.class) : null;
-        service.putConfigRule(region, rule, extractCreationTags(req));
+        service.putConfigRule(region, rule, extractCreationTags(req, "InvalidParameterValueException"));
         return Response.ok(mapper.createObjectNode()).build();
     }
 
@@ -196,13 +199,14 @@ public class ConfigServiceJsonHandler {
 
     private Response putConfigurationRecorder(JsonNode req, String region) throws Exception {
         ConfigurationRecorder recorder = mapper.treeToValue(req.path("ConfigurationRecorder"), ConfigurationRecorder.class);
-        service.putConfigurationRecorder(region, recorder);
+        service.putConfigurationRecorder(region, recorder, extractCreationTags(req, "ValidationException"));
         return Response.ok(mapper.createObjectNode()).build();
     }
 
     private Response describeConfigurationRecorders(JsonNode req, String region) {
         List<String> names = extractStringList(req, "ConfigurationRecorderNames");
-        List<ConfigurationRecorder> recorders = service.describeConfigurationRecorders(region, names);
+        String arn = req.path("Arn").asText(null);
+        List<ConfigurationRecorder> recorders = service.describeConfigurationRecorders(region, names, arn);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("ConfigurationRecorders", mapper.valueToTree(recorders));
         return Response.ok(resp).build();
@@ -227,7 +231,8 @@ public class ConfigServiceJsonHandler {
 
     private Response describeConfigurationRecorderStatus(JsonNode req, String region) {
         List<String> names = extractStringList(req, "ConfigurationRecorderNames");
-        List<ConfigurationRecorderStatus> statuses = service.describeConfigurationRecorderStatus(region, names);
+        String arn = req.path("Arn").asText(null);
+        List<ConfigurationRecorderStatus> statuses = service.describeConfigurationRecorderStatus(region, names, arn);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("ConfigurationRecordersStatus", mapper.valueToTree(statuses));
         return Response.ok(resp).build();
@@ -315,7 +320,7 @@ public class ConfigServiceJsonHandler {
         AggregationAuthorization authorization = service.putAggregationAuthorization(region,
                 req.path("AuthorizedAccountId").asText(null),
                 req.path("AuthorizedAwsRegion").asText(null),
-                extractCreationTags(req));
+                extractCreationTags(req, "InvalidParameterValueException"));
         ObjectNode resp = mapper.createObjectNode();
         resp.set("AggregationAuthorization", mapper.valueToTree(authorization));
         return Response.ok(resp).build();
@@ -368,30 +373,15 @@ public class ConfigServiceJsonHandler {
         return tagList;
     }
 
-    /** PutConfigRule and PutAggregationAuthorization take a {@code TagsList} (config/2014-11-12:
-     *  at most 50 {@code Tag}s, Key 1-128 characters, optional Value of at most 256) and model
-     *  {@code InvalidParameterValueException} as their only parameter error. Checked before the
-     *  service stores anything, so a rejected request leaves no resource behind. An absent Value
+    /** PutConfigRule, PutAggregationAuthorization and PutConfigurationRecorder take a
+     *  {@code TagsList}, whose count and Key and Value lengths ConfigRequestShapes has checked.
+     *  The model leaves a tag's Key optional, so a tag without one is refused here, with the
+     *  operation's modelled parameter error, before the service stores anything. An absent Value
      *  is optional in the model and is stored as the empty string. */
-    private List<Map<String, String>> extractCreationTags(JsonNode req) {
-        JsonNode tags = req.path("Tags");
-        if (tags.isMissingNode() || tags.isNull()) {
-            return List.of();
-        }
-        if (!tags.isArray()) {
-            throw new AwsException("InvalidParameterValueException", "Tags must be a list.", 400);
-        }
-        if (tags.size() > 50) {
-            throw new AwsException("InvalidParameterValueException",
-                    "Tags must contain at most 50 tags.", 400);
-        }
-        for (JsonNode tag : tags) {
-            JsonNode key = tag.path("Key");
-            JsonNode value = tag.path("Value");
-            boolean valueOk = value.isMissingNode() || value.isNull()
-                    || (value.isTextual() && value.asText().length() <= 256);
-            if (!key.isTextual() || key.asText().isEmpty() || key.asText().length() > 128 || !valueOk) {
-                throw new AwsException("InvalidParameterValueException",
+    private List<Map<String, String>> extractCreationTags(JsonNode req, String errorCode) {
+        for (JsonNode tag : req.path("Tags")) {
+            if (!tag.path("Key").isTextual()) {
+                throw new AwsException(errorCode,
                         "Each tag needs a Key of 1-128 characters and a Value of at most 256 characters.", 400);
             }
         }

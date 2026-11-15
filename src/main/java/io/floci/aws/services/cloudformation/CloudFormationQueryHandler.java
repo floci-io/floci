@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -42,6 +43,26 @@ public class CloudFormationQueryHandler {
     public CloudFormationQueryHandler(CloudFormationService cfnService, StackSetService stackSetService) {
         this.cfnService = cfnService;
         this.stackSetService = stackSetService;
+    }
+
+    /** The id of the stack a stack name or id names, as a request naming it finds it. */
+    public Optional<String> stackId(String stackNameOrId, String region) {
+        return cfnService.stackId(stackNameOrId, region);
+    }
+
+    /** The id of the stack holding the change set {@code changeSetArn} names. */
+    public Optional<String> stackIdOfChangeSet(String changeSetArn, String region) {
+        return cfnService.stackIdOfChangeSet(changeSetArn, region);
+    }
+
+    /** The id of the stack that owns the resource {@code physicalResourceId} names. */
+    public Optional<String> stackIdOfResource(String physicalResourceId, String region) {
+        return cfnService.stackIdOfResource(physicalResourceId, region);
+    }
+
+    /** The id of the stack set of this name. */
+    public Optional<String> stackSetId(String stackSetName) {
+        return stackSetService.stackSetId(stackSetName);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -71,7 +92,7 @@ public class CloudFormationQueryHandler {
             case "DescribeOrganizationsAccess" -> describeOrganizationsAccess();
             case "ActivateOrganizationsAccess" -> activateOrganizationsAccess();
             case "CreateStackSet" -> createStackSet(params);
-            case "DescribeStackSet" -> describeStackSet(params);
+            case "DescribeStackSet" -> describeStackSet(params, region);
             case "ListStackSets" -> listStackSets();
             case "UpdateStackSet" -> updateStackSet(params);
             case "DeleteStackSet" -> deleteStackSet(params);
@@ -901,7 +922,7 @@ public class CloudFormationQueryHandler {
         }
     }
 
-    private Response describeStackSet(MultivaluedMap<String, String> params) {
+    private Response describeStackSet(MultivaluedMap<String, String> params, String region) {
         try {
             StackSet ss = stackSetService.describeStackSet(params.getFirst("StackSetName"));
             XmlBuilder xml = new XmlBuilder()
@@ -910,6 +931,7 @@ public class CloudFormationQueryHandler {
                     .start("StackSet")
                     .elem("StackSetName", ss.getStackSetName())
                     .elem("StackSetId", ss.getStackSetId())
+                    .elem("StackSetARN", stackSetService.stackSetArn(ss, region))
                     .elem("Status", ss.getStatus())
                     .elem("Description", ss.getDescription())
                     .elem("TemplateBody", ss.getTemplateBody())

@@ -641,6 +641,54 @@ class CodeArtifactNuGetDockerIntegrationTest {
      * entry and reference it with a nuspec {@code <readme>} element, the real NuGet readme-file
      * feature.
      */
+    /**
+     * A real {@code .nupkg} whose {@code .nuspec} declares one {@code <dependencies>} group, for
+     * {@code ListPackageVersionDependencies} to parse back off the real BaGetter sidecar.
+     */
+    private static byte[] buildNupkgWithDependency(String id, String version, String dependencyId,
+            String dependencyVersion) {
+        String nuspec = "<?xml version=\"1.0\"?>"
+                + "<package xmlns=\"http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd\">"
+                + "<metadata><id>" + id + "</id><version>" + version + "</version><authors>floci</authors>"
+                + "<description>a package with a real dependency</description>"
+                + "<dependencies><group targetFramework=\"net6.0\">"
+                + "<dependency id=\"" + dependencyId + "\" version=\"" + dependencyVersion + "\"/>"
+                + "</group></dependencies></metadata></package>";
+        try {
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (ZipOutputStream zip = new ZipOutputStream(out)) {
+                zip.putNextEntry(new ZipEntry(id + ".nuspec"));
+                zip.write(nuspec.getBytes(StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
+            return out.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Test
+    @Order(19)
+    void listPackageVersionDependenciesReadsTheRealNuspecFromTheRealBagetterSidecar() {
+        String packageId = "ListDeps.Package";
+        byte[] nupkg = buildNupkgWithDependency(packageId, VERSION, "Newtonsoft.Json", "13.0.1");
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", nupkg))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/package/version/dependencies?domain=" + DOMAIN + "&repository=" + REPO + "&format=nuget"
+                        + "&package=" + packageId + "&version=" + VERSION)
+                .then().statusCode(200)
+                .body("package", equalTo(packageId))
+                .body("dependencies.size()", equalTo(1))
+                .body("dependencies[0].package", equalTo("Newtonsoft.Json"))
+                .body("dependencies[0].versionRequirement", equalTo("13.0.1"))
+                .body("dependencies[0].containsKey('dependencyType')", equalTo(false));
+    }
+
     private static byte[] buildNupkg(String id, String version, String description, String readmePathOrNull,
             String readmeTextOrNull) {
         String readmeElement = readmePathOrNull == null ? "" : "<readme>" + readmePathOrNull + "</readme>";

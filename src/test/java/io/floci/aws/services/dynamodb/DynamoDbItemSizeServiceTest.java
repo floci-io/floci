@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
+import io.floci.aws.services.dynamodb.model.ConditionalCheckFailedException;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -207,6 +208,51 @@ class DynamoDbItemSizeServiceTest {
         update("a", "SET b = if_not_exists(b, :pad)", ceiling, 0);
         assertEquals(ceiling, storedBytes("a"));
         assertRefused(() -> update("b", "SET b = if_not_exists(b, :pad)", ceiling + 1, 0));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "'SET c = if_not_exists(c, :huge)', attribute_exists(nope)",
+            "'SET c = if_not_exists(c, :huge)', attribute_exists(c)",
+            "'SET c = if_not_exists(c, :huge)',",
+            "SET pk = :huge,"
+    })
+    void updateItemRefusesAnOverLimitStatementBeforeTheCondition(String expression, String condition) {
+        seed("a", "c", stringValue("x"));
+
+        assertRefused(() -> service.updateItem(TABLE, key("a"), null, expression, null,
+                values(":huge", stringValue("h".repeat(MAX_ITEM_SIZE + 100))), "NONE", condition, REGION, "NONE"));
+        assertEquals("pk".length() + "a".length() + "c".length() + "x".length(), storedBytes("a"));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a
+            SET a = :v, b
+            ADD a
+            SET ,
+            ADD ,
+            SET a = if_not_exists(b, :v
+            SET a = list_append(c, :v
+            SET a = if_not_exists(list_append(c, :v), :v
+            SET a, b = :v
+            """)
+    void updateItemLeavesAStatementItCannotSizeToTheUpdateParser(String expression) {
+        seed("a", "c", stringValue("x"));
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateItem(TABLE, key("a"), null,
+                expression, null, values(":v", stringValue("v")), "NONE", REGION));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void updateItemChecksTheConditionBeforeTheFinishedItem() {
+        seed("a", "b", stringValue(padding("a", MAX_ITEM_SIZE, 0)));
+
+        assertThrows(ConditionalCheckFailedException.class, () -> service.updateItem(TABLE, key("a"), null,
+                "SET d = :d", null, values(":d", stringValue("y")), "NONE", "attribute_exists(nope)", REGION, "NONE"));
+        assertRefused(() -> service.updateItem(TABLE, key("a"), null,
+                "SET d = :d", null, values(":d", stringValue("y")), "NONE", null, REGION, "NONE"));
     }
 
     @Test

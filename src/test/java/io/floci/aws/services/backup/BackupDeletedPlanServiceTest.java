@@ -11,7 +11,6 @@ import io.floci.aws.services.backup.model.BackupPlan;
 import io.floci.aws.services.backup.model.BackupSelection;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.ParkingStore;
-import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -20,12 +19,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -107,39 +102,24 @@ class BackupDeletedPlanServiceTest {
         AccountAwareStorageBackend<BackupSelection> selections =
                 new AccountAwareStorageBackend<>(innerSelections, null, ACCOUNT);
         BackupService service = service(storage(plans, selections), config());
-        ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
             BackupPlan plan = service.createBackupPlan("ordered", List.of(), null, REGION);
             Runnable delete = () -> service.deleteBackupPlan(plan.getBackupPlanId());
             Runnable select = () -> service.createBackupSelection(plan.getBackupPlanId(), "selection", "role",
                     List.of("resource"), List.of(), null);
-            if (deleteFirst) {
-                innerPlans.parkNextWrite();
-            } else {
-                innerSelections.parkNextWrite();
-            }
-            Future<?> first = workers.submit(deleteFirst ? delete : select);
-            assertTrue(deleteFirst ? innerPlans.awaitParked() : innerSelections.awaitParked());
-            AtomicReference<Thread> competing = new AtomicReference<>();
-            Future<AwsException> second = workers.submit(() -> {
-                competing.set(Thread.currentThread());
-                return assertThrows(AwsException.class, (deleteFirst ? select : delete)::run);
+            ParkingStore<?> parkedStore = deleteFirst ? innerPlans : innerSelections;
+            Runnable first = deleteFirst ? delete : select;
+            Runnable competing = deleteFirst ? select : delete;
+            String expectedError = deleteFirst ? "ResourceNotFoundException" : "InvalidRequestException";
+            parkedStore.parkNextWrite();
+            assertOperationWaitsForParkedStore(parkedStore, first, () -> {
+                AwsException failure = assertThrows(AwsException.class, competing::run);
+                assertEquals(expectedError, failure.getErrorCode());
             });
-            ThreadStates.awaitBlockedOrDone(competing, second);
-            assertFalse(second.isDone(), "competing mutation must wait for the same plan lock");
-            innerPlans.release();
-            innerSelections.release();
-            first.get(5, TimeUnit.SECONDS);
-            assertEquals(deleteFirst ? "ResourceNotFoundException" : "InvalidRequestException",
-                    second.get(5, TimeUnit.SECONDS).getErrorCode());
             assertEquals(deleteFirst ? 0 : 1, service.listBackupSelections(plan.getBackupPlanId()).size());
             assertEquals(deleteFirst ? 0 : 1, service.listBackupPlans().size());
             assertEquals(1, service.listBackupPlans(REGION, true, null, null).items().size());
         } finally {
-            innerPlans.release();
-            innerSelections.release();
-            workers.shutdownNow();
-            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
             service.shutdown();
         }
     }

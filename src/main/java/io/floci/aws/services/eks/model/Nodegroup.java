@@ -107,7 +107,50 @@ public class Nodegroup {
     @JsonIgnore
     private String accountId;
 
+    /**
+     * Whether Floci created this node group's Auto Scaling group. Set once the group exists, so the startup backfill
+     * creates one only for a node group stored before Floci kept these groups, and a group deleted through Auto
+     * Scaling stays deleted. Stored with the node group, and left out of every response by EksController.
+     */
+    @JsonProperty("autoScalingGroupCreated")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    private boolean autoScalingGroupCreated;
+
     public Nodegroup() {}
+
+    /** A copy sharing this node group's nested values, for a response that leaves out Floci's own fields. */
+    public Nodegroup copy() {
+        Nodegroup c = new Nodegroup();
+        c.nodegroupName = this.nodegroupName;
+        c.nodegroupArn = this.nodegroupArn;
+        c.clusterName = this.clusterName;
+        c.version = this.version;
+        c.releaseVersion = this.releaseVersion;
+        c.createdAt = this.createdAt;
+        c.modifiedAt = this.modifiedAt;
+        c.status = this.status;
+        c.capacityType = this.capacityType;
+        c.scalingConfig = this.scalingConfig;
+        c.instanceTypes = this.instanceTypes;
+        c.subnets = this.subnets;
+        c.remoteAccess = this.remoteAccess;
+        c.amiType = this.amiType;
+        c.nodeRole = this.nodeRole;
+        c.labels = this.labels;
+        c.taints = this.taints;
+        c.resources = this.resources;
+        c.diskSize = this.diskSize;
+        c.health = this.health;
+        c.updateConfig = this.updateConfig;
+        c.nodeRepairConfig = this.nodeRepairConfig;
+        c.launchTemplate = this.launchTemplate;
+        c.warmPoolConfig = this.warmPoolConfig;
+        c.tags = this.tags;
+        c.clientRequestToken = this.clientRequestToken;
+        c.accountId = this.accountId;
+        c.autoScalingGroupCreated = this.autoScalingGroupCreated;
+        return c;
+    }
 
     public String getNodegroupName() { return nodegroupName; }
     public void setNodegroupName(String nodegroupName) { this.nodegroupName = nodegroupName; }
@@ -189,4 +232,9 @@ public class Nodegroup {
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public boolean isAutoScalingGroupCreated() { return autoScalingGroupCreated; }
+    public void setAutoScalingGroupCreated(boolean autoScalingGroupCreated) {
+        this.autoScalingGroupCreated = autoScalingGroupCreated;
+    }
 }

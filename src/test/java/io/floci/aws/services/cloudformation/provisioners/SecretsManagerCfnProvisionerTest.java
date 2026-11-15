@@ -1,11 +1,13 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
@@ -17,12 +19,14 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -43,13 +47,8 @@ class SecretsManagerCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx(String priorPhysicalId) {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
-        });
-        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(),
+                REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
     private static StackResource resource() {
@@ -295,5 +294,92 @@ class SecretsManagerCfnProvisionerTest {
         verify(secrets).createSecret(eq("app/db"), eq("s3cret"), isNull(), isNull(), isNull(), anyList(),
                 eq(REGION));
         assertEquals(ARN, r.getPhysicalId());
+    }
+
+    // --- dropped Description, against a real in-memory SecretsManagerService ---
+
+    private static final String WITH_DESCRIPTION = """
+            {"Name":"app/db","SecretString":"v1","Description":"orig","KmsKeyId":"alias/app"}
+            """;
+    private static final String WITHOUT_DESCRIPTION = """
+            {"Name":"app/db","SecretString":"v1","KmsKeyId":"alias/app"}
+            """;
+
+    private SecretsManagerService realSecrets() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        return new SecretsManagerService(storageFactory, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                new RegionResolver(REGION, "000000000000"), null, new ObjectMapper(), null);
+    }
+
+    private StackResource deploySecret(SecretsManagerService real, String properties) throws Exception {
+        StackResource r = resource();
+        new SecretsManagerCfnProvisioner(real).provision(r, mapper.readTree(properties), ctx(null));
+        return r;
+    }
+
+    private void updateSecret(SecretsManagerService real, StackResource r, String previous, String current)
+            throws Exception {
+        new SecretsManagerCfnProvisioner(real).provision(r, mapper.readTree(current),
+                ProvisionContexts.update(REGION, "000000000000", "my-stack",
+                        r.getPhysicalId(), previous));
+    }
+
+    @Test
+    void secretDescriptionDroppedFromTheTemplateIsClearedOnUpdate() throws Exception {
+        SecretsManagerService real = realSecrets();
+        StackResource r = deploySecret(real, WITH_DESCRIPTION);
+        assertEquals("orig", real.describeSecret("app/db", REGION).getDescription());
+
+        updateSecret(real, r, WITH_DESCRIPTION, WITHOUT_DESCRIPTION);
+
+        assertNull(real.describeSecret("app/db", REGION).getDescription());
+    }
+
+    @Test
+    void changedSecretDescriptionStillApplies() throws Exception {
+        SecretsManagerService real = realSecrets();
+        StackResource r = deploySecret(real, WITH_DESCRIPTION);
+
+        updateSecret(real, r, WITH_DESCRIPTION, WITH_DESCRIPTION.replace("orig", "changed"));
+
+        assertEquals("changed", real.describeSecret("app/db", REGION).getDescription());
+    }
+
+    @Test
+    void emptySecretDescriptionIsStoredAsGivenAndALaterDropClearsIt() throws Exception {
+        SecretsManagerService real = realSecrets();
+        StackResource r = deploySecret(real, WITH_DESCRIPTION);
+        String empty = WITH_DESCRIPTION.replace("\"orig\"", "\"\"");
+
+        updateSecret(real, r, WITH_DESCRIPTION, empty);
+        assertEquals("", real.describeSecret("app/db", REGION).getDescription());
+
+        updateSecret(real, r, empty, WITHOUT_DESCRIPTION);
+        assertNull(real.describeSecret("app/db", REGION).getDescription());
+    }
+
+    @Test
+    void secretDescriptionSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() throws Exception {
+        SecretsManagerService real = realSecrets();
+        StackResource r = deploySecret(real, WITHOUT_DESCRIPTION);
+        real.updateSecret("app/db", "outside", null, REGION);
+
+        updateSecret(real, r, WITHOUT_DESCRIPTION, WITHOUT_DESCRIPTION.replace("\"v1\"", "\"v2\""));
+
+        assertEquals("outside", real.describeSecret("app/db", REGION).getDescription());
+        assertEquals("v2", real.getSecretValue("app/db", null, null, REGION).getSecretString());
+    }
+
+    @Test
+    void droppingTheSecretDescriptionKeepsTheValueAndTheKmsKey() throws Exception {
+        SecretsManagerService real = realSecrets();
+        StackResource r = deploySecret(real, WITH_DESCRIPTION);
+
+        updateSecret(real, r, WITH_DESCRIPTION, WITHOUT_DESCRIPTION);
+
+        assertEquals("v1", real.getSecretValue("app/db", null, null, REGION).getSecretString());
+        assertEquals("alias/app", real.describeSecret("app/db", REGION).getKmsKeyId());
     }
 }

@@ -64,7 +64,7 @@ class EksWorkerAuthenticationTest {
         when(iam.findInstanceProfile(ACCOUNT, "worker-profile")).thenReturn(Optional.of(profile));
         when(iam.findEksSessionIdentity(KEY)).thenReturn(Optional.of(
                 new EksSessionIdentity(ACCOUNT, ROLE, role.getRoleId(), instance.getInstanceId())));
-        when(eks.findAuthenticationCluster(ACCOUNT, "demo")).thenReturn(Optional.of(cluster));
+        when(eks.findAuthenticationCluster(ACCOUNT, REGION, "demo")).thenReturn(Optional.of(cluster));
         when(ec2.findInstanceForAccount(ACCOUNT, REGION, "i-worker")).thenReturn(Optional.of(instance));
         createEntry("EC2_LINUX");
     }
