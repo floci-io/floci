@@ -65,7 +65,7 @@ public class SecretsManagerService implements ResourceProvider {
     private static final String PENDING_DELETION_STATE = "PendingDeletion";
     private static final Pattern SECRET_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9/_+=.@-]+");
     private static final Pattern WORD_BOUNDARY = Pattern.compile(
-            "[^\\p{Alnum}]+|(?<=\\p{Lower})(?=\\p{Upper})|(?<=\\p{Alpha})(?=\\p{Digit})|(?<=\\p{Digit})(?=\\p{Alpha})");
+            "[^\\p{Alnum}]+|(?<=\\p{Lower})(?=\\p{Upper})|(?<=\\p{Alpha})(?=\\p{Digit})");
 
     public static final String SCHEDULED_DELETION_ERROR_MESSAGE =
         "You can't perform this operation on the secret because it was marked for deletion.";

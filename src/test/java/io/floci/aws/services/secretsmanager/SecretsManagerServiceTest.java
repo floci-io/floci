@@ -1792,6 +1792,17 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void allFilterKeepsANumberFollowedByLettersAsOneWord() {
+        service.createSecret("db2prod", "v1", null, null, null, null, REGION);
+        service.createSecret("prod2db", "v2", null, null, null, null, REGION);
+
+        List<Secret> found = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("prod"))));
+
+        assertEquals(List.of("prod2db"), found.stream().map(Secret::getName).toList());
+    }
+
+    @Test
     void allFilterWithEmptyValueMatchesEverySecretAndItsNegationMatchesNone() {
         service.createSecret("alpha", "v1", null, null, null, null, REGION);
         service.createSecret("beta", "v2", null, "some description", null, null, REGION);
