@@ -270,9 +270,9 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
-              "rekognition", "resource-explorer-2", "route53", "s3tables", "servicediscovery", "servicequotas", "ssm",
-              "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub",
-              "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation")
+              "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
+              "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
+              "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
@@ -427,7 +427,6 @@ NOT_COVERED: dict[str, str] = {
     "rds-data": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
-    "s3vectors": _REST,
     "sagemaker": _LATER,
     "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
                       "AccountId the account a portfolio is shared with, which the rule reads as the portfolio's; a "

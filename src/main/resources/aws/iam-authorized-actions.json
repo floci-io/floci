@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-12",
+    "retrieved": "2026-11-15",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -1036,6 +1036,9 @@
     ],
     "s3tables": [
       "ListTableBuckets"
+    ],
+    "s3vectors": [
+      "ListVectorBuckets"
     ],
     "scheduler": [
       "ListScheduleGroups",

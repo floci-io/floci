@@ -113,8 +113,9 @@ NAMESPACES = (
     "guardduty", "iam", "kinesis", "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
     "network-firewall", "oam", "organizations", "payment-cryptography", "pipes", "ram", "rds", "redshift",
     "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "s3tables",
-    "sagemaker", "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso",
-    "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
+    "s3vectors", "sagemaker", "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns",
+    "sqs", "ssm", "sso", "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer",
+    "translate", "wafv2",
     "xray",
 )
 

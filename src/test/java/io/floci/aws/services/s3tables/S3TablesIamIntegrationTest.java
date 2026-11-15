@@ -3,12 +3,12 @@ package io.floci.aws.services.s3tables;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
+import io.floci.aws.testing.SignedRestRequests;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3tables.S3TablesClient;
@@ -18,10 +18,9 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -294,17 +293,6 @@ class S3TablesIamIntegrationTest {
     }
 
     private Response send(AwsRequestSigner signer, String method, String path, String body) throws Exception {
-        URI uri = endpoint.resolve(path);
-        byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-        RequestSpecification request = given().urlEncodingEnabled(false)
-                .headers(signer.headersFor(method, uri, Map.of(), bytes));
-        if (body != null) {
-            request = request.contentType("application/json").body(bytes);
-        }
-        return request.request(method, uri);
-    }
-
-    private static void denied(Response response, String action) {
-        response.then().statusCode(403).body(containsString("not authorized to perform: " + action));
+        return SignedRestRequests.send(endpoint, signer, method, path, body, "application/json");
     }
 }
