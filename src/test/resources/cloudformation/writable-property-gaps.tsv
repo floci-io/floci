@@ -622,8 +622,6 @@ AWS::S3::Bucket	AbacStatus	accepted and ignored
 AWS::S3::Bucket	AccelerateConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AccessControl	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AnalyticsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
-AWS::S3::Bucket	BucketNamePrefix	accepted and ignored
-AWS::S3::Bucket	BucketNamespace	accepted and ignored
 AWS::S3::Bucket	IntelligentTieringConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	InventoryConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	LoggingConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
