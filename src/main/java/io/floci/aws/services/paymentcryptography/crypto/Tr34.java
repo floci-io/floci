@@ -245,7 +245,7 @@ public final class Tr34 {
         random.nextBytes(ephemeral);
         byte[] iv = new byte[aes ? AES_BLOCK_SIZE : TDES_BLOCK_SIZE];
         random.nextBytes(iv);
-        byte[] padded = pad(encoded(new DERSequence(keyBlock)), aes ? AES_BLOCK_SIZE : TDES_BLOCK_SIZE);
+        byte[] padded = Bytes.pkcs7Pad(encoded(new DERSequence(keyBlock)), aes ? AES_BLOCK_SIZE : TDES_BLOCK_SIZE);
         byte[] encryptedBlock = aes
                 ? Ciphers.aesCbcEncrypt(padded, ephemeral, iv)
                 : Ciphers.tdesCbcEncrypt(padded, Ciphers.widenTdesKey(ephemeral), iv);
@@ -273,7 +273,7 @@ public final class Tr34 {
         // The envelope is three elements, not a SEQUENCE: the version, the recipients and the
         // encrypted content. That is the shape the reference writes and the shape the reader
         // takes.
-        byte[] envelope = concat(encoded(new ASN1Integer(0)),
+        byte[] envelope = Bytes.concat(encoded(new ASN1Integer(0)),
                 encoded(new DERSet(new DERSequence(recipientInfo))),
                 encoded(new DERSequence(encryptedContentInfo)));
 
@@ -680,16 +680,6 @@ public final class Tr34 {
         return new Recovered(HEX_UPPER.formatHex(key), header);
     }
 
-    /** The PKCS#7 padding of a block. */
-    private static byte[] pad(byte[] buffer, int blockSize) {
-        int pad = blockSize - (buffer.length % blockSize);
-        byte[] out = Arrays.copyOf(buffer, buffer.length + pad);
-        for (int i = buffer.length; i < out.length; i++) {
-            out[i] = (byte) pad;
-        }
-        return out;
-    }
-
     /** The SHA-256 digest of the given bytes. */
     private static byte[] digest(byte[] data) {
         try {
@@ -733,7 +723,8 @@ public final class Tr34 {
     }
 
     /** The given byte arrays, one after the other. */
-    private static byte[] concat(byte[]... parts) {        int length = 0;
+    private static byte[] concat(byte[]... parts) {
+        int length = 0;
         for (byte[] part : parts) {
             length += part.length;
         }

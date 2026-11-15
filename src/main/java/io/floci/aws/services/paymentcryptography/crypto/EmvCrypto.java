@@ -144,7 +144,7 @@ public final class EmvCrypto {
         for (int i = 0; i < 8; i++) {
             zr[i] = (byte) (y[i] ^ 0xff);
         }
-        return adjustDesParity(concat(
+        return adjustDesParity(Bytes.concat(
                 Ciphers.tdes2Encrypt(y, imk16),
                 Ciphers.tdes2Encrypt(zr, imk16)));
     }
@@ -191,7 +191,7 @@ public final class EmvCrypto {
         for (int i = 0; i < 8; i++) {
             zr[i] = (byte) (zl[i] ^ 0xff);
         }
-        return adjustDesParity(concat(
+        return adjustDesParity(Bytes.concat(
                 Ciphers.tdes2Encrypt(zl, imk16),
                 Ciphers.tdes2Encrypt(zr, imk16)));
     }
@@ -244,7 +244,7 @@ public final class EmvCrypto {
         f1[2] = (byte) 0xf0;
         byte[] f2 = r.clone();
         f2[2] = (byte) 0x0f;
-        return adjustDesParity(concat(
+        return adjustDesParity(Bytes.concat(
                 Ciphers.tdes2Encrypt(f1, mk16),
                 Ciphers.tdes2Encrypt(f2, mk16)));
     }
@@ -287,7 +287,7 @@ public final class EmvCrypto {
      */
     public static byte[] computeArpcMethod2(byte[] sk, byte[] arqc,
                                             String csuHex, String padHex) {
-        byte[] data = concat(
+        byte[] data = Bytes.concat(
                 arqc,
                 csuHex == null ? new byte[0] : HEX.parseHex(csuHex),
                 padHex == null ? new byte[0] : HEX.parseHex(padHex));
@@ -332,17 +332,4 @@ public final class EmvCrypto {
         return out;
     }
 
-    private static byte[] concat(byte[]... parts) {
-        int n = 0;
-        for (byte[] p : parts) {
-            n += p.length;
-        }
-        byte[] out = new byte[n];
-        int at = 0;
-        for (byte[] p : parts) {
-            System.arraycopy(p, 0, out, at, p.length);
-            at += p.length;
-        }
-        return out;
-    }
 }

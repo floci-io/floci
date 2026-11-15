@@ -2,6 +2,7 @@ package io.floci.aws.services.paymentcryptography;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.paymentcryptography.crypto.Bytes;
 import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.ConcatKdf;
 import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
@@ -542,7 +543,7 @@ final class PaymentCryptographyKeyExchange {
         Map<String, Object> derivationData = object(material, "DerivationData");
         String sharedInformation = derivationData == null
                 ? "" : text(derivationData, "SharedInformation");
-        if (sharedInformation.isEmpty() || !isHex(sharedInformation)) {
+        if (sharedInformation.isEmpty() || !Bytes.isHex(sharedInformation)) {
             throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DerivationData."
                     + "SharedInformation must be a hexadecimal string");
         }
@@ -1263,7 +1264,7 @@ final class PaymentCryptographyKeyExchange {
             throw notFound(token);
         }
         String nonce = text(material, "RandomNonce");
-        if (!nonce.isEmpty() && !isHex(nonce)) {
+        if (!nonce.isEmpty() && !Bytes.isHex(nonce)) {
             throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
         }
         // The headers the request names are the ones the block carries, the optional
@@ -1308,6 +1309,12 @@ final class PaymentCryptographyKeyExchange {
                 PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
         PaymentCryptographyKeyAlgorithm algorithm =
                 PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        // AS2805's cryptography is all TDES, so only TDES keys leave and come back in
+        // an AS2805 cryptogram.
+        if (!algorithm.isTdes()) {
+            throw validation("an AS2805 key is a TDES key, but " + key.getArn() + " is "
+                    + key.getKeyAlgorithm());
+        }
         String tooWeak = PaymentCryptographyKeyStrength.refusal(kek.getKeyAlgorithm(),
                 key.getKeyAlgorithm());
         if (tooWeak != null) {
@@ -1346,8 +1353,7 @@ final class PaymentCryptographyKeyExchange {
      * @param kek the wrapping key
      */
     private static void requireKeyEncryptionKey(PaymentCryptographyKey kek) {
-        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())
-                && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
+        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())) {
             throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
                     + kek.getArn() + " is " + kek.getKeyUsage());
         }
@@ -1387,7 +1393,7 @@ final class PaymentCryptographyKeyExchange {
         // the exporter signs it. It is optional in the model, and a block without one is
         // read without the freshness it carries.
         String nonce = text(material, "RandomNonce");
-        if (!nonce.isEmpty() && !isHex(nonce)) {
+        if (!nonce.isEmpty() && !Bytes.isHex(nonce)) {
             throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
         }
         Tr34.Recovered recovered;
@@ -1451,7 +1457,12 @@ final class PaymentCryptographyKeyExchange {
                 PaymentCryptographyKeyAlgorithm.from(algorithmName);
         if (algorithm == null || !algorithm.symmetric()) {
             throw validation("KeyAlgorithm '" + algorithmName + "' is not a symmetric algorithm this "
-                    + "service imports (TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
+                    + "service imports (TDES_2KEY, TDES_3KEY)");
+        }
+        // AS2805's cryptography is all TDES, so only TDES keys leave and come back in
+        // an AS2805 cryptogram.
+        if (!algorithm.isTdes()) {
+            throw validation("an AS2805 key is a TDES key, but " + algorithmName);
         }
         // The wrapping key has to be at least as strong as the key it protects, the same
         // rule the export enforces, so a cryptogram that the export would refuse to write

@@ -1,5 +1,6 @@
 package io.floci.aws.services.paymentcryptography;
 
+import io.floci.aws.services.paymentcryptography.crypto.Bytes;
 import io.floci.aws.services.paymentcryptography.crypto.Ciphers;
 import io.floci.aws.services.paymentcryptography.crypto.ConcatKdf;
 
@@ -111,7 +112,7 @@ public final class PaymentCryptographyAs2805Cryptogram {
         }
         byte[] bound = bind(clearKey, variantByte);
         byte[] check = checkValue(clearKey, algorithm);
-        byte[] plain = pad(concat(bound, check), blockSize(wrappingAlgorithm));
+        byte[] plain = Bytes.pkcs7Pad(Bytes.concat(bound, check), blockSize(wrappingAlgorithm));
         byte[] encryptionKey = derive(wrappingKey, ENCRYPTION_LABEL, wrappingKey.length);
         byte[] authenticationKey = derive(wrappingKey, AUTHENTICATION_LABEL, TAG_BYTES);
         // The vector is fresh for every cryptogram, so the same key under the same wrapping
@@ -125,7 +126,7 @@ public final class PaymentCryptographyAs2805Cryptogram {
         byte[] tag = tag(authenticationKey, algorithm, variantByte, iv, body);
         // The model's pattern for the cryptogram is upper-case hexadecimal, so that is the
         // case it is written in.
-        return HEX_UPPER.formatHex(concat(MARKER, iv, body, tag));
+        return HEX_UPPER.formatHex(Bytes.concat(MARKER, iv, body, tag));
     }
 
     /**
@@ -145,7 +146,7 @@ public final class PaymentCryptographyAs2805Cryptogram {
      */
     public static byte[] unwrap(String cryptogram, int variantByte, PaymentCryptographyKeyAlgorithm algorithm,
                                 byte[] wrappingKey, PaymentCryptographyKeyAlgorithm wrappingAlgorithm) {
-        if (cryptogram == null || !isHex(cryptogram)) {
+        if (cryptogram == null || !Bytes.isHex(cryptogram)) {
             throw new IllegalArgumentException("the cryptogram is not hexadecimal");
         }
         byte[] payload = HEX.parseHex(cryptogram);
@@ -185,7 +186,7 @@ public final class PaymentCryptographyAs2805Cryptogram {
             byte[] plain = wrappingAlgorithm.isAes()
                     ? Ciphers.aesCbcDecrypt(body, encryptionKey, iv)
                     : Ciphers.tdesCbcDecrypt(body, Ciphers.widenTdesKey(encryptionKey), iv);
-            plain = unpad(plain, blockSize);
+            plain = Bytes.pkcs7Unpad(plain, blockSize);
 
             int expected = expectedBytes(algorithm);
             if (plain.length != expected + KCV_BYTES) {
@@ -224,7 +225,7 @@ public final class PaymentCryptographyAs2805Cryptogram {
      */
     private static byte[] tag(byte[] authenticationKey, PaymentCryptographyKeyAlgorithm algorithm,
                               int variantByte, byte[] iv, byte[] body) {
-        byte[] authenticated = concat(MARKER,
+        byte[] authenticated = Bytes.concat(MARKER,
                 algorithm.name().getBytes(StandardCharsets.US_ASCII),
                 new byte[] {(byte) variantByte}, iv, body);
         try {
@@ -273,23 +274,6 @@ public final class PaymentCryptographyAs2805Cryptogram {
         return HEX.parseHex(checkValueHex(clearKey, algorithm));
     }
 
-    /** Whether the text is non-empty and entirely hexadecimal. */
-    private static boolean isHex(String text) {
-        if (text == null || text.isEmpty() || text.length() % 2 != 0) {
-            return false;
-        }
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            boolean digit = c >= '0' && c <= '9';
-            boolean lower = c >= 'a' && c <= 'f';
-            boolean upper = c >= 'A' && c <= 'F';
-            if (!digit && !lower && !upper) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     /** The check value of the key, in upper-case hex. */
     private static String checkValueHex(byte[] clearKey, PaymentCryptographyKeyAlgorithm algorithm) {
         return PaymentCryptographyCrypto.checkValue(clearKey, algorithm);
@@ -306,56 +290,5 @@ public final class PaymentCryptographyAs2805Cryptogram {
     /** The cipher's block size, which the padding works to. */
     private static int blockSize(PaymentCryptographyKeyAlgorithm algorithm) {
         return algorithm.isAes() ? 16 : 8;
-    }
-
-    /**
-     * PKCS#5 padding.
-     *
-     * <p>A whole block is added when the input already fills one, so the
-     * padding is never ambiguous.
-     */
-    private static byte[] pad(byte[] data, int blockSize) {
-        int padLength = blockSize - (data.length % blockSize);
-        byte[] out = new byte[data.length + padLength];
-        System.arraycopy(data, 0, out, 0, data.length);
-        for (int i = 0; i < padLength; i++) {
-            out[data.length + i] = (byte) padLength;
-        }
-        return out;
-    }
-
-    /** Strip PKCS#5 padding, and refuse anything that is not properly padded. */
-    private static byte[] unpad(byte[] data, int blockSize) {
-        if (data.length == 0 || data.length % blockSize != 0) {
-            throw new IllegalArgumentException("the cryptogram did not decrypt to whole blocks");
-        }
-        int padLength = data[data.length - 1] & 0xFF;
-        if (padLength < 1 || padLength > blockSize || padLength > data.length) {
-            throw new IllegalArgumentException(
-                    "the cryptogram did not decrypt under the wrapping key");
-        }
-        for (int i = data.length - padLength; i < data.length; i++) {
-            if ((data[i] & 0xFF) != padLength) {
-                throw new IllegalArgumentException(
-                        "the cryptogram did not decrypt under the wrapping key");
-            }
-        }
-        byte[] out = new byte[data.length - padLength];
-        System.arraycopy(data, 0, out, 0, out.length);
-        return out;
-    }
-
-    private static byte[] concat(byte[]... parts) {
-        int n = 0;
-        for (byte[] p : parts) {
-            n += p.length;
-        }
-        byte[] out = new byte[n];
-        int at = 0;
-        for (byte[] p : parts) {
-            System.arraycopy(p, 0, out, at, p.length);
-            at += p.length;
-        }
-        return out;
     }
 }

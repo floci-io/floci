@@ -823,15 +823,15 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void aKeyThatLeavesUnderAnAs2805CryptogramComesBack() {
-        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
-        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
 
         Map<?, ?> wrapped = as2805Export(key, kek, PIN_VARIANT);
         assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
 
         PaymentCryptographyKey imported = service.importKey("us-east-1", "As2805KeyCryptogram",
                 as2805Import(PIN_VARIANT, kek.getKeyId(), (String) wrapped.get("KeyMaterial"),
-                        "AES_256", "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of());
+                        "TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of());
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals("TR31_P0_PIN_ENCRYPTION_KEY", imported.getKeyUsage());
@@ -841,8 +841,8 @@ class PaymentCryptographyKeyExchangeTest {
     void aCryptogramThatWasChangedDoesNotOpen() {
         // The cryptogram carries a tag over the whole of it, so a cryptogram that was
         // changed does not open at all, and not under a key that is wrong but plausible.
-        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
-        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
 
         String cryptogram = (String) as2805Export(key, kek, PIN_VARIANT).get("KeyMaterial");
         // The character is inside the ciphertext, which is where the key it carries is.
@@ -850,7 +850,7 @@ class PaymentCryptographyKeyExchangeTest {
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "As2805KeyCryptogram",
-                        as2805Import(PIN_VARIANT, kek.getKeyId(), changed, "AES_256",
+                        as2805Import(PIN_VARIANT, kek.getKeyId(), changed, "TDES_3KEY",
                                 "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of()));
 
         assertEquals("ValidationException", refused.getErrorCode());
@@ -861,8 +861,8 @@ class PaymentCryptographyKeyExchangeTest {
         // The material of a key is held while the emulator runs and is not written to the
         // store, so a key read back after a restart has none, and the export says so
         // rather than failing on the missing value.
-        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
-        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
         kek.setKeyMaterialHex(null);
 
         AwsException refused = assertThrows(AwsException.class,
@@ -892,8 +892,8 @@ class PaymentCryptographyKeyExchangeTest {
     void aCryptogramUnderAVariantTheServiceDoesNotServeIsRefused() {
         // The model's union names four variants, and the service serves every one of them,
         // so a variant outside the four names no variant at all.
-        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
-        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
@@ -905,15 +905,15 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void aCryptogramThatIsWrappedUnderTheWrongVariantDoesNotOpen() {
-        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
-        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
 
         String cryptogram = (String) as2805Export(key, kek, PIN_VARIANT).get("KeyMaterial");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "As2805KeyCryptogram",
-                        as2805Import(DATA_VARIANT, kek.getKeyId(), cryptogram, "AES_256",
-                                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"), "", true, Map.of()));
+                        as2805Import(DATA_VARIANT, kek.getKeyId(), cryptogram, "TDES_3KEY",
+                                "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of()));
         assertEquals("ValidationException", refused.getErrorCode());
     }
 
@@ -935,8 +935,8 @@ class PaymentCryptographyKeyExchangeTest {
         // The variant says what the key is for, so a key exported under another variant
         // would come back with the other variant's usage, and the export would change what
         // the key is for.
-        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
-        PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        PaymentCryptographyKey kek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
@@ -952,17 +952,18 @@ class PaymentCryptographyKeyExchangeTest {
         // The wrapping key has to be at least as strong as the key it protects, the same
         // rule the export enforces, so a cryptogram the export would refuse to write does
         // not open here either.
+        // TDES_2KEY is weaker than TDES_3KEY, so a TDES_2KEY wrapping key cannot protect
+        // a TDES_3KEY key.
         PaymentCryptographyKey kek = createKey("TDES_2KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
         String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(
-                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F10111213141516171819"
-                        + "1A1B1C1D1E1F"),
-                0x00, PaymentCryptographyKeyAlgorithm.AES_256,
+                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F1011121314151617"),
+                0x00, PaymentCryptographyKeyAlgorithm.TDES_3KEY,
                 PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()),
                 PaymentCryptographyKeyAlgorithm.TDES_2KEY);
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "As2805KeyCryptogram",
-                        as2805Import(MAJOR_VARIANT, kek.getKeyId(), cryptogram, "AES_256",
+                        as2805Import(MAJOR_VARIANT, kek.getKeyId(), cryptogram, "TDES_3KEY",
                                 "TR31_K0_KEY_ENCRYPTION_KEY"), "", true, Map.of()));
 
         assertEquals("ValidationException", refused.getErrorCode());
