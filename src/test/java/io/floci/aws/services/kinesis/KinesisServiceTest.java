@@ -131,6 +131,22 @@ class KinesisServiceTest {
     }
 
     @Test
+    void deleteStream_internalCallerOnMissingStream_isANoOp() {
+        assertDoesNotThrow(() -> kinesisService.deleteStream("never-created", REGION));
+    }
+
+    @Test
+    void deleteStream_internalCallerWithConsumers_deletesStreamAndConsumers() {
+        KinesisStream stream = kinesisService.createStream("cfn-owned", 1, REGION);
+        kinesisService.registerStreamConsumer(stream.getStreamArn(), "c1", REGION);
+
+        kinesisService.deleteStream("cfn-owned", REGION);
+
+        assertTrue(kinesisService.listStreamDetails(REGION).isEmpty());
+        assertTrue(kinesisService.listStreamConsumers(stream.getStreamArn(), REGION).isEmpty());
+    }
+
+    @Test
     void deleteStream_missingStream_throwsResourceNotFound() {
         AwsException e = assertThrows(AwsException.class,
                 () -> kinesisService.deleteStream("nope", false, REGION));
