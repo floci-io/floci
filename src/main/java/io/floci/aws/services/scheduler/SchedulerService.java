@@ -12,6 +12,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -26,10 +27,11 @@ import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class SchedulerService {
+public class SchedulerService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(SchedulerService.class);
 
@@ -69,6 +71,28 @@ public class SchedulerService {
         this.groupStore = groupStore;
         this.scheduleStore = scheduleStore;
         this.regionResolver = regionResolver;
+    }
+
+    // ──────────────────────────── IAM lookups ────────────────────────────
+
+    @Override
+    public String namespace() {
+        return "scheduler";
+    }
+
+    /** Scheduler mints no part of an ARN a request names, so there is nothing to look up by name. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The schedule group Scheduler acts on for a request naming none, {@code default}, which every account has in
+     * every Region. Reads only: the group is not stored until a request uses it.
+     */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "schedule-group".equals(type) ? Optional.of(buildGroupArn(region, DEFAULT_GROUP)) : Optional.empty();
     }
 
     // ──────────────────────────── Schedule Groups ────────────────────────────

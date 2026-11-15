@@ -73,6 +73,15 @@ public final class RequestResources {
     }
 
     /**
+     * Whether the table reads this namespace whole, every operation's resources from its request as modeled: one it
+     * covers that {@code ResourceArnBuilder} does not build by hand, which a few of its operations may be read for.
+     */
+    public static boolean readsNamespace(String namespace) {
+        return namespace != null && RequestResourceMembers.table().namespaces().contains(namespace)
+                && !builtByHand(namespace);
+    }
+
+    /**
      * The ARNs of the resources a request names, in the request's partition, Region and account: empty when the
      * table does not read the operation or its request names none, so it is checked on {@code *}. The operation,
      * as {@code <namespace>:<Operation>}, is the one the request is dispatched as, never read from the request

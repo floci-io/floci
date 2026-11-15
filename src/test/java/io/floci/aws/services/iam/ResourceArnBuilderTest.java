@@ -2414,65 +2414,101 @@ class ResourceArnBuilderTest {
                 builder.buildResources("apigateway", ctx, "us-gov-west-1", ACCOUNT, "aws-us-gov"));
     }
 
+    /**
+     * Scheduler as IAM asks it: the {@code default} schedule group, in the partition given, the one a request naming
+     * no group acts on.
+     */
+    private static StoredResourceArns schedulerIn(String partition) {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "scheduler";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "schedule-group".equals(type)
+                        ? Optional.of("arn:" + partition + ":scheduler:" + region + ":" + ACCOUNT
+                                + ":schedule-group/default")
+                        : Optional.empty();
+            }
+        };
+    }
+
+    private List<String> schedulerResources(ResourceArnBuilder builder, String method, String sent, String operation) {
+        when(ctx.getMethod()).thenReturn(method);
+        request(sent);
+        return builder.buildResources("scheduler", "scheduler:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    /**
+     * A schedule is in the group its request names, the body's {@code GroupName} on a create or an update and the
+     * {@code groupName} query parameter otherwise, and in the {@code default} group when it names none, as botocore
+     * documents ("If you omit this, the default schedule group is used"); a group is the one its path names; a tag
+     * route's resource the ARN in its path; and the list operations act on no resource type.
+     */
     @Test
-    void schedulerRoutesResolveTheScheduleInItsGroupTheGroupOrTheTaggedArn() {
-        when(uriInfo.getPath()).thenReturn("/schedules/nightly");
-        assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/default/nightly",
-                builder.build("scheduler", ctx, "us-east-1", "000000000000"));
+    void aScheduleIsInTheGroupItsRequestNamesOrTheDefaultOneAndAGroupIsTheOneItsPathNames() {
+        ResourceArnBuilder backed = reading(schedulerIn("aws"));
+        String schedule = "arn:aws:scheduler:us-east-1:000000000000:schedule/";
+
+        assertEquals(List.of(schedule + "default/nightly"),
+                schedulerResources(backed, "GET", "/schedules/nightly", "GetSchedule"));
+        assertEquals(List.of(schedule + "default/nightly"),
+                schedulerResources(backed, "DELETE", "/schedules/nightly", "DeleteSchedule"));
         queryParams.putSingle("groupName", "reports");
-        assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/reports/nightly",
-                builder.build("scheduler", ctx, "us-east-1", "000000000000"));
-        // A create or update names its group in the body, which Scheduler reads, not in the query, which
-        // it ignores for them: a groupName there does not move the check to another group.
-        when(ctx.getMethod()).thenReturn("POST");
-        setJsonBody("{\"GroupName\":\"billing\",\"ScheduleExpression\":\"rate(1 hour)\"}");
-        assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/billing/nightly",
-                builder.build("scheduler", ctx, "us-east-1", "000000000000"));
-        queryParams.putSingle("groupName", "reports");
-        setJsonBody("{\"GroupName\":\"billing\",\"ScheduleExpression\":\"rate(1 hour)\"}");
-        assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/billing/nightly",
-                builder.build("scheduler", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of(schedule + "reports/nightly"),
+                schedulerResources(backed, "GET", "/schedules/nightly?groupName=reports", "GetSchedule"));
+        // A create or update names its group in the body, which Scheduler reads, not in the query, which it
+        // ignores for them: a groupName there does not move the check to another group. A target's ARN is no
+        // schedule's.
+        setJsonBody("{\"GroupName\":\"billing\",\"ScheduleExpression\":\"rate(1 hour)\",\"Target\":{\"Arn\":"
+                + "\"arn:aws:lambda:us-east-1:000000000000:function:f\","
+                + "\"RoleArn\":\"arn:aws:iam::000000000000:role/r\"}}");
+        assertEquals(List.of(schedule + "billing/nightly"),
+                schedulerResources(backed, "POST", "/schedules/nightly?groupName=reports", "CreateSchedule"));
         queryParams.clear();
-        when(ctx.getMethod()).thenReturn("PUT");
         setJsonBody("{\"ScheduleExpression\":\"rate(1 hour)\"}");
-        assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/default/nightly",
-                builder.build("scheduler", ctx, "us-east-1", "000000000000"));
-        when(ctx.getMethod()).thenReturn("GET");
-        queryParams.clear();
-        when(uriInfo.getPath()).thenReturn("/schedule-groups/reports");
-        assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule-group/reports",
-                builder.build("scheduler", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of(schedule + "default/nightly"),
+                schedulerResources(backed, "PUT", "/schedules/nightly", "UpdateSchedule"));
+
         String group = "arn:aws:scheduler:us-east-1:000000000000:schedule-group/reports";
-        when(uriInfo.getPath()).thenReturn("/tags/" + group);
-        assertEquals(group, builder.build("scheduler", ctx, "us-east-1", "000000000000"));
-        // The same tagging is served at /tags, the ARN in the resourceArn query parameter or body field.
-        when(uriInfo.getPath()).thenReturn("/tags");
-        queryParams.putSingle("resourceArn", group);
-        assertEquals(group, builder.build("scheduler", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of(group), schedulerResources(backed, "GET", "/schedule-groups/reports", "GetScheduleGroup"));
+        assertEquals(List.of(group),
+                schedulerResources(backed, "POST", "/schedule-groups/reports", "CreateScheduleGroup"));
+        assertEquals(List.of(group),
+                schedulerResources(backed, "DELETE", "/schedule-groups/reports", "DeleteScheduleGroup"));
+        // An SDK sends the ARN in the path encoded, as one segment of the modeled /tags/{ResourceArn}.
+        String encoded = "/tags/arn%3Aaws%3Ascheduler%3Aus-east-1%3A000000000000%3Aschedule-group%2Freports";
+        assertEquals(List.of(group), schedulerResources(backed, "GET", encoded, "ListTagsForResource"));
+        assertEquals(List.of(group), schedulerResources(backed, "POST", encoded, "TagResource"));
+        queryParams.putSingle("TagKeys", "team");
+        assertEquals(List.of(group), schedulerResources(backed, "DELETE", encoded + "?TagKeys=team", "UntagResource"));
         queryParams.clear();
-        when(ctx.getMethod()).thenReturn("POST");
-        setJsonBody("{\"resourceArn\":\"" + group + "\",\"tags\":[]}");
-        assertEquals(group, builder.build("scheduler", ctx, "us-east-1", "000000000000"));
-        // POST /tags tags the body's ARN, so a resourceArn in the query does not move the check.
-        queryParams.putSingle("resourceArn", "arn:aws:scheduler:us-east-1:000000000000:schedule-group/other");
-        setJsonBody("{\"resourceArn\":\"" + group + "\",\"tags\":[]}");
-        assertEquals(group, builder.build("scheduler", ctx, "us-east-1", "000000000000"));
-        queryParams.clear();
-        when(uriInfo.getPath()).thenReturn("/schedules");
-        assertEquals("*", builder.build("scheduler", ctx, "us-east-1", "000000000000"));
+        assertEquals(List.of("*"), schedulerResources(backed, "GET", "/schedules", "ListSchedules"));
+        assertEquals(List.of("*"), schedulerResources(backed, "GET", "/schedule-groups", "ListScheduleGroups"));
     }
 
     @Test
     void schedulerAndPipesArnsAreMintedInTheRequestsPartition() {
         // A Region no partition publishes takes the deployment's partition, as Scheduler and Pipes mint
         // their ARNs, rather than aws.
-        when(uriInfo.getPath()).thenReturn("/schedules/nightly");
+        ResourceArnBuilder backed = reading(schedulerIn("aws-cn"));
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/schedules/nightly");
         assertEquals(List.of("arn:aws-cn:scheduler:xx-local-1:000000000000:schedule/default/nightly"),
-                builder.buildResources("scheduler", ctx, "xx-local-1", "000000000000", "aws-cn"));
-        when(uriInfo.getPath()).thenReturn("/schedule-groups/reports");
+                backed.buildResources("scheduler", "scheduler:GetSchedule", ctx, "xx-local-1", "000000000000",
+                        "aws-cn"));
+        request("/schedule-groups/reports");
         assertEquals(List.of("arn:aws-cn:scheduler:xx-local-1:000000000000:schedule-group/reports"),
-                builder.buildResources("scheduler", ctx, "xx-local-1", "000000000000", "aws-cn"));
-        when(uriInfo.getPath()).thenReturn("/v1/pipes/orders");
+                backed.buildResources("scheduler", "scheduler:GetScheduleGroup", ctx, "xx-local-1", "000000000000",
+                        "aws-cn"));
+        request("/v1/pipes/orders");
         assertEquals(List.of("arn:aws-cn:pipes:xx-local-1:000000000000:pipe/orders"),
                 builder.buildResources("pipes", ctx, "xx-local-1", "000000000000", "aws-cn"));
     }

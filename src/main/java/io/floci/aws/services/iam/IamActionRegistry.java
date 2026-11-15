@@ -743,6 +743,18 @@ public class IamActionRegistry {
                 .map(IamRestRoutes.Match::labels).orElse(Map.of());
     }
 
+    /**
+     * Whether the path of a request sent to the URI {@code uriInfo} gives is one of the credential scope's vendored
+     * model, whatever method it is sent with: matched still percent-encoded, so an encoded {@code /} stays inside
+     * its label and an unencoded one ends it. True for a scope whose routes are not vendored, which the model
+     * cannot answer for.
+     */
+    public static boolean modelRoutes(String credentialScope, UriInfo uriInfo) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        return !routes.routes(credentialScope)
+                || routes.takesPath(credentialScope, sentPath(uriInfo), uriInfo.getQueryParameters());
+    }
+
     /** Keep the modeled operation when AWS authorizes its route under a different action name. */
     public String operationForRoute(String credentialScope, String action, ContainerRequestContext ctx) {
         if (credentialScope == null || action == null) {
