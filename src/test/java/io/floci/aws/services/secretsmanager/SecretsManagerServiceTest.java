@@ -1801,4 +1801,73 @@ class SecretsManagerServiceTest {
         assertEquals(List.of("AWSCURRENT"), after.getVersions().get(current).getVersionStages());
         assertEquals(current, after.getCurrentVersionId());
     }
+
+    @Test
+    void listSecretsAllFilterSplitsValueIntoWords() {
+        service.createSecret("database", "v", null, "production credentials", null, null, REGION);
+        service.createSecret("unrelated", "v", null, "nothing here", null, null, REGION);
+        List<SecretsManagerService.Filter> filters =
+                List.of(new SecretsManagerService.Filter("all", List.of("Database PRODUCTION")));
+
+        List<Secret> found = service.listSecrets(REGION, filters);
+
+        assertEquals(List.of("database"), found.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void listSecretsAllFilterMatchesWordPrefixInTagsAndNegates() {
+        service.createSecret("alpha", "v", null, null, null, List.of(new Secret.Tag("Team", "Platform")), REGION);
+        service.createSecret("beta", "v", null, null, null, null, REGION);
+
+        List<Secret> tagged = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("zzz plat"))));
+        List<Secret> others = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("!plat zzz"))));
+
+        assertEquals(List.of("alpha"), tagged.stream().map(Secret::getName).toList());
+        assertEquals(List.of("beta"), others.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void batchGetSecretValueByFiltersAllFilterSplitsValueIntoWords() {
+        service.createSecret("database", "v1", null, "production credentials", null, null, REGION);
+        service.createSecret("unrelated", "v2", null, "nothing here", null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> found = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of("database production"))), REGION);
+
+        assertEquals(List.of("database"), found.stream().map(SecretsManagerService.BatchSecretValue::name).toList());
+    }
+
+    @Test
+    void allFilterKeepsANumberFollowedByLettersAsOneWord() {
+        service.createSecret("db2prod", "v1", null, null, null, null, REGION);
+        service.createSecret("prod2db", "v2", null, null, null, null, REGION);
+
+        List<Secret> found = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("prod"))));
+
+        assertEquals(List.of("prod2db"), found.stream().map(Secret::getName).toList());
+    }
+
+    @Test
+    void allFilterWithEmptyValueMatchesEverySecretAndItsNegationMatchesNone() {
+        service.createSecret("alpha", "v1", null, null, null, null, REGION);
+        service.createSecret("beta", "v2", null, "some description", null, null, REGION);
+
+        List<Secret> listedEmpty = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of(""))));
+        List<Secret> listedNegated = service.listSecrets(REGION,
+                List.of(new SecretsManagerService.Filter("all", List.of("!"))));
+        List<SecretsManagerService.BatchSecretValue> batchEmpty = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of(""))), REGION);
+        List<SecretsManagerService.BatchSecretValue> batchNegated = service.batchGetSecretValueByFilters(
+                List.of(new SecretsManagerService.Filter("all", List.of("!"))), REGION);
+
+        assertEquals(List.of("alpha", "beta"), listedEmpty.stream().map(Secret::getName).sorted().toList());
+        assertEquals(List.of(), listedNegated.stream().map(Secret::getName).toList());
+        assertEquals(List.of("alpha", "beta"),
+                batchEmpty.stream().map(SecretsManagerService.BatchSecretValue::name).sorted().toList());
+        assertEquals(List.of(), batchNegated.stream().map(SecretsManagerService.BatchSecretValue::name).toList());
+    }
 }
