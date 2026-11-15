@@ -1500,8 +1500,9 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Returns the underlying DockerClient for operations not covered by this manager.
-     * Prefer using manager methods when available.
+     * Returns the underlying control-plane DockerClient for operations not covered by this
+     * manager. Prefer using manager methods when available. A stream that stays open for a
+     * container's lifetime belongs on the {@link StreamingDocker} client instead.
      */
     public DockerClient getDockerClient() {
         return dockerClient;

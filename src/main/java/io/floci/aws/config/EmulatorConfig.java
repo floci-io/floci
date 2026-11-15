@@ -4152,30 +4152,33 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
-         * Size of the connection pool behind the shared Docker client. Every Docker call leases a
-         * connection from it, and some hold one for as long as a container runs: a Lambda
-         * container holds one (its exit watcher) plus one per extension. Log-follow streams
-         * live in the separate streaming pool. Once the long-lived connections fill this pool,
-         * create, start, stop and remove wait for a free connection, including the calls that
-         * would release one, so the emulator stalls.
+         * Size of the connection pool behind the shared Docker client. Every short Docker call
+         * leases a connection from it, and a few streams hold one for as long as they run:
+         * CodeBuild phase execs, EKS audit followers and ECS Exec sessions. The streams a Lambda
+         * container holds for its whole lifetime live in the separate streaming pool. Once
+         * long-lived connections fill this pool, create, start, stop and remove wait for a free
+         * connection, including the calls that would release one, so the emulator stalls.
          *
-         * <p>1024 rather than the former hard-coded 100, which capped live Lambda containers at
-         * about 50: a tenth of the 500 that the runtime API port range
-         * ({@link LambdaServiceConfig#runtimeApiBasePort}) exists to allow. Connections are
-         * opened on demand, so a small stack never approaches the limit.
+         * <p>1024 rather than the former hard-coded 100. Connections are opened on demand, so a
+         * small stack never approaches the limit.
          */
         @WithDefault("1024")
         int maxConnections();
 
         /**
          * Connection pool size for the {@code @StreamingDocker} DockerClient, sized for the
-         * long-lived container log-follow streams that occupy a slot for a container's entire
-         * lifetime. Exec-output and container-wait streams stay on the main pool. Total live
-         * containers is unbounded across distinct functions (each {@code WarmPool} caps only
-         * per-function), so this pool is sized generously rather than tied to any single
-         * function's warm-pool cap.
+         * long-lived streams that occupy a slot for a container's entire lifetime: container log
+         * follow, and for each Lambda container its exit watcher and one exec per extension.
+         * Total live containers is unbounded across distinct functions (each {@code WarmPool}
+         * caps only per-function), so this pool is sized generously rather than tied to any
+         * single function's warm-pool cap.
+         *
+         * <p>2048 covers the 500 containers the runtime API port range
+         * ({@link LambdaServiceConfig#runtimeApiBasePort}) allows, each with its log follow, its
+         * exit watcher and two extensions. Connections are opened on demand, so a small stack
+         * never approaches the limit.
          */
-        @WithDefault("512")
+        @WithDefault("2048")
         int streamingMaxConnections();
 
         /**

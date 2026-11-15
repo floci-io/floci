@@ -30,13 +30,15 @@ class LambdaExitWatcherTest {
     private final List<Duration> delays = new ArrayList<>();
     private long now;
     private DockerClient docker;
+    private DockerClient streamingDocker;
     private InspectContainerCmd inspect;
 
     @BeforeEach
     void setUp() {
         docker = mock(DockerClient.class);
+        streamingDocker = mock(DockerClient.class);
         WaitContainerCmd wait = mock(WaitContainerCmd.class);
-        when(docker.waitContainerCmd(CONTAINER)).thenReturn(wait);
+        when(streamingDocker.waitContainerCmd(CONTAINER)).thenReturn(wait);
         when(wait.exec(any())).thenAnswer(invocation -> {
             WaitContainerResultCallback callback = invocation.getArgument(0);
             armed.add(callback);
@@ -48,7 +50,7 @@ class LambdaExitWatcherTest {
 
     /** A watch whose clock is {@link #now} and whose scheduler records each delay and runs the task at once. */
     private void watch() {
-        new LambdaExitWatcher(docker, CONTAINER, exits::add, (delay, task) -> {
+        new LambdaExitWatcher(docker, streamingDocker, CONTAINER, exits::add, (delay, task) -> {
             delays.add(delay);
             task.run();
         }, () -> now).arm();
