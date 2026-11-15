@@ -154,6 +154,43 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void describeSecretOmitsRotationEnabledAndLastAccessedDateForAFreshSecret() {
+        createSecret("fresh-secret");
+
+        ObjectNode described = describe("fresh-secret");
+
+        assertThat(described.has("RotationEnabled"), is(false));
+        assertThat(described.has("LastAccessedDate"), is(false));
+    }
+
+    @Test
+    void describeSecretReturnsLastAccessedDateAfterGetSecretValue() {
+        createSecret("read-secret");
+        ObjectNode getReq = MAPPER.createObjectNode();
+        getReq.put("SecretId", "read-secret");
+        handler.handle("GetSecretValue", getReq, REGION);
+
+        assertThat(describe("read-secret").has("LastAccessedDate"), is(true));
+    }
+
+    @Test
+    void listSecretsOmitsRotationEnabledForASecretNeverConfiguredForRotation() {
+        createSecret("list-fresh");
+        createSecret("list-rotating");
+        enableRotation("list-rotating");
+
+        ObjectNode body = (ObjectNode) handler.handle("ListSecrets", MAPPER.createObjectNode(), REGION).getEntity();
+
+        for (JsonNode entry : body.get("SecretList")) {
+            if ("list-fresh".equals(entry.get("Name").asText())) {
+                assertThat(entry.has("RotationEnabled"), is(false));
+            } else {
+                assertThat(entry.get("RotationEnabled").asBoolean(), is(true));
+            }
+        }
+    }
+
+    @Test
     void targetAttachmentOwnershipIsNotExposedByPublicResponses() {
         ObjectNode createReq = MAPPER.createObjectNode();
         createReq.put("Name", "attached-secret");

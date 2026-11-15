@@ -97,7 +97,7 @@ class TestSecretsManagerSecret:
         try:
             response = secretsmanager_client.describe_secret(SecretId=secret_name)
             assert response.get("Tags")
-            assert not response.get("RotationEnabled", True)
+            assert not response.get("RotationEnabled", False)
         finally:
             secretsmanager_client.delete_secret(
                 SecretId=secret_name, ForceDeleteWithoutRecovery=True

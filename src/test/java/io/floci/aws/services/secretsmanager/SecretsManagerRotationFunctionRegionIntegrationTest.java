@@ -57,7 +57,7 @@ class SecretsManagerRotationFunctionRegionIntegrationTest {
         secretsManager("DescribeSecret", "{\"SecretId\": \"" + secretName + "\"}")
             .then()
             .statusCode(200)
-            .body("RotationEnabled", equalTo(false))
+            .body("RotationEnabled", nullValue())
             .body("RotationLambdaARN", nullValue());
     }
 

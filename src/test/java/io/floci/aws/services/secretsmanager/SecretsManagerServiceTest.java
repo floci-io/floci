@@ -1287,6 +1287,18 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void rotationConfiguredIsFalseUntilRotateSecretAndSurvivesCancel() {
+        service.createSecret("rotating", "v1", null, null, null, null, REGION);
+        assertFalse(service.describeSecret("rotating", REGION).isRotationConfigured());
+
+        enableRotation("rotating");
+        assertTrue(service.describeSecret("rotating", REGION).isRotationConfigured());
+
+        service.cancelRotateSecret("rotating", REGION);
+        assertTrue(service.describeSecret("rotating", REGION).isRotationConfigured());
+    }
+
+    @Test
     void cancelRotateSecretReportsNoPendingVersionWhenNoneIsStaged() {
         service.createSecret("rotating", "v1", null, null, null, null, REGION);
         enableRotation("rotating");

@@ -19,6 +19,7 @@ public class Secret {
     private String description;
     private String kmsKeyId;
     private boolean rotationEnabled;
+    private boolean rotationConfigured;
     private Instant createdDate;
     private Instant lastChangedDate;
     private Instant lastAccessedDate;
@@ -108,6 +109,18 @@ public class Secret {
 
     public void setRotationEnabled(boolean rotationEnabled) {
         this.rotationEnabled = rotationEnabled;
+        if (rotationEnabled) {
+            this.rotationConfigured = true;
+        }
+    }
+
+    /** True once rotation has been configured at least once, even if it was later cancelled. */
+    public boolean isRotationConfigured() {
+        return rotationConfigured;
+    }
+
+    public void setRotationConfigured(boolean rotationConfigured) {
+        this.rotationConfigured = rotationConfigured;
     }
 
     public Instant getCreatedDate() {
