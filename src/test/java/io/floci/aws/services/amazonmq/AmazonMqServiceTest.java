@@ -13,6 +13,7 @@ import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -191,12 +192,12 @@ class AmazonMqServiceTest {
 
         inRegion("eu-west-1");
         assertEquals(List.of(), service.listBrokers());
-        assertEquals("NotFoundException",
-                assertThrows(AwsException.class, () -> service.describeBroker(brokerId)).getErrorCode());
-        assertEquals("NotFoundException",
-                assertThrows(AwsException.class, () -> service.rebootBroker(brokerId)).getErrorCode());
-        assertEquals("NotFoundException",
-                assertThrows(AwsException.class, () -> service.deleteBroker(brokerId)).getErrorCode());
+        for (Executable call : List.<Executable>of(
+                () -> service.describeBroker(brokerId),
+                () -> service.rebootBroker(brokerId),
+                () -> service.deleteBroker(brokerId))) {
+            assertEquals("NotFoundException", assertThrows(AwsException.class, call).getErrorCode());
+        }
 
         inRegion("us-east-1");
         assertEquals(List.of(brokerId), service.listBrokers().stream().map(Broker::getBrokerId).toList());
