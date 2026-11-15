@@ -58,10 +58,17 @@ public class AuthMiddleware {
             Map<String, String> headers, GraphqlApi api, Set<AuthenticationType> configured, AuthRequestInfo info) {
         boolean bearerModes = configured.contains(AuthenticationType.AMAZON_COGNITO_USER_POOLS)
                 || configured.contains(AuthenticationType.OPENID_CONNECT);
-        if (bearerModes && CredentialClassifier.isBareJwt(CredentialClassifier.header(headers, "authorization"))) {
+        String authorization = CredentialClassifier.header(headers, "authorization");
+        if (bearerModes && isDecodableBareJwt(authorization)) {
             return authenticateBearer(headers, api, configured, info);
         }
         return authenticateLambda(headers, api, configured, info);
+    }
+
+    private boolean isDecodableBareJwt(String authorization) {
+        return CredentialClassifier.isBareJwt(authorization)
+                && jwtClaimsDecoder.decodeHeader(authorization).isPresent()
+                && jwtClaimsDecoder.decode(authorization).isPresent();
     }
 
     private AppSyncAuthContext authenticateApiKey(
