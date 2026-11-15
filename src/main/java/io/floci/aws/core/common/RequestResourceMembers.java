@@ -55,6 +55,8 @@ final class RequestResourceMembers {
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
+    /** A word of a child type's own and one id, which its format appends to its parent's whole resource. */
+    private static final Pattern NESTED_ID = Pattern.compile("[/:][A-Za-z][A-Za-z0-9-]*[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way. */
     private static final List<String> FOUND_ONLY = List.of("arnOf", "fixed");
     /** The keys of a resource read from a member holding its ARN. */
@@ -273,9 +275,11 @@ final class RequestResourceMembers {
     /**
      * A resource a create makes under a parent its action acts on, from a member holding the parent's ARN: the
      * parent's resource with its leading type word {@code parentWord} replaced by {@code childWord} and an open
-     * id appended after {@code separator} ({@code listener/app/<lb>/<id>/*} under {@code loadbalancer/app/...}).
+     * id appended after {@code infix} ({@code listener/app/<lb>/<id>/*} under {@code loadbalancer/app/...}, infix
+     * {@code /}), or the parent's whole resource with a word of the child's own before the open id
+     * ({@code bucket/<name>/table/*} under {@code bucket/<name>}, infix {@code /table/}).
      */
-    record Created(String type, String parent, Member arn, String parentWord, String childWord, String separator) {
+    record Created(String type, String parent, Member arn, String parentWord, String childWord, String infix) {
     }
 
     /** An ordered heterogeneous id list; unsupported ids retain wildcard authorization. */
@@ -783,15 +787,18 @@ final class RequestResourceMembers {
         String parent = created.path("parent").asText("");
         Matcher child = formats.containsKey(type) ? RESOURCE_PART.matcher(formats.get(type).format()) : null;
         Matcher under = formats.containsKey(parent) ? RESOURCE_PART.matcher(formats.get(parent).format()) : null;
+        boolean nested = child != null && under != null && child.matches() && under.matches()
+                && child.group(1).equals(under.group(1));
         if (child == null || under == null || !child.matches() || !under.matches()
-                || child.group(1).equals(under.group(1)) || !child.group(2).startsWith(under.group(2))
-                || !APPENDED_ID.matcher(child.group(2).substring(under.group(2).length())).matches()) {
+                || !child.group(2).startsWith(under.group(2))
+                || !(nested ? NESTED_ID : APPENDED_ID).matcher(child.group(2).substring(under.group(2).length()))
+                        .matches()) {
             throw new IllegalStateException(RESOURCE_NAME + " creates a " + type + " for " + operation
                     + " under a " + parent + ", no parent of it");
         }
-        String separator = child.group(2).substring(under.group(2).length(), under.group(2).length() + 1);
+        String appended = child.group(2).substring(under.group(2).length());
         return new Created(type, parent, member(operation, created.path("arn").asText("")), under.group(1),
-                child.group(1), separator);
+                child.group(1), appended.substring(0, appended.indexOf("${")));
     }
 
     private static Member member(String operation, String path) {

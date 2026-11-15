@@ -1034,6 +1034,9 @@
       "ListTrafficPolicyInstances",
       "TestDNSAnswer"
     ],
+    "s3tables": [
+      "ListTableBuckets"
+    ],
     "scheduler": [
       "ListScheduleGroups",
       "ListSchedules",

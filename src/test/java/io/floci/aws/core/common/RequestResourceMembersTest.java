@@ -586,6 +586,15 @@ class RequestResourceMembersTest {
                     String parent = example(table.formats().get(namespace).get(created.parent()).format());
                     String child = example(table.formats().get(namespace).get(created.type()).format());
                     String expected = child.substring(0, child.length() - 1) + "*";
+                    // A REST request carrying the parent's ARN in its path names it there alone (S3 Tables'
+                    // CreateTable, under /tables/{tableBucketARN}/...), as its handler reads it.
+                    String where = table.located().getOrDefault(operation.getKey(), Map.of()).get(created.arn().name());
+                    if (where != null && where.startsWith("{")) {
+                        assertTrue(RequestResources.created(operation.getKey(), null, json("{}"), "aws", "us-east-1",
+                                "000000000000", Map.of(where.substring(1, where.length() - 1), parent))
+                                .contains(expected), where + " " + parent);
+                        return;
+                    }
                     ObjectNode body = MAPPER.createObjectNode();
                     if (created.arn().list()) {
                         body.putArray(created.arn().name()).add(parent);
