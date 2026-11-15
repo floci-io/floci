@@ -85,7 +85,7 @@ public interface StoredResourceArns {
      * when the service holds no such resource or keeps no tags on it. Read on every request checked on such an ARN,
      * so it reads the one resource the ARN names and leaves the resource as it is (a secret's last-accessed date).
      */
-    default Map<String, String> tags(String arn) {
+    default Map<String, String> storedTags(String arn) {
         return Map.of();
     }
 

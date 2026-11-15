@@ -558,7 +558,7 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
      * and leaves the secret's last-accessed date as it is.
      */
     @Override
-    public Map<String, String> tags(String arn) {
+    public Map<String, String> storedTags(String arn) {
         AwsArnUtils.Arn parsed = parseOrNull(arn);
         String name = secretNameOrNull(parsed);
         int named = name == null ? -1 : name.length() - RANDOM_SUFFIX_LENGTH - 1;

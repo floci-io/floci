@@ -3025,7 +3025,7 @@ floci populates:
   takes the resource-tag keys the generated `resourceTagKeys` table in `iam-request-resources.json` gives
   its type (`aws:ResourceTag/`, `secretsmanager:ResourceTag/`), which `regen_iam_request_resources.py`
   reads from the Service Reference for every namespace it reads, valued from the tags the type's service
-  holds on that resource (`StoredResourceArns.tags`); a service that holds none leaves them absent.
+  holds on that resource (`StoredResourceArns.storedTags`); a service that holds none leaves them absent.
   Secrets Manager answers for its secrets. Tag keys differing only in case are one condition key holding
   every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and

@@ -881,7 +881,7 @@ class IamConditionContextResolverTest {
             }
 
             @Override
-            public Map<String, String> tags(String arn) {
+            public Map<String, String> storedTags(String arn) {
                 return secret.equals(arn) ? held : Map.of();
             }
         });

@@ -177,7 +177,7 @@ public class IamConditionContextResolver {
      * The condition keys the tags of the resource {@code resource} names give: each resource-tag key the
      * request-resources table gives the ARN's type ({@code aws:ResourceTag/<key>},
      * {@code secretsmanager:ResourceTag/<key>}) for each tag the service of the ARN's namespace holds on it
-     * ({@link StoredResourceArns#tags}), whatever the namespace; null when the table gives the type no such keys or
+     * ({@link StoredResourceArns#storedTags}), whatever the namespace; null when the table gives the type no such keys or
      * the service holds no tags there. Tag keys differing only in case are one condition key, as IAM's keys are,
      * holding every value, so a set operator sees each. Read for each ARN on its own, never borrowed from another
      * target in the same request; {@link #withResourceTags} puts them in that ARN's context.
@@ -190,7 +190,7 @@ public class IamConditionContextResolver {
         Map<String, List<String>> types = RequestResourceMembers.table().resourceTagKeys()
                 .getOrDefault(namespace, Map.of());
         StoredResourceArns stored = types.isEmpty() ? null : storedResourceArns(namespace);
-        Map<String, String> tags = stored == null ? Map.of() : stored.tags(resource);
+        Map<String, String> tags = stored == null ? Map.of() : stored.storedTags(resource);
         List<String> prefixes = tags.isEmpty() ? List.of() : resourceTagPrefixes(namespace, resource, types);
         if (prefixes.isEmpty()) {
             return null;
