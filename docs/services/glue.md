@@ -353,6 +353,16 @@ The operations are the twelve AWS lists: `GetConfig`, `ListNamespaces`, `CreateN
 
 Not yet: IAM policies are not checked on this endpoint, so under IAM enforcement it answers only the account's root credentials and Floci's own query engine, and refuses IAM principals (`ForbiddenException`, 403) rather than let them through unchecked. Other accounts' catalogs and nested catalogs (`s3tablescatalog/<bucket>`) are not served. DuckDB signs SigV4 catalog requests only over HTTPS, so DuckDB attaches this endpoint with SigV4 only when Floci serves TLS (`floci.tls.enabled`).
 
+## Catalogs and Amazon S3 Tables
+
+`CreateCatalog`, `GetCatalog`, `GetCatalogs`, `UpdateCatalog` and `DeleteCatalog` manage catalogs beside the account's default one. Integrating table buckets with AWS analytics services creates the federated catalog `s3tablescatalog`:
+
+```bash
+aws glue create-catalog --cli-input-json '{"Name":"s3tablescatalog","CatalogInput":{"FederatedCatalog":{"Identifier":"arn:aws:s3tables:us-east-1:000000000000:bucket/*","ConnectionName":"aws:s3tables"},"AllowFullTableExternalDataAccess":"True"}}'
+```
+
+Each table bucket of the account is then a child catalog, `s3tablescatalog/<bucket>` (or `<account>:s3tablescatalog/<bucket>`), listed by `GetCatalogs` with `ParentCatalogId` `s3tablescatalog`, whose `FederatedCatalog.Identifier` is the bucket's ARN. With that `CatalogId`, `GetDatabases` and `GetDatabase` answer the bucket's namespaces, and `GetTables` and `GetTable` its tables, read from S3 Tables: Iceberg tables whose `metadata_location` and columns come from the table's current metadata file. A table without metadata yet has neither. Catalog ids answer as `<account>:<catalog>[/<child>]`. Writing through a federated catalog (`CreateDatabase`, `CreateTable` with its `CatalogId`), a federated catalog's IAM resources, and the Iceberg REST endpoint's federated catalogs are not served yet.
+
 ## Configuration
 
 | Variable | Default | Description |
