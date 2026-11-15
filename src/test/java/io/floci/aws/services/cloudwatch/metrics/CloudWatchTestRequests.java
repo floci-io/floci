@@ -18,6 +18,15 @@ final class CloudWatchTestRequests {
     private CloudWatchTestRequests() {
     }
 
+    static void deleteAlarm(URI endpoint, String scope, String name) {
+        try {
+            call(endpoint, scope, true, "DeleteAlarms", Map.of("AlarmNames", List.of(name)))
+                    .then().statusCode(200);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     static Response call(URI endpoint, String scope, boolean json, String operation, Map<String, ?> body)
             throws JsonProcessingException {
         if (json) {

@@ -285,14 +285,7 @@ class CompositeAlarmIntegrationTest {
     private Response call(boolean json, String operation, Map<String, ?> body) throws JsonProcessingException {
         if ("PutCompositeAlarm".equals(operation) || "PutMetricAlarm".equals(operation)) {
             String name = body.get("AlarmName").toString();
-            cleanup.register(() -> {
-                try {
-                    CloudWatchTestRequests.call(baseUri, SCOPE, true, "DeleteAlarms",
-                            Map.of("AlarmNames", List.of(name))).then().statusCode(200);
-                } catch (JsonProcessingException e) {
-                    throw new IllegalStateException(e);
-                }
-            });
+            cleanup.register(() -> CloudWatchTestRequests.deleteAlarm(baseUri, SCOPE, name));
         }
         return CloudWatchTestRequests.call(baseUri, SCOPE, json, operation, body);
     }
