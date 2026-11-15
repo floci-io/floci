@@ -1261,15 +1261,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
         }
         int pageSize = limit == null ? 25 : Math.min(limit, 500);
+        if (position != null && position.isBlank()) {
+            throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+        }
         int start = 0;
-        if (position != null && !position.isBlank()) {
-            while (start < authorizers.size() && !position.equals(authorizers.get(start).getId())) {
+        if (position != null) {
+            while (start < authorizers.size() && authorizers.get(start).getId().compareTo(position) <= 0) {
                 start++;
             }
-            if (start == authorizers.size()) {
-                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
-            }
-            start++;
         }
         int end = Math.min(start + pageSize, authorizers.size());
         String nextPosition = end < authorizers.size() ? authorizers.get(end - 1).getId() : null;
