@@ -123,6 +123,7 @@ class EmrDockerRunnerDockerIntegrationTest {
         startCluster("[]");
 
         assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop-streaming",
+                "-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1",
                 "-files", side("mapper.py", "reducer.py"), "-mapper", "python3 mapper.py",
                 "-reducer", "python3 reducer.py", "-input", s3Uri("in/"), "-output", s3Uri("out/")));
         assertEquals(WORD_COUNTS, counts("out/"));
@@ -166,6 +167,7 @@ class EmrDockerRunnerDockerIntegrationTest {
         startCluster("[]");
 
         assertEquals("COMPLETED", runStep("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar",
+                "-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1",
                 "-files", side("mapper.py", "reducer.py"), "-mapper", "python3 mapper.py",
                 "-reducer", "python3 reducer.py", "-input", s3Uri("in/"), "-output", s3Uri("jar-out/")));
         assertEquals(WORD_COUNTS, counts("jar-out/"));
