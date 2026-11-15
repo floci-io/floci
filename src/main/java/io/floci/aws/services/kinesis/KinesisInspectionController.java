@@ -91,7 +91,7 @@ public class KinesisInspectionController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("StreamName", stream.getStreamName());
         node.put("StreamARN", stream.getStreamArn());
-        node.put("StreamStatus", stream.getStreamStatus());
+        node.put("StreamStatus", kinesisService.streamStatus(stream));
         node.put("StreamMode", stream.getStreamMode());
         node.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
         node.put("EncryptionType", stream.getEncryptionType());

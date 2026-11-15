@@ -81,7 +81,8 @@ class AthenaQueryScopeTest {
             String id = RequestScopes.callAs(account, REGION,
                     () -> athena.startQueryExecution("SELECT 1", "primary", context, null));
 
-            assertEquals(List.of(expected, account), handedToDuck.get(10, TimeUnit.SECONDS));
+            assertEquals(List.of(TrinoSqlCompatibility.FUNCTION_MACROS + expected, account),
+                    handedToDuck.get(10, TimeUnit.SECONDS));
             await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).untilAsserted(() ->
                     assertEquals(QueryExecutionState.SUCCEEDED, RequestScopes.callAs(account, REGION,
                             () -> athena.getQueryExecution(id).getStatus().getState())));

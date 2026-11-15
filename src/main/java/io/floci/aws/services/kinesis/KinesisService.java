@@ -1,6 +1,7 @@
 package io.floci.aws.services.kinesis;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
@@ -77,6 +78,8 @@ public class KinesisService implements ResourceProvider {
     private final StorageBackend<String, KinesisConsumer> consumerStore;
     private final RegionResolver regionResolver;
     private final Clock clock;
+    private final long creatingDelayMillis;
+    private final long updatingDelayMillis;
     private final AtomicLong sequenceGenerator = new AtomicLong(System.currentTimeMillis());
     // One monitor per stream key, handed out by lockFor. Serializes sequence allocation + shard
     // append + persist so the in-memory log, the assigned sequence order and the WAL write order
@@ -95,6 +98,16 @@ public class KinesisService implements ResourceProvider {
     Runnable putRecordBeforeLockHook = () -> {};
 
     @Inject
+    public KinesisService(StorageFactory factory, RegionResolver regionResolver, EmulatorConfig config) {
+        this(factory.create("kinesis", "kinesis-streams.json",
+                        new TypeReference<Map<String, KinesisStream>>() {}),
+                factory.create("kinesis", "kinesis-consumers.json",
+                        new TypeReference<Map<String, KinesisConsumer>>() {}),
+                regionResolver, Clock.systemUTC(),
+                config.services().kinesis().creatingDelayMillis(),
+                config.services().kinesis().updatingDelayMillis());
+    }
+
     public KinesisService(StorageFactory factory, RegionResolver regionResolver) {
         this(factory.create("kinesis", "kinesis-streams.json",
                         new TypeReference<Map<String, KinesisStream>>() {}),
@@ -117,10 +130,54 @@ public class KinesisService implements ResourceProvider {
     KinesisService(StorageBackend<String, KinesisStream> store,
                    StorageBackend<String, KinesisConsumer> consumerStore,
                    RegionResolver regionResolver, Clock clock) {
+        this(store, consumerStore, regionResolver, clock, 0, 0);
+    }
+
+    KinesisService(StorageBackend<String, KinesisStream> store,
+                   StorageBackend<String, KinesisConsumer> consumerStore,
+                   RegionResolver regionResolver, Clock clock,
+                   long creatingDelayMillis, long updatingDelayMillis) {
+        if (creatingDelayMillis < 0 || updatingDelayMillis < 0) {
+            throw new IllegalArgumentException("Kinesis status delays must be non-negative");
+        }
         this.store = store;
         this.consumerStore = consumerStore;
         this.regionResolver = regionResolver;
         this.clock = clock;
+        this.creatingDelayMillis = creatingDelayMillis;
+        this.updatingDelayMillis = updatingDelayMillis;
+    }
+
+    private void requireActive(KinesisStream stream) {
+        String status = streamStatus(stream);
+        if (!"ACTIVE".equals(status)) {
+            throw new AwsException("ResourceInUseException",
+                    "Stream " + stream.getStreamName() + " is not ACTIVE (current state: " + status + ")", 400);
+        }
+    }
+
+    String streamStatus(KinesisStream stream) {
+        return stream.getStreamStatus(clock.instant());
+    }
+
+    void requireWritableStream(KinesisStream stream) {
+        String status = streamStatus(stream);
+        if (!"ACTIVE".equals(status) && !"UPDATING".equals(status)) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Stream " + stream.getStreamName() + " is not ready (current state: " + status + ")", 400);
+        }
+    }
+
+    private void enterStatusWindow(KinesisStream stream, String status, long delayMillis) {
+        if (delayMillis == 0) {
+            stream.setStatusWindow("ACTIVE", null);
+        } else {
+            stream.setStatusWindow(status, clock.instant().plusMillis(delayMillis));
+        }
+    }
+
+    private void beginStatusUpdate(KinesisStream stream) {
+        enterStatusWindow(stream, "UPDATING", updatingDelayMillis);
     }
 
     public KinesisStream createStream(String streamName, int shardCount, String region) {
@@ -138,24 +195,42 @@ public class KinesisService implements ResourceProvider {
      */
     public KinesisStream createStream(String streamName, int shardCount, String streamMode,
                                       Integer maxRecordSizeInKiB, String region) {
+        return createStream(streamName, shardCount, streamMode, maxRecordSizeInKiB, Map.of(), region);
+    }
+
+    public KinesisStream createStream(String streamName, int shardCount, String streamMode,
+                                      Integer maxRecordSizeInKiB, Map<String, String> tags, String region) {
+        return createStream(streamName, shardCount, streamMode, maxRecordSizeInKiB, tags, null, region);
+    }
+
+    public KinesisStream createStream(String streamName, int shardCount, String streamMode,
+                                      Integer maxRecordSizeInKiB, Map<String, String> tags,
+                                      Integer retentionPeriodHours, String region) {
         String resolvedMode = streamMode != null ? streamMode : DEFAULT_STREAM_MODE;
-        if (!VALID_STREAM_MODES.contains(resolvedMode)) {
-            throw new AwsException("InvalidArgumentException",
-                    "StreamMode must be PROVISIONED or ON_DEMAND, got: " + resolvedMode, 400);
-        }
+        validateStreamMode(resolvedMode);
         if (maxRecordSizeInKiB != null) {
             validateMaxRecordSize(maxRecordSizeInKiB, "InvalidArgumentException");
+        }
+        if (retentionPeriodHours != null && (retentionPeriodHours < 24 || retentionPeriodHours > 8760)) {
+            throw new AwsException("InvalidArgumentException",
+                    "Retention period must be between 24 and 8760 hours", 400);
         }
 
         String storageKey = regionKey(region, streamName);
         if (store.get(storageKey).isPresent()) {
             throw new AwsException("ResourceInUseException", "Stream already exists: " + streamName, 400);
         }
+        validateTagCapacity(Map.of(), tags);
 
         String arn = regionResolver.buildArn("kinesis", region, "stream/" + streamName);
         KinesisStream stream = new KinesisStream(streamName, arn);
         stream.setAccountId(regionResolver.getAccountId());
         stream.setStreamMode(resolvedMode);
+        stream.getTags().putAll(tags);
+        if (retentionPeriodHours != null) {
+            stream.setRetentionPeriodHours(retentionPeriodHours);
+        }
+        enterStatusWindow(stream, "CREATING", creatingDelayMillis);
         if (maxRecordSizeInKiB != null) {
             stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
         }
@@ -175,26 +250,28 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void updateStreamMode(String streamName, String streamMode, String region) {
-        if (streamMode == null || !VALID_STREAM_MODES.contains(streamMode)) {
-            throw new AwsException("InvalidArgumentException",
-                    "StreamMode must be PROVISIONED or ON_DEMAND, got: " + streamMode, 400);
-        }
+        validateStreamMode(streamMode);
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
-            if (!"ACTIVE".equals(stream.getStreamStatus())) {
-                throw new AwsException("ResourceInUseException",
-                        "Stream " + streamName + " is not ACTIVE (current state: " + stream.getStreamStatus() + ")", 400);
-            }
+            requireActive(stream);
             // Same-mode is a no-op. Mirrors the same-value behaviour in
             // increase/decreaseStreamRetentionPeriod (see #342). Avoids breaking
             // terraform-provider-aws which calls UpdateStreamMode on every refresh.
             if (streamMode.equals(stream.getStreamMode())) {
                 return;
             }
+            beginStatusUpdate(stream);
             stream.setStreamMode(streamMode);
             store.put(key, stream);
             LOG.infov("Updated stream mode for {0} to {1}", streamName, streamMode);
+        }
+    }
+
+    public static void validateStreamMode(String streamMode) {
+        if (streamMode == null || !VALID_STREAM_MODES.contains(streamMode)) {
+            throw new AwsException("InvalidArgumentException",
+                    "StreamMode must be PROVISIONED or ON_DEMAND, got: " + streamMode, 400);
         }
     }
 
@@ -290,6 +367,7 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
+            requireActive(stream);
             validateTagCapacity(stream.getTags(), tags);
             stream.getTags().putAll(tags);
             store.put(key, stream);
@@ -300,6 +378,7 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
+            requireActive(stream);
             tagKeys.forEach(stream.getTags()::remove);
             store.put(key, stream);
         }
@@ -324,6 +403,7 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = describeStreamByArn(resourceArn, region);
+            requireActive(stream);
             validateResourceTagLimit(stream.getTags(), tags);
             stream.getTags().putAll(tags);
             store.put(key, stream);
@@ -344,6 +424,7 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = describeStreamByArn(resourceArn, region);
+            requireActive(stream);
             tagKeys.forEach(stream.getTags()::remove);
             store.put(key, stream);
         }
@@ -394,7 +475,7 @@ public class KinesisService implements ResourceProvider {
         validateTagCapacity(current, added);
     }
 
-    private static void validateTagCapacity(Map<String, String> current, Map<String, String> added) {
+    public static void validateTagCapacity(Map<String, String> current, Map<String, String> added) {
         Set<String> keys = new HashSet<>(current.keySet());
         keys.addAll(added.keySet());
         if (keys.size() > 50 && added.keySet().stream().anyMatch(key -> !current.containsKey(key))) {
@@ -406,6 +487,8 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
+            requireActive(stream);
+            beginStatusUpdate(stream);
             stream.setEncryptionType(encryptionType);
             stream.setKeyId(keyId);
             store.put(key, stream);
@@ -433,6 +516,7 @@ public class KinesisService implements ResourceProvider {
             if (retentionPeriodHours == stream.getRetentionPeriodHours()) {
                 return;
             }
+            requireActive(stream);
             stream.setRetentionPeriodHours(retentionPeriodHours);
             store.put(key, stream);
             LOG.infov("Increased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
@@ -457,6 +541,7 @@ public class KinesisService implements ResourceProvider {
             if (retentionPeriodHours == stream.getRetentionPeriodHours()) {
                 return;
             }
+            requireActive(stream);
             stream.setRetentionPeriodHours(retentionPeriodHours);
             store.put(key, stream);
             LOG.infov("Decreased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
@@ -513,6 +598,8 @@ public class KinesisService implements ResourceProvider {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             KinesisStream stream = resolveStream(streamName, region);
+            requireActive(stream);
+            beginStatusUpdate(stream);
             stream.setEncryptionType("NONE");
             stream.setKeyId(null);
             store.put(key, stream);
@@ -520,6 +607,11 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void splitShard(String streamName, String shardId, String newStartingHashKey, String region) {
+        splitShard(streamName, shardId, newStartingHashKey, region, false);
+    }
+
+    private void splitShard(String streamName, String shardId, String newStartingHashKey,
+                            String region, boolean fromShardCountUpdate) {
         String key = regionKey(region, streamName);
         // Share the producer critical section so a split can't race an append: selectShard runs
         // under the same lock, so a producer never appends to a parent a completed split has closed.
@@ -527,6 +619,9 @@ public class KinesisService implements ResourceProvider {
             // Resolve under the lock so a concurrent deleteStream (same monitor) cannot leave us
             // mutating and re-persisting a stale, deleted instance.
             KinesisStream stream = resolveStream(streamName, region);
+            if (!fromShardCountUpdate) {
+                requireActive(stream);
+            }
             KinesisShard parent = stream.getShards().stream()
                     .filter(s -> s.getShardId().equals(shardId))
                     .findFirst()
@@ -545,24 +640,21 @@ public class KinesisService implements ResourceProvider {
                 throw new AwsException("InvalidArgumentException",
                         "NewStartingHashKey must be inside the parent shard's hash range.", 400);
             }
+            String start = parentRange.startingHashKey();
+            String end = parentRange.endingHashKey();
+            String leftEnd = subtractOne(newStartingHashKey);
+            if (!fromShardCountUpdate) {
+                beginStatusUpdate(stream);
+            }
             normalizeOpenShardRanges(stream, legacyOpenShards);
-
             parent.setClosed(true);
             parent.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(
                     parent.getSequenceNumberRange().startingSequenceNumber(),
                     String.valueOf(sequenceGenerator.get())));
 
-            String start = parent.getHashKeyRange().startingHashKey();
-            String end = parent.getHashKeyRange().endingHashKey();
-
-            // Derive both child ids from the base size WITHOUT relying on the first add: nextShardId
-            // is size-based, so two sequential adds would either collide (both ids computed pre-add)
-            // or expose a half-published topology (child1 visible before child2). Compute base+0 and
-            // base+1 up front so the ids stay distinct, then publish BOTH children in one atomic
-            // CopyOnWriteArrayList.addAll, so a lock-free reader can never observe {parent, child1}
-            // without child2.
+            // Publish both children in one addAll, so lock-free readers never see only one.
             int base = stream.getShards().size();
-            KinesisShard child1 = new KinesisShard(String.format("shardId-%012d", base), start, subtractOne(newStartingHashKey), String.valueOf(sequenceGenerator.get()));
+            KinesisShard child1 = new KinesisShard(String.format("shardId-%012d", base), start, leftEnd, String.valueOf(sequenceGenerator.get()));
             child1.setParentShardId(shardId);
 
             KinesisShard child2 = new KinesisShard(String.format("shardId-%012d", base + 1), newStartingHashKey, end, String.valueOf(sequenceGenerator.get()));
@@ -575,11 +667,19 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void mergeShards(String streamName, String shardId, String adjacentShardId, String region) {
+        mergeShards(streamName, shardId, adjacentShardId, region, false);
+    }
+
+    private void mergeShards(String streamName, String shardId, String adjacentShardId,
+                             String region, boolean fromShardCountUpdate) {
         String key = regionKey(region, streamName);
         synchronized (lockFor(key)) {
             // Resolve under the lock so a concurrent deleteStream (same monitor) cannot leave us
             // mutating and re-persisting a stale, deleted instance.
             KinesisStream stream = resolveStream(streamName, region);
+            if (!fromShardCountUpdate) {
+                requireActive(stream);
+            }
             KinesisShard shard1 = stream.getShards().stream()
                     .filter(s -> s.getShardId().equals(shardId))
                     .findFirst()
@@ -602,22 +702,17 @@ public class KinesisService implements ResourceProvider {
             if (!end1.add(BigInteger.ONE).equals(start2) && !end2.add(BigInteger.ONE).equals(start1)) {
                 throw new AwsException("InvalidArgumentException", "Shards must have adjacent hash ranges.", 400);
             }
+            String start = start1.min(start2).toString();
+            String end = end1.max(end2).toString();
+            if (!fromShardCountUpdate) {
+                beginStatusUpdate(stream);
+            }
             normalizeOpenShardRanges(stream, legacyOpenShards);
-
             shard1.setClosed(true);
             shard2.setClosed(true);
             String seq = String.valueOf(sequenceGenerator.get());
             shard1.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard1.getSequenceNumberRange().startingSequenceNumber(), seq));
             shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
-
-            // Combine the adjacent hash ranges.
-            BigInteger s1Start = new BigInteger(shard1.getHashKeyRange().startingHashKey());
-            BigInteger s2Start = new BigInteger(shard2.getHashKeyRange().startingHashKey());
-
-            String start = s1Start.min(s2Start).toString();
-            BigInteger s1End = new BigInteger(shard1.getHashKeyRange().endingHashKey());
-            BigInteger s2End = new BigInteger(shard2.getHashKeyRange().endingHashKey());
-            String end = s1End.max(s2End).toString();
 
             KinesisShard child = new KinesisShard(nextShardId(stream), start, end, seq);
             child.setParentShardId(shardId);
@@ -667,18 +762,15 @@ public class KinesisService implements ResourceProvider {
                         "UpdateShardCount is only supported for data streams with the provisioned capacity mode.",
                         400);
             }
-            if (!"ACTIVE".equals(stream.getStreamStatus())) {
-                throw new AwsException("ResourceInUseException",
-                        "Stream " + streamName + " is not ACTIVE (current state: " + stream.getStreamStatus() + ")", 400);
-            }
+            requireActive(stream);
 
             currentOpenShardCount = (int) stream.getShards().stream().filter(s -> !s.isClosed()).count();
             validateTargetShardCount(streamName, currentOpenShardCount, targetShardCount);
             List<Instant> updateTimestamps = nextShardCountUpdateTimestamps(stream);
+            beginStatusUpdate(stream);
             normalizeOpenShardRanges(stream);
             stream.setShardCountUpdateTimestamps(updateTimestamps);
             store.put(key, stream);
-
             applyUniformScaling(streamName, stream, currentOpenShardCount, targetShardCount, region);
 
             return new UpdateShardCountResult(streamName, stream.getStreamArn(), currentOpenShardCount, targetShardCount);
@@ -750,7 +842,7 @@ public class KinesisService implements ResourceProvider {
                     .limit(splitsNeeded)
                     .toList();
             for (KinesisShard parent : splitCandidates) {
-                splitShard(streamName, parent.getShardId(), midpointHashKey(parent.getHashKeyRange()), region);
+                splitShard(streamName, parent.getShardId(), midpointHashKey(parent.getHashKeyRange()), region, true);
             }
         } else if (targetShardCount < currentOpenShardCount) {
             int mergesNeeded = currentOpenShardCount - targetShardCount;
@@ -764,7 +856,7 @@ public class KinesisService implements ResourceProvider {
                 int[] pair = narrowestFirstDisjointPairs.get(i);
                 KinesisShard shard1 = openByHashKey.get(pair[0]);
                 KinesisShard shard2 = openByHashKey.get(pair[1]);
-                mergeShards(streamName, shard1.getShardId(), shard2.getShardId(), region);
+                mergeShards(streamName, shard1.getShardId(), shard2.getShardId(), region, true);
             }
         }
     }
@@ -870,11 +962,8 @@ public class KinesisService implements ResourceProvider {
                         "UpdateMaxRecordSize is only supported for data streams with the provisioned capacity mode.",
                         400);
             }
-            if (!"ACTIVE".equals(stream.getStreamStatus())) {
-                throw new AwsException("ResourceInUseException",
-                        "Stream " + streamName + " is not ACTIVE (current state: "
-                                + stream.getStreamStatus() + ")", 400);
-            }
+            requireActive(stream);
+            beginStatusUpdate(stream);
             stream.setMaxRecordSizeInKiB(maxRecordSizeInKiB);
             store.put(key, stream);
             LOG.infov("Updated max record size for {0} to {1} KiB", streamName, maxRecordSizeInKiB);
@@ -929,9 +1018,10 @@ public class KinesisService implements ResourceProvider {
             // deleted before we get here is absent and this fails like any other missing stream rather
             // than appending to a stale instance and resurrecting it.
             KinesisStream current = resolveStreamForAccountMigrating(accountId, streamName, region);
-            // Ordered exactly as before this moved under the monitor: a missing stream still reports
-            // ResourceNotFoundException ahead of an invalid ExplicitHashKey, and the size check runs
-            // against the same lock-protected instance that shard selection and the append use.
+            requireWritableStream(current);
+            // A missing or not-yet-active stream reports ResourceNotFoundException ahead of an
+            // invalid ExplicitHashKey. Size validation runs against the same lock-protected instance
+            // that shard selection and the append use.
             validateExplicitHashKey(explicitHashKey);
             validateRecordSize(current, data, partitionKey);
             KinesisShard shard = selectShard(current, partitionKey, explicitHashKey);

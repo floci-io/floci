@@ -15,17 +15,22 @@ import io.floci.aws.services.mwaa.model.EnvironmentStatus;
 import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import io.floci.aws.services.mwaa.model.UpdateEnvironmentRequest;
 import io.floci.aws.services.mwaa.proxy.MwaaProxyManager;
+import io.floci.aws.services.mwaa.proxy.MwaaWebProxy;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +50,7 @@ import static org.mockito.Mockito.when;
 class MwaaServiceTest {
 
     private MwaaService mwaaService;
+    private MutableClock clock;
     private AccountAwareStorageBackend<Environment> environmentStorage;
     private String currentAccount;
     private String currentRegion;
@@ -67,7 +73,9 @@ class MwaaServiceTest {
         when(regionResolver.getAccountId()).thenAnswer(invocation -> currentAccount);
         when(regionResolver.getRegion()).thenAnswer(invocation -> currentRegion);
         S3Service s3Service = Mockito.mock(S3Service.class);
-        mwaaService = new MwaaService(storageFactory, config, regionResolver, null, null, null, s3Service);
+        clock = new MutableClock();
+        mwaaService = new MwaaService(storageFactory, config, regionResolver, null, null, null, s3Service,
+                Runnable::run, clock);
     }
 
     @Test
@@ -529,6 +537,44 @@ class MwaaServiceTest {
         Map<String, Object> response = mwaaService.createWebLoginToken("web-token-env");
         assertNotNull(response.get("WebToken"));
         assertNotNull(response.get("WebServerHostname"));
+        assertEquals("admin", response.get("AirflowIdentity"));
+    }
+
+    @Test
+    void webLoginTokenIsValidForSixtySecondsAndOnlyForItsEnvironment() {
+        mwaaService.createEnvironment("web-login-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+        String identity = mwaaService.environmentIdentity(mwaaService.getEnvironment("web-login-env"));
+        String token = (String) mwaaService.createWebLoginToken("web-login-env").get("WebToken");
+
+        assertTrue(mwaaService.isValidWebToken(identity, token));
+        assertFalse(mwaaService.isValidWebToken("other-env", token));
+        assertFalse(mwaaService.isValidWebToken(identity, "not-a-real-token"));
+
+        clock.advance(Duration.ofSeconds(60));
+
+        assertFalse(mwaaService.isValidWebToken(identity, token));
+    }
+
+    @Test
+    void cliTokensAndWebLoginTokensAreNotInterchangeable() {
+        mwaaService.createEnvironment("two-tokens-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+        String identity = mwaaService.environmentIdentity(mwaaService.getEnvironment("two-tokens-env"));
+        String cliToken = (String) mwaaService.createCliToken("two-tokens-env").get("CliToken");
+        String webToken = (String) mwaaService.createWebLoginToken("two-tokens-env").get("WebToken");
+
+        assertFalse(mwaaService.isValidWebToken(identity, cliToken));
+        assertFalse(mwaaService.isValidCliToken(identity, webToken));
+    }
+
+    @Test
+    void deletingAnEnvironmentDropsItsWebLoginTokens() {
+        mwaaService.createEnvironment("deleted-web-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+        String identity = mwaaService.environmentIdentity(mwaaService.getEnvironment("deleted-web-env"));
+        String token = (String) mwaaService.createWebLoginToken("deleted-web-env").get("WebToken");
+
+        mwaaService.deleteEnvironment("deleted-web-env");
+
+        assertFalse(mwaaService.isValidWebToken(identity, token));
     }
 
     @Test
@@ -605,7 +651,50 @@ class MwaaServiceTest {
             when(portAllocator.allocate(8700, 8799)).thenReturn(8701);
 
             realModeService = new MwaaService(storageFactory, config, regionResolver,
-                    environmentManager, proxyManager, portAllocator, s3Service, queuedInstalls::add);
+                    environmentManager, proxyManager, portAllocator, s3Service, queuedInstalls::add, Clock.systemUTC());
+        }
+
+        @Test
+        void theProxySignsWebLoginsInAsTheEnvironmentsAdminAfterCheckingTheToken() {
+            Mockito.doAnswer(invocation -> {
+                invocation.getArgument(0, Environment.class).setAirflowAdminPassword("generated-pw");
+                return null;
+            }).when(environmentManager).startEnvironment(any(), any(), any(), any());
+
+            Environment environment = realModeService.createEnvironment("login-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            String token = (String) realModeService.createWebLoginToken("login-env").get("WebToken");
+
+            ArgumentCaptor<MwaaWebProxy.TokenValidator> webTokenValidator =
+                    ArgumentCaptor.forClass(MwaaWebProxy.TokenValidator.class);
+            ArgumentCaptor<MwaaWebProxy.AirflowAccount> account = ArgumentCaptor.forClass(MwaaWebProxy.AirflowAccount.class);
+            verify(proxyManager).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), webTokenValidator.capture(),
+                    account.capture());
+            assertEquals(new MwaaWebProxy.AirflowAccount("admin", "generated-pw"), account.getValue());
+            String identity = realModeService.environmentIdentity(environment);
+            assertTrue(webTokenValidator.getValue().isValid(identity, token));
+            assertFalse(webTokenValidator.getValue().isValid(identity, "not-a-real-token"));
+        }
+
+        @Test
+        void eachProxyAcceptsOnlyTheTokensOfItsOwnEnvironmentNotOfALaterOneOfTheSameName() {
+            ArgumentCaptor<MwaaWebProxy.TokenValidator> validators =
+                    ArgumentCaptor.forClass(MwaaWebProxy.TokenValidator.class);
+            Environment first = realModeService.createEnvironment("reused-env",
+                    createRequest("arn:aws:s3:::my-bucket", "dags"));
+            String identity = realModeService.environmentIdentity(first);
+            String firstToken = (String) realModeService.createWebLoginToken("reused-env").get("WebToken");
+            realModeService.deleteEnvironment("reused-env");
+            realModeService.createEnvironment("reused-env", createRequest("arn:aws:s3:::my-bucket", "dags"));
+            String secondToken = (String) realModeService.createWebLoginToken("reused-env").get("WebToken");
+
+            verify(proxyManager, Mockito.times(2)).startProxy(any(), anyInt(), any(), anyInt(), any(), any(),
+                    validators.capture(), any());
+            MwaaWebProxy.TokenValidator firstProxy = validators.getAllValues().get(0);
+            MwaaWebProxy.TokenValidator secondProxy = validators.getAllValues().get(1);
+            assertTrue(secondProxy.isValid(identity, secondToken));
+            assertFalse(secondProxy.isValid(identity, firstToken));
+            assertFalse(firstProxy.isValid(identity, secondToken));
         }
 
         @Test
@@ -635,7 +724,7 @@ class MwaaServiceTest {
             // under us between allocate() and bind()). The port must not leak, and whatever
             // startEnvironment() already started must get torn down, not orphaned.
             Mockito.doThrow(new RuntimeException("bind failed"))
-                    .when(proxyManager).startProxy(any(), anyInt(), any(), anyInt(), any(), any());
+                    .when(proxyManager).startProxy(any(), anyInt(), any(), anyInt(), any(), any(), any(), any());
 
             Environment environment = realModeService.createEnvironment("failed-proxy-env",
                     createRequest("arn:aws:s3:::my-bucket", "dags"));
