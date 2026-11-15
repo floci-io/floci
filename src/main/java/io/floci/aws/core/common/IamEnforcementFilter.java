@@ -64,7 +64,8 @@ import java.util.regex.Pattern;
  *
  * <p>Bypass rules (request is always allowed through):
  * <ul>
- *   <li>Enforcement is disabled (default)</li>
+ *   <li>Enforcement is disabled (default). The first request signed with an IAM identity's
+ *       credentials then logs one warning ({@link UnenforcedIamCredentialNotice}).</li>
  *   <li>Access key is {@code "test"} (root/admin stand-in)</li>
  *   <li>Access key is a real credential this filter cannot map to policies, such as a session
  *       carrying no role ARN. An access key that exists nowhere or is inactive, an expired

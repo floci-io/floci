@@ -6,8 +6,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.logging.Level;
-import java.util.logging.LogRecord;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -42,10 +41,7 @@ class UnenforcedIamCredentialNoticeTest {
             assertFalse(notice.observe("AKIAOTHERUSER", ACCOUNT));
         });
 
-        assertEquals(List.of("A request in account 123456789012 was signed with an IAM user's access key "
-                + "(AKIAUSERKEY), but IAM policy enforcement is off, so Floci allowed it without evaluating "
-                + "the policies that apply to it. Set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to evaluate "
-                + "them as AWS does. This is logged once."), warnings);
+        assertEquals(List.of(expectedWarning(ACCOUNT, "an IAM user's access key", "AKIAUSERKEY")), warnings);
     }
 
     @Test
@@ -54,10 +50,7 @@ class UnenforcedIamCredentialNoticeTest {
 
         List<String> warnings = warnings(() -> assertTrue(notice.observe("ASIAROLESESSION", ACCOUNT)));
 
-        assertEquals(List.of("A request in account 123456789012 was signed with a session Floci issued "
-                + "(ASIAROLESESSION), but IAM policy enforcement is off, so Floci allowed it without evaluating "
-                + "the policies that apply to it. Set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to evaluate "
-                + "them as AWS does. This is logged once."), warnings);
+        assertEquals(List.of(expectedWarning(ACCOUNT, "a session Floci issued", "ASIAROLESESSION")), warnings);
     }
 
     @Test
@@ -90,6 +83,29 @@ class UnenforcedIamCredentialNoticeTest {
     }
 
     @Test
+    void aUrlFlociPresignedForItsOwnUseNeverWarnsAndIsLookedUpOnce() {
+        when(iamService.isKnownAccessKey("ASIAPRESIGNED")).thenReturn(true);
+        when(iamService.presignedScope("ASIAPRESIGNED")).thenReturn(Optional.of(
+                new IamService.PresignedScope("lambda:GetFunction", "arn:aws:lambda:us-east-1:123456789012:function:f")));
+
+        List<String> warnings = warnings(() -> {
+            assertFalse(notice.observe("ASIAPRESIGNED", ACCOUNT));
+            assertFalse(notice.observe("ASIAPRESIGNED", ACCOUNT));
+        });
+
+        assertEquals(List.of(), warnings);
+        verify(iamService, times(1)).presignedScope("ASIAPRESIGNED");
+    }
+
+    @Test
+    void theSeededDeployerKeyNeverWarns() {
+        when(iamService.isKnownAccessKey("floci")).thenReturn(true);
+        when(iamService.isSeededDeployerAccessKey("floci")).thenReturn(true);
+
+        assertEquals(List.of(), warnings(() -> assertFalse(notice.observe("floci", ACCOUNT))));
+    }
+
+    @Test
     void aKeyFlociDidNotIssueIsLookedUpOnce() {
         List<String> warnings = warnings(() -> {
             assertFalse(notice.observe("AKIAIOSFODNN7EXAMPLE", ACCOUNT));
@@ -112,12 +128,14 @@ class UnenforcedIamCredentialNoticeTest {
         verify(iamService, times(2)).isKnownAccessKey("AKIAONEMORE");
     }
 
-    /** The warnings the notice logs while {@code action} runs, formatted as written. */
     private static List<String> warnings(Runnable action) {
-        List<LogRecord> records = LogCapture.capture(UnenforcedIamCredentialNotice.class, action);
-        return records.stream()
-                .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
-                .map(LogCapture::formatted)
-                .toList();
+        return LogCapture.warnings(UnenforcedIamCredentialNotice.class, action);
+    }
+
+    /** The warning for a request in {@code account} signed with {@code credential}, whose key is {@code key}. */
+    static String expectedWarning(String account, String credential, String key) {
+        return "A request in account " + account + " was signed with " + credential + " (" + key + "), but IAM "
+                + "policy enforcement is off, so Floci allowed it without evaluating the policies that apply to it. "
+                + "Set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to evaluate them as AWS does. This is logged once.";
     }
 }

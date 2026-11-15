@@ -14,9 +14,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * written before any identity exists and before the first request.
  *
  * <p>An IAM identity's credential is an IAM user's access key or a session Floci issued, such as
- * an assumed role or a Lambda function's execution role. The account root's credentials never
- * warn: the {@code test} key, a bare account-id key and a GetSessionToken session either of them
- * minted, which acts as the root.
+ * an assumed role, a Lambda function's execution role or a role Floci signs its own calls with.
+ * These never warn: the account root's credentials (the {@code test} key, a bare account-id key and
+ * a GetSessionToken session minted with a key IAM does not hold, which acts as the root), the
+ * credentials of a URL Floci presigned for its own use, scoped to that URL rather than an
+ * identity's, and the seeded {@code floci} deployer key, which holds AdministratorAccess, so its
+ * policies would allow the request anyway.
  *
  * <p>Once the warning is logged this costs one read per request. Before that, each other access
  * key id is looked up once: a key Floci did not issue never becomes one it issued, and a session
@@ -46,7 +49,9 @@ final class UnenforcedIamCredentialNotice {
                 || checkedKeys.contains(accessKeyId)) {
             return false;
         }
-        if (!iamService.isKnownAccessKey(accessKeyId) || iamService.isRootIssuedSessionToken(accessKeyId)) {
+        if (!iamService.isKnownAccessKey(accessKeyId) || iamService.isRootIssuedSessionToken(accessKeyId)
+                || iamService.presignedScope(accessKeyId).isPresent()
+                || iamService.isSeededDeployerAccessKey(accessKeyId)) {
             if (checkedKeys.size() < MAX_CHECKED_KEYS) {
                 checkedKeys.add(accessKeyId);
             }
@@ -58,7 +63,6 @@ final class UnenforcedIamCredentialNotice {
         checkedKeys.clear();
         String credential = IamService.isTemporaryAccessKey(accessKeyId)
                 ? "a session Floci issued" : "an IAM user's access key";
-        // No apostrophes in the pattern: warnv formats it with MessageFormat, which reads one as a quote.
         LOG.warnv("A request in account {0} was signed with {1} ({2}), but IAM policy enforcement is off, "
                         + "so Floci allowed it without evaluating the policies that apply to it. Set "
                         + "FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to evaluate them as AWS does. "
