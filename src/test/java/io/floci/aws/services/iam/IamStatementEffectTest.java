@@ -102,4 +102,39 @@ class IamStatementEffectTest {
 
         assertEquals(List.of("s3"), reachable);
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"allow", "ALLOW", "aLLoW"})
+    void anAllowSpelledInAnotherCaseStatesNothing(String effect) {
+        // IAM User Guide, "AWS JSON policy elements: Effect": "The Effect value is case
+        // sensitive". The write validator of this package compares the word as written too, so a
+        // document carrying another spelling was never stored through a write here.
+        String document = identityStatement("\"Effect\":\"" + effect + "\",");
+
+        assertEquals(Decision.DENY, evaluator.evaluate(
+                CallerContext.of(List.of(document)), null, "s3:GetObject", "arn:aws:s3:::b/k", null));
+        assertTrue(evaluator.servicesGrantedBy(List.of(document)).isEmpty());
+        assertTrue(evaluator.servicesAllowedByScpLevels(List.of(List.of(document))).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"deny", "DENY", "dENy"})
+    void aDenySpelledInAnotherCaseOverridesNothing(String effect) {
+        String document = "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"},"
+                + "{\"Effect\":\"" + effect + "\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
+
+        assertEquals(Decision.ALLOW, evaluator.evaluate(
+                CallerContext.of(List.of(document)), null, "s3:GetObject", "arn:aws:s3:::b/k", null));
+    }
+
+    @Test
+    void aResourcePolicyStatementIsHeldToTheSameTwoSpellings() {
+        String bucketPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"allow\","
+                + "\"Principal\":\"*\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}";
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL, evaluator.evaluateResourcePolicy(
+                List.of(bucketPolicy), "arn:aws:iam::123456789012:user/alice", "s3:GetObject",
+                "arn:aws:s3:::b/k", null));
+    }
 }
