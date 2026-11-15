@@ -72,6 +72,24 @@ class S3GlobalBucketNamespaceTest {
         assertEquals(404, error.getHttpStatus());
     }
 
+    @Test
+    void scratchBucketOfAnotherAccountIsNotReachableThroughAGlobalNamespace() throws Exception {
+        Instance<RequestContext> context = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, DEFAULT_ACCT);
+        S3Service service = new S3Service(buckets, objects, Path.of("s3-gns-scratch-test"), true, true);
+        caller.set(ACCOUNT_A);
+        S3ScratchSpace.SPECTRUM.ensureBucket(service, "us-east-1");
+
+        assertTrue(service.isScratchBucket(S3ScratchSpace.SPECTRUM.bucketName(), ACCOUNT_A));
+        caller.set(ACCOUNT_B);
+        assertFalse(service.isScratchBucket(S3ScratchSpace.SPECTRUM.bucketName(), ACCOUNT_B));
+        S3ScratchSpace.SPECTRUM.ensureBucket(service, "us-east-1");
+        assertTrue(service.isScratchBucket(S3ScratchSpace.SPECTRUM.bucketName(), ACCOUNT_B));
+    }
+
     @SuppressWarnings("unchecked")
     private Instance<RequestContext> mutableContext() {
         RequestContext rc = mock(RequestContext.class);

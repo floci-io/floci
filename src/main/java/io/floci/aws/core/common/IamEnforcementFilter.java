@@ -782,9 +782,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return false;
         }
         String prefix = "s3:ListBucket".equals(action) ? ctx.getUriInfo().getQueryParameters().getFirst("prefix") : null;
+        // the session's own account must own the bucket: a same-named scratch bucket of another account is out of bounds
+        String sessionAccountId = AwsArnUtils.accountOrDefault(callerArns.principalArn(), null);
         for (S3ScratchSpace space : S3ScratchSpace.values()) {
             if (space.permits(action, allowed.get(), resources, prefix)
-                    && s3ServiceProvider.get().isScratchBucket(space.bucketName())) {
+                    && s3ServiceProvider.get().isScratchBucket(space.bucketName(), sessionAccountId)) {
                 return true;
             }
         }
