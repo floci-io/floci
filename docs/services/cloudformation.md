@@ -62,9 +62,23 @@ changing credentials already issued.
 | `ListStackSetAutoDeploymentTargets` | - |
 <!-- floci:actions:end -->
 
+## IAM Enforcement
+
+With IAM enforcement on, each CloudFormation request is checked on the resources it names, from the generated request
+resources: a stack by its name or its stack id, at the ARN CloudFormation minted for it
+(`stack/<name>/<id>`), and a stack set by its name, at its ARN (`stackset/<name>:<id>`), each found in the caller's
+account and Region; a stack or stack set that does not exist yet, as a create names it, is checked with its id open
+(`stack/<name>/*`). A stack instance is checked on its stack set in the caller's account, whatever account the
+instance is in. An operation whose action has no resource type in the Service Authorization Reference (`ListStacks`,
+`ListStackSets`, `ValidateTemplate`, `CreateStackSet`, the Organizations access calls) is checked on `*`, and so is a
+request naming its stack by no `StackName` (a change set by its ARN alone, `DescribeStackResources` by
+`PhysicalResourceId` alone), the generated data filling the stack from `StackName` only. The
+`stackset-target` and `type` resources the reference also lists for the stack instance and stack set update calls are
+not checked: no member of those requests gives them.
+
 ## StackSets compatibility
 
-StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
+StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's ARN as `StackSetARN`, its `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
 
 With `AutoDeployment` enabled, a service-managed stack set follows its organization. An account created in, invited into or moved under a targeted root or OU gets an instance in every Region of the targets that now cover it, and an account moved out of every target or removed from the organization loses its instances; their stacks stay when `RetainStacksOnAccountRemoval` is set. Account placement changes are reconciled asynchronously, so Organizations calls do not wait for deployments and deployment failures do not undo completed account changes. A second `CreateStackInstances` for a target already recorded adds its Regions to the earlier ones. Automatic creates and deletes are recorded in `ListStackSetOperations` and `DescribeStackSetOperation`, with their timestamps and success or failure status. An account move that needs no instance changes records no operation. A returning account uses a distinct backing-stack name when its previous name remains occupied; the retained stack is not reassociated.
 

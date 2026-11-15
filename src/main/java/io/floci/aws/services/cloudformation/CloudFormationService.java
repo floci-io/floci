@@ -444,6 +444,14 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * The id of the live stack a name or a stack id names in the caller's account and the Region, its ARN with the id
+     * CloudFormation minted, which IAM checks a request naming the stack on; empty when there is none. Reads only.
+     */
+    public Optional<String> stackArn(String stackNameOrArn, String region) {
+        return Optional.ofNullable(resolveStack(stackNameOrArn, region, currentAccount())).map(Stack::getStackId);
+    }
+
+    /**
      * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
      * resolve {@code UsePreviousValue} on an update before the stack lookup that
      * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.

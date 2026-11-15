@@ -535,6 +535,16 @@ def test_an_account_member_typed_elsewhere_in_the_service_is_inferred_only_for_n
     assert r.account_members(models, "CreateOther") == [member]
 
 
+def test_an_account_member_naming_another_records_account_gives_none(tmp_path):
+    # CloudFormation's StackInstanceAccount is the account of a StackInstance, not of the stack set it belongs to.
+    service = model({"DescribeStackInstance": {"StackInstanceAccount": "AccountId", "OwnerAccount": "AccountId"}})
+    service["shapes"]["AccountId"]["pattern"] = "^[0-9]{12}$"
+    service["shapes"]["StackInstance"] = {"type": "structure", "members": {}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.account_members(models, "DescribeStackInstance") == ["OwnerAccount"]
+
+
 def test_account_member_inference_does_not_cross_service_models(tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ownerAccount": "String"}}),
                             "other": model({"ListThings": {"ownerAccount": "AccountId"}})})
