@@ -116,6 +116,7 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int FUNCTION_URL_CONFIGS_PAGE_SIZE = 50;
     private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
     private static final int MAX_ENVIRONMENT_BYTES = 4096;
     private static final int MAX_ENVIRONMENT_DIAGNOSTIC_BYTES = 5120;
@@ -3541,16 +3542,10 @@ public class LambdaService implements ResourceProvider {
     public PaginatedResult<LambdaUrlConfig> listFunctionUrlConfigs(
             String region, String functionName, String maxItems, String marker) {
         requireFunctionUrlsAvailable(region);
-        int limit = 50;
-        if (maxItems != null) {
-            try {
-                limit = Integer.parseInt(maxItems);
-            } catch (NumberFormatException e) {
-                throw new AwsException("InvalidParameterValueException", "MaxItems must be an integer from 1 to 50.", 400);
-            }
-            if (limit < 1 || limit > 50) {
-                throw new AwsException("InvalidParameterValueException", "MaxItems must be between 1 and 50.", 400);
-            }
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, FUNCTION_URL_CONFIGS_PAGE_SIZE, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
         }
 
         LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, null);
@@ -3558,14 +3553,15 @@ public class LambdaService implements ResourceProvider {
         if (AwsArnUtils.looksLikeArn(functionName)
                 && AwsArnUtils.isForeignPartition(AwsArnUtils.parse(functionName),
                         regionResolver.partitionForRegion(region))) {
-            throw new AwsException("ResourceNotFoundException", "Function does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
         }
         String accountId = regionResolver.getAccountId();
         if (ref.account() != null && !accountId.equals(ref.account())) {
-            throw new AwsException("ResourceNotFoundException", "Function does not exist", 404);
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
         }
         LambdaFunction function = functionStore.get(region, ref.name())
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Function does not exist", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Function not found: " + functionName, 404));
         List<LambdaUrlConfig> urls = new ArrayList<>();
         if (function.getUrlConfig() != null) {
             urls.add(function.getUrlConfig());
@@ -3578,9 +3574,8 @@ public class LambdaService implements ResourceProvider {
             }
         }
         String scope = accountId + "\n" + region + "\n" + function.getFunctionName() + "\n";
-        return Pagination.paginate(urls, LambdaUrlConfig::getFunctionArn, limit, marker,
-                functionUrlMarkers, scope, ignored -> new AwsException("InvalidParameterValueException",
-                        "Invalid marker value from user.", 400));
+        return LambdaPagination.paginate(urls, LambdaUrlConfig::getFunctionArn, requested,
+                FUNCTION_URL_CONFIGS_PAGE_SIZE, marker, functionUrlMarkers, scope);
     }
 
     public LambdaUrlConfig getFunctionUrlConfig(String region, String functionName, String qualifier) {

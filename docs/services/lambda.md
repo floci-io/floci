@@ -464,6 +464,13 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+`ListFunctionUrlConfigs` lists the unpublished function's URL and its alias URLs.
+It accepts `MaxItems` from 1 through 50, defaulting to 50, and resumes with `Marker`.
+Pagination uses Lambda's shared validation: out-of-range integers return
+`ValidationException`, non-integers return `SerializationException`, and an invalid
+marker returns `InvalidParameterValueException` with `Invalid pagination key.`.
+Missing or inaccessible function references return `ResourceNotFoundException`.
+
 A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
 
 Function URLs are not available in AWS GovCloud (US) or in the China Regions

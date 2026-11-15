@@ -71,6 +71,7 @@ class LambdaFunctionUrlListIntegrationTest {
                 () -> client.listFunctionUrlConfigs(request -> request
                 .functionName(functionName + "-missing")));
         assertEquals(404, missing.statusCode());
+        assertEquals("Function not found: " + functionName + "-missing", missing.awsErrorDetails().errorMessage());
     }
 
     @ParameterizedTest
@@ -176,8 +177,9 @@ class LambdaFunctionUrlListIntegrationTest {
                 assertThrows(InvalidParameterValueException.class, () -> other.listFunctionUrlConfigs(request -> request
                         .functionName(functionName).marker(marker)));
             }
-            assertThrows(ResourceNotFoundException.class, () -> otherAccount.listFunctionUrlConfigs(request -> request
-                    .functionName(functionArn)));
+            ResourceNotFoundException missing = assertThrows(ResourceNotFoundException.class,
+                    () -> otherAccount.listFunctionUrlConfigs(request -> request.functionName(functionArn)));
+            assertEquals("Function not found: " + functionArn, missing.awsErrorDetails().errorMessage());
         }
     }
 
@@ -187,13 +189,16 @@ class LambdaFunctionUrlListIntegrationTest {
         InvalidParameterValueException invalid = assertThrows(InvalidParameterValueException.class,
                 () -> client.listFunctionUrlConfigs(request -> request.functionName(functionName).marker(marker)));
         assertEquals(400, invalid.statusCode());
+        assertEquals("Invalid pagination key.", invalid.awsErrorDetails().errorMessage());
     }
 
     @Test
     void aForeignPartitionArnCannotSelectTheCallersFunction() {
         createUrls();
-        assertThrows(ResourceNotFoundException.class, () -> client.listFunctionUrlConfigs(request -> request
-                .functionName(functionArn.replace("arn:aws:", "arn:aws-cn:"))));
+        String foreignArn = functionArn.replace("arn:aws:", "arn:aws-cn:");
+        ResourceNotFoundException missing = assertThrows(ResourceNotFoundException.class,
+                () -> client.listFunctionUrlConfigs(request -> request.functionName(foreignArn)));
+        assertEquals("Function not found: " + foreignArn, missing.awsErrorDetails().errorMessage());
         assertEquals(3, client.listFunctionUrlConfigs(request -> request.functionName(functionArn))
                 .functionUrlConfigs().size());
     }
@@ -207,11 +212,40 @@ class LambdaFunctionUrlListIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"0", "-1", "51", "2147483648", "1.5", "invalid"})
-    void invalidPageSizesReturnModeledJsonErrors(String maxItems) {
+    @ValueSource(ints = {0, -1, 51})
+    void invalidPageSizesReturnModeledJsonErrors(int maxItems) {
+        String bound = maxItems < 1 ? "greater than or equal to 1" : "less than or equal to 50";
         given().port(endpoint.getPort()).header("Authorization", AUTH).queryParam("MaxItems", maxItems)
                 .get("/2021-10-31/functions/" + functionName + "/urls")
-                .then().statusCode(400).body("__type", equalTo("InvalidParameterValueException"));
+                .then().statusCode(400).body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value '" + maxItems
+                        + "' at 'maxItems' failed to satisfy constraint: Member must have value " + bound));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"2147483648", "1.5", "invalid"})
+    void nonIntegerPageSizesReturnSerializationErrors(String maxItems) {
+        given().port(endpoint.getPort()).header("Authorization", AUTH).queryParam("MaxItems", maxItems)
+                .get("/2021-10-31/functions/" + functionName + "/urls")
+                .then().statusCode(400).body("__type", equalTo("SerializationException"))
+                .body("message", equalTo("'" + maxItems + "' can not be converted to Integer"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, -1, 51})
+    void sdkReportsPageSizeValidationErrors(int maxItems) {
+        LambdaException invalid = assertThrows(LambdaException.class,
+                () -> client.listFunctionUrlConfigs(request -> request.functionName(functionName).maxItems(maxItems)));
+        assertEquals(400, invalid.statusCode());
+        assertEquals("ValidationException", invalid.awsErrorDetails().errorCode());
+    }
+
+    @Test
+    void emptyPageSizeUsesTheDefault() {
+        createUrls();
+        given().port(endpoint.getPort()).header("Authorization", AUTH).queryParam("MaxItems", "")
+                .get("/2021-10-31/functions/" + functionName + "/urls")
+                .then().statusCode(200).body("FunctionUrlConfigs.size()", equalTo(3));
     }
 
     private void createUrls() {
