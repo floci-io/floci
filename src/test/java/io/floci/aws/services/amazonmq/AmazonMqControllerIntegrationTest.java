@@ -2,6 +2,7 @@ package io.floci.aws.services.amazonmq;
 
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -235,8 +237,8 @@ class AmazonMqControllerIntegrationTest {
 
     /**
      * Brokers are Regional: another Region of the account neither lists, describes, reboots nor deletes
-     * one. Its name is unique in the account, so another Region refuses it too. The test works in an account
-     * of its own, so each listing holds only its brokers.
+     * one, nor describes its shared resources. Its name is unique in the account, so another Region refuses
+     * it too. The test works in an account of its own, so each listing holds only its brokers.
      */
     @Test
     void aBrokerIsSeenOnlyInTheRegionItWasCreatedIn() {
@@ -249,22 +251,16 @@ class AmazonMqControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("brokerSummaries.brokerId", equalTo(List.of()));
-        mq(account, "us-east-1")
-        .when()
-            .get("/v1/brokers/{id}", inIreland)
-        .then()
-            .statusCode(404);
-        mq(account, "us-east-1")
-            .contentType("application/json")
-        .when()
-            .post("/v1/brokers/{id}/reboot", inIreland)
-        .then()
-            .statusCode(404);
-        mq(account, "us-east-1")
-        .when()
-            .delete("/v1/brokers/{id}", inIreland)
-        .then()
-            .statusCode(404);
+        for (Function<RequestSpecification, Response> call : List.<Function<RequestSpecification, Response>>of(
+                request -> request.get("/v1/brokers/{id}", inIreland),
+                request -> request.get("/v1/brokers/{id}/shared-resources", inIreland),
+                request -> request.contentType("application/json").post("/v1/brokers/{id}/reboot", inIreland),
+                request -> request.delete("/v1/brokers/{id}", inIreland))) {
+            call.apply(mq(account, "us-east-1"))
+            .then()
+                .statusCode(404)
+                .body("__type", equalTo("NotFoundException"));
+        }
 
         postRabbitBroker(mq(account, "us-east-1"), "it-regional")
             .statusCode(409)
