@@ -193,10 +193,8 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     /** With enforcement off a Map's role is not looked at, so one that does not exist still reads and exports. */
     @Test
     void mapS3CallsRetainDefaultIamDisabledBehavior() throws Exception {
-        String bucket = "credentials-map-" + UUID.randomUUID();
+        String bucket = sfn().bucket(SOURCE, "us-east-1", "credentials-map-");
         String s3 = auth(SOURCE, "s3");
-        given().port(baseUri.getPort()).header("Authorization", s3).put("/" + bucket).then().statusCode(200);
-        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), s3, bucket));
         given().port(baseUri.getPort()).header("Authorization", s3).body("[1,2]")
                 .put("/" + bucket + "/items.json").then().statusCode(200);
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Run", "States", Map.of("Run", Map.of(
@@ -288,19 +286,17 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     @ParameterizedTest
     @ValueSource(strings = {"dynamodb:putItem", "aws-sdk:dynamodb:putItem", "s3:putObject", "aws-sdk:s3:putObject"})
     void dataCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
-        String name = "credentials-" + UUID.randomUUID();
         Map<String, Object> arguments;
         if (integration.contains("dynamodb")) {
+            String name = "credentials-" + UUID.randomUUID();
             dynamoDb("CreateTable", Map.of("TableName", name, "BillingMode", "PAY_PER_REQUEST",
                     "AttributeDefinitions", List.of(Map.of("AttributeName", "pk", "AttributeType", "S")),
                     "KeySchema", List.of(Map.of("AttributeName", "pk", "KeyType", "HASH"))));
             cleanup.register(() -> dynamoDb("DeleteTable", Map.of("TableName", name)));
             arguments = Map.of("TableName", name, "Item", Map.of("pk", Map.of("S", "a")));
         } else {
-            given().port(baseUri.getPort()).header("Authorization", auth(SOURCE, "s3")).put("/" + name)
-                    .then().statusCode(200);
-            cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), auth(SOURCE, "s3"), name));
-            arguments = Map.of("Bucket", name, "Key", "a", "Body", "hello");
+            String bucket = sfn().bucket(SOURCE, "us-east-1", "credentials-");
+            arguments = Map.of("Bucket", bucket, "Key", "a", "Body", "hello");
         }
         assertDataTaskIsNotEvaluated(integration, arguments, "SUCCEEDED");
     }

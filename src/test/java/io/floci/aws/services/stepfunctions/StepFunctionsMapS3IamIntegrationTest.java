@@ -2,7 +2,6 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -27,11 +26,12 @@ import java.util.UUID;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.allow;
+import static io.floci.aws.testing.StepFunctionsTestClient.policy;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * The S3 calls a Distributed Map makes as its execution role, under IAM enforcement. S3 runs for real, so a test reads
@@ -715,26 +715,13 @@ class StepFunctionsMapS3IamIntegrationTest {
         assertEquals(error, completed.jsonPath().getString("error"), completed.asString());
     }
 
-    private static String allow(String resource, String... actions) {
-        return policy(List.of(Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", List.of(resource))));
-    }
-
-    private static String policy(List<Map<String, Object>> statements) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", statements));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     private static String bucketStatement(String effect, String principal, String action, String resource) {
         return policy(List.of(Map.of("Effect", effect, "Principal", Map.of("AWS", principal),
                 "Action", action, "Resource", resource)));
     }
 
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-map-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-map-", trust, policy);
     }
 
     private String bucket() {
@@ -742,14 +729,7 @@ class StepFunctionsMapS3IamIntegrationTest {
     }
 
     private String bucket(String account, String region) {
-        String name = "sfn-map-" + UUID.randomUUID();
-        String authorization = auth(account, region, "s3");
-        given().port(baseUri.getPort()).header("Authorization", authorization)
-                .body(REGION.equals(region) ? "" : "<CreateBucketConfiguration><LocationConstraint>" + region
-                        + "</LocationConstraint></CreateBucketConfiguration>")
-                .put("/" + name).then().statusCode(200);
-        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), authorization, name));
-        return name;
+        return sfn().bucket(account, region, "sfn-map-");
     }
 
     private void put(String bucket, String key, String body) {
@@ -762,8 +742,7 @@ class StepFunctionsMapS3IamIntegrationTest {
     }
 
     private void setBucketPolicy(String bucket, String policy) {
-        given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "s3")).body(policy)
-                .queryParam("policy", "").put("/" + bucket).then().statusCode(200);
+        sfn().setBucketPolicy(ACCOUNT, bucket, policy);
     }
 
     private List<String> keys(String bucket) {

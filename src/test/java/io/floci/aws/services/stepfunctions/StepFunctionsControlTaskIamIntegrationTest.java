@@ -3,7 +3,6 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -40,6 +39,8 @@ import java.util.stream.Stream;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.allow;
+import static io.floci.aws.testing.StepFunctionsTestClient.policy;
 import static io.floci.aws.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -897,22 +898,8 @@ class StepFunctionsControlTaskIamIntegrationTest {
         return task;
     }
 
-    private static String allow(String resource, String... actions) {
-        return policy(List.of(Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", List.of(resource))));
-    }
-
-    private static String policy(List<Map<String, Object>> statements) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", statements));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-control-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-control-", trust, policy);
     }
 
     private static String machineArn(String name) {
