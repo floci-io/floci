@@ -178,6 +178,23 @@ class CfnReplacementIntegrationTest {
                         "\"RepositoryName\": \"repl-ecr-named\"", "", "True", false, null),
                 createOnlyRow("DynamoDB table explicit TableName removed", "", "", "AWS::DynamoDB::Table",
                         DDB_KEYS + ", \"TableName\": \"repl-ddb-removed\"", DDB_KEYS, "True", false, null),
+                new Row("log group given a Properties block that sets its name",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"LogGroupName\": \"repl-added-properties\"}}}}",
+                        "Subject", "True", true, null),
+                new Row("log group given a Properties block with only an updatable property",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "Subject", "False", false, null),
+                new Row("log group whose existing Properties block gains its name",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7,"
+                                + " \"LogGroupName\": \"repl-added-name\"}}}}",
+                        "Subject", "True", true, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
