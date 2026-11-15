@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.controltower.model.EnabledBaseline;
@@ -731,8 +732,7 @@ public class ControlTowerService {
     }
 
     private static void validateOperationIdentifier(String operationIdentifier) {
-        if (operationIdentifier == null
-                || !operationIdentifier.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")) {
+        if (!UuidShapes.matchesLowerCase(operationIdentifier)) {
             throw validation("operationIdentifier must be a UUID.");
         }
     }

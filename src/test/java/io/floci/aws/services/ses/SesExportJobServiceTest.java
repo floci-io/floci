@@ -25,6 +25,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -376,6 +377,12 @@ class SesExportJobServiceTest {
         assertEquals("NotFoundException", notFound.getErrorCode());
         assertEquals(404, notFound.getHttpStatus());
         assertEquals("Job ID: <" + unknown + "> not found", notFound.getMessage());
+
+        String upperCase = unknown.toUpperCase(Locale.ROOT);
+        AwsException upperCaseNotFound = assertThrows(AwsException.class,
+                () -> service.getExportJob(REGION, upperCase));
+        assertEquals("NotFoundException", upperCaseNotFound.getErrorCode());
+        assertEquals("Job ID: <" + upperCase + "> not found", upperCaseNotFound.getMessage());
 
         AwsException malformed = assertThrows(AwsException.class,
                 () -> service.getExportJob(REGION, unknown + "0"));

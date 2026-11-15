@@ -11,6 +11,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -38,7 +39,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Pattern;
 
 import static io.floci.aws.services.ses.SesV2Json.intMemberOrAbsent;
 
@@ -82,8 +82,6 @@ public class SesExportJobService implements Resettable {
     private static final DateTimeFormatter OBJECT_STAMP =
             DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss", Locale.ROOT).withZone(ZoneOffset.UTC);
     private static final int PRESIGNED_URL_EXPIRY_SECONDS = 3600;
-    private static final Pattern JOB_ID_SHAPE = Pattern.compile(
-            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
     private final StorageBackend<String, ExportJob> exportJobStore;
     private final SesSentEmailService sentEmailService;
@@ -375,7 +373,7 @@ public class SesExportJobService implements Resettable {
     }
 
     private static AwsException unknownJob(String jobId) {
-        if (JOB_ID_SHAPE.matcher(jobId).matches()) {
+        if (UuidShapes.matchesEitherCase(jobId)) {
             return new AwsException("NotFoundException", "Job ID: <" + jobId + "> not found", 404);
         }
         return new AwsException("BadRequestException", "Invalid JobId", 400);

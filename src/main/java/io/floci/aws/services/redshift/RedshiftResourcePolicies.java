@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.services.redshiftserverless.model.Namespace;
@@ -22,7 +23,6 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 /**
  * Redshift resource policies, which authorize the sources of zero-ETL integrations into a Redshift
@@ -39,9 +39,6 @@ public class RedshiftResourcePolicies {
     private static final List<String> POLICY_KEY_ORDER = List.of("Version", "Statement");
     private static final List<String> STATEMENT_KEY_ORDER =
             List.of("Effect", "Principal", "Action", "Resource", "Condition");
-
-    private static final Pattern NAMESPACE_ID =
-            Pattern.compile("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
     private final RedshiftService redshift;
     private final RedshiftServerlessService serverless;
@@ -109,7 +106,7 @@ public class RedshiftResourcePolicies {
                     + "Region. Change your current Region to the same Region in your resource ARN.", 400);
         }
         if ("redshift-serverless".equals(arn.service()) && arn.resource().startsWith("namespace/")) {
-            if (!NAMESPACE_ID.matcher(arn.resource().substring("namespace/".length())).matches()) {
+            if (!UuidShapes.matchesEitherCase(arn.resource().substring("namespace/".length()))) {
                 throw new AwsException("InvalidParameterValue",
                         "The format of the provided identifier is invalid.", 400);
             }
