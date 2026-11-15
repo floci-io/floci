@@ -263,6 +263,80 @@ class AmazonMqServiceTest {
     }
 
     /**
+     * A DeleteBroker landing while the readiness poller waits on the broker's container: the poller reads the broker
+     * again before writing it, finds it gone, and does not store it back as RUNNING.
+     */
+    @Test
+    void aBrokerDeletedWhileItsReadinessIsCheckedIsNotWrittenBack() {
+        RabbitMqManager readyManager = Mockito.mock(RabbitMqManager.class);
+        service = newService(false, readyManager);
+        String brokerId = startingBroker();
+        when(readyManager.isReady(Mockito.any())).thenAnswer(check -> {
+            service.deleteBroker(brokerId);
+            return true;
+        });
+
+        service.pollReadiness();
+
+        assertEquals(List.of(), service.listBrokers());
+        assertTrue(brokers.scanAllAccounts().isEmpty());
+    }
+
+    /**
+     * A DeleteBroker arriving while the poller reads a ready broker again waits for the poller to write it back,
+     * then deletes it, so the broker is not written back after the delete.
+     */
+    @Test
+    void aDeleteWaitsWhileThePollerWritesAReadyBrokerBack() throws Exception {
+        ParkingStore<Broker> parking = new ParkingStore<>();
+        brokers = new AccountAwareStorageBackend<>(parking, null, ACCOUNT);
+        RabbitMqManager readyManager = Mockito.mock(RabbitMqManager.class);
+        service = newService(false, readyManager);
+        String brokerId = startingBroker();
+        // Armed once the poller has scanned, so the read it parks is the one it makes again under the lock.
+        when(readyManager.isReady(Mockito.any())).thenAnswer(check -> {
+            parking.parkNextRead();
+            return true;
+        });
+
+        assertOperationWaitsForParkedStore(parking, service::pollReadiness, () -> service.deleteBroker(brokerId));
+        assertEquals(List.of(), service.listBrokers());
+    }
+
+    /**
+     * Two DeleteBroker calls of one broker: the second waits while the first, parked as it reads the broker, holds
+     * the broker's lock. It then either deletes the broker too or finds it gone, and either way the broker is not
+     * stored once both are done.
+     */
+    @Test
+    void aSecondDeleteWaitsForTheFirstAndLeavesTheBrokerDeleted() throws Exception {
+        ParkingStore<Broker> parking = new ParkingStore<>();
+        brokers = new AccountAwareStorageBackend<>(parking, null, ACCOUNT);
+        service = newService(false, Mockito.mock(RabbitMqManager.class));
+        String brokerId = startingBroker();
+        parking.parkNextRead();
+
+        assertOperationWaitsForParkedStore(parking, () -> service.deleteBroker(brokerId), () -> {
+            try {
+                service.deleteBroker(brokerId);
+            } catch (AwsException e) {
+                assertEquals("NotFoundException", e.getErrorCode());
+            }
+        });
+        assertEquals(List.of(), service.listBrokers());
+        assertTrue(brokers.scanAllAccounts().isEmpty());
+    }
+
+    /** A broker still being created, stored in the caller's account and Region; its id. */
+    private String startingBroker() {
+        Broker starting = new Broker("b-starting", "arn:aws:mq:us-east-1:" + ACCOUNT + ":broker:starting:b-starting",
+                "starting", "RABBITMQ", "3.13", "SINGLE_INSTANCE", "mq.t3.micro");
+        starting.setBrokerState(BrokerState.CREATION_IN_PROGRESS);
+        brokers.putForAccount(ACCOUNT, AmazonMqService.brokerKey("us-east-1", "b-starting"), starting);
+        return "b-starting";
+    }
+
+    /**
      * Two creates of one broker name in an account: the second waits for the first, parked as it stores its
      * broker, and then finds the name taken, so only one broker has it.
      */
