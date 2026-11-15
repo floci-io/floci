@@ -161,7 +161,8 @@ class MwaaIntegrationTest {
     @Test
     @Order(10)
     void everySupportedAirflowVersionRoundTrips() {
-        String[] versions = {"2.10.5", "2.9.3", "2.8.4"};
+        String[] versions = {"2.11.2", "2.11.0", "2.10.5", "2.10.3", "2.10.1", "2.9.3", "2.9.2", "2.8.4", "2.8.1",
+                "2.7.2"};
         for (String version : versions) {
             String name = "mwaa-it-v" + version.replace(".", "");
             given().contentType(JSON)

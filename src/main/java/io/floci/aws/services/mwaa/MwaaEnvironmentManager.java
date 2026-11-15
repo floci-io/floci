@@ -386,9 +386,10 @@ public class MwaaEnvironmentManager {
      * arguments with POSIX quoting rules and executed without a shell, so shell syntax such as
      * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
      */
-    public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+    public ContainerExec.Result runAirflowCli(String airflowContainerId, String airflowVersion, String cliCommand)
+            throws Exception {
         List<String> arguments = splitCliArguments(cliCommand);
-        if (!isSupportedCliCommand(arguments)) {
+        if (!isSupportedCliCommand(arguments, airflowVersion)) {
             return new ContainerExec.Result(1, "", "Command is not supported by Amazon MWAA\n", false);
         }
         List<String> argv = new ArrayList<>();
@@ -397,7 +398,7 @@ public class MwaaEnvironmentManager {
         return execInContainer(airflowContainerId, argv.toArray(new String[0]));
     }
 
-    static boolean isSupportedCliCommand(List<String> arguments) {
+    static boolean isSupportedCliCommand(List<String> arguments, String airflowVersion) {
         if (arguments.isEmpty()) {
             return false;
         }
@@ -405,7 +406,14 @@ public class MwaaEnvironmentManager {
             return true;
         }
         Set<String> subcommands = MWAA_CLI_SUBCOMMANDS.get(arguments.getFirst());
-        return arguments.size() >= 2 && subcommands != null && subcommands.contains(arguments.get(1));
+        if (arguments.size() < 2 || subcommands == null || !subcommands.contains(arguments.get(1))) {
+            return false;
+        }
+        // Amazon MWAA's CLI reference lists "providers notifications" from v2.8 on. It is the one
+        // command above whose minimum is newer than v2.7.2, the oldest version MWAA still offers.
+        boolean providersNotifications = "providers".equals(arguments.getFirst())
+                && "notifications".equals(arguments.get(1));
+        return !providersNotifications || isAtLeast(airflowVersion, 2, 8);
     }
 
     /**
@@ -523,10 +531,14 @@ public class MwaaEnvironmentManager {
      * every 3.x release) runs Python 3.12.
      */
     static String pythonTagFor(String airflowVersion) {
+        return isAtLeast(airflowVersion, 2, 11) ? "python3.12" : "python3.11";
+    }
+
+    static boolean isAtLeast(String airflowVersion, int major, int minor) {
         String[] parts = airflowVersion.split("\\.", 3);
-        int major = Integer.parseInt(parts[0]);
-        int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
-        return (major > 2 || (major == 2 && minor >= 11)) ? "python3.12" : "python3.11";
+        int actualMajor = Integer.parseInt(parts[0]);
+        int actualMinor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+        return actualMajor > major || (actualMajor == major && actualMinor >= minor);
     }
 
     /**
