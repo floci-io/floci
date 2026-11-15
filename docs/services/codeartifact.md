@@ -460,20 +460,19 @@ state.
   (`KELLNR_SETUP__ADMIN_PWD`, confirmed live to override that default) and read fresh on every
   admin login rather than cached, so it also stays correct across a container silently restarted
   under the same repository id.
-- **Every native endpoint's own external connections resolve, for Maven, npm, pypi, nuget, and now
-  cargo (`public:crates-io`, against the real `index.crates.io`/`static.crates.io`); the
-  repository-to-repository upstream side does not yet resolve for cargo.** A real `cargo build`/
-  `cargo add` needs more than a plain on-demand fetch to work at all: its own sparse index for one
-  crate name is a single file covering every version, so a cache miss on the download route alone
-  would leave an upstream-only version invisible to its resolver. The native cargo endpoint's own
-  sparse-index route merges in the real upstream index's own version lines not already known
-  locally (read-only, nothing retained until a real download actually happens), the one thing none
-  of the other four formats' own external-connection importers need, since their own clients can
-  always ask for one already-known version directly. `cargo` is otherwise still a container-backed
-  format like the other four (`DescribePackageVersion`, `ListPackages`, `DeletePackage`,
-  `CopyPackageVersions`, and byte accounting all already work for it the same way), but has no
-  repository-to-repository upstream resolution against its own native endpoint yet; that's its own
-  future work. On real CodeArtifact, a repository with another repository
+- **Every native endpoint's own external connections, and now its own repository-to-repository
+  upstream chain too, resolve for Maven, npm, pypi, nuget, and cargo** (cargo's external
+  connection is `public:crates-io`, against the real `index.crates.io`/`static.crates.io`). A real
+  `cargo build`/`cargo add` needs more than a plain on-demand fetch to work at all: its own sparse
+  index for one crate name is a single file covering every version, so a cache miss on the
+  download route alone would leave an upstream-only version invisible to its resolver. The native
+  cargo endpoint's own sparse-index route merges in real version lines not already known locally,
+  from both its external connection and its own upstream repository chain (read-only, nothing
+  retained until a real download actually happens), the one thing none of the other four formats'
+  own importers need, since their own clients can always ask for one already-known version
+  directly. `cargo` is otherwise still a container-backed format like the other four
+  (`DescribePackageVersion`, `ListPackages`, `DeletePackage`, `CopyPackageVersions`, and byte
+  accounting all already work for it the same way). On real CodeArtifact, a repository with another repository
   configured as an upstream (`UpdateRepository`'s `upstreams`) or with an
   `AssociateExternalConnection` to a public repository serves packages from those sources too, not
   just its own; a repository has one or the other, never both. Floci's Maven endpoint does this
@@ -502,10 +501,10 @@ state.
   task so a popular package's first install doesn't risk outlasting a real `pip`/`twine` client's
   own default read timeout.
 
-  A repository-to-repository upstream chain resolves the same way, for all four formats, reusing
-  the exact claim/fence/origin-tracking machinery above: a GET/HEAD/tarball-download/packument
-  miss searches the repository's own `upstreams`, transitively, for the first repository with a
-  usable copy. The order is AWS's documented priority order: depth-first, in each repository's
+  A repository-to-repository upstream chain resolves the same way, for all five formats, reusing
+  the exact claim/fence/origin-tracking machinery above: a GET/HEAD/tarball-download/packument/
+  sparse-index miss searches the repository's own `upstreams`, transitively, for the first
+  repository with a usable copy. The order is AWS's documented priority order: depth-first, in each repository's
   listed order, an upstream's own upstreams searched before the next one, so `my_repo` with
   upstreams `A` and `B`, `A` with `C` and `D` and `D` with `E` is searched `A, C, D, E, B`. An
   Archived or Disposed version *at the resolved upstream repository itself* is skipped, the walk
@@ -514,14 +513,18 @@ state.
   through an upstream's own external connection, the first in that same order that has one, and
   retained both there and in the repository the request was made to, as AWS documents for a
   downstream request chaining through an upstream's `public:*` connection; a packument, Simple
-  index or `maven-metadata.xml` read through such an upstream offers what its connection has too.
+  index, `maven-metadata.xml`, or cargo sparse-index read through such an upstream offers what its
+  connection has too (cargo's own sparse-index merge walks every reachable upstream in that same
+  priority order rather than stopping at the first one with anything to offer, since it is merging
+  real version lines across however many hops the chain has, not resolving a single target the way
+  the other four formats' own one-shot reads do).
   A retained version's `origin.domainEntryPoint` names where it entered the domain: the external
   connection it was fetched through, `EXTERNAL`, or the repository it was published to, however
   many upstreams it was retained through. Since the copy from a same-domain upstream never leaves
   this process (a fetch through an upstream's connection is that connection's own import), pypi's
-  own copy here needs none of the real external connection's PEP 691 sha256 re-verification or
-  background-thread split: every asset of the resolved version is copied synchronously, in one
-  pass.
+  and cargo's own copy here need none of the real external connection's PEP 691/cargo-index-cksum
+  re-verification or (pypi's own) background-thread split: every asset of the resolved version is
+  copied synchronously, in one pass.
 - **Maven external-connection retention is the one place this emulator makes a real outbound
   call to the public internet**, rather than only ever talking to a container it started itself.
   An offline environment, or a real outage of the public repository being connected to, means a
@@ -577,8 +580,8 @@ state.
   native wire protocol (`mvn deploy`, `npm publish`, `twine upload`, `nuget push`, `cargo publish`)
   directly against the repository endpoint. `upstream` is stored and reported faithfully for every
   format, and gates every format's own external-connection retention and repository-to-repository
-  upstream retention (external-connection retention now resolves for cargo too, alongside Maven,
-  npm, pypi, and nuget; cargo has no repository-to-repository upstream retention yet, see above).
+  upstream retention, both of which now resolve for cargo too, alongside Maven, npm, pypi, and
+  nuget (see above).
   `CopyPackageVersions`
   deliberately does not check `publish: BLOCK`/`upstream: BLOCK` either, for any format, including
   its own `includeFromUpstream` search: the User Guide's own definition of both controls scopes
@@ -620,10 +623,9 @@ state.
   (`PublishPackageVersion`'s own `generic`-format path and every native proxy controller's own
   publish guard, `mvn deploy`/`npm publish`/`twine upload`/`nuget push`/`cargo publish` alike);
   `EXTERNAL_UPSTREAM` and `INTERNAL_UPSTREAM` only apply where a format has retention to gate in
-  the first place; cargo's own external-connection retention is gated by `EXTERNAL_UPSTREAM` the
-  same way the other four formats' already are (`isUpstreamRetentionBlocked`'s own check is fully
-  format-agnostic), but `INTERNAL_UPSTREAM` still never reaches cargo, since it has no
-  repository-to-repository upstream resolution yet (see above). For the formats that do: every
+  the first place; cargo's own external-connection and repository-to-repository retention are both
+  gated the same way the other four formats' already are (`isUpstreamRetentionBlocked`'s own check
+  is fully format-agnostic). Every
   format's external-connection retention (Maven, npm, pypi, NuGet, and now cargo) is wired to the
   resolved `EXTERNAL_UPSTREAM` mode; and every format's repository-to-repository upstream retention
   (`UpdateRepository`'s `upstreams`) is wired to the resolved `INTERNAL_UPSTREAM` mode the same
