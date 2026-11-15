@@ -257,27 +257,30 @@ public class AmazonMqService implements ResourceProvider {
     }
 
     private void startReadinessPoller() {
-        poller.scheduleAtFixedRate(() -> {
-            try {
-                if (config.services().amazonmq().mock()) {
-                    return;
-                }
-                // Every account's brokers, each written back under the account and key it is stored
-                // under: the poller has no request context, so a plain put would land in the default
-                // account. Brokers stored under a bare id have moved to their Region's key at startup.
-                for (AccountEntry<Broker> entry : storage.scanAllAccountEntries(key -> true)) {
-                    Broker broker = entry.value();
-                    if (broker.getBrokerState() == BrokerState.CREATION_IN_PROGRESS
-                            && rabbitMqManager.isReady(broker)) {
-                        LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
-                        broker.setBrokerState(BrokerState.RUNNING);
-                        storage.putForAccount(entry.accountId(), entry.key(), broker);
-                    }
-                }
-            } catch (Exception e) {
-                LOG.error("Error in Amazon MQ readiness poller", e);
+        poller.scheduleAtFixedRate(this::pollReadiness, 1, 2, TimeUnit.SECONDS);
+    }
+
+    /** One pass of the readiness poller: marks each starting broker whose container answers {@code RUNNING}. */
+    void pollReadiness() {
+        try {
+            if (config.services().amazonmq().mock()) {
+                return;
             }
-        }, 1, 2, TimeUnit.SECONDS);
+            // Every account's brokers, each written back under the account and key it is stored
+            // under: the poller has no request context, so a plain put would land in the default
+            // account. Brokers stored under a bare id have moved to their Region's key at startup.
+            for (AccountEntry<Broker> entry : storage.scanAllAccountEntries(key -> true)) {
+                Broker broker = entry.value();
+                if (broker.getBrokerState() == BrokerState.CREATION_IN_PROGRESS
+                        && rabbitMqManager.isReady(broker)) {
+                    LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
+                    broker.setBrokerState(BrokerState.RUNNING);
+                    storage.putForAccount(entry.accountId(), entry.key(), broker);
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("Error in Amazon MQ readiness poller", e);
+        }
     }
 
     static String brokerKey(String region, String brokerId) {

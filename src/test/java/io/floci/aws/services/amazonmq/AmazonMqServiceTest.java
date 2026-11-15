@@ -15,11 +15,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.time.Duration;
 import java.util.List;
 
 import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.when;
 
@@ -256,10 +254,10 @@ class AmazonMqServiceTest {
         String key = AmazonMqService.brokerKey("eu-west-1", "b-starting");
         brokers.putForAccount("111111111111", key, starting);
 
-        service.init();
+        service.pollReadiness();
 
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> assertEquals(BrokerState.RUNNING,
-                brokers.getForAccount("111111111111", key).map(Broker::getBrokerState).orElse(null)));
+        assertEquals(BrokerState.RUNNING,
+                brokers.getForAccount("111111111111", key).map(Broker::getBrokerState).orElse(null));
         assertEquals(1, brokers.scanAllAccounts().size());
     }
 
