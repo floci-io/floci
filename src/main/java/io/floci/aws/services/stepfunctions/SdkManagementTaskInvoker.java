@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServiceRegistry;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.lambda.LambdaController;
 import io.floci.aws.services.secretsmanager.SecretsManagerJsonHandler;
@@ -52,6 +53,11 @@ public class SdkManagementTaskInvoker {
             case "secretsmanager" -> "describeSecret".equals(integration.api());
             default -> false;
         };
+    }
+
+    /** The secrets Secrets Manager finds, for the request of a {@code DescribeSecret} task. */
+    StoredResourceArns secretsStoredResourceArns() {
+        return secrets.storedResourceArns();
     }
 
     JsonNode invoke(StatesIntegration integration, JsonNode input, String region) throws Exception {
