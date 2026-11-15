@@ -4,10 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.GlueTableResolver;
 import io.floci.aws.services.glue.model.Column;
@@ -73,24 +71,19 @@ public class GlueIcebergCatalog {
     private final S3Service s3;
     private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
-    private final EmulatorConfig config;
-    private final RequestContext requestContext;
     private final Clock clock;
 
     @Inject
-    public GlueIcebergCatalog(GlueService glue, S3Service s3, RegionResolver regionResolver, ObjectMapper mapper,
-                              EmulatorConfig config, RequestContext requestContext) {
-        this(glue, s3, regionResolver, mapper, config, requestContext, Clock.systemUTC());
+    public GlueIcebergCatalog(GlueService glue, S3Service s3, RegionResolver regionResolver, ObjectMapper mapper) {
+        this(glue, s3, regionResolver, mapper, Clock.systemUTC());
     }
 
     GlueIcebergCatalog(GlueService glue, S3Service s3, RegionResolver regionResolver, ObjectMapper mapper,
-                       EmulatorConfig config, RequestContext requestContext, Clock clock) {
+                       Clock clock) {
         this.glue = glue;
         this.s3 = s3;
         this.regionResolver = regionResolver;
         this.mapper = mapper;
-        this.config = config;
-        this.requestContext = requestContext;
         this.clock = clock;
     }
 
@@ -239,7 +232,7 @@ public class GlueIcebergCatalog {
      * Creates a table from a {@code CreateTableRequest}, or, with {@code stage-create}, answers the metadata it would
      * have without creating it: the commit that follows, required to find no table ({@code assert-create}), does.
      */
-    ObjectNode createTable(String catalog, String namespace, JsonNode request) {
+    public ObjectNode createTable(String catalog, String namespace, JsonNode request) {
         requireDefaultCatalog(catalog);
         Database database = requireNamespace(namespace(namespace));
         String name = request.path("name").asText();
@@ -271,7 +264,7 @@ public class GlueIcebergCatalog {
         return result;
     }
 
-    ObjectNode loadTable(String catalog, String namespace, String name, String snapshots) {
+    public ObjectNode loadTable(String catalog, String namespace, String name, String snapshots) {
         requireDefaultCatalog(catalog);
         Database database = requireNamespace(namespace(namespace));
         Table table = requireIcebergTable(database.getName(), name);
@@ -299,7 +292,7 @@ public class GlueIcebergCatalog {
      * ({@code CommitFailedException}) when the Glue table changed since. A commit requiring {@code assert-create}
      * creates the table.
      */
-    ObjectNode commitTable(String catalog, String namespace, String name, JsonNode request) {
+    public ObjectNode commitTable(String catalog, String namespace, String name, JsonNode request) {
         requireDefaultCatalog(catalog);
         Database database = requireNamespace(namespace(namespace));
         Table existing = findTable(database.getName(), name);
@@ -375,28 +368,9 @@ public class GlueIcebergCatalog {
     // ─── Helpers ──────────────────────────────────────────────────────────────────
 
     private void requireDefaultCatalog(String catalog) {
-        requireCheckableCaller();
         if (!DEFAULT_CATALOG.equals(catalog) && !regionResolver.getAccountId().equals(catalog)) {
             throw IcebergRestException.badRequest("Catalog " + catalog
                     + " is not supported: use the caller's default catalog (':' or its account id)");
-        }
-    }
-
-    /**
-     * Under IAM enforcement, no rule maps this endpoint's routes to the Glue actions AWS checks for them yet, and an
-     * unmapped REST route is allowed, so an IAM principal is refused here rather than let through unchecked: only the
-     * account's root credentials, and Floci's own callers, which carry no access key, reach the catalog then.
-     */
-    private void requireCheckableCaller() {
-        if (!config.services().iam().enforcementEnabled()) {
-            return;
-        }
-        String accessKeyId = requestContext.getAccessKeyId();
-        if (accessKeyId != null && !"test".equals(accessKeyId)
-                && !accessKeyId.equals(requestContext.getAccountId())) {
-            throw new IcebergRestException(403, "ForbiddenException",
-                    "AWS Glue's Iceberg REST endpoint does not check IAM policies in Floci yet, so under IAM "
-                            + "enforcement it answers only the account's root credentials");
         }
     }
 

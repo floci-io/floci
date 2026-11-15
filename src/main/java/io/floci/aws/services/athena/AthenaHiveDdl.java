@@ -1,6 +1,7 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.glue.iceberg.IcebergSchemas;
 import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
@@ -15,9 +16,10 @@ import java.util.Set;
 /**
  * Parses the Hive DDL statements Athena runs against the Glue Data Catalog rather than against
  * data: {@code CREATE EXTERNAL TABLE}, {@code DROP TABLE}, {@code ALTER TABLE ... ADD|DROP
- * PARTITION}, {@code MSCK REPAIR TABLE} and {@code SHOW PARTITIONS}. {@link #parse} answers null
- * for every other statement, an Iceberg {@code CREATE TABLE} and {@code CREATE TABLE AS} included,
- * so those keep going to the query engine.
+ * PARTITION}, {@code MSCK REPAIR TABLE} and {@code SHOW PARTITIONS}, and the Iceberg {@code CREATE TABLE ...
+ * TBLPROPERTIES ('table_type'='ICEBERG')} and {@code VACUUM}, which Floci runs against Glue's Iceberg catalog.
+ * {@link #parse} answers null for every other statement, {@code CREATE TABLE AS} included, so those keep going to
+ * the query engine.
  *
  * <p>Names are lower-cased, as Athena stores them in Glue. String literals take Hive's backslash
  * escapes, so {@code FIELDS TERMINATED BY '\t'} stores a tab.
@@ -25,7 +27,7 @@ import java.util.Set;
 final class AthenaHiveDdl {
 
     sealed interface Statement permits CreateTable, DropTable, AddPartitions, DropPartitions, RepairTable,
-            ShowPartitions {
+            ShowPartitions, CreateIcebergTable, Vacuum {
         TableRef ref();
     }
 
@@ -53,6 +55,16 @@ final class AthenaHiveDdl {
     }
 
     record ShowPartitions(TableRef ref) implements Statement {
+    }
+
+    /** An Iceberg {@code CREATE TABLE}: its columns, partition transforms, location and other table properties. */
+    record CreateIcebergTable(TableRef ref, boolean ifNotExists, List<Column> columns,
+                              List<IcebergSchemas.PartitionField> partitioning, String location,
+                              Map<String, String> properties) implements Statement {
+    }
+
+    /** {@code VACUUM}: expires an Iceberg table's old snapshots. */
+    record Vacuum(TableRef ref) implements Statement {
     }
 
     private record Format(String inputFormat, String outputFormat, String serde) {
@@ -102,8 +114,11 @@ final class AthenaHiveDdl {
             return finish(createTable());
         }
         if (peekWords("CREATE", "TABLE")) {
-            if (isIcebergOrCtas()) {
+            if (isCtas()) {
                 return null;
+            }
+            if (isIceberg()) {
+                return finish(createIcebergTable());
             }
             throw invalid("Athena creates a table without EXTERNAL only as an Iceberg table "
                     + "(TBLPROPERTIES ('table_type'='ICEBERG')); use CREATE EXTERNAL TABLE for a Hive table");
@@ -111,6 +126,9 @@ final class AthenaHiveDdl {
         if (acceptWords("DROP", "TABLE")) {
             boolean ifExists = acceptWords("IF", "EXISTS");
             return finish(new DropTable(tableRef(), ifExists));
+        }
+        if (acceptWords("VACUUM")) {
+            return finish(new Vacuum(tableRef()));
         }
         if (acceptWords("MSCK", "REPAIR", "TABLE")) {
             return finish(new RepairTable(tableRef()));
@@ -145,7 +163,8 @@ final class AthenaHiveDdl {
         return statement;
     }
 
-    private boolean isIcebergOrCtas() {
+    /** A {@code CREATE TABLE AS} (with a {@code WITH (...)} property list or not), which the query engine runs. */
+    private boolean isCtas() {
         for (int i = position; i < tokens.size(); i++) {
             Token token = tokens.get(i);
             Token following = i + 1 < tokens.size() ? tokens.get(i + 1) : null;
@@ -154,13 +173,74 @@ final class AthenaHiveDdl {
             if (token.isWord("AS") && query || token.isWord("WITH") && following != null && following.is("(")) {
                 return true;
             }
-            if (token.kind() == Kind.STRING && "table_type".equalsIgnoreCase(token.text())
-                    && i + 2 < tokens.size() && tokens.get(i + 1).is("=")
-                    && "ICEBERG".equalsIgnoreCase(tokens.get(i + 2).text())) {
+        }
+        return false;
+    }
+
+    /** A {@code CREATE TABLE} whose table properties make it an Iceberg table. */
+    private boolean isIceberg() {
+        for (int i = position; i + 2 < tokens.size(); i++) {
+            if (tokens.get(i).kind() == Kind.STRING && "table_type".equalsIgnoreCase(tokens.get(i).text())
+                    && tokens.get(i + 1).is("=") && "ICEBERG".equalsIgnoreCase(tokens.get(i + 2).text())) {
                 return true;
             }
         }
         return false;
+    }
+
+    private CreateIcebergTable createIcebergTable() {
+        expectWords("CREATE", "TABLE");
+        boolean ifNotExists = acceptWords("IF", "NOT", "EXISTS");
+        TableRef ref = tableRef();
+        expect("(");
+        List<Column> columns = columns();
+        String location = null;
+        List<IcebergSchemas.PartitionField> partitioning = new ArrayList<>();
+        Map<String, String> properties = new LinkedHashMap<>();
+        while (position < tokens.size() && !tokens.get(position).is(";")) {
+            if (acceptWords("PARTITIONED", "BY")) {
+                expect("(");
+                partitioning = partitionTransforms();
+            } else if (acceptWords("LOCATION")) {
+                location = string();
+            } else if (acceptWords("TBLPROPERTIES")) {
+                properties.putAll(properties());
+            } else {
+                throw invalid("Unexpected '" + tokens.get(position).text() + "' in CREATE TABLE");
+            }
+        }
+        properties.keySet().removeIf(key -> key.equalsIgnoreCase("table_type"));
+        return new CreateIcebergTable(ref, ifNotExists, columns, partitioning, location, properties);
+    }
+
+    /**
+     * An Iceberg table's {@code PARTITIONED BY} entries, after the opening parenthesis: a column, or a transform of
+     * one ({@code day(ts)}, {@code bucket(16, id)}, {@code truncate(4, name)}).
+     */
+    private List<IcebergSchemas.PartitionField> partitionTransforms() {
+        List<IcebergSchemas.PartitionField> fields = new ArrayList<>();
+        do {
+            String name = identifier();
+            if (accept("(")) {
+                Integer width = null;
+                if (position < tokens.size() && tokens.get(position).kind() == Kind.NUMBER) {
+                    String argument = next().text();
+                    try {
+                        width = Integer.parseInt(argument);
+                    } catch (NumberFormatException e) {
+                        throw invalid("The width of partition transform " + name + " must be a whole number: "
+                                + argument);
+                    }
+                    expect(",");
+                }
+                fields.add(new IcebergSchemas.PartitionField(name, width, identifier()));
+                expect(")");
+            } else {
+                fields.add(new IcebergSchemas.PartitionField("identity", null, name));
+            }
+        } while (accept(","));
+        expect(")");
+        return fields;
     }
 
     private CreateTable createTable() {

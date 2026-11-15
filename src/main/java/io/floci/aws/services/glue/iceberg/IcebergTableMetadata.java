@@ -325,6 +325,18 @@ final class IcebergTableMetadata {
             }
         }
         metadata.set("snapshot-log", log);
+        // So do the removed snapshots' statistics files, as Iceberg's metadata builder drops them.
+        for (String statistics : List.of("statistics", "partition-statistics")) {
+            if (metadata.has(statistics)) {
+                ArrayNode keptStatistics = JSON.arrayNode();
+                for (JsonNode file : metadata.withArray(statistics)) {
+                    if (!removed.contains(file.path("snapshot-id").asLong())) {
+                        keptStatistics.add(file);
+                    }
+                }
+                metadata.set(statistics, keptStatistics);
+            }
+        }
     }
 
     /**

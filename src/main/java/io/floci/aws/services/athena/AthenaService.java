@@ -110,6 +110,7 @@ public class AthenaService {
     private final GlueViewDdlBuilder ddlBuilder;
     private final RegionResolver regionResolver;
     private final AthenaHiveDdlExecutor hiveDdlExecutor;
+    private final AthenaIcebergStatements icebergStatements;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
@@ -119,7 +120,8 @@ public class AthenaService {
                          EmulatorConfig config,
                          Vertx vertx,
                          GlueViewDdlBuilder ddlBuilder,
-                         RegionResolver regionResolver) {
+                         RegionResolver regionResolver,
+                         AthenaIcebergStatements icebergStatements) {
         this.queryStore = storageFactory.create("athena", "queries.json",
                 new TypeReference<>() {});
         this.workGroupStore = storageFactory.create("athena", "workgroups.json",
@@ -135,7 +137,8 @@ public class AthenaService {
         this.vertx = vertx;
         this.ddlBuilder = ddlBuilder;
         this.regionResolver = regionResolver;
-        this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service);
+        this.icebergStatements = icebergStatements;
+        this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service, icebergStatements);
     }
 
     public String startQueryExecution(String query,
@@ -160,7 +163,9 @@ public class AthenaService {
         } catch (AwsException e) {
             invalidHiveDdl = e;
         }
-        boolean hiveDdlStatement = hiveDdl != null || invalidHiveDdl != null;
+        // VACUUM reads the table's manifests, so it runs on the query engine like a query.
+        AthenaHiveDdl.Vacuum vacuum = hiveDdl instanceof AthenaHiveDdl.Vacuum statement ? statement : null;
+        boolean hiveDdlStatement = (hiveDdl != null && vacuum == null) || invalidHiveDdl != null;
         // AWS reports the result CSV object itself as the OutputLocation, not a
         // directory prefix — the same key is written and returned to the client.
         // Statements that do not return rows must not be wrapped in a result COPY.
@@ -225,17 +230,31 @@ public class AthenaService {
                     // Athena fails a query that reads a table with an incomplete location template, or that
                     // leaves an injected partition column unconstrained. It fails the query rather than the
                     // submission, which is what throwing here produces.
+                    if (vacuum != null) {
+                        icebergStatements.vacuum(vacuum.ref(), database);
+                        return null;
+                    }
                     List<Table> projectionTables = tablesForProjectionCheck(database);
                     PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
                     PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
-                    String setupDdl = TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query);
-                    String duckQuery = TrinoSqlCompatibility.translate(query);
-                    if (outputLocation != null) {
-                        ensureOutputBucket(outputLocation);
-                    }
-                    duckClient.execute(duckQuery, setupDdl, outputLocation, accountId);
-                    if (outputLocation != null) {
-                        resultColumnTypeStore.put(id, describeColumnTypes(duckQuery, setupDdl, accountId));
+                    // A write to an Iceberg table goes through the engine's attachment of Glue's Iceberg catalog.
+                    AthenaIcebergStatements.IcebergWrite icebergWrite = icebergStatements.write(query, database);
+                    try {
+                        String setupDdl = (icebergWrite != null ? icebergWrite.setupSql() : "")
+                                + TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query);
+                        String duckQuery = TrinoSqlCompatibility.translate(
+                                icebergWrite != null ? icebergWrite.query() : query);
+                        if (outputLocation != null) {
+                            ensureOutputBucket(outputLocation);
+                        }
+                        duckClient.execute(duckQuery, setupDdl, outputLocation, accountId);
+                        if (outputLocation != null) {
+                            resultColumnTypeStore.put(id, describeColumnTypes(duckQuery, setupDdl, accountId));
+                        }
+                    } finally {
+                        if (icebergWrite != null) {
+                            icebergStatements.finished(icebergWrite);
+                        }
                     }
                     return null;
                 })

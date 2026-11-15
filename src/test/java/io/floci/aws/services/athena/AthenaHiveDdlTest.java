@@ -1,6 +1,7 @@
 package io.floci.aws.services.athena;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.glue.iceberg.IcebergSchemas;
 import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
@@ -109,13 +110,58 @@ class AthenaHiveDdlTest {
     }
 
     @Test
-    void createTableWithoutExternalIsLeftToIcebergAndCtasOrRefused() {
-        assertNull(AthenaHiveDdl.parse("CREATE TABLE t (a int) LOCATION 's3://b/t/' TBLPROPERTIES ('table_type'='ICEBERG')"));
+    void createTableWithoutExternalIsIcebergOrLeftToCtasOrRefused() {
+        assertInstanceOf(AthenaHiveDdl.CreateIcebergTable.class, AthenaHiveDdl.parse(
+                "CREATE TABLE t (a int) LOCATION 's3://b/t/' TBLPROPERTIES ('table_type'='ICEBERG')"));
         assertNull(AthenaHiveDdl.parse("CREATE TABLE t WITH (format = 'PARQUET') AS SELECT 1 AS a"));
+        assertNull(AthenaHiveDdl.parse("CREATE TABLE t WITH (table_type = 'ICEBERG') AS SELECT 1 AS a"));
         assertNull(AthenaHiveDdl.parse("CREATE TABLE t AS SELECT 1 AS a"));
         AwsException hive = assertThrows(AwsException.class,
                 () -> AthenaHiveDdl.parse("CREATE TABLE t (a int) STORED AS PARQUET LOCATION 's3://b/t/'"));
         assertTrue(hive.getMessage().contains("EXTERNAL"), hive.getMessage());
+    }
+
+    @Test
+    void anIcebergCreateTableKeepsItsColumnsPartitionTransformsLocationAndProperties() {
+        AthenaHiveDdl.CreateIcebergTable create = assertInstanceOf(AthenaHiveDdl.CreateIcebergTable.class,
+                AthenaHiveDdl.parse("""
+                        CREATE TABLE IF NOT EXISTS Lake.events (
+                          id bigint COMMENT 'the id',
+                          category string,
+                          ts timestamp,
+                          name string)
+                        PARTITIONED BY (category, bucket(16, id), day(ts), truncate(4, name))
+                        LOCATION 's3://lake/events/'
+                        TBLPROPERTIES ('table_type'='ICEBERG', 'format'='parquet', 'vacuum_min_snapshots_to_keep'='3');
+                        """));
+
+        assertTrue(create.ifNotExists());
+        assertEquals(new AthenaHiveDdl.TableRef("lake", "events"), create.ref());
+        assertEquals(List.of("id:bigint", "category:string", "ts:timestamp", "name:string"), create.columns().stream()
+                .map(column -> column.getName() + ":" + column.getType()).toList());
+        assertEquals("the id", create.columns().getFirst().getComment());
+        assertEquals(List.of(new IcebergSchemas.PartitionField("identity", null, "category"),
+                new IcebergSchemas.PartitionField("bucket", 16, "id"),
+                new IcebergSchemas.PartitionField("day", null, "ts"),
+                new IcebergSchemas.PartitionField("truncate", 4, "name")), create.partitioning());
+        assertEquals("s3://lake/events/", create.location());
+        assertEquals(Map.of("format", "parquet", "vacuum_min_snapshots_to_keep", "3"), create.properties());
+    }
+
+    @Test
+    void aMalformedIcebergPartitionTransformSaysWhatIsWrong() {
+        AwsException e = assertThrows(AwsException.class, () -> AthenaHiveDdl.parse(
+                "CREATE TABLE t (id int) PARTITIONED BY (bucket(id, 16)) TBLPROPERTIES ('table_type'='ICEBERG')"));
+
+        assertEquals("InvalidRequestException", e.getErrorCode());
+    }
+
+    @Test
+    void vacuumNamesItsTable() {
+        assertEquals(new AthenaHiveDdl.TableRef("lake", "events"), assertInstanceOf(AthenaHiveDdl.Vacuum.class,
+                AthenaHiveDdl.parse("VACUUM lake.events;")).ref());
+        assertEquals(new AthenaHiveDdl.TableRef(null, "_events"), assertInstanceOf(AthenaHiveDdl.Vacuum.class,
+                AthenaHiveDdl.parse("vacuum `_events`")).ref());
     }
 
     @Test

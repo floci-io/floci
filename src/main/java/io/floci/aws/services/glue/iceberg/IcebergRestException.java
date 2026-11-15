@@ -5,7 +5,7 @@ package io.floci.aws.services.glue.iceberg;
  * "code"}}}), whose {@code type} an Iceberg client maps to its own exception: {@code NoSuchTableException},
  * {@code CommitFailedException} and so on.
  */
-final class IcebergRestException extends RuntimeException {
+public final class IcebergRestException extends RuntimeException {
 
     private final int code;
     private final String type;
@@ -16,11 +16,11 @@ final class IcebergRestException extends RuntimeException {
         this.type = type;
     }
 
-    int code() {
+    public int code() {
         return code;
     }
 
-    String type() {
+    public String type() {
         return type;
     }
 
