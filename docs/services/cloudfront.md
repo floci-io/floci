@@ -169,8 +169,10 @@ the path:
 - `DeleteDistribution` returns `DistributionNotDisabled` (409) if `Enabled` is `true` in the config.
 - All mutating operations (`PUT`, `DELETE`) require an `If-Match` header containing the current
   `ETag`. Response headers policies, public keys, and key groups distinguish a missing header
-  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Other CloudFront
-  resources currently return `InvalidIfMatchVersion` (400) for either case.
+  (`InvalidIfMatchVersion`, 400) from a stale `ETag` (`PreconditionFailed`, 412). Key-value-store
+  control-plane updates and deletes also return `PreconditionFailed` (412) for stale UUID versions
+  issued by Floci; missing or malformed versions return `InvalidIfMatchVersion` (400). Other
+  CloudFront resources currently return `InvalidIfMatchVersion` (400) for either case.
 - All `GET` and `POST` (create) responses include an `ETag` response header.
 - List operations emit the payload root declared by the CloudFront REST XML model (for example,
   `ListDistributions` returns `<DistributionList>`), with list contents represented by
