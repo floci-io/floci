@@ -260,11 +260,11 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
               "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty",
-              "secretsmanager")
+              "secretsmanager", "scheduler")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
-              "resource-groups", "s3", "scheduler", "sns", "sqs", "sts")
+              "resource-groups", "s3", "sns", "sqs", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
@@ -2506,15 +2506,21 @@ def named_by_variable(variable: str, formats: dict[str, str]) -> str | None:
 
 
 # Documentation saying what a service uses for a member a request leaves out: "If you do not specify a cluster, the
-# default cluster is assumed", "If you don't specify a cluster, default is used".
+# default cluster is assumed", "If you don't specify a cluster, default is used", or, naming the type after
+# `default`, "If you omit this, the default schedule group is used", "If you omit this, EventBridge Scheduler assumes
+# that the schedule is associated with the default group".
 DOC_DEFAULT_RE = re.compile(r"\bif you do(?: not|n't) specify an? ([a-z][a-z -]*?), (?:the )?default(?: [a-z -]+?)? is "
-                            r"(?:assumed|used)\b")
+                            r"(?:assumed|used)\b"
+                            r"|\bif you omit this(?: value)?, (?:the default ([a-z][a-z -]*?) is (?:assumed|used)\b"
+                            r"|[a-z0-9 -]+? assumes (?:that )?the [a-z -]+? is associated (?:with|to) the default "
+                            r"([a-z][a-z -]*?)(?:[.,;]|$))")
 
 
 def defaulted_members(models: dict[str, dict], operation: str) -> dict[str, str]:
     """The optional top-level members of the operation's request, strings or lists of them, whose documentation says
     its service uses its default of a type for a request leaving them out, by their path, each with the word it
-    names that type by: ECS's `cluster`, "If you do not specify a cluster, the default cluster is assumed"."""
+    names that type by: ECS's `cluster`, "If you do not specify a cluster, the default cluster is assumed";
+    EventBridge Scheduler's `GroupName`, "If you omit this, the default schedule group is used"."""
     found: dict[str, str] = {}
     for model in models.values():
         spec = model["operations"].get(operation)
@@ -2525,7 +2531,7 @@ def defaulted_members(models: dict[str, dict], operation: str) -> dict[str, str]
             strings = _strings(model, model["shapes"][member["shape"]])
             said = DOC_DEFAULT_RE.search(_lead_text(member.get("documentation")))
             if name not in shape.get("required", []) and strings is not None and said:
-                found.setdefault(name + strings, said.group(1).replace(" ", "-"))
+                found.setdefault(name + strings, next(word for word in said.groups() if word).replace(" ", "-"))
     return found
 
 
@@ -2534,7 +2540,9 @@ def with_documented_defaults(resources: list[dict], formats: dict[str, str], def
     service uses its default for a request leaving it out marked so (`defaults`), when the variable is the one of a
     type whose format is that variable alone named by the word the documentation uses: a service's
     `service/${ClusterName}/${ServiceName}` is on the default cluster, `cluster/${ClusterName}`, for a request with
-    no `cluster`. The reader asks the type's service for that default."""
+    no `cluster`. The reader asks the type's service for that default. A resource of a pair that already applies by
+    whether the member names the default (`whenDefault`, `unlessDefault`: a rule on the default event bus or on
+    another) is left as it is, the pair's other resource being the one a request leaving it out names."""
     found = []
     for resource in resources:
         defaults = {}
@@ -2543,7 +2551,8 @@ def with_documented_defaults(resources: list[dict], formats: dict[str, str], def
             if path in defaulted and kind is not None and related(stem(defaulted[path]), stem(kind)):
                 defaults[path] = kind
         found.append(dict(resource, defaults=dict(sorted(defaults.items()))) if defaults and "type" in resource
-                     and not {"when", "unless", "find", "default"} & set(resource) else resource)
+                     and not {"when", "unless", "find", "default", "whenDefault", "unlessDefault"} & set(resource)
+                     else resource)
     return found
 
 

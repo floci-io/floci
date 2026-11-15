@@ -1926,9 +1926,9 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
-SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
+SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
-Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
+Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
@@ -2122,8 +2122,10 @@ tagging route names, everything after `/tags/` whether its slashes are sent enco
 re-encoded, in SigV4 canonical form, as the `Tags` resource's `/tags/<UrlEncodedResourceARN>` gives it.
 
 A Scheduler request is checked against `schedule/<group>/<name>`, the group from the body's
-`GroupName` on a create or an update, from `groupName` otherwise, and `default` when neither names
-one, or `schedule-group/<name>`. A Pipes request is checked against `pipe/<name>`. A DSQL request
+`GroupName` on a create or an update, from `groupName` otherwise, and the `default` group when neither
+names one, as botocore documents ("If you omit this, the default schedule group is used"), or
+`schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
+`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`. A DSQL request
 is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
 route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A MicroVM image
 or network connector request is checked against `microvm-image:<name>` or `network-connector:<id>`
@@ -2158,7 +2160,11 @@ The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service
 and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
 it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
-`resourceArn` query parameter on the other bare routes.
+`resourceArn` query parameter on the other bare routes. A service whose resources the generated table reads
+whole is served there only on the routes its model gives, as AWS, which tells these services apart by hostname,
+serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty and Security Hub tag only on
+`/tags/{resourceArn}`, the ARN encoded, and a request on the bare `/tags`, or naming an ARN whose `/` is not
+encoded, is refused with `BadRequestException` ("Invalid resource ARN") and tags nothing.
 
 A REST request names its resources in its path and its query as well as its body. For the REST
 services the table reads, OpenSearch Service, IAM Access Analyzer, Security Hub and GuardDuty among them, a member its path carries, the
@@ -2580,9 +2586,9 @@ AWS checks as `dynamodb:GetItem`, is checked item by item, as described under
 
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` is active, Floci also queries registered `ResourcePolicyProvider` SPI implementations (such as S3 bucket policies) during request authorization:
 
-- Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"CanonicalUser": "<id>"}`, which S3 bucket policies accept, names an account by its S3 canonical user ID and matches that account's IAM identities, as an account principal does; Floci derives that ID from the account ID as its SHA-256 hex digest, the 64-hex value its S3 ACLs report, and still accepts the account ID itself for policies written before it derived one. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` entries never match an IAM caller.
+- Resource policy statements are matched against the caller (`Principal` and `NotPrincipal` clauses), each principal type naming only its own kind of caller, as on AWS: `"*"` matches anyone; `{"AWS": "*"}` matches IAM identities and AWS services; any other `AWS` entry (a user, role, account id or account root) matches IAM identities only, and a role session matches a `Principal` naming its role through the role's own ARN, path included; `{"Service": "<name>"}` matches that service exactly. `{"CanonicalUser": "<id>"}`, which S3 bucket policies accept, names an account by its S3 canonical user ID and matches that account's IAM identities, as an account principal does; Floci derives that ID from the account ID as its SHA-256 hex digest, the 64-hex value its S3 ACLs report, and still accepts the account ID itself for policies written before it derived one. `{"Service": "*"}`, which AWS does not accept, matches nothing, and `Federated` entries never match an IAM caller. Each entry is written as a string, so a principal element whose entries are no strings names nobody at all, and a statement whose principal element names nobody matches no caller. A statement carrying both elements is a shape the grammar does not describe, and the `Principal` it names decides it either way, one naming nobody included.
 - An explicit **Deny** in a resource policy overrides any allows.
-- A Deny statement's `NotPrincipal` spares an IAM caller only when it names the caller's account as well as the caller itself, the user, role or role session (the account alone for the account root), and never spares a caller that has a permissions boundary attached, as the IAM User Guide's "AWS JSON policy elements: NotPrincipal" describes: without the account, AWS "might deny access to the entire account", and with a boundary it "will always deny". An Allow with `NotPrincipal`, which Access Analyzer warns can grant to anonymous callers, grants everyone it does not name.
+- A Deny statement's `NotPrincipal` spares an IAM caller only when it names the caller's account as well as the caller itself, the user, role or role session (the account alone for the account root), and never spares a caller that has a permissions boundary attached, as the IAM User Guide's "AWS JSON policy elements: NotPrincipal" describes: without the account, AWS "might deny access to the entire account", and with a boundary it "will always deny". An Allow with `NotPrincipal`, which Access Analyzer warns can grant to anonymous callers, grants everyone it does not name, and one that names nobody spares nobody and so covers nobody, rather than covering every caller there is; a Deny written that way denies nobody for the same reason.
 - In cross-account scenarios or resource-controlled access, an explicit **Allow** in a resource policy grants access to the principal.
 - A statement that names the caller only through its account, by its id, its root ARN or its S3 canonical user ID, delegates to the account, as the IAM User Guide's "AWS account principals" describes: across accounts it is the resource owner's half of the grant, and within the account it grants nothing on its own, so the caller's identity policies have to allow the request. A statement naming the user, role or role session itself, or `"*"`, grants on its own within the account.
 - For detailed S3 bucket policy behavior and configuration, see [S3 Bucket Policy Enforcement](s3.md#bucket-policy-enforcement).
@@ -2872,7 +2878,10 @@ account key carries no identity policies of its own.
   resolved from the request context.
 - **Effects**: `Allow` and `Deny`. A statement whose `Effect` names neither, because it is absent,
   is not a string, or is some other word, states nothing: it grants nothing, denies nothing, and
-  leaves the request to the rest of the document.
+  leaves the request to the rest of the document. The two words are read as written, the IAM User
+  Guide saying of the element that "The `Effect` value is case sensitive", so `"Effect": "allow"`
+  states nothing here, as it is also refused by a write of this package, and a `Deny` spelled in
+  another case overrides nothing.
 
 #### Policy variables
 

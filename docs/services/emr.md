@@ -186,7 +186,12 @@ holding the driver and its executors, or a command or a script. The cluster itse
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
-  when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
+  when a file there has it, one a former step left there included. A step can run `sudo`, as the Release Guide's
+  "Using HBase snapshots" step does with `command-runner.jar` and `sudo -u hbase`, and the Management Guide's
+  Kerberos users step with a `script-runner.jar` script running `sudo kadmin.local`. The image has no `sudo`, so a
+  step finds Floci's first on its `PATH`, a Hive step's shell commands (Hive's `!`) too, the bootstrap actions' one: it
+  drops its options, with their values, and runs its command as it is, as the step's `hadoop` user. So
+  `sudo -u hadoop spark-submit ...` runs as on EMR, and a command that needs root fails, as it would for `hadoop`. `hadoop fs` and `hdfs dfs` reach the
   cluster's HDFS (see **Storage**) and Floci's S3. A `spark-submit` they start runs on the cluster's YARN, or in local
   mode where it runs none, on Floci's S3 with the
   cluster's `spark-defaults`, `core-site`, `spark-hive-site` and `spark-log4j2`, which Floci puts in a Spark
@@ -338,7 +343,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   another). Floci makes it the first time one of the release's clusters needs it: a container of the release's
   image, never started, gets the Hive image's folders, and is committed, as a bootstrap's is, as
   `floci-aws-emr-release:<release>-<hash>`, 0.6 GB more than the release's image, and kept for the release's next
-  cluster (`docker image rm` removes it); a newer pull of either image makes another. A failure to make it, a Hive
+  cluster (`docker image rm` removes it); a newer pull of either image makes another, which replaces the ones made
+  before from the same two image names for the same release and kind (with Hive or without): each is removed then,
+  unless a container still uses it, or a step or a bootstrap given it has yet to end, which keeps it until the next
+  newer one. Images of one kind are made one at a time, so one made of the older images never comes after the newer
+  one. One made before Floci labelled images with their kind is left. A failure to make it, a Hive
   image that cannot be pulled say, fails the step that needed it ("The step could not start: ..."), or, for a
   bootstrap, ends the cluster with `INTERNAL_ERROR`. The two images ship different builds of one goodies JAR under
   one name, so Tez keeps the Hive image's, and Hive runs with the Hive image's Hadoop configuration, which puts Tez

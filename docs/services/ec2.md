@@ -94,6 +94,11 @@ The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
 these same entries. Catalog consumers also use their ARM64 architecture and
 CPU/memory capacity for launch validation and container resource limits.
 
+`RunInstances` refuses an AMI whose architecture the instance type cannot run, as
+AWS does. An `x86_64` AMI on `m6g.large` answers `InvalidParameterValue` with
+`The architecture 'arm64' of the specified instance type does not match the
+architecture 'x86_64' of the specified AMI.`, so a Graviton type needs an `arm64` AMI.
+
 The values were captured from AWS `DescribeInstanceTypes` in `us-east-1` on
 2026-11-04, including each size's network-card/interface limits and each family's
 generation and encryption-in-transit flags. The capture reports C6gn as previous
@@ -305,6 +310,7 @@ User data is returned as the original base64-decoded bytes, without decompressin
 | `GET /latest/meta-data/mac` | MAC address of first ENI |
 | `GET /latest/meta-data/security-groups` | Security group names |
 | `GET /latest/meta-data/placement/availability-zone` | AZ |
+| `GET /latest/meta-data/placement/availability-zone-id` | AZ ID (for example `use1-az1`), the same ID `DescribeSubnets` reports for the zone |
 | `GET /latest/meta-data/placement/region` | Region |
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |

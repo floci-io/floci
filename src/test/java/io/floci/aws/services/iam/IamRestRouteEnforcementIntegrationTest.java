@@ -144,28 +144,39 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void schedulerTaggingIsCheckedOnTheBareTagsRouteToo() {
-        // The shared tagging routes also take the ARN in the body of POST /tags.
+    void schedulerTaggingIsCheckedOnTheGroupItsModeledRouteNamesAndServedOnNoOtherRoute() {
+        // Scheduler tags the group whose ARN its modeled /tags/{ResourceArn} carries, which the generated request
+        // resources read, so a Deny on that group holds against an Allow on every resource. The shared controller's
+        // bare POST /tags is no route of Scheduler's model, as AWS gives it none: let through, it is refused as an
+        // ARN that path does not serve, and tags nothing.
         String user = user("route-scheduler-tags");
         String group = scheduleGroup("route-group-" + suffix());
+        String tagsPath = "/tags/" + encoded(group);
+        String tags = "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
 
         policy(user, allow("scheduler:ListTagsForResource", "*"));
-        refused(as(user, "scheduler").body(tagBody(group)).post("/tags").then(), "scheduler:TagResource");
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
         policy(user, allow("scheduler:TagResource", group));
         // Allowed on that group, the request reaches Scheduler, which has no such group.
-        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(not(403));
+        as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then().statusCode(not(403));
+        policy(user, allow("scheduler:TagResource", "*") + "," + deny("scheduler:TagResource", group));
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
+        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(400)
+                .body(containsString("Invalid resource ARN"));
     }
 
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
         // POST /tags tags the ARN its body names: one named in the query does not move the check.
         String user = user("route-tags-body");
-        String allowed = scheduleGroup("route-allowed-" + suffix());
-        String other = scheduleGroup("route-other-" + suffix());
+        String allowed = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-allowed-" + suffix();
+        String other = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-other-" + suffix();
 
-        policy(user, allow("scheduler:TagResource", allowed));
-        refused(as(user, "scheduler").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
-                "scheduler:TagResource");
+        policy(user, allow("pipes:TagResource", allowed));
+        refused(as(user, "pipes").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
+                "pipes:TagResource");
     }
 
     @Test

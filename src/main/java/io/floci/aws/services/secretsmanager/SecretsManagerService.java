@@ -67,6 +67,8 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
     private static final String AWS_MANAGED_KEY = "aws/secretsmanager";
     private static final String PENDING_DELETION_STATE = "PendingDeletion";
     private static final Pattern SECRET_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9/_+=.@-]+");
+    private static final Pattern WORD_BOUNDARY = Pattern.compile(
+            "[^\\p{Alnum}]+|(?<=\\p{Lower})(?=\\p{Upper})|(?<=\\p{Alpha})(?=\\p{Digit})");
 
     public static final String SCHEDULED_DELETION_ERROR_MESSAGE =
         "You can't perform this operation on the secret because it was marked for deletion.";
@@ -826,15 +828,43 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
             case "owning-service" -> secret.getOwningService() != null
                     && secret.getOwningService().startsWith(targetVal);
             case "all" -> {
-                String lowerVal = targetVal.toLowerCase();
-                boolean nameMatch = secret.getName() != null && secret.getName().toLowerCase().startsWith(lowerVal);
-                boolean descMatch = secret.getDescription() != null && secret.getDescription().toLowerCase().startsWith(lowerVal);
-                boolean tagKeyMatch = secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.key() != null && t.key().toLowerCase().startsWith(lowerVal));
-                boolean tagValueMatch = secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.value() != null && t.value().toLowerCase().startsWith(lowerVal));
-                yield nameMatch || descMatch || tagKeyMatch || tagValueMatch;
+                List<String> words = splitWords(targetVal);
+                if (words.isEmpty()) {
+                    // A value with no words is a prefix of every name, as it was before word splitting.
+                    yield secret.getName() != null;
+                }
+                yield matchesAnyWord(secret.getName(), words)
+                        || matchesAnyWord(secret.getDescription(), words)
+                        || (secret.getTags() != null && secret.getTags().stream()
+                                .anyMatch(t -> matchesAnyWord(t.key(), words) || matchesAnyWord(t.value(), words)));
             }
             default -> false;
         };
+    }
+
+    private static List<String> splitWords(String text) {
+        List<String> words = new ArrayList<>();
+        for (String word : WORD_BOUNDARY.split(text)) {
+            if (!word.isEmpty()) {
+                words.add(word.toLowerCase());
+            }
+        }
+        return words;
+    }
+
+    private static boolean matchesAnyWord(String attribute, List<String> filterWords) {
+        if (attribute == null) {
+            return false;
+        }
+        List<String> attributeWords = splitWords(attribute);
+        for (String filterWord : filterWords) {
+            for (String attributeWord : attributeWords) {
+                if (attributeWord.startsWith(filterWord)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     public record Filter(String key, List<String> values) {}

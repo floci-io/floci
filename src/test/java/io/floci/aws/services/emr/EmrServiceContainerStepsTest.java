@@ -1432,6 +1432,22 @@ class EmrServiceContainerStepsTest {
         assertEquals("s3://logs/emr/" + cluster.getId() + "/steps/" + stepId + "/", job.logFolder());
         assertEquals(List.of(cluster.getId()), fixture.clusterStorage.created);
         assertEquals("COMPLETED", service.describeStep(cluster.getId(), stepId).getState());
+        // Held from when the step got it until it ended, so no newer image of its kind removed it under the step.
+        assertEquals(List.of(EmrServiceFixture.RecordingReleaseImages.IMAGE), fixture.releaseImages.released);
+    }
+
+    @Test
+    void aStepThatCouldNotStartReleasesTheImageItWasGiven() {
+        EmrCluster requested = cluster("hive-failing", true, hiveStep("report", "-e", "show tables;"));
+        requested.setApplications("[{\"Name\": \"Hive\"}]");
+        runner.whileRunning = () -> {
+            throw new IllegalStateException("The step's container could not be created");
+        };
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(EmrServiceFixture.RecordingReleaseImages.IMAGE), fixture.releaseImages.released);
     }
 
     @Test
@@ -1462,8 +1478,9 @@ class EmrServiceContainerStepsTest {
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, bootstrap.bootstraps.get(0).imageTemplate());
         assertEquals(SparkJobRunner.Engine.HIVE, runner.jobs.get(0).engine());
         assertEquals(IMAGE, runner.jobs.get(0).imageTemplate());
-        // Made once, for the bootstrap: the image it left holds it.
+        // Made once, for the bootstrap: the image it left holds it. Released once the bootstrap ended.
         assertEquals(1, bootstrapping.releaseImages.asked.size());
+        assertEquals(List.of(EmrServiceFixture.RecordingReleaseImages.IMAGE), bootstrapping.releaseImages.released);
     }
 
     @Test

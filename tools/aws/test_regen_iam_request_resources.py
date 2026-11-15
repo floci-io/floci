@@ -1860,6 +1860,44 @@ def test_a_member_whose_service_uses_its_default_when_left_out_names_that_defaul
     assert r.with_optional_qualifier([service], {"cluster"}) == [dict(service, unless={"cluster": [None]})]
 
 
+GROUPS = {"schedule": "arn:${Partition}:scheduler:${Region}:${Account}:schedule/${GroupName}/${ScheduleName}",
+          "schedule-group": "arn:${Partition}:scheduler:${Region}:${Account}:schedule-group/${GroupName}"}
+
+
+def test_a_member_whose_service_assumes_its_default_when_omitted_names_that_default():
+    # EventBridge Scheduler names the type after "default", in each of the three ways botocore puts it.
+    for doc in ("<p>The name of the schedule group to associate with this schedule. If you omit this, the default "
+                "schedule group is used.</p>",
+                "<p>The name of the schedule group associated with this schedule. If you omit this, EventBridge "
+                "Scheduler assumes that the schedule is associated with the default group.</p>",
+                "<p>The name of the schedule group with which the schedule is associated. You must provide this value "
+                "in order for EventBridge Scheduler to find the schedule you want to update. If you omit this value, "
+                "EventBridge Scheduler assumes the group is associated to the default group.</p>"):
+        defaulted = r.defaulted_members(cluster_model("GetSchedule", {"GroupName": doc}), "GetSchedule")
+        assert set(defaulted) == {"GroupName"}
+        schedule = {"type": "schedule", "fill": {"GroupName": "GroupName", "ScheduleName": "Name"}}
+        assert r.with_documented_defaults([schedule], GROUPS, defaulted) == [
+            dict(schedule, defaults={"GroupName": "schedule-group"})]
+    # A filter naming no default names none.
+    listing = cluster_model("ListSchedules", {"GroupName": "<p>If specified, only lists the schedules whose associated "
+                                                           "schedule group matches the given filter.</p>"})
+    assert r.defaulted_members(listing, "ListSchedules") == {}
+
+
+def test_a_resource_of_a_default_pair_takes_no_default_of_its_own():
+    # EventBridge documents EventBusName "If you omit this, the default event bus is used", and a rule on the
+    # default bus is the pair's other resource, which applies when the request leaves the bus out.
+    formats = {"event-bus": "arn:${Partition}:events:${Region}:${Account}:event-bus/${EventBusName}",
+               "rule-on-custom-event-bus": "arn:${Partition}:events:${Region}:${Account}:rule/${EventBusName}/"
+                                           "${RuleName}"}
+    custom = {"type": "rule-on-custom-event-bus", "fill": {"EventBusName": "EventBusName", "RuleName": "Name"},
+              "unlessDefault": {"EventBusName": "event-bus"}}
+    assert r.with_documented_defaults([custom], formats, {"EventBusName": "event-bus"}) == [custom]
+    unpaired = {key: value for key, value in custom.items() if key != "unlessDefault"}
+    assert r.with_documented_defaults([unpaired], formats, {"EventBusName": "event-bus"}) == [
+        dict(unpaired, defaults={"EventBusName": "event-bus"})]
+
+
 def test_a_member_documented_as_a_name_or_an_arn_of_another_type_may_give_that_types_arn():
     for doc in (CLUSTER_DOC, "<p>The short name or full ARN of the cluster that hosts the task.</p>",
                 # AWS's own typo, the "of" left out.

@@ -21,6 +21,7 @@ import io.floci.aws.services.elbv2.model.RuleCondition;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
 import io.floci.aws.services.elbv2.model.TargetHealth;
+import io.floci.aws.testing.ThreadStates;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -35,6 +36,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -48,6 +51,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -732,6 +736,60 @@ class ElbV2ServiceTest {
         TargetGroup newTargetGroup = service.describeTargetGroups(REGION, null, List.of(newTgArn), null).getFirst();
         assertFalse(oldTargetGroup.getLoadBalancerArns().contains(lbArn));
         assertTrue(newTargetGroup.getLoadBalancerArns().contains(lbArn));
+    }
+
+    /**
+     * Creating, modifying and deleting a rule change which target groups the load balancer routes to while holding
+     * the load balancer, as listener changes do: unlinking the groups nothing routes to any more reads every rule of
+     * the load balancer, so a rule changed beside it unlocked could have the link of a group it forwards to dropped.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify", "delete"})
+    void aRuleChangeWaitsForItsLoadBalancerAndLeavesExactlyTheGroupsItForwardsToLinked(String change)
+            throws Exception {
+        String fallback = createTargetGroup("rule-lock-default-" + change);
+        String first = createTargetGroup("rule-lock-first-" + change);
+        String second = createTargetGroup("rule-lock-second-" + change);
+        LoadBalancer lb = service.createLoadBalancer(REGION, "rule-lock-" + change, "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of());
+        String listener = service.createListener(REGION, lb.getLoadBalancerArn(), "HTTP", 80, null, List.of(),
+                List.of(forwardAction(fallback)), List.of(), Map.of()).getListenerArn();
+        Rule rule = "create".equals(change) ? null : service.createRule(REGION, listener,
+                List.of(pathPattern("/app/*")), 10, List.of(forwardAction(first)), Map.of());
+        AtomicReference<Thread> writer = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> write;
+            synchronized (lb) {
+                write = worker.submit(() -> {
+                    writer.set(Thread.currentThread());
+                    switch (change) {
+                        case "create" -> service.createRule(REGION, listener, List.of(pathPattern("/app/*")), 10,
+                                List.of(forwardAction(first)), Map.of());
+                        case "modify" -> service.modifyRule(REGION, rule.getRuleArn(), null,
+                                List.of(forwardAction(second)));
+                        default -> service.deleteRule(REGION, rule.getRuleArn());
+                    }
+                });
+                ThreadStates.awaitBlockedOrDone(writer, write);
+                assertFalse(write.isDone(), "the rule changed without waiting for its load balancer");
+                ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(writer.get().threadId());
+                assertEquals(Thread.State.BLOCKED, info.getThreadState());
+                assertEquals(Thread.currentThread().threadId(), info.getLockOwnerId());
+            }
+            write.get(5, TimeUnit.SECONDS);
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+        assertEquals(List.of(lb.getLoadBalancerArn()), loadBalancersOf(fallback));
+        assertEquals("create".equals(change) ? List.of(lb.getLoadBalancerArn()) : List.of(), loadBalancersOf(first));
+        assertEquals("modify".equals(change) ? List.of(lb.getLoadBalancerArn()) : List.of(), loadBalancersOf(second));
+    }
+
+    private List<String> loadBalancersOf(String targetGroupArn) {
+        return service.describeTargetGroups(REGION, null, List.of(targetGroupArn), null).getFirst()
+                .getLoadBalancerArns();
     }
 
     @ParameterizedTest
