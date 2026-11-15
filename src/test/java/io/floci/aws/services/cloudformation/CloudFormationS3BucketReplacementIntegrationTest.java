@@ -195,8 +195,10 @@ class CloudFormationS3BucketReplacementIntegrationTest {
     }
 
     /**
-     * A prefix together with {@code BucketName}, and a prefix without the account regional
-     * namespace, are both rejected: the resource fails and the stack rolls back.
+     * A prefix together with {@code BucketName}, a prefix without the account regional namespace
+     * and a prefix with an uppercase letter are all rejected: the resource fails and the stack
+     * rolls back. S3 names "can only consist of lowercase letters, numbers, periods (.), and
+     * hyphens (-)".
      */
     @Test
     void aPrefixWithABucketNameOrOutsideTheAccountRegionalNamespaceFailsTheCreate() {
@@ -204,13 +206,11 @@ class CloudFormationS3BucketReplacementIntegrationTest {
         List<String> invalid = List.of(
                 "\"BucketName\": \"nsp-both-" + suffix + "\", \"BucketNamePrefix\": \"nsp-both\", "
                         + "\"BucketNamespace\": \"account-regional\"",
-                "\"BucketNamePrefix\": \"nsp-global-" + suffix + "\"");
+                "\"BucketNamePrefix\": \"nsp-global-" + suffix + "\"",
+                "\"BucketNamePrefix\": \"Repl-Upper\", \"BucketNamespace\": \"account-regional\"");
         for (int i = 0; i < invalid.size(); i++) {
             String stackName = "s3-nsp-bad-" + i + "-" + suffix;
-            given().contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateStack").formParam("Version", "2010-05-15")
-                .formParam("StackName", stackName).formParam("TemplateBody", prefixTemplate(invalid.get(i)))
-            .when().post("/").then().statusCode(200);
+            sendCreateStack(stackName, prefixTemplate(invalid.get(i)));
             CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
             deleteStack(stackName);
         }
@@ -253,11 +253,15 @@ class CloudFormationS3BucketReplacementIntegrationTest {
     }
 
     private static void createStack(String stackName, String body) {
+        sendCreateStack(stackName, body);
+        await(stackName, "CREATE_COMPLETE");
+    }
+
+    private static void sendCreateStack(String stackName, String body) {
         given().contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack").formParam("Version", "2010-05-15")
             .formParam("StackName", stackName).formParam("TemplateBody", body)
         .when().post("/").then().statusCode(200);
-        await(stackName, "CREATE_COMPLETE");
     }
 
     private static void updateStack(String stackName, String body) {
