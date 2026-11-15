@@ -32,8 +32,10 @@ import static org.mockito.Mockito.anyList;
 import static org.mockito.Mockito.argThat;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -150,6 +152,34 @@ class AutoScalingEksManagedGroupTest {
         verify(targets).deregisterTargets(eq(REGION), eq("tg-b"), only(NODE));
         verifyNoMoreInteractions(targets);
         assertEquals(List.of(NODE), memberIds(FIRST));
+    }
+
+    @Test
+    void aDetachElbV2RefusesLeavesTheTargetGroupAttachedSoTheDetachCanBeSentAgain() {
+        service.createEksManagedGroup(REGION, FIRST, 1, 3, 2, List.of(), tags("workers"));
+        service.addEksManagedInstance(REGION, FIRST, node());
+        service.attachLoadBalancerTargetGroups(REGION, FIRST, List.of("tg-a"));
+        service.attachTrafficSources(REGION, FIRST, List.of(
+                new AutoScalingService.TrafficSourceIdentifier("tg-b", null)));
+        AwsException refusal = new AwsException("InternalFailure", "ELBv2 could not deregister the target", 500);
+        doThrow(refusal).doNothing().when(targets).deregisterTargets(eq(REGION), eq("tg-a"), anyList());
+        doThrow(refusal).doNothing().when(targets).deregisterTargets(eq(REGION), eq("tg-b"), anyList());
+
+        assertThrows(AwsException.class,
+                () -> service.detachLoadBalancerTargetGroups(REGION, FIRST, List.of("tg-a")));
+        assertEquals(List.of("tg-a"), service.describeLoadBalancerTargetGroups(REGION, FIRST));
+        service.detachLoadBalancerTargetGroups(REGION, FIRST, List.of("tg-a"));
+        assertEquals(List.of(), service.describeLoadBalancerTargetGroups(REGION, FIRST));
+
+        List<AutoScalingService.TrafficSourceIdentifier> trafficSource = List.of(
+                new AutoScalingService.TrafficSourceIdentifier("tg-b", "elbv2"));
+        assertThrows(AwsException.class, () -> service.detachTrafficSources(REGION, FIRST, trafficSource));
+        assertEquals(Map.of("tg-b", "elbv2"), service.describeTrafficSources(REGION, FIRST, null));
+        service.detachTrafficSources(REGION, FIRST, trafficSource);
+        assertEquals(Map.of(), service.describeTrafficSources(REGION, FIRST, null));
+
+        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-a"), only(NODE));
+        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-b"), only(NODE));
     }
 
     @Test

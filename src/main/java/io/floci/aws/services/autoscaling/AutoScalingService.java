@@ -1630,19 +1630,29 @@ public class AutoScalingService implements PassedRoleLookup {
         synchronized (lockFor(region)) {
             synchronized (lockFor(key)) {
                 AutoScalingGroup current = requireGroup(region, name);
+                List<String> targetGroupsBefore = new ArrayList<>(current.getTargetGroupARNs());
+                Map<String, String> trafficSourcesBefore = new LinkedHashMap<>(current.getTrafficSourceTypeByIdentifier());
                 Set<String> attachedBefore = attachedTargetGroups(current);
                 change.accept(current);
-                groups.put(key, current);
                 Set<String> attached = attachedTargetGroups(current);
                 Set<String> detached = new LinkedHashSet<>(attachedBefore);
                 detached.removeAll(attached);
                 attached.removeAll(attachedBefore);
+                // The node leaves the target groups the change detached before the change is stored: when ELBv2
+                // refuses, the group keeps them attached, so the detach can be sent again.
+                try {
+                    deregisterFromUnsharedTargetGroups(current, memberIds(current), detached);
+                } catch (RuntimeException e) {
+                    current.setTargetGroupARNs(targetGroupsBefore);
+                    current.setTrafficSourceTypeByIdentifier(trafficSourcesBefore);
+                    throw e;
+                }
+                groups.put(key, current);
                 for (AsgInstance member : current.getInstances()) {
                     if ("InService".equals(member.getLifecycleState())) {
                         registerWithTargetGroups(elbV2Service, current, attached, member.getInstanceId(), false);
                     }
                 }
-                deregisterFromUnsharedTargetGroups(current, memberIds(current), detached);
             }
         }
     }
