@@ -426,6 +426,34 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * The tags of the live stack, or of the change set, stored under {@code arn} in the account and Region the ARN
+     * names, by key, which IAM gives a resource-tag condition; empty when there is none. Reads only, matching the
+     * stack's id or the change set's on the whole ARN.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cloudformation")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (resource.startsWith("stack/")) {
+            Stack stack = resolveStack(arn, parsed.region(), parsed.accountId());
+            return stack != null && arn.equals(stack.getStackId()) ? stack.tagsSnapshot() : Map.of();
+        }
+        if (!resource.startsWith("changeSet/")) {
+            return Map.of();
+        }
+        try {
+            Stack stack = findStackForChangeSetArn(arn, parsed.region(), parsed.accountId());
+            ChangeSet changeSet = stack == null ? null
+                    : stack.getChangeSets().get(resolveChangeSetName(arn, parsed.region(), parsed.accountId()));
+            return changeSet == null || changeSet.getTags() == null ? Map.of() : Map.copyOf(changeSet.getTags());
+        } catch (AwsException expected) {
+            return Map.of();
+        }
+    }
+
+    /**
      * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
      * resolve {@code UsePreviousValue} on an update before the stack lookup that
      * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.
