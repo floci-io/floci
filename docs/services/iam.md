@@ -504,8 +504,9 @@ on `PutUserPolicy`, `PutGroupPolicy` and `PutRolePolicy`, is held to that gramma
 validator's one sentence for both cases, `Syntax errors in policy.`, and to the values the policy
 language defines: a `Version` outside `2012-10-17` and `2008-10-17` answers that same sentence, a
 statement whose `Effect` is not literally `Allow` or `Deny` answers `The policy failed legacy
-parsing`, and a resource named neither by ARN nor by `*` answers `Resource <value> must be in ARN
-format or "*".` A value that is no string names the text of that value, as the `Version` and the
+parsing`, an action that no vendor prefaces answers `Actions/Conditions must be prefaced by a
+vendor, e.g., iam, sdb, ec2, etc.`, and a resource named neither by ARN nor by `*` answers
+`Resource <value> must be in ARN format or "*".` A value that is no string names the text of that value, as the `Version` and the
 `Effect` already do, so `"Resource": 123` answers that sentence exactly as `"Resource": "123"`
 does; an element carrying null names nothing, which is the element's own case rather than a value
 to read. A managed policy, on `CreatePolicy` and `CreatePolicyVersion`, is held to those and
@@ -514,6 +515,15 @@ statement must contain resources.`, where a statement that is no object at all i
 rather than a missing element. One clause the two validators do not word alike: an `Effect` the
 language does not define answers `The policy failed legacy parsing` on an inline write and
 `Syntax errors in policy.` on a managed one, so the sentence follows the validator that read it.
+
+An action is prefaced when it carries a service namespace before a colon, whatever the name after it
+spells: `s3:*` and `iam:*AccessKey*` are the reference's own examples, and the bare `*`, which
+stands for every action there is, is admitted on its own. The namespace is asked for rather than
+looked up, since no sentence says AWS refuses an action whose vendor it does not publish, so an
+action naming a service Floci has yet to model is stored as written. The clause is read before the
+resource one, which is the order the required elements are already read in, and AWS words it for
+actions and condition keys together while only the actions are read here, a condition key being a
+value neither validator reads yet.
 
 A document carrying `Statement` with nothing in it is still a policy, one that grants nothing, and a
 member the request leaves out is still answered as absent by the constraints ahead of the operation.
