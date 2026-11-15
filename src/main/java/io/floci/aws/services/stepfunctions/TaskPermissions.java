@@ -617,18 +617,14 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * {@code ListEventSourceMappings} has no resource type in the service reference, and
-     * {@code UpdateEventSourceMapping} acts on the mapping its {@code Uuid} names; a request naming none is refused
-     * by the integration.
+     * The check the vendored request resources give the same call made directly, on the request the integration
+     * sends ({@link SdkManagementTaskInvoker#lambdaRequest}): {@code ListEventSourceMappings} acts on no resource type,
+     * and {@code UpdateEventSourceMapping} on the mapping its {@code UUID} names; a request naming none is refused by
+     * the integration.
      */
     private static TaskPermissions lambdaSdk(String api, JsonNode input, StateMachine machine) {
-        String action = "lambda:" + AslExecutor.capitalizeFirst(api);
-        if ("listEventSourceMappings".equals(api)) {
-            return accessDenied(LAMBDA_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
-        }
-        String uuid = text(input.path("Uuid"));
-        return accessDenied(LAMBDA_PREFIX, uuid == null ? List.of()
-                : List.of(new Permission(action, arn(machine, "lambda", "event-source-mapping:" + uuid))));
+        return accessDenied(LAMBDA_PREFIX, requestPermissions("lambda", AslExecutor.capitalizeFirst(api),
+                SdkManagementTaskInvoker.lambdaRequest(input), machine, null));
     }
 
     /**
