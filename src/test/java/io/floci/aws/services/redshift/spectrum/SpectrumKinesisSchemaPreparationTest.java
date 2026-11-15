@@ -224,6 +224,27 @@ class SpectrumKinesisSchemaPreparationTest {
     }
 
     @Test
+    void leavesAnUnboundLocalSchemaAloneUnderIfNotExists() {
+        doThrow(new SpectrumReadException("42P06", "schema \"kds\" already exists")).when(backend)
+                .execute("CREATE SCHEMA \"kds\"");
+
+        assertThat(preparation.prepare("CREATE EXTERNAL SCHEMA IF NOT EXISTS kds FROM KINESIS IAM_ROLE '" + ROLE + "'",
+                SESSION, backend), equalTo(true));
+
+        assertThat(bound("kds").isPresent(), equalTo(false));
+        SpectrumReadException error = assertThrows(SpectrumReadException.class, () -> preparation.prepare(CREATE, SESSION, backend));
+        assertThat(error.sqlState(), equalTo("42P06"));
+    }
+
+    @Test
+    void rejectsAnEmptyRoleWithASyntaxError() {
+        SpectrumSqlException error = assertThrows(SpectrumSqlException.class,
+                () -> preparation.prepare("CREATE EXTERNAL SCHEMA kds FROM KINESIS IAM_ROLE ''", SESSION, backend));
+
+        assertThat(error.sqlState(), equalTo("42601"));
+    }
+
+    @Test
     void aGlueSchemaCannotTakeTheNameOfAKinesisSchemaAndLeavesGlueUntouched() {
         GlueService glue = mock(GlueService.class);
         SpectrumQueryPreparation withGlue = new SpectrumQueryPreparation(glueSchemas, kinesisSchemas, materializer,

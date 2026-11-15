@@ -28,6 +28,7 @@ import java.util.function.BiFunction;
 @ApplicationScoped
 public class SpectrumQueryPreparation {
     private static final Logger LOG = Logger.getLogger(SpectrumQueryPreparation.class);
+    private static final String DUPLICATE_SCHEMA = "42P06";
     private final ExternalCatalogRegistry registry;
     private final KinesisSchemaRegistry kinesisSchemas;
     private final ExternalTableMaterializer materializer;
@@ -386,8 +387,8 @@ public class SpectrumQueryPreparation {
         }
         ExternalSchemaBinding binding = new ExternalSchemaBinding(session.accountId(), session.clusterKey(),
                 session.databaseName(), schema.schemaName(), schema.glueDatabase(), schema.iamRoleArn());
-        createBoundSchema(backend, schema.schemaName(), () -> metadata.refresh(backend, session.accountId(), binding),
-                () -> registry.bind(binding));
+        createBoundSchema(backend, schema.schemaName(), schema.ifNotExists(),
+                () -> metadata.refresh(backend, session.accountId(), binding), () -> registry.bind(binding));
         return true;
     }
 
@@ -401,8 +402,8 @@ public class SpectrumQueryPreparation {
         }
         KinesisSchemaBinding binding = new KinesisSchemaBinding(session.accountId(), session.clusterKey(),
                 session.databaseName(), schema.schemaName(), schema.region(), schema.iamRoleArn());
-        createBoundSchema(backend, schema.schemaName(), () -> metadata.refreshKinesis(backend, binding),
-                () -> kinesisSchemas.bind(binding));
+        createBoundSchema(backend, schema.schemaName(), schema.ifNotExists(),
+                () -> metadata.refreshKinesis(backend, binding), () -> kinesisSchemas.bind(binding));
         return true;
     }
 
@@ -420,9 +421,20 @@ public class SpectrumQueryPreparation {
         throw new SpectrumSqlException("42P06", "schema \"" + schemaName + "\" already exists");
     }
 
-    /** Creates the local schema, publishes its metadata, and binds it once committed; removes it again on failure. */
-    private void createBoundSchema(BackendSql backend, String schemaName, Runnable refreshMetadata, Runnable bind) {
-        backend.execute("CREATE SCHEMA " + ExternalTableMaterializer.quote(schemaName));
+    /**
+     * Creates the local schema, publishes its metadata, and binds it once committed; removes it again on failure.
+     * A local schema of that name that no binding owns is left alone under IF NOT EXISTS.
+     */
+    private void createBoundSchema(BackendSql backend, String schemaName, boolean ifNotExists,
+                                   Runnable refreshMetadata, Runnable bind) {
+        try {
+            backend.execute("CREATE SCHEMA " + ExternalTableMaterializer.quote(schemaName));
+        } catch (SpectrumReadException exception) {
+            if (ifNotExists && DUPLICATE_SCHEMA.equals(exception.sqlState())) {
+                return;
+            }
+            throw exception;
+        }
         try {
             refreshMetadata.run();
             bindWhenCommitted(backend, bind);

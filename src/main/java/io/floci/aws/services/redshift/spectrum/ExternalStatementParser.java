@@ -132,7 +132,11 @@ public class ExternalStatementParser {
         if (!QUOTED_LITERAL.matcher(role).matches()) {
             throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
         }
-        return unquote(role);
+        String arn = unquote(role);
+        if (arn.isBlank()) {
+            throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
+        }
+        return arn;
     }
 
     private static String stripLeadingComments(String sql) {
