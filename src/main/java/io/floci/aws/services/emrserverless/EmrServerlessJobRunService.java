@@ -618,12 +618,21 @@ public class EmrServerlessJobRunService implements Resettable {
      * digest until the attempt's runner resolves that image, {@link #imageDigestResolved}.
      */
     private static void applyImages(JobRun run, Application app) {
-        run.setImageConfiguration(appliedImage(app.getImageConfiguration()));
+        run.setImageConfiguration(pinned(app, "") != null ? copyOf(pinned(app, ""))
+                : appliedImage(app.getImageConfiguration()));
         Map<String, WorkerTypeSpecification> workerTypes = new LinkedHashMap<>();
+        Map<String, WorkerTypeSpecification> specifications = new LinkedHashMap<>();
         if (app.getWorkerTypeSpecifications() != null) {
-            app.getWorkerTypeSpecifications().forEach((workerType, specification) -> {
-                ImageConfiguration image = specification != null
-                        ? appliedImage(specification.getImageConfiguration()) : null;
+            specifications.putAll(app.getWorkerTypeSpecifications());
+        }
+        if (app.getPinnedImages() != null) {
+            app.getPinnedImages().keySet().stream().filter(key -> !key.isEmpty())
+                    .forEach(key -> specifications.putIfAbsent(key, null));
+        }
+        if (!specifications.isEmpty()) {
+            specifications.forEach((workerType, specification) -> {
+                ImageConfiguration image = pinned(app, workerType) != null ? copyOf(pinned(app, workerType))
+                        : specification != null ? appliedImage(specification.getImageConfiguration()) : null;
                 if (image != null) {
                     WorkerTypeSpecification applied = new WorkerTypeSpecification();
                     applied.setImageConfiguration(image);
@@ -643,6 +652,30 @@ public class EmrServerlessJobRunService implements Resettable {
         return applied;
     }
 
+    // The image the application resolved for a worker type ("" its own) as it started, which its runs take until it
+    // starts again (EmrServerlessService.pinImages); null where it resolved none.
+    private static ImageConfiguration pinned(Application app, String key) {
+        return app.getPinnedImages() != null ? app.getPinnedImages().get(key) : null;
+    }
+
+    private static ImageConfiguration copyOf(ImageConfiguration image) {
+        ImageConfiguration copy = new ImageConfiguration();
+        copy.setImageUri(image.getImageUri());
+        copy.setResolvedImageDigest(image.getResolvedImageDigest());
+        return copy;
+    }
+
+    // The image a run pulls for a resolved one: its repository by its digest, as its tag may since name another.
+    private static String byDigest(ImageConfiguration image) {
+        String uri = image.getImageUri();
+        if (uri.contains("@")) {
+            return uri;
+        }
+        int colon = uri.lastIndexOf(':');
+        String repository = colon > uri.lastIndexOf('/') ? uri.substring(0, colon) : uri;
+        return repository + "@" + image.getResolvedImageDigest();
+    }
+
     // The image configuration an attempt applies to a worker type: the worker type's own, else the run's, as
     // workerImage chose its image.
     private static ImageConfiguration appliedImage(JobRun run, String workerType) {
@@ -651,13 +684,20 @@ public class EmrServerlessJobRunService implements Resettable {
         return worker != null ? worker.getImageConfiguration() : run.getImageConfiguration();
     }
 
-    // A worker type's custom image, else the application's, else null for the release's.
+    // A worker type's custom image, else the application's, else null for the release's: the one the application
+    // resolved as it started where it resolved it then, by its digest, else the one it names now.
     private static String workerImage(Application app, String workerType) {
+        if (pinned(app, workerType) != null) {
+            return byDigest(pinned(app, workerType));
+        }
         WorkerTypeSpecification worker = app.getWorkerTypeSpecifications() != null
                 ? app.getWorkerTypeSpecifications().get(workerType) : null;
         if (worker != null && worker.getImageConfiguration() != null
                 && worker.getImageConfiguration().getImageUri() != null) {
             return worker.getImageConfiguration().getImageUri();
+        }
+        if (pinned(app, "") != null) {
+            return byDigest(pinned(app, ""));
         }
         return app.getImageConfiguration() != null ? app.getImageConfiguration().getImageUri() : null;
     }
