@@ -371,6 +371,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
+    monkeypatch.setattr(r, "READ_IN_NOT_COVERED", {})
     monkeypatch.setattr(r, "MEASURED", {})
     monkeypatch.setattr(r, "FORWARDED", {})
     return monkeypatch
@@ -2110,3 +2111,76 @@ def test_eip_operations_read_scalar_targets_from_models(operation, members, kind
     action = "ec2:" + operation
     entry = r.entry_for(action, {"action": action, "types": kinds}, formats, {"ec2": ec2})
     assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]
+
+
+@pytest.mark.parametrize("documentation,expected", [
+    ("<p>The resource to tag. This value is an Amazon Resource Name (ARN).</p>", True),
+    ("<p>This value is an Amazon Resource Name (ARN).</p>", True),
+    ("<p>The resource to tag. This value is an Amazon Resource Name (ARN) or a name.</p>", False),
+    ("<p>The resource to tag. This value can be an Amazon Resource Name (ARN).</p>", False),
+    ("<p>The resource to tag. Its parent is an Amazon Resource Name (ARN).</p>", False),
+])
+def test_an_explicit_arn_value_sentence_identifies_the_request_resource(documentation, expected):
+    modeled = model({"AddTagsToResource": {"ResourceName": "String"}}, protocol="query")
+    modeled["shapes"]["AddTagsToResourceIn"]["members"]["ResourceName"]["documentation"] = documentation
+    result = r.with_documented("svc:AddTagsToResource", ["thing", "pool"], FORMATS, {"svc": modeled}, [])
+    assert result == ([{"types": ["thing", "pool"], "arn": "ResourceName"}] if expected else [])
+
+
+def test_incremental_coverage_reads_only_selected_operations_of_an_uncovered_namespace(isolated):
+    isolated.setattr(r, "READ_IN_NOT_COVERED", {"later:GetThing": "tested lifecycle"})
+    assert r.reads("later:GetThing")
+    assert not r.reads("later:CreateOther")
+    r._check_overrides({"later:GetThing": {}})
+    with pytest.raises(ValueError, match="READ_IN_NOT_COVERED"):
+        r._check_overrides({})
+    isolated.setattr(r, "READ_IN_NOT_COVERED", {"svc:GetThing": "already fully read"})
+    with pytest.raises(ValueError, match="outside NOT_COVERED"):
+        r._check_overrides({"svc:GetThing": {}})
+
+
+def test_a_creates_subject_can_be_its_sole_arn_variable_for_an_abbreviated_type():
+    formats = {"db": "arn:${Partition}:svc:${Region}:${Account}:db:${DbInstanceName}",
+               "pg": "arn:${Partition}:svc:${Region}:${Account}:pg:${ParameterGroupName}"}
+    database = {"type": "db", "fill": {"DbInstanceName": "DBInstanceIdentifier"}}
+    group = {"type": "pg", "fill": {"ParameterGroupName": "DBParameterGroupName"}}
+    assert r.with_made([database, group], "svc:CreateDBInstance", formats) == [dict(database, made=True), group]
+    assert r.with_made([database, group], "svc:ModifyDBInstance", formats) == [database, group]
+
+
+def test_verification_does_not_report_intentionally_unread_operations_as_new(isolated):
+    document = good_document()
+    document["notCovered"] = {"svc": "only A is covered"}
+    isolated.setattr(r, "READ_IN_NOT_COVERED", {"svc:A": "tested"})
+    upstream = {"svc:D": {"action": "svc:D", "types": [], "clients": ["svc"]}}
+    _, added = r.verify_against(document, upstream, document["arnFormats"])
+    assert added == []
+
+
+def test_resource_type_tag_prefixes_require_the_documented_namespace_and_type():
+    formats = {"rds": {"pg": "arn:${Partition}:rds:${Region}:${Account}:pg:${PgName}"}}
+    documents = [{"Name": "rds", "Resources": [{"Name": "pg", "ConditionKeys": [
+        "aws:ResourceTag/${TagKey}", "rds:pg-tag/${TagKey}", "rds:pg-tag/tag-key",
+        "rds:req-tag/${TagKey}", "rds:db-tag/${TagKey}", "other:pg-tag/${TagKey}", "rds:pg-tag/Owner"]}]}]
+    assert r.resource_tag_keys(documents, formats) == {"rds": {"pg": ["aws:ResourceTag/", "rds:pg-tag/"]}}
+
+
+def test_distinct_qualified_parameter_groups_do_not_collapse_to_one_ambiguous_member():
+    formats = {"cluster-pg": "arn:${Partition}:rds:${Region}:${Account}:cluster-pg:${ClusterParameterGroupName}",
+               "pg": "arn:${Partition}:rds:${Region}:${Account}:pg:${ParameterGroupName}"}
+    assert r.resources_for("rds:ModifyDBCluster", ["cluster-pg", "pg"], formats,
+            members("DBClusterParameterGroupName", "DBInstanceParameterGroupName")) == [
+        {"type": "cluster-pg", "fill": {"ClusterParameterGroupName": "DBClusterParameterGroupName"}},
+        {"type": "pg", "fill": {"ParameterGroupName": "DBInstanceParameterGroupName"}}]
+    assert r.resources_for("rds:ModifyDBCluster", ["cluster-pg", "pg"], formats,
+            members("DBClusterParameterGroupName")) == [
+        {"type": "cluster-pg", "fill": {"ClusterParameterGroupName": "DBClusterParameterGroupName"}}]
+
+
+def test_a_shorter_member_is_not_reserved_for_a_more_qualified_variable():
+    formats = {"subnet": "arn:${Partition}:ec2:${Region}:${Account}:subnet/${SubnetId}",
+               "secondary-subnet": "arn:${Partition}:ec2:${Region}:${Account}:secondary-subnet/${SecondarySubnetId}"}
+    assert r.resources_for("ec2:RunInstances", ["subnet", "secondary-subnet"], formats,
+            members("SubnetId", "SecondarySubnetId")) == [
+        {"type": "subnet", "fill": {"SubnetId": "SubnetId"}},
+        {"type": "secondary-subnet", "fill": {"SecondarySubnetId": "SecondarySubnetId"}}]

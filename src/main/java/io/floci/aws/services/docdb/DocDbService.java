@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.docdb.container.DocDbContainerHandle;
@@ -1087,6 +1088,43 @@ public class DocDbService {
     /** A resolved tag target: the record's key, its tags, and a sink that persists an update. */
     private record TagTarget(String lockKey, Map<String, String> tags,
                              Consumer<Map<String, String>> save) {}
+
+    /** Exact stored tags for IAM, without legacy-record migration or resource creation. */
+    public Optional<Map<String, String>> storedResourceTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "rds")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        int separator = arn.resource().indexOf(':');
+        if (separator < 0 || !regionResolver.partitionForRegion(arn.region()).equals(arn.partition())) {
+            return Optional.empty();
+        }
+        return switch (arn.resource().substring(0, separator)) {
+            case "cluster" -> storedResourceTags(clusters, resourceArn,
+                    DocDbCluster::getDbClusterArn, DocDbCluster::getTags);
+            case "db" -> storedResourceTags(instances, resourceArn,
+                    DocDbInstance::getDbInstanceArn, DocDbInstance::getTags);
+            case "cluster-snapshot" -> storedResourceTags(snapshots, resourceArn,
+                    DocDbClusterSnapshot::getDbClusterSnapshotArn, DocDbClusterSnapshot::getTags);
+            default -> Optional.empty();
+        };
+    }
+
+    private <T> Optional<Map<String, String>> storedResourceTags(StorageBackend<String, T> store, String arn,
+                                                                Function<T, String> identity,
+                                                                Function<T, Map<String, String>> tags) {
+        String account = AwsArnUtils.parse(arn).accountId();
+        List<T> records = store instanceof AccountAwareStorageBackend<T> aware
+                ? aware.scanForAccount(account, ignored -> true) : store.scan(ignored -> true);
+        Optional<T> found = records.stream().filter(resource -> arn.equals(identity.apply(resource))).findFirst();
+        if (found.isEmpty() && store instanceof AccountAwareStorageBackend<T> aware) {
+            found = aware.scanAllAccountEntries(ignored -> true).stream()
+                    .filter(entry -> account.equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .filter(resource -> arn.equals(identity.apply(resource))).findFirst();
+        }
+        return found.map(resource -> new LinkedHashMap<>(tags.apply(resource)));
+    }
 
     public Map<String, String> listTagsForResource(String resourceName) {
         return Map.copyOf(resolveTagTarget(resourceName).tags());

@@ -1269,3 +1269,19 @@ PGSSLROOTCERT=./data/tls/floci-root-ca.crt psql "host=localhost port=7001 user=a
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
   --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/floci-root-ca.crt
 ```
+
+### IAM lifecycle resources and tags
+
+With IAM enforcement enabled, parameter groups, cluster parameter groups, subnet
+groups, DB instances and DB clusters use their named ARNs for lifecycle
+operations. Explicitly supplied secondary groups and clusters are authorized
+separately, including parameter-group changes in `ModifyDBCluster`. Tagging operations use the ARN in `ResourceName`; unfiltered describe
+requests continue to require a wildcard grant.
+
+For modeled taggable RDS resources (including endpoints and proxies) and
+DocumentDB clusters, instances and snapshots sharing the RDS ARN namespace,
+supported `aws:ResourceTag` and RDS resource-specific tag conditions read stored
+tags from the exact target ARN's account, Region and partition through the shared
+stored-tag resolver. Create-time request tags remain separate
+from existing-resource tags. Other RDS resource families retain their existing
+IAM resource-resolution coverage.

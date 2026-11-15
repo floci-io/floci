@@ -121,6 +121,41 @@ class ResourceArnBuilderTest {
         }).when(ctx).setEntityStream(any(InputStream.class));
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws,us-east-1", "aws-us-gov,us-gov-west-1", "aws-cn,cn-north-1"})
+    void rdsGroupLifecycleUsesTheNamedGroupAndUnfilteredListsRemainWildcard(String partition, String region) {
+        String prefix = "arn:" + partition + ":rds:" + region + ":" + ACCOUNT + ":";
+        for (String[] group : List.of(new String[]{"DBParameterGroup", "pg"},
+                new String[]{"DBClusterParameterGroup", "cluster-pg"}, new String[]{"DBSubnetGroup", "subgrp"})) {
+            for (String verb : List.of("Create", "Modify", "Delete", "Describe")) {
+                String action = verb + group[0] + ("Describe".equals(verb) ? "s" : "");
+                setFormBody(group[0] + "Name=owned");
+                assertEquals(List.of(prefix + group[1] + ":owned"),
+                        builder.buildResources("rds", "rds:" + action, ctx, region, ACCOUNT, partition), action);
+            }
+            setFormBody("");
+            assertEquals(List.of("*"), builder.buildResources("rds", "rds:Describe" + group[0] + "s",
+                    ctx, region, ACCOUNT, partition));
+        }
+        for (String action : List.of("AddTagsToResource", "RemoveTagsFromResource", "ListTagsForResource")) {
+            setFormBody("ResourceName=" + prefix + "pg:owned");
+            assertEquals(List.of(prefix + "pg:owned"),
+                    builder.buildResources("rds", "rds:" + action, ctx, region, ACCOUNT, partition));
+        }
+    }
+
+    @Test
+    void rdsCreatesAuthorizeEachExplicitDatabaseAndGroupTarget() {
+        String prefix = "arn:aws:rds:us-east-1:" + ACCOUNT + ":";
+        setFormBody("DBClusterIdentifier=db&DBClusterParameterGroupName=parameters&DBSubnetGroupName=subnets");
+        assertEquals(List.of(prefix + "cluster:db", prefix + "cluster-pg:parameters", prefix + "subgrp:subnets"),
+                builder.buildResources("rds", "rds:CreateDBCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+        setFormBody("DBInstanceIdentifier=instance&DBClusterIdentifier=db&DBParameterGroupName=parameters"
+                + "&DBSubnetGroupName=subnets");
+        assertEquals(List.of(prefix + "cluster:db", prefix + "db:instance", prefix + "pg:parameters", prefix + "subgrp:subnets"),
+                builder.buildResources("rds", "rds:CreateDBInstance", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── IAM ──────────────────────────────────────────────────────────────────────
 
     /**

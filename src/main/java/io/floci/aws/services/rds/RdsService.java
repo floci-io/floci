@@ -94,6 +94,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -3072,6 +3073,69 @@ public class RdsService implements Resettable, ResourceProvider {
         } else {
             clusterSnapshots.delete(key);
         }
+    }
+
+    /** Stored tags are read by exact ARN, without resource creation or legacy-record migration. */
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "rds")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        int separator = arn.resource().indexOf(':');
+        if (separator < 0 || !regionResolver.partitionForRegion(arn.region()).equals(arn.partition())) {
+            return Map.of();
+        }
+        String type = arn.resource().substring(0, separator);
+        String name = arn.resource().substring(separator + 1);
+        return switch (type) {
+            case "db" -> storedTags(instances, arn, name, DbInstance::getDbInstanceArn, DbInstance::getTags);
+            case "cluster" -> storedTags(clusters, arn, name, DbCluster::getDbClusterArn, DbCluster::getTags);
+            case "pg" -> storedTags(parameterGroups, arn, name,
+                    DbParameterGroup::getDbParameterGroupArn, DbParameterGroup::getTags);
+            case "cluster-pg" -> storedTags(clusterParameterGroups, arn, name,
+                    DbClusterParameterGroup::getDbClusterParameterGroupArn, DbClusterParameterGroup::getTags);
+            case "subgrp" -> storedTags(subnetGroups, arn, name, DbSubnetGroup::getDbSubnetGroupArn, DbSubnetGroup::getTags);
+            case "snapshot" -> storedTags(snapshots, arn, name, DbSnapshot::getDbSnapshotArn, DbSnapshot::getTags);
+            case "cluster-snapshot" -> storedTags(clusterSnapshots, arn, name,
+                    DbClusterSnapshot::getDbClusterSnapshotArn, DbClusterSnapshot::getTags);
+            case "cluster-endpoint" -> storedTags(clusterEndpoints, arn, name,
+                    DbClusterEndpoint::getDbClusterEndpointArn, DbClusterEndpoint::getTags);
+            case "es" -> storedTags(eventSubscriptions, arn, name,
+                    EventSubscription::getEventSubscriptionArn, EventSubscription::getTags);
+            case "deployment" -> storedTags(blueGreenDeployments, arn, name,
+                    BlueGreenDeployment::getBlueGreenDeploymentArn, BlueGreenDeployment::getTags);
+            case "db-proxy-endpoint" -> storedTags(proxyEndpoints, arn, name,
+                    DbProxyEndpoint::getDbProxyEndpointArn, DbProxyEndpoint::getTags);
+            case "db-proxy" -> storedTags(proxies, arn, name, DbProxy::getDbProxyArn, DbProxy::getTags);
+            case "target-group" -> storedTags(proxyTargetGroups, arn, name,
+                    DbProxyTargetGroup::getTargetGroupArn, DbProxyTargetGroup::getTags);
+            case "og" -> storedTags(optionGroups, arn, name, OptionGroup::getOptionGroupArn, OptionGroup::getTags);
+            default -> Map.of();
+        };
+    }
+
+    private <T> Map<String, String> storedTags(StorageBackend<String, T> store, AwsArnUtils.Arn arn, String name,
+                                              Function<T, String> identity, Function<T, Map<String, String>> tags) {
+        for (String key : List.of(dbResourceKey(arn.region(), name), name)) {
+            Optional<T> resource = store instanceof AccountAwareStorageBackend<T> aware
+                    ? aware.getForAccount(arn.accountId(), key) : store.get(key);
+            Optional<Map<String, String>> found = resource.filter(value -> arn.toString().equals(identity.apply(value)))
+                    .map(tags);
+            if (found.isPresent()) {
+                return new LinkedHashMap<>(found.get());
+            }
+        }
+        // Proxy ARNs carry generated identifiers while their storage keys use user-supplied names.
+        List<T> records = store instanceof AccountAwareStorageBackend<T> aware
+                ? aware.scanForAccount(arn.accountId(), ignored -> true) : store.scan(ignored -> true);
+        Optional<T> found = records.stream().filter(value -> arn.toString().equals(identity.apply(value))).findFirst();
+        if (found.isEmpty() && store instanceof AccountAwareStorageBackend<T> aware) {
+            found = aware.scanAllAccountEntries(ignored -> true).stream()
+                    .filter(entry -> arn.accountId().equals(entry.accountId()))
+                    .map(AccountAwareStorageBackend.AccountEntry::value)
+                    .filter(value -> arn.toString().equals(identity.apply(value))).findFirst();
+        }
+        return found.map(tags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
     }
 
     public Map<String, String> listTagsForResource(String resourceName) {

@@ -224,6 +224,26 @@ class RdsServiceTest {
     }
 
     @Test
+    void storedIamTagsReadLegacyRecordsWithoutMigratingOrMutatingThem() {
+        String arn = "arn:aws:rds:us-east-1:123456789012:cluster:legacy-tags";
+        InMemoryStorage<String, DbCluster> records = new InMemoryStorage<>();
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("legacy-tags");
+        cluster.setDbClusterArn(arn);
+        cluster.setTags(new LinkedHashMap<>(Map.of("Owner", "fixture")));
+        records.put("legacy-tags", cluster);
+        RdsService service = newService(containerManager, proxyManager, new InMemoryStorage<>(),
+                new AccountAwareStorageBackend<>(records, null, "123456789012"),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        Map<String, String> read = service.storedTags(arn);
+        assertEquals(Map.of("Owner", "fixture"), read);
+        read.put("Owner", "changed-copy");
+        assertEquals(Map.of("Owner", "fixture"), cluster.getTags());
+        assertEquals(Set.of("legacy-tags"), records.keys());
+        assertEquals(Map.of(), service.storedTags(arn.replace("123456789012", "999999999999")));
+    }
+
+    @Test
     void createDbInstanceGeneratesMissingFields() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",

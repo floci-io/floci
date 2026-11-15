@@ -94,6 +94,8 @@ follow the rule unchanged: a family of a hand-built namespace whose requests nam
 way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
+`READ_IN_NOT_COVERED` selects tested operations from a namespace still listed in `NOT_COVERED`;
+its remaining operations retain their previous fallback until they have their own coverage.
 `ID_TARGETS` is Floci's coverage of id-list namespaces, the types of each it reads by id (EC2's instances and
 network resources): a resource ARN's variable names its list member, with the request's list of whatever resources
 it acts on (`Resources`) as a fallback. A list a type's variable names is the request's targets only when the
@@ -113,7 +115,8 @@ Beyond the members' names, botocore's shapes and documentation say what a member
   variable when it is the kind the variable is (a name, an id), and is found by the type's service otherwise
   (`find`: "The name of the stream processor" for its `${StreamprocessorId}`), the id open when it finds none;
   one whose documentation's head noun is an ARN ("The Amazon Resource Name (ARN) to which you want to add the tag")
-  holds an ARN, and so does one whose name ends in `ArnList`;
+  holds an ARN, as does a member documented with "This value is an Amazon Resource Name (ARN).",
+  and so does one whose name ends in `ArnList`;
 - a field of a top-level structure is a member too (`Budget.BudgetName`, `pipeline.name`, a bare field taking the
   structure's name), and so is a field of each element of a list or value of a map of structures named after a type
   (`PutEvents`' `Entries[].EventBusName`); a nested field named as an optional top-level member filling the same
@@ -284,6 +287,22 @@ for operation in ("GetLayerVersion", "GetLayerVersionByArn"):
         "Lambda layer lookups name the version through modeled path and query members; "
         "other Lambda resources retain their existing builders")
 
+# Incremental coverage in a namespace whose remaining operations are still named in NOT_COVERED.
+# The rules derive the selected operations normally; this list does not override their AWS resource types.
+READ_IN_NOT_COVERED = {
+    f"rds:{operation}": "RDS group and database lifecycle, with SDK authorization coverage"
+    for operation in (
+        "CreateDBParameterGroup", "CopyDBParameterGroup", "DescribeDBParameterGroups", "DescribeDBParameters",
+        "ModifyDBParameterGroup", "ResetDBParameterGroup", "DeleteDBParameterGroup",
+        "CreateDBClusterParameterGroup", "CopyDBClusterParameterGroup", "DescribeDBClusterParameterGroups",
+        "DescribeDBClusterParameters", "ModifyDBClusterParameterGroup", "ResetDBClusterParameterGroup",
+        "DeleteDBClusterParameterGroup", "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup",
+        "DeleteDBSubnetGroup", "CreateDBCluster", "DescribeDBClusters", "ModifyDBCluster", "DeleteDBCluster",
+        "CreateDBInstance", "DescribeDBInstances", "ModifyDBInstance", "DeleteDBInstance",
+        "CreateDBClusterSnapshot", "DescribeDBClusterSnapshots", "DeleteDBClusterSnapshot",
+        "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource")
+}
+
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
 #
@@ -416,7 +435,7 @@ NOT_COVERED: dict[str, str] = {
     "mq": _REST,
     "network-firewall": _LATER,
     "organizations": _LATER,
-    "rds": _LATER,
+    "rds": "parameter/subnet groups, instance/cluster lifecycle and tagging are read; other operations await coverage",
     "rds-data": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
@@ -551,9 +570,18 @@ def resource_tag_keys(documents: list[dict], formats: dict[str, dict[str, str]])
         namespace = document["Name"]
         if namespace not in formats:
             continue
-        types = {resource["Name"]: sorted({match.group("prefix") for match in map(
-                 RESOURCE_TAG_KEY_RE.fullmatch, resource.get("ConditionKeys", [])) if match})
-                 for resource in document.get("Resources", []) if resource["Name"] in formats[namespace]}
+        types = {}
+        for resource in document.get("Resources", []):
+            kind = resource["Name"]
+            if kind not in formats[namespace]:
+                continue
+            keys = resource.get("ConditionKeys", [])
+            prefixes = {match.group("prefix") for match in map(RESOURCE_TAG_KEY_RE.fullmatch, keys) if match}
+            # RDS spells its resource-specific keys as the namespace and resource type, e.g. rds:pg-tag/${TagKey}.
+            typed_prefix = f"{namespace}:{kind}-tag/"
+            if typed_prefix + "${TagKey}" in keys or typed_prefix + "tag-key" in keys:
+                prefixes.add(typed_prefix)
+            types[kind] = sorted(prefixes)
         types = {kind: keys for kind, keys in types.items() if keys}
         if types:
             result[namespace] = dict(sorted(types.items()))
@@ -818,6 +846,9 @@ def documented_members(models: dict[str, dict], operation: str) -> dict[str, dic
                 element = model["shapes"][item_shape["member"]["shape"]] if item_shape["type"] == "list" else item_shape
                 found.setdefault(path, {"path": path + strings, "nested": "." in path,
                                         "lead": _lead(item.get("documentation") or item_shape.get("documentation")),
+                                        "arnValue": bool(re.search(
+                                            r"(?:^|\. )this value is an amazon resource name \(arn\)\.",
+                                            _lead_text(item.get("documentation") or item_shape.get("documentation")))),
                                         "pattern": element.get("pattern") or ""})
     return found
 
@@ -889,6 +920,9 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
     held = {resource["arn"] for resource in resources if "arn" in resource}
     for path, fact in sorted(facts.items()):
         if fact["nested"] or fact["path"] in held or not kinds or re.search(r"arn(s|list)?$", path, re.IGNORECASE):
+            continue
+        if fact["arnValue"]:
+            resources.insert(0, {"types": kinds, "arn": fact["path"]})
             continue
         head, of = doc_head(fact["lead"])
         if re.search(r"(?:arns?|amazon resource names? \(arns?\))$", head) \
@@ -1630,7 +1664,15 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         in_slot = slot.group(1) if slot else None
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (v == in_slot, kind_of(v) == "", v)):
-            choice = _filling(variable, kind_stem, len(variables), {m: p for m, p in names.items() if m not in fill.values()},
+            # Reserve a member naming a more qualified variable for that type. A cluster parameter group
+            # cannot also fill the instance parameter group's shorter ParameterGroupName variable.
+            qualified = {v for other in types if other != kind for v in VARIABLE_RE.findall(formats.get(other, ""))
+                         if stem(variable) and v not in KNOWN_VARIABLES and stem(v) != stem(variable)
+                         and stem(v).endswith(stem(variable))}
+            eligible = {m: p for m, p in names.items() if m not in fill.values()
+                        and not ("." not in p and not p.endswith("[]")
+                                 and any(stem(m).endswith(stem(v)) and compatible(m, v) for v in qualified))}
+            choice = _filling(variable, kind_stem, len(variables), eligible,
                               bare=bare, aliased=aliased, word_stem=word_stem,
                               shapes=shapes if not held else None)
             if choice is not None:
@@ -1665,7 +1707,8 @@ ACCOUNT_SLOT_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:\$\{(\w+)}:")
 def with_made(resources: list[dict], operation: str, formats: dict[str, str]) -> list[dict]:
     """The resources, those a create makes marked `made` when it names others too (the pipeline a webhook connects
     to, the namespace a service is created in), so that its tags are checked on what it makes alone: of a type, or
-    with an ARN format's leading resource word, related to the operation's name past its verb. A member that may hold
+    with an ARN format's leading resource word, related to the operation's name past its verb, or with its sole
+    resource variable named after that operation's subject (`db:${DbInstanceName}`). A member that may hold
     an ARN of several types is made only when every one of them is: one that may name the parent too (a subscriber's
     `EventBusArn`) names a resource the create does not make."""
     name = operation.split(":", 1)[1]
@@ -1675,7 +1718,10 @@ def with_made(resources: list[dict], operation: str, formats: dict[str, str]) ->
 
     def is_created(kind: str) -> bool:
         word = RESOURCE_PART_RE.match(formats.get(kind, ""))
-        return related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+        variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, ""))
+                     if variable not in KNOWN_VARIABLES]
+        return (related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+                or len(variables) == 1 and stem(variables[0]) == created)
 
     def makes(resource: dict) -> bool:
         return all(is_created(kind) for kind in _kinds(resource))
@@ -2894,10 +2940,10 @@ def _with_resource_types(documents: list[dict]) -> set[str]:
 
 def reads(operation: str) -> bool:
     """Read whole namespaces, and in a namespace otherwise built by hand the operations `READ_IN_HAND_BUILT` lists
-    and those `MEASURED` gives."""
+    and those `MEASURED` gives, plus the incremental operations in `READ_IN_NOT_COVERED`."""
     namespace = namespace_of(operation)
-    return namespace in NAMESPACES or namespace in HAND_BUILT and (operation in READ_IN_HAND_BUILT
-                                                                     or operation in MEASURED)
+    return (namespace in NAMESPACES or operation in READ_IN_NOT_COVERED
+            or namespace in HAND_BUILT and (operation in READ_IN_HAND_BUILT or operation in MEASURED))
 
 
 def _check_overrides(covered: dict[str, dict]) -> None:
@@ -2905,6 +2951,10 @@ def _check_overrides(covered: dict[str, dict]) -> None:
     two places."""
     stale = [f"READ_IN_HAND_BUILT names {operation}, which the reference does not give" for operation in READ_IN_HAND_BUILT
               if operation not in covered]
+    stale += [f"READ_IN_NOT_COVERED names {operation}, which the reference does not give"
+              for operation in READ_IN_NOT_COVERED if operation not in covered]
+    stale += [f"READ_IN_NOT_COVERED names {operation}, outside NOT_COVERED"
+              for operation in READ_IN_NOT_COVERED if namespace_of(operation) not in NOT_COVERED]
     stale += [f"MEASURED gives {operation}, which the file does not read" for operation in MEASURED
               if operation not in covered]
     stale += [f"MEASURED gives {operation}, which READ_IN_HAND_BUILT reads by the rules" for operation in MEASURED
@@ -2985,7 +3035,8 @@ def validate(document: dict) -> list[str]:
     if not isinstance(tag_keys, dict) or any(
             not isinstance(kinds, dict) or any(kind not in formats.get(namespace, {})
                 or not isinstance(keys, list) or not all(isinstance(key, str) for key in keys) or keys != sorted(set(keys))
-                or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key) for key in keys)
+                or any(not isinstance(key, str) or (not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key)
+                    and key != f"{namespace}:{kind}-tag/") for key in keys)
                 for kind, keys in kinds.items()) for namespace, kinds in tag_keys.items()):
         problems.append("resourceTagKeys is not stored-tag prefixes for supported resource types")
     resource_keys_document = document.get("resourceKeys", {})
@@ -3295,6 +3346,8 @@ def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str,
                    if namespace_of(operation) in vendored["namespaces"]
                    and (namespace_of(operation) not in vendored["handBuilt"] or operation in READ_IN_HAND_BUILT
                         or operation in MEASURED)
+                   and (namespace_of(operation) not in vendored.get("notCovered", {})
+                        or operation in READ_IN_NOT_COVERED)
                    and operation not in vendored["operations"])
     return untrue, added
 
