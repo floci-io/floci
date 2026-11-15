@@ -137,11 +137,11 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         // The engine's change decides, as it does for the change set's Replacement: BucketName,
         // BucketNamePrefix and BucketNamespace are create-only in the registry. A bucket named in the
         // template cannot be replaced under that name; an unnamed one gets a fresh generated name.
-        boolean updatesInPlace = ctx.isUpdate() && ctx.priorPhysicalId() != null;
-        boolean replaces = updatesInPlace && ctx.changes(BUCKET, props).requiresReplacement();
+        boolean updatesExisting = ctx.isUpdate() && ctx.priorPhysicalId() != null;
+        boolean replaces = updatesExisting && ctx.changes(BUCKET, props).requiresReplacement();
         // An update that keeps the bucket does not decide its name, so a prefix it carries is not
         // derived or refused: one created before the prefix was read has a generated name.
-        String explicitName = updatesInPlace && !replaces
+        String explicitName = updatesExisting && !replaces
                 ? ctx.resolveOptional(props, "BucketName")
                 : templateBucketName(props, ctx);
         if (replaces && explicitName != null && explicitName.equals(ctx.priorPhysicalId())) {
