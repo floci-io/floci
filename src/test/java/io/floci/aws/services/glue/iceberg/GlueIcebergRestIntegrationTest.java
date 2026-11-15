@@ -3,11 +3,11 @@ package io.floci.aws.services.glue.iceberg;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
-import io.floci.aws.testing.SignedRestRequests;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
+import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
@@ -204,8 +205,15 @@ class GlueIcebergRestIntegrationTest {
     }
 
     private Response send(AwsRequestSigner signer, String method, String path, String body) {
+        URI uri = endpoint.resolve(path);
+        byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
         try {
-            return SignedRestRequests.send(endpoint, signer, method, path, body, "application/json");
+            RequestSpecification request = given().urlEncodingEnabled(false)
+                    .headers(signer.headersFor(method, uri, Map.of(), bytes));
+            if (body != null) {
+                request = request.contentType("application/json").body(bytes);
+            }
+            return request.request(method, uri);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
