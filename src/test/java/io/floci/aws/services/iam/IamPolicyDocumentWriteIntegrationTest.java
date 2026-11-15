@@ -34,6 +34,9 @@ class IamPolicyDocumentWriteIntegrationTest {
 
     private static final String MALFORMED = "MalformedPolicyDocument";
 
+    private static final String ACTIONS_WANT_A_VENDOR =
+            "Actions/Conditions must be prefaced by a vendor, e.g., iam, sdb, ec2, etc.";
+
     /** Everything these tests create outlives the class otherwise: the emulator is shared. */
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -381,6 +384,72 @@ class IamPolicyDocumentWriteIntegrationTest {
                     "Syntax errors in policy.");
             expectMalformed(inlinePolicyWrite(userName, "write-effect-wording", document),
                     "The policy failed legacy parsing");
+        }
+    }
+
+    /**
+     * An action is written as a service namespace, a colon and the name of an action, so one that
+     * no vendor prefaces is refused with the clause's own sentence, which both identity validators
+     * word alike. A value that is no string is held to the rule its text would be, as the resource
+     * values beside it are.
+     */
+    @Test
+    void anActionNoVendorPrefacesIsRefusedByBothValidators() {
+        String userName = createUser("write-action-vendor");
+        String arn = createManagedPolicy("write-action-vendor");
+        String bare = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"GetObject\",\"Resource\":\"*\"}]}";
+        String inAList = "{\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":[\"s3:GetObject\",\"ListAllMyBuckets\"],\"Resource\":\"*\"}]}";
+        String notAction = "{\"Statement\":[{\"Effect\":\"Allow\",\"NotAction\":\"ChangePassword\","
+                + "\"Resource\":\"*\"}]}";
+        String noString = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":123,\"Resource\":\"*\"}]}";
+
+        for (String document : new String[] {bare, inAList, notAction, noString}) {
+            expectMalformed(inlinePolicyWrite(userName, "write-action-vendor", document),
+                    ACTIONS_WANT_A_VENDOR);
+            expectMalformed(managedPolicyWrite("write-action-vendor-managed", document),
+                    ACTIONS_WANT_A_VENDOR);
+            expectMalformed(iam("CreatePolicyVersion")
+                    .formParam("PolicyArn", arn)
+                    .formParam("PolicyDocument", document),
+                    ACTIONS_WANT_A_VENDOR);
+        }
+
+        // An action element naming nothing is the element's own sentence rather than this one.
+        expectMalformed(managedPolicyWrite("write-action-none",
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":null,\"Resource\":\"*\"}]}"),
+                "Policy statement must contain actions.");
+    }
+
+    /**
+     * What the rule admits: the bare wildcard, which stands for every action there is, and a
+     * namespace before a colon whatever the name after it spells, the wildcards the reference
+     * writes into an action name included. The vendor is asked for rather than looked up, so an
+     * action of a service this emulator does not model is stored as written.
+     */
+    @Test
+    void anActionThatNamesAVendorIsStoredWhateverTheNameSpells() {
+        String userName = createUser("write-action-admitted");
+
+        for (String action : new String[] {"\"*\"", "[\"*\"]", "\"s3:*\"", "\"iam:*AccessKey\"",
+            "\"*:GetObject\"", "\"nosuchservice:DoThing\"", "[\"s3:Get*\",\"s3:List*\"]"}) {
+            String document = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                    + "\"Action\":" + action + ",\"Resource\":\"*\"}]}";
+            String policyName = unique("write-action-admitted");
+
+            inlinePolicyWrite(userName, policyName, document)
+                .when().post("/").then().statusCode(200);
+            iam("GetUserPolicy")
+                    .formParam("UserName", userName)
+                    .formParam("PolicyName", policyName)
+                .when().post("/").then().statusCode(200);
+            // The holder has to be deletable afterwards, and a user keeping an inline policy is
+            // not, so each case takes its own back out.
+            iam("DeleteUserPolicy")
+                    .formParam("UserName", userName)
+                    .formParam("PolicyName", policyName)
+                .when().post("/").then().statusCode(200);
         }
     }
 }
