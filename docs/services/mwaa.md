@@ -44,6 +44,12 @@ Once Airflow's unauthenticated `/health` endpoint reports `metadatabase`, `sched
 
 Floci runs its own HTTP proxy per environment (published on a host port from the configured range) that fronts the real Airflow webserver: every request is forwarded through to Airflow as-is, **except** `POST /aws_mwaa/cli`, which the proxy intercepts itself. It validates the `Authorization: Bearer <CliToken>` from `CreateCliToken`, then runs supported Amazon MWAA Airflow CLI commands inside the container via `docker exec` and returns the AWS-documented `{stdout, stderr}` (base64) shape. Unsupported commands return an error in `stderr` without reaching the container. The supported commands match the [Amazon MWAA Airflow v2 CLI list](https://docs.aws.amazon.com/mwaa/latest/userguide/airflow-cli-command-reference.html); as in that list, `providers notifications` needs Airflow 2.8 or later, so a 2.7.2 environment refuses it. `Environment.WebserverUrl` and the URL returned by `CreateWebLoginToken` both point at this proxy, so Airflow-UI browsing and the CLI-token flow go through the same place.
 
+### Web login (`CreateWebLoginToken`)
+
+The token from `CreateWebLoginToken` works the way Amazon MWAA's [Apache Airflow REST API guide](https://docs.aws.amazon.com/mwaa/latest/userguide/access-mwaa-apache-airflow-rest-api.html) describes. POST it as the `token` form field to `/aws_mwaa/login` on the `WebServerHostname`. The proxy signs in to Airflow's own login form as the `admin` user Floci created for the environment, and answers `302` to `/home` with Airflow's `session` cookie. That cookie opens the Airflow UI and the REST API, for example `GET /api/v1/dags` or `POST /api/v1/dags/{dag_id}/dagRuns`. A token is valid for 60 seconds, as on AWS. An unknown or expired token gets `401`.
+
+With `floci.tls.enabled`, `WebserverUrl` and `WebServerHostname` name an `https` endpoint, and the proxy serves TLS with Floci's own server certificate, so a client that builds `https://{WebServerHostname}` (as AWS's sample code does) reaches it.
+
 ### Startup scripts (`StartupScriptS3Path`)
 
 If configured, the script is fetched from S3 at environment-creation time and injected into the Airflow container before it starts. It runs first, then `requirements.txt` is installed, then `airflow db migrate` and the triggerer, scheduler and webserver start, matching real MWAA's ordering. Variables the script exports (a private index URL for `pip`, for example) are still set when `requirements.txt` installs, at creation and on every later reinstall. Two behaviors worth knowing about since they're not obvious from the API surface:
@@ -185,7 +191,6 @@ The following are current, known gaps:
 
 - `PluginsS3Path` is accepted and stored on the environment but not fetched or applied — real MWAA's `plugins.zip` mechanism for shipping custom binaries has no equivalent here yet.
 - `UpdateEnvironment` supports metadata-only fields (tags, description, logging-config toggles). Changing `AirflowVersion`, `AirflowConfigurationOptions`, or `RequirementsS3Path` requires deleting and recreating the environment — these would require recreating the running container, which is out of scope for an in-place update today.
-- `CreateWebLoginToken` returns a stubbed token rather than performing a real Airflow FAB/JWT SSO handshake.
 - No per-component `MWAA_AIRFLOW_COMPONENT` environment variable. Real MWAA runs the startup script separately on webserver, scheduler, and worker; Floci runs the webserver, scheduler and triggerer together in one container, so there's no per-component distinction to expose.
 - Docker container and volume names are namespace-aware (via `FLOCI_DOCKER_RESOURCE_NAMESPACE`, same as every other Docker-backed service) but not scoped by AWS account id — two accounts creating an identically-named environment can collide. This is a pre-existing characteristic shared by every Docker-backed Floci service (EKS, RDS, ...), not unique to MWAA.
 - Environments loaded from persistent storage on Floci restart are not automatically reconnected to their Docker containers — again, a gap shared by every Docker-backed service today, not specific to MWAA.
