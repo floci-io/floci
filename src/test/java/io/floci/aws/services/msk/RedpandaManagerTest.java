@@ -466,8 +466,9 @@ class RedpandaManagerTest {
         assertFalse(Files.exists(tempDir.resolve("msk").resolve("test-cluster")),
                 "container mode must not create host directories from inside the emulator container");
 
-        assertEquals("172.18.0.5:9092", cluster.getBootstrapBrokers(),
-                "without a bootstrap hostname, GetBootstrapBrokers keeps the Docker-network address");
+        assertEquals("floci-aws-msk-abc123:9092", cluster.getBootstrapBrokers(),
+                "without a bootstrap hostname, GetBootstrapBrokers names the internal listener the way the "
+                        + "broker advertises it, not by the container IP");
     }
 
     @Test
@@ -513,7 +514,7 @@ class RedpandaManagerTest {
         int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
         assertEquals("internal://floci-aws-msk-abc123:9092,host://localhost:9305",
                 spec.cmd().get(flagIndex + 1));
-        assertEquals("172.18.0.8:9092", cluster.getBootstrapBrokers());
+        assertEquals("floci-aws-msk-abc123:9092", cluster.getBootstrapBrokers());
     }
 
     @Test
