@@ -1,5 +1,6 @@
 package io.floci.aws.services.eventbridge;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
@@ -69,15 +70,15 @@ class EventBridgeEcsRunTaskIntegrationTest {
                           "Group": "eb-ecs-group-%s",
                           "NetworkConfiguration": {
                             "awsvpcConfiguration": {
-                              "Subnets": ["subnet-013f16799e920587a", "subnet-00af8362367af5f99"],
-                              "SecurityGroups": ["sg-010f8cfacc2b77b90"],
+                              "Subnets": ["%s", "%s"],
+                              "SecurityGroups": ["%s"],
                               "AssignPublicIp": "ENABLED"
                             }
                           }
                         }
                       }]
                     }
-                    """.formatted(ruleName, clusterArn, taskDefinitionArn, suffix))
+                    """.formatted(ruleName, clusterArn, taskDefinitionArn, suffix, Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"), Ec2Service.defaultSecurityGroupId("us-east-1")))
         .when()
             .post("/")
         .then()
@@ -100,9 +101,9 @@ class EventBridgeEcsRunTaskIntegrationTest {
             .body("Targets[0].EcsParameters.LaunchType", equalTo("FARGATE"))
             .body("Targets[0].EcsParameters.Group", equalTo("eb-ecs-group-" + suffix))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.Subnets",
-                    hasItem("subnet-013f16799e920587a"))
+                    hasItem(Ec2Service.defaultSubnetId("us-east-1", "a")))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.SecurityGroups",
-                    hasItem("sg-010f8cfacc2b77b90"))
+                    hasItem(Ec2Service.defaultSecurityGroupId("us-east-1")))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.AssignPublicIp",
                     equalTo("ENABLED"));
 

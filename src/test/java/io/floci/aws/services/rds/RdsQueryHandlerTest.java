@@ -3,6 +3,7 @@ package io.floci.aws.services.rds;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
 import io.floci.aws.services.rds.model.DatabaseEngine;
@@ -3509,8 +3510,8 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         group.setVpcId("vpc-default");
         group.setSubnetGroupStatus("Complete");
-        group.setSubnetIds(List.of("subnet-013f16799e920587a", "subnet-00af8362367af5f99"));
-        group.setSubnetAvailabilityZones(Map.of("subnet-013f16799e920587a", "us-east-1a", "subnet-00af8362367af5f99", "us-east-1b"));
+        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
+        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b"), "us-east-1b"));
         return group;
     }
 

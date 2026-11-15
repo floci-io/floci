@@ -284,14 +284,6 @@ public class DocDbService {
      * and windows clear of each other; on modify it keeps the cluster's.
      */
 
-    private static String resolveDefaultSecurityGroupId(Ec2Service ec2Service, String region) {
-        if (ec2Service == null) {
-            return Ec2Service.defaultSecurityGroupId(region);
-        }
-        String resolved = ec2Service.resolveDefaultSecurityGroupId(region);
-        return resolved != null ? resolved : Ec2Service.defaultSecurityGroupId(region);
-    }
-
     private DocDbClusterSettings resolveClusterSettings(DocDbClusterSettings settings, DocDbCluster current,
                                                         String engineVersion, String region) {
         boolean create = current == null;
@@ -398,6 +390,14 @@ public class DocDbService {
     }
 
     /** The family of the group a cluster is on; a group deleted since is judged by nothing. */
+    private static String resolveDefaultSecurityGroupId(Ec2Service ec2Service, String region) {
+        if (ec2Service == null) {
+            return Ec2Service.defaultSecurityGroupId(region);
+        }
+        String resolved = ec2Service.resolveDefaultSecurityGroupId(region);
+        return resolved != null ? resolved : Ec2Service.defaultSecurityGroupId(region);
+    }
+
     private String currentParameterGroupFamily(String name, String region) {
         try {
             return rdsService.getDbClusterParameterGroup(name, region).getDbParameterGroupFamily();

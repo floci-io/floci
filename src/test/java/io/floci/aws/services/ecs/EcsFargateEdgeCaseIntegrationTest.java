@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -37,7 +38,7 @@ class EcsFargateEdgeCaseIntegrationTest {
     private static final String CLUSTER = "fargate-edge-cluster";
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                    + "[\"subnet-013f16799e920587a\"]}}";
+                    + "[" + Ec2Service.defaultSubnetId("us-east-1", "a") + "]}}";
 
     @BeforeAll
     static void configure() {
@@ -446,7 +447,7 @@ class EcsFargateEdgeCaseIntegrationTest {
 
         call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\"" + family
                 + "\",\"launchType\":\"FARGATE\",\"networkConfiguration\":{\"awsvpcConfiguration\":"
-                + "{\"subnets\":[\"subnet-013f16799e920587a\"],\"securityGroups\":[\"sg-nope\"]}}}", 400)
+                + "{\"subnets\":[" + Ec2Service.defaultSubnetId("us-east-1", "a") + "],\"securityGroups\":[\"sg-nope\"]}}}", 400)
                 .then()
                 .body("__type", containsString("InvalidParameterException"))
                 .body("message", containsString("sg-nope"));
@@ -778,7 +779,7 @@ class EcsFargateEdgeCaseIntegrationTest {
         // A changed network configuration starts new tasks, so it rolls.
         call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"edge-roll-svc\","
                 + "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                + "[\"subnet-00af8362367af5f99\"]}}}", 200);
+                + "[" + Ec2Service.defaultSubnetId("us-east-1", "b") + "]}}}", 200);
         assertNotEquals(initial, deploymentId("edge-roll-svc"),
                 "a changed network configuration must roll the deployment");
 
@@ -1070,7 +1071,7 @@ class EcsFargateEdgeCaseIntegrationTest {
                 + "\"launchType\":\"FARGATE\",\"externalId\":\"d-EXAMPLE\","
                 + "\"scale\":{\"value\":50,\"unit\":\"PERCENT\"},"
                 + "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                + "[\"subnet-013f16799e920587a\"]}},"
+                + "[" + Ec2Service.defaultSubnetId("us-east-1", "a") + "]}},"
                 + "\"loadBalancers\":[{\"targetGroupArn\":\"arn:aws:elasticloadbalancing:us-east-1:"
                 + "000000000000:targetgroup/tg/1\",\"containerName\":\"app\",\"containerPort\":80}],"
                 + "\"tags\":[{\"key\":\"team\",\"value\":\"platform\"}]}", 200);

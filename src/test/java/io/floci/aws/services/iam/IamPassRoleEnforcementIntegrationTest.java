@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -1102,16 +1103,17 @@ class IamPassRoleEnforcementIntegrationTest {
     private static String runTask(String cluster, String family, String taskRoleOverride) {
         return """
                 {"cluster":"%s","taskDefinition":"%s","launchType":"FARGATE","count":1,
-                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-013f16799e920587a"]}}%s}"""
-                .formatted(cluster, family, taskRoleOverride == null ? ""
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}}%s}"""
+                .formatted(cluster, family, Ec2Service.defaultSubnetId("us-east-1", "a"),
+                        taskRoleOverride == null ? ""
                         : ",\"overrides\":{\"taskRoleArn\":\"" + taskRoleOverride + "\"}");
     }
 
     private static String service(String cluster, String name, String family) {
         return """
                 {"cluster":"%s","serviceName":"%s","taskDefinition":"%s","desiredCount":0,"launchType":"FARGATE",
-                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["subnet-013f16799e920587a"]}}}"""
-                .formatted(cluster, name, family);
+                 "networkConfiguration":{"awsvpcConfiguration":{"subnets":["%s"]}}}"""
+                .formatted(cluster, name, family, Ec2Service.defaultSubnetId("us-east-1", "a"));
     }
 
     private static RequestSpecification createStack(User user, String stack) {

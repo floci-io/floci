@@ -1,5 +1,6 @@
 package io.floci.aws.services.dms;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -31,8 +32,8 @@ class DmsLifecycleIntegrationTest {
     private static final String ACCOUNT_ID = "723679240095";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/dms/aws4_request";
-    private static final String SUBNET_A = "subnet-013f16799e920587a";
-    private static final String SUBNET_B = "subnet-00af8362367af5f99";
+    private static final String SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
 
     @BeforeAll
     static void configureRestAssured() {
@@ -180,7 +181,7 @@ class DmsLifecycleIntegrationTest {
                 .body("ReplicationInstances[0].VpcSecurityGroups[0].VpcSecurityGroupId", equalTo("sg-1"))
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.ReplicationSubnetGroupIdentifier",
                         equalTo("lc-rep-subnets"))
-                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-002565fab14571abd"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")))
                 .body("ReplicationInstances[0].EngineVersion", notNullValue());
 
         dms("DeleteReplicationSubnetGroup")
@@ -231,7 +232,7 @@ class DmsLifecycleIntegrationTest {
         describeInstance("lc-rep-default")
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.ReplicationSubnetGroupIdentifier",
                         equalTo("default"))
-                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo("vpc-002565fab14571abd"))
+                .body("ReplicationInstances[0].ReplicationSubnetGroup.VpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")))
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.SubnetGroupStatus", equalTo("Complete"))
                 .body("ReplicationInstances[0].ReplicationSubnetGroup.Subnets.SubnetIdentifier",
                         hasItems(SUBNET_A, SUBNET_B));

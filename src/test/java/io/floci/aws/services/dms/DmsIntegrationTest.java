@@ -1,5 +1,6 @@
 package io.floci.aws.services.dms;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -29,8 +30,8 @@ class DmsIntegrationTest {
     private static final String ACCOUNT_ID = "723679240095";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=" + ACCOUNT_ID + "/20260101/us-east-1/dms/aws4_request";
-    private static final String SUBNET_A = "subnet-013f16799e920587a";
-    private static final String SUBNET_B = "subnet-00af8362367af5f99";
+    private static final String SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
 
     @BeforeAll
     static void configureRestAssured() {
@@ -59,7 +60,7 @@ class DmsIntegrationTest {
                 .body("ReplicationSubnetGroups", hasSize(1))
                 .body("ReplicationSubnetGroups[0].ReplicationSubnetGroupDescription",
                         equalTo("terraform managed"))
-                .body("ReplicationSubnetGroups[0].VpcId", equalTo("vpc-002565fab14571abd"))
+                .body("ReplicationSubnetGroups[0].VpcId", equalTo(Ec2Service.defaultVpcId("us-east-1")))
                 .body("ReplicationSubnetGroups[0].SubnetGroupStatus", equalTo("Complete"))
                 .body("ReplicationSubnetGroups[0].Subnets.SubnetIdentifier", contains(SUBNET_A, SUBNET_B))
                 .body("ReplicationSubnetGroups[0].Subnets.find { it.SubnetIdentifier == '"
@@ -202,7 +203,7 @@ class DmsIntegrationTest {
                 .statusCode(200)
                 .body("ReplicationSubnetGroups", hasSize(1))
                 .body("ReplicationSubnetGroups[0].ReplicationSubnetGroupIdentifier", equalTo("default"))
-                .body("ReplicationSubnetGroups[0].VpcId", equalTo("vpc-0060964b5782ac50d"));
+                .body("ReplicationSubnetGroups[0].VpcId", equalTo(Ec2Service.defaultVpcId("ap-southeast-2")));
     }
 
     /**
@@ -230,7 +231,7 @@ class DmsIntegrationTest {
         .then()
                 .statusCode(200)
                 .body("ReplicationSubnetGroups", hasSize(1))
-                .body("ReplicationSubnetGroups[0].VpcId", equalTo("vpc-010d65e8a5d057b88"));
+                .body("ReplicationSubnetGroups[0].VpcId", equalTo(Ec2Service.defaultVpcId("ca-central-1")));
     }
 
     @Test

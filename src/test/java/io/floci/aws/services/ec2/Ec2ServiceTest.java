@@ -4220,7 +4220,7 @@ class Ec2ServiceTest {
     @Test
     void defaultVpcSubnetAndSecurityGroupIdsAreRegionScoped() {
         // #21: the default VPC/subnets/security group were literal ids ("vpc-default",
-        // "subnet-013f16799e920587a/b/c", "sg-default") reused as-is in every region. Storage was
+        // "subnet-default-a/b/c", "sg-default") reused as-is in every region. Storage was
         // already correctly keyed by region, so nothing actually collided server-side, but every
         // region's DescribeVpcs/DescribeSubnets/DescribeSecurityGroups echoed identical ids back
         // to the caller, making the two regions' default resources indistinguishable from an SDK
@@ -4270,7 +4270,6 @@ class Ec2ServiceTest {
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
 
-        String[] prefixes = {"igw-", "rtb-", "rtbassoc-", "acl-", "aclassoc-", "vpc-cidr-assoc-"};
         for (String region : List.of("us-east-1", "eu-west-1")) {
             InternetGateway igw = service.describeInternetGateways(region, List.of(), Map.of()).getFirst();
             assertTrue(igw.getInternetGatewayId().startsWith("igw-"));
@@ -4298,18 +4297,35 @@ class Ec2ServiceTest {
                             && isHex17(c.getAssociationId().substring("vpc-cidr-assoc-".length()))));
         }
 
-        // uniqueness across regions
-        InternetGateway usIgw = service.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst();
-        InternetGateway euIgw = service.describeInternetGateways("eu-west-1", List.of(), Map.of()).getFirst();
-        assertNotEquals(usIgw.getInternetGatewayId(), euIgw.getInternetGatewayId());
+        // uniqueness across regions, for every default resource type
+        List<String> usEastIds = defaultResourceIds(service, "us-east-1");
+        List<String> euWestIds = defaultResourceIds(service, "eu-west-1");
+        assertTrue(usEastIds.stream().noneMatch(euWestIds::contains),
+                "default resource ids must not collide across regions: " + usEastIds + " vs " + euWestIds);
 
         // stability across two seeding runs (new storage)
         Ec2Service service2 = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
-        assertEquals(service.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst().getInternetGatewayId(),
-                service2.describeInternetGateways("us-east-1", List.of(), Map.of()).getFirst().getInternetGatewayId());
+        assertEquals(usEastIds, defaultResourceIds(service2, "us-east-1"));
+    }
+
+    /** Every default resource id of one region, in a fixed order: gateway, route table, its
+     *  first association, the default ACL, its first association and the VPC CIDR association. */
+    private static List<String> defaultResourceIds(Ec2Service service, String region) {
+        List<String> ids = new ArrayList<>();
+        ids.add(service.describeInternetGateways(region, List.of(), Map.of()).getFirst().getInternetGatewayId());
+        RouteTable rt = service.describeRouteTables(region, List.of(), Map.of()).getFirst();
+        ids.add(rt.getRouteTableId());
+        ids.add(rt.getAssociations().getFirst().getRouteTableAssociationId());
+        NetworkAcl acl = service.describeNetworkAcls(region, List.of(), Map.of()).stream()
+                .filter(NetworkAcl::isDefault).findFirst().orElseThrow();
+        ids.add(acl.getNetworkAclId());
+        ids.add(acl.getAssociations().getFirst().getNetworkAclAssociationId());
+        ids.add(service.describeVpcs(region, List.of(), Map.of()).getFirst()
+                .getCidrBlockAssociationSet().getFirst().getAssociationId());
+        return ids;
     }
 
     private static boolean isHex17(String s) {

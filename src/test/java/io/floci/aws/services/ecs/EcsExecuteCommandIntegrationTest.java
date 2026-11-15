@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -40,7 +41,7 @@ class EcsExecuteCommandIntegrationTest {
     private static final String CLUSTER = "exec-cluster";
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                    + "[\"subnet-013f16799e920587a\"]}}";
+                    + "[" + Ec2Service.defaultSubnetId("us-east-1", "a") + "]}}";
 
     @BeforeAll
     static void configure() {

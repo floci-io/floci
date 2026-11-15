@@ -1,5 +1,6 @@
 package io.floci.aws.services.ecs;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecs.model.ClusterSetting;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -56,8 +57,8 @@ class EcsContainerInsightsIntegrationTest {
               "Service": {"Type": "AWS::ECS::Service", "Properties": {"ServiceName": "web",
                 "Cluster": {"Ref": "Cluster"}, "TaskDefinition": {"Ref": "TaskDef"},
                 "DesiredCount": 1, "LaunchType": "FARGATE", "NetworkConfiguration": {"AwsvpcConfiguration":
-                  {"Subnets": ["subnet-013f16799e920587a"]}}}}}}
-            """.formatted(cluster);
+                  {"Subnets": ["%2$s"]}}}}}}
+            """.formatted(cluster, Ec2Service.defaultSubnetId("us-east-1", "a"));
 
         given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateStack")

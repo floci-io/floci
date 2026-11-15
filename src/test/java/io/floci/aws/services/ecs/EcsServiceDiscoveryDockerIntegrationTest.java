@@ -5,6 +5,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.services.cloudmap.CloudMapService;
 import io.floci.aws.services.cloudmap.model.Operation;
 import io.floci.aws.services.cloudmap.model.Service;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.CreateServiceRequest;
@@ -44,7 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EcsServiceDiscoveryDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
-    private static final String SUBNET = "subnet-013f16799e920587a";
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
     private static final String BUSYBOX_IMAGE = TestImages.BUSYBOX;
     private static final String CONTAINER_NAME = "app";
     private static final String CLOUD_MAP_SERVICE_NAME = "cache";
