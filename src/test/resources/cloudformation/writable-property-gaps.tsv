@@ -253,7 +253,6 @@ AWS::EC2::VPCEndpoint	ServiceNetworkArn	accepted and ignored
 AWS::EC2::VPCEndpoint	ServiceRegion	accepted and ignored
 AWS::EC2::VPCEndpoint	Tags	accepted and ignored
 AWS::ECR::Repository	EmptyOnDelete	accepted and ignored
-AWS::ECR::Repository	EncryptionConfiguration	accepted and ignored
 AWS::ECR::Repository	ImageScanningConfiguration	accepted and ignored
 AWS::ECR::Repository	ImageTagMutabilityExclusionFilters	accepted and ignored
 AWS::ECS::CapacityProvider	ClusterName	accepted and ignored
