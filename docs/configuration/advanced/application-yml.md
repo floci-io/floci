@@ -120,8 +120,8 @@ floci:
     log-max-size: "10m"                      # Max size per container log file before rotation
     log-max-file: "3"                        # Number of rotated log files to retain
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
-    max-connections: 1024                    # Docker client connection pool; each live Lambda container holds 1
-    streaming-max-connections: 512           # Separate pool for container log-follow streams
+    max-connections: 1024                    # Docker client connection pool for short calls
+    streaming-max-connections: 2048          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 

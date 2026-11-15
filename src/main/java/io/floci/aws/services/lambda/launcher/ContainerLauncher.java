@@ -16,6 +16,7 @@ import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.core.common.docker.StreamingDocker;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.iam.model.SessionCreds;
@@ -119,6 +120,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
+    private final DockerClient streamingDocker;
     private final ContainerLogStreamer logStreamer;
     private final ImageResolver imageResolver;
     private final RuntimeApiServerFactory runtimeApiServerFactory;
@@ -136,6 +138,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     @Inject
     public ContainerLauncher(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
+                             @StreamingDocker DockerClient streamingDocker,
                              ContainerLogStreamer logStreamer,
                              ImageResolver imageResolver,
                              RuntimeApiServerFactory runtimeApiServerFactory,
@@ -148,6 +151,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                              Ec2Service ec2Service) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
+        this.streamingDocker = streamingDocker;
         this.logStreamer = logStreamer;
         this.imageResolver = imageResolver;
         this.runtimeApiServerFactory = runtimeApiServerFactory;
@@ -1469,7 +1473,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      */
     private void watchForUnexpectedExit(DockerClient dockerClient, String containerId,
                                         RuntimeApiServer runtimeApiServer) {
-        LambdaExitWatcher.watch(dockerClient, containerId, runtimeApiServer::handleRuntimeProcessExited);
+        LambdaExitWatcher.watch(dockerClient, streamingDocker, containerId,
+                runtimeApiServer::handleRuntimeProcessExited);
     }
 
     private void launchExtensions(DockerClient dockerClient, String containerId, String functionName,
@@ -1496,7 +1501,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 // the container log and an observability extension's output would vanish entirely.
                 // Draining is also required in its own right — an unread exec pipe fills up and
                 // stalls the extension process.
-                dockerClient.execStartCmd(execId).exec(logStreamer.execLogCallbackForAccount(
+                //
+                // The stream holds its connection while the extension runs, so it uses the
+                // streaming pool, where it cannot starve short control-plane calls.
+                streamingDocker.execStartCmd(execId).exec(logStreamer.execLogCallbackForAccount(
                         logDestination.accountId(), logDestination.logGroup(), logDestination.logStream(),
                         logDestination.region(),
                         "lambda:" + functionName + ":" + name));
