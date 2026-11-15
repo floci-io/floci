@@ -767,6 +767,10 @@ public class SecretsManagerService implements ResourceProvider {
                     && secret.getOwningService().startsWith(targetVal);
             case "all" -> {
                 List<String> words = splitWords(targetVal);
+                if (words.isEmpty()) {
+                    // A value with no words is a prefix of every name, as it was before word splitting.
+                    yield secret.getName() != null;
+                }
                 yield matchesAnyWord(secret.getName(), words)
                         || matchesAnyWord(secret.getDescription(), words)
                         || (secret.getTags() != null && secret.getTags().stream()
