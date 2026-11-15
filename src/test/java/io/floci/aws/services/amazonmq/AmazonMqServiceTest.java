@@ -303,6 +303,30 @@ class AmazonMqServiceTest {
         assertEquals(List.of(), service.listBrokers());
     }
 
+    /**
+     * Two DeleteBroker calls of one broker: the second waits while the first, parked as it reads the broker, holds
+     * the broker's lock. It then either deletes the broker too or finds it gone, and either way the broker is not
+     * stored once both are done.
+     */
+    @Test
+    void aSecondDeleteWaitsForTheFirstAndLeavesTheBrokerDeleted() throws Exception {
+        ParkingStore<Broker> parking = new ParkingStore<>();
+        brokers = new AccountAwareStorageBackend<>(parking, null, ACCOUNT);
+        service = newService(false, Mockito.mock(RabbitMqManager.class));
+        String brokerId = startingBroker();
+        parking.parkNextRead();
+
+        assertOperationWaitsForParkedStore(parking, () -> service.deleteBroker(brokerId), () -> {
+            try {
+                service.deleteBroker(brokerId);
+            } catch (AwsException e) {
+                assertEquals("NotFoundException", e.getErrorCode());
+            }
+        });
+        assertEquals(List.of(), service.listBrokers());
+        assertTrue(brokers.scanAllAccounts().isEmpty());
+    }
+
     /** A broker still being created, stored in the caller's account and Region; its id. */
     private String startingBroker() {
         Broker starting = new Broker("b-starting", "arn:aws:mq:us-east-1:" + ACCOUNT + ":broker:starting:b-starting",
