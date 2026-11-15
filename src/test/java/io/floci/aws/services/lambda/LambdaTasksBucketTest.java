@@ -22,7 +22,7 @@ class LambdaTasksBucketTest {
         byte[] archive = {1, 2, 3};
         assertTrue(LambdaService.putTasksObjectQuietly(s3, "us-east-2", "function/code.zip",
                 DeploymentPackage.of(archive), "test package"));
-        verify(s3).createInternalBucket("awslambda-us-east-2-tasks", "us-east-2");
+        verify(s3).createServiceOwnedBucket("awslambda-us-east-2-tasks", "us-east-2");
         verify(s3, never()).createBucket("awslambda-us-east-2-tasks", "us-east-2");
         verify(s3).putObject("awslambda-us-east-2-tasks", "function/code.zip", archive,
                 "application/zip", Map.of());
@@ -31,7 +31,7 @@ class LambdaTasksBucketTest {
     @Test
     void anExistingOwnedTasksBucketIsReused() {
         S3Service s3 = mock(S3Service.class);
-        when(s3.createInternalBucket("awslambda-us-east-1-tasks", "us-east-1"))
+        when(s3.createServiceOwnedBucket("awslambda-us-east-1-tasks", "us-east-1"))
                 .thenThrow(new AwsException("BucketAlreadyOwnedByYou", "owned", 409));
         assertTrue(LambdaService.putTasksObjectQuietly(s3, "us-east-1", "layer.zip",
                 DeploymentPackage.of(new byte[]{1}), "test layer"));
@@ -40,7 +40,7 @@ class LambdaTasksBucketTest {
     @Test
     void unexpectedStagingFailuresStillRejectTheStoredCopy() {
         S3Service s3 = mock(S3Service.class);
-        when(s3.createInternalBucket("awslambda-us-east-2-tasks", "us-east-2"))
+        when(s3.createServiceOwnedBucket("awslambda-us-east-2-tasks", "us-east-2"))
                 .thenThrow(new AwsException("AccessDenied", "denied", 403));
         assertFalse(LambdaService.putTasksObjectQuietly(s3, "us-east-2", "function.zip",
                 DeploymentPackage.of(new byte[]{1}), "test package"));
