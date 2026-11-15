@@ -115,6 +115,10 @@ other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `
 `TERMINATED` instances. As `ListInstances` "Provides information for all active Amazon EC2 instances and Amazon EC2
 instances terminated in the last 30 days, up to a maximum of 2,000", a call lists at most 2,000 and gives a `Marker`
 for the next; a `Marker` no call gave is refused with `InvalidRequestException`.
+A cluster's `SecurityConfiguration` names one `CreateSecurityConfiguration` made, and `DescribeCluster` gives it back.
+`RunJobFlow` naming one that does not exist is refused with `ValidationException` "Security configuration does not
+exist: <name>"; no source gives AWS's answer, so the code is the one `RunJobFlow` refuses its other input with, and the
+wording that of `DescribeSecurityConfiguration` and `DeleteSecurityConfiguration`.
 A cluster has instance groups or instance fleets, never both, as "instance fleets and instance groups cannot coexist in a
 cluster": `RunJobFlow` with both is refused with `ValidationException` "The RunJobFlow request can contain
 InstanceFleets parameters or InstanceGroups parameters, but not both.", the API reference's own words, and
