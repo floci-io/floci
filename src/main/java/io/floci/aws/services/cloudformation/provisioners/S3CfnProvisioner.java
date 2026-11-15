@@ -338,6 +338,10 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             if (ctx.isUpdate()) {
                 r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
                         "Could not restore bucket " + bucketName + ": " + e.getMessage());
+                if (unwind.created) {
+                    // The bucket this update created stays listed, so a later commit or the stack delete removes it.
+                    ReplacementCleanup.recordOrphan(r, bucketName, BUCKET, ctx.region());
+                }
             }
         }
     }
