@@ -15,6 +15,7 @@ import io.floci.aws.services.glue.model.Partition;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.lakeformation.LakeFormationAuthorizer;
 import io.floci.aws.services.redshift.proxy.RedshiftRoleAccess;
 import io.floci.aws.services.redshift.proxy.S3CopySimulator;
 import io.floci.aws.services.s3.S3ResourceArns;
@@ -84,6 +85,7 @@ public class ExternalTableMaterializer {
     private final S3Service s3Service;
     private final IamService iamService;
     private final EmulatorConfig config;
+    private final LakeFormationAuthorizer lakeFormation;
     private final ExternalCatalogLocks catalogLocks;
     private final ConcurrentHashMap<String, String> fingerprints = new ConcurrentHashMap<>();
     /** Column definitions each loaded table was created with, to tell a data reload from a schema change. */
@@ -183,18 +185,21 @@ public class ExternalTableMaterializer {
     }
 
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
-                                     IamService iamService, EmulatorConfig config) {
-        this(duckClient, glueService, s3Service, iamService, config, new ExternalCatalogLocks());
+                                     IamService iamService, EmulatorConfig config,
+                                     LakeFormationAuthorizer lakeFormation) {
+        this(duckClient, glueService, s3Service, iamService, config, lakeFormation, new ExternalCatalogLocks());
     }
 
     @Inject
     public ExternalTableMaterializer(FlociDuckClient duckClient, GlueService glueService, S3Service s3Service,
-                                     IamService iamService, EmulatorConfig config, ExternalCatalogLocks catalogLocks) {
+                                     IamService iamService, EmulatorConfig config,
+                                     LakeFormationAuthorizer lakeFormation, ExternalCatalogLocks catalogLocks) {
         this.duckClient = duckClient;
         this.glueService = glueService;
         this.s3Service = s3Service;
         this.iamService = iamService;
         this.config = config;
+        this.lakeFormation = lakeFormation;
         this.catalogLocks = catalogLocks;
     }
 
@@ -243,6 +248,8 @@ public class ExternalTableMaterializer {
             throw exception;
         }
         String label = binding.schemaName() + "." + tableName;
+        // Checked ahead of the cache probe below, so a revoke takes effect on data already loaded.
+        authorizeLakeFormation(binding, session, table.getName(), label);
         // DuckDB reads as the account, so the bound role's access is enforced here, ahead of the read,
         // with the same signed authorization COPY uses: identity policy and bucket policy.
         RedshiftRoleAccess.RoleSession roleSession = openRoleSession(binding, session);
@@ -585,6 +592,17 @@ public class ExternalTableMaterializer {
                     s3Service, iamService, roleSession, binding.iamRoleArn(), bucket, key));
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
+        }
+    }
+
+    private void authorizeLakeFormation(ExternalSchemaBinding binding, SpectrumSession session, String glueTable,
+                                        String label) {
+        if (!config.services().redshift().spectrumLakeFormationEnforcement()) {
+            return;
+        }
+        if (!lakeFormation.canSelect(session.accountId(), binding.iamRoleArn(), binding.glueDatabase(), glueTable)) {
+            throw new SpectrumSqlException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "Insufficient Lake Formation permission(s) on external table \"" + label + "\"");
         }
     }
 

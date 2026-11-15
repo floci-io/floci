@@ -230,6 +230,7 @@ floci:
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 2000
       spectrum-max-rows: 1000000
+      spectrum-lake-formation-enforcement: false
     rds:
       enabled: true
       mock: false

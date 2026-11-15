@@ -940,9 +940,26 @@ is authorized ahead of the role's policies directly for the minted transfer sess
 verifying Floci's internal tag on the bucket. Reads of the scratch bucket and every other bucket stay under
 normal policy evaluation.
 
+With `floci.services.redshift.spectrum-lake-formation-enforcement=true`
+(`FLOCI_SERVICES_REDSHIFT_SPECTRUM_LAKE_FORMATION_ENFORCEMENT`, default `false`), a query on an external
+table also needs a Lake Formation `SELECT` grant for the IAM role bound to its external schema. The grant can
+be on the table, on every table of its database (`TableWildcard`), or on the whole table through a column
+wildcard without exclusions; `ALL` also counts. A grant to `IAM_ALLOWED_PRINCIPALS` leaves the table to IAM
+alone, so only the S3 checks above apply to it, as in AWS's IAM-only and hybrid modes. Floci's Glue never
+stores that grant, so a catalog that keeps AWS's initial settings leaves every table to IAM: that is the case
+when no data lake settings are stored, or when `CreateTableDefaultPermissions` names `IAM_ALLOWED_PRINCIPALS`.
+Call `PutDataLakeSettings` with `CreateTableDefaultPermissions` empty to hand tables to Lake Formation.
+Without a grant the query then fails with SQLSTATE `42501`. A schema created without a Glue database reads
+through the legacy catalog, where no grant can name its tables, so the flag refuses those queries as well.
+The check runs on every query, ahead of the cache, so a
+`RevokePermissions` stops the next query even for a table already loaded. Column grants, LF-Tags and data
+cells filters are not evaluated: a table reachable only through them is refused.
+The check runs where Floci reads the external table, which is a query that names it: a local view over an
+external table is not followed, so a query on such a view is not checked until the table is next named.
+
 Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
 some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
-schema-qualified external table names. Full Glue IAM enforcement, Lake Formation, role chaining
+schema-qualified external table names. Full Glue IAM enforcement, Lake Formation column and tag permissions, role chaining
 and `IAM_ROLE SESSION` are outside this implementation. Metadata is exposed through
 `svv_external_schemas`, `svv_external_tables`, `svv_external_columns` and `svv_external_partitions`.
 
