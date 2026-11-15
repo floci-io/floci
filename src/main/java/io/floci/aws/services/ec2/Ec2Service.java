@@ -4526,11 +4526,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .noneMatch(imageArchitecture.get()::equals))
                 .ifPresent(type -> {
                     throw new AwsException("InvalidParameterValue",
-                            "The architecture '" + imageArchitecture.get()
-                                    + "' of the specified image does not match the architecture supported by instance type '"
-                                    + instanceType + "'.",
+                            "The architecture '" + instanceTypeArchitecture(type)
+                                    + "' of the specified instance type does not match the architecture '"
+                                    + imageArchitecture.get() + "' of the specified AMI.",
                             400);
                 });
+    }
+
+    /** The architecture RunInstances names for an instance type: x86_64 for a type that also runs i386. */
+    private static String instanceTypeArchitecture(Ec2InstanceTypeCatalog.CatalogInstanceType type) {
+        return type.supportedArchitectures.contains("x86_64") ? "x86_64" : type.supportedArchitectures.getFirst();
     }
 
     private String architectureFor(String region, String imageId, String instanceType) {
