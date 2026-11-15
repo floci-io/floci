@@ -60,15 +60,10 @@ import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrantNotFoundE
 import software.amazon.awssdk.services.redshift.model.Tag;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Properties;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -184,7 +179,7 @@ class RedshiftOperationsTest {
         int sourcePort = sourceCluster.endpoint().port();
 
         // 2. Use JDBC to create a table and insert a row
-        try (Connection conn = awaitPostgresConnection(sourceHost, sourcePort, USERNAME, PASSWORD);
+        try (Connection conn = TestFixtures.awaitRedshiftConnection(sourceHost, sourcePort, USERNAME, PASSWORD);
              Statement stmt = conn.createStatement()) {
             stmt.execute("CREATE TABLE test_data (id INT PRIMARY KEY, name VARCHAR(100));");
             stmt.execute("INSERT INTO test_data (id, name) VALUES (1, 'floci-redshift-snapshot-val');");
@@ -237,7 +232,7 @@ class RedshiftOperationsTest {
         int restoredPort = restoredCluster.endpoint().port();
 
         // 6. Use JDBC to query restored cluster and verify row exists
-        try (Connection conn = awaitPostgresConnection(restoredHost, restoredPort, USERNAME, PASSWORD);
+        try (Connection conn = TestFixtures.awaitRedshiftConnection(restoredHost, restoredPort, USERNAME, PASSWORD);
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery("SELECT name FROM test_data WHERE id = 1;")) {
             assertThat(rs.next()).isTrue();
@@ -511,24 +506,5 @@ class RedshiftOperationsTest {
         assertThat(paged).hasSize(total);
         assertThat(paged).doesNotHaveDuplicates();
         assertThat(paged).isSorted();
-    }
-
-    private static Connection awaitPostgresConnection(String host, int port, String username, String password) throws Exception {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try {
-                Properties properties = new Properties();
-                properties.setProperty("user", username);
-                properties.setProperty("password", password);
-                properties.setProperty("sslmode", "disable");
-                properties.setProperty("connectTimeout", "5");
-                return DriverManager.getConnection("jdbc:postgresql://" + host + ":" + port + "/" + DATABASE, properties);
-            } catch (SQLException e) {
-                last = e;
-                Thread.sleep(1000);
-            }
-        }
-        throw last != null ? last : new SQLException("Timed out waiting for PostgreSQL connection at " + host + ":" + port);
     }
 }
