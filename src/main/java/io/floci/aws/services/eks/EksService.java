@@ -289,6 +289,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 .toList();
     }
 
+    /** Every account's cluster stored under {@code key}, read with one get per account rather than a scan. */
+    private List<AccountAwareStorageBackend.AccountEntry<Cluster>> clusterEntries(String key) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            return aware.findAllAccountEntries(key);
+        }
+        return allClusterEntries().stream().filter(entry -> key.equals(clusterKey(entry.value()))).toList();
+    }
+
     private boolean isClusterDeleting(String accountId, Cluster cluster) {
         return cluster != null && cluster.getName() != null
                 && (cluster.getStatus() == ClusterStatus.DELETING
@@ -1896,7 +1904,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      */
     private static Map<String, String> nodeGroupAutoScalingTags(String clusterName, String nodegroupName) {
         return Map.of(
-                "eks:cluster-name", clusterName,
+                EksClusterManager.CLUSTER_NAME_TAG, clusterName,
                 "eks:nodegroup-name", nodegroupName,
                 "k8s.io/cluster-autoscaler/enabled", "true",
                 "k8s.io/cluster-autoscaler/" + clusterName, "owned");
@@ -1940,11 +1948,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     /**
-     * Adds a cluster's node, once it registers, to the Auto Scaling group of each of the cluster's node groups. An
-     * instance that joins a cluster from EC2 is in no managed node group, and is not added.
+     * Adds a cluster's node, once it registers, to the Auto Scaling group of each of the cluster's node groups. The
+     * node carries its cluster's Region and, in its {@code eks:cluster-name} tag, its name, so only the clusters
+     * stored under that Region and name are read. An instance that joins a cluster from EC2 is in no managed node
+     * group, and is not added.
      */
     private void addNodeToNodeGroupAutoScalingGroups(Instance node) {
-        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+        String clusterName = node.getTags() == null ? null : node.getTags().stream()
+                .filter(tag -> EksClusterManager.CLUSTER_NAME_TAG.equals(tag.getKey()))
+                .map(Tag::getValue).findFirst().orElse(null);
+        if (clusterName == null || node.getRegion() == null) {
+            return;
+        }
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry
+                : clusterEntries(clusterKey(node.getRegion(), clusterName))) {
             Cluster cluster = entry.value();
             Instance registered = clusterManager.getRegisteredClusterNodeInstance(cluster);
             if (registered == null || !registered.getInstanceId().equals(node.getInstanceId())) {

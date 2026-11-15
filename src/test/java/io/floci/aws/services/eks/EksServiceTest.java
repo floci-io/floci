@@ -1272,7 +1272,7 @@ class EksServiceTest {
         AutoScalingService autoScaling = mock(AutoScalingService.class);
         EksService service = serviceWithAutoScaling(clusterManager, autoScaling);
         service.createCluster(createTestClusterRequest("asg-cluster"));
-        Instance node = instance("i-0123456789abcdef0");
+        Instance node = clusterNode("i-0123456789abcdef0", "asg-cluster");
         when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
         NodegroupScalingConfig scalingConfig = new NodegroupScalingConfig();
         scalingConfig.setMinSize(1);
@@ -1303,11 +1303,16 @@ class EksServiceTest {
         service.createCluster(createTestClusterRequest("late-node"));
         String first = reportedAutoScalingGroup(service.createNodeGroup("late-node", nodeGroupRequest("first")));
         String second = reportedAutoScalingGroup(service.createNodeGroup("late-node", nodeGroupRequest("second")));
-        Instance node = instance("i-0123456789abcdef0");
+        Instance node = clusterNode("i-0123456789abcdef0", "late-node");
         when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
 
-        // An EC2 instance joining the cluster is in no managed node group.
-        listener.getValue().accept(instance("i-0fedcba9876543210"));
+        // An EC2 instance joining the cluster is in no managed node group, even tagged with the cluster's name.
+        listener.getValue().accept(clusterNode("i-0fedcba9876543210", "late-node"));
+        // Only the cluster the node names, in the node's Region, is read.
+        listener.getValue().accept(clusterNode("i-0123456789abcdef0", "other-cluster"));
+        Instance inAnotherRegion = clusterNode("i-0123456789abcdef0", "late-node");
+        inAnotherRegion.setRegion("eu-west-1");
+        listener.getValue().accept(inAnotherRegion);
         verify(autoScaling, never()).addEksManagedInstance(any(), any(), any());
 
         // A group that fails to take the node does not keep it from the other node groups' groups.
@@ -1410,7 +1415,7 @@ class EksServiceTest {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Consumer<Instance>> listener = ArgumentCaptor.forClass(Consumer.class);
         verify(clusterManager).addNodeRegistrationListener(listener.capture());
-        Instance node = instance("i-0123456789abcdef0");
+        Instance node = clusterNode("i-0123456789abcdef0", "restarted-node");
         when(clusterManager.getRegisteredClusterNodeInstance(any())).thenReturn(node);
         listener.getValue().accept(node);
 
@@ -1438,9 +1443,12 @@ class EksServiceTest {
         return (String) ((Map<?, ?>) autoScalingGroups.getFirst()).get("name");
     }
 
-    private static Instance instance(String instanceId) {
+    /** An instance in us-east-1 tagged, as a cluster's node is, with its cluster's name. */
+    private static Instance clusterNode(String instanceId, String clusterName) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
+        instance.setRegion("us-east-1");
+        instance.setTags(List.of(new Tag("eks:cluster-name", clusterName)));
         return instance;
     }
 
