@@ -4,13 +4,12 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.amazonmq.model.Broker;
 import io.floci.aws.services.amazonmq.model.BrokerState;
 import io.floci.aws.services.amazonmq.model.MqUser;
-import io.floci.aws.testing.ThreadStates;
+import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,14 +17,8 @@ import org.mockito.Mockito;
 
 import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.when;
@@ -271,43 +264,21 @@ class AmazonMqServiceTest {
     }
 
     /**
-     * Two creates of one broker name in one Region of an account: the second waits for the first to store its
-     * broker, whose container is still starting, and then finds the name taken, so only one broker has it.
+     * Two creates of one broker name in an account: the second waits for the first, parked as it stores its
+     * broker, and then finds the name taken, so only one broker has it.
      */
     @Test
     void aSecondCreateOfANameWaitsForTheFirstAndIsRefused() throws Exception {
-        CountDownLatch starting = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        RabbitMqManager slowManager = Mockito.mock(RabbitMqManager.class);
-        Mockito.doAnswer(call -> {
-            starting.countDown();
-            assertTrue(release.await(5, TimeUnit.SECONDS), "the first create was not released");
-            return null;
-        }).when(slowManager).startContainer(Mockito.any());
-        service = newService(false, slowManager);
-        ExecutorService creates = Executors.newFixedThreadPool(2);
-        AtomicReference<Thread> second = new AtomicReference<>();
-        try {
-            Future<Broker> first = creates.submit(() -> service.createBroker(rabbitParams("orders")));
-            assertTrue(starting.await(5, TimeUnit.SECONDS), "the first create did not start its container");
-            Future<Broker> duplicate = creates.submit(() -> {
-                second.set(Thread.currentThread());
-                return service.createBroker(rabbitParams("orders"));
-            });
-            ThreadStates.awaitBlockedOrDone(second, duplicate);
-            assertEquals(Thread.State.BLOCKED, second.get().getState());
+        ParkingStore<Broker> parking = new ParkingStore<>();
+        brokers = new AccountAwareStorageBackend<>(parking, null, ACCOUNT);
+        service = newService(true, Mockito.mock(RabbitMqManager.class));
+        parking.parkNextWrite();
 
-            release.countDown();
-            assertEquals("orders", first.get(5, TimeUnit.SECONDS).getBrokerName());
-            ExecutionException refused = assertThrows(ExecutionException.class,
-                    () -> duplicate.get(5, TimeUnit.SECONDS));
-            assertEquals("ConflictException", ((AwsException) refused.getCause()).getErrorCode());
-            assertEquals(1, service.listBrokers().size());
-        } finally {
-            release.countDown();
-            creates.shutdownNow();
-            assertTrue(creates.awaitTermination(5, TimeUnit.SECONDS));
-        }
+        assertOperationWaitsForParkedStore(parking,
+                () -> service.createBroker(rabbitParams("orders")),
+                () -> assertEquals("ConflictException", assertThrows(AwsException.class,
+                        () -> service.createBroker(rabbitParams("orders"))).getErrorCode()));
+        assertEquals(1, service.listBrokers().size());
     }
 
     private AmazonMqService realModeServiceWithFailingManager() {
