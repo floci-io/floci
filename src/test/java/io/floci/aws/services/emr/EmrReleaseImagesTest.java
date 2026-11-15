@@ -486,6 +486,10 @@ class EmrReleaseImagesTest {
         return copied;
     }
 
+    /**
+     * A stub-only command: Mockito verification on it is unsupported. Tests that verify copy calls
+     * must create a recording mock and account for the tar streams retained by its invocation history.
+     */
     private static CopyArchiveToContainerCmd copyCommand() {
         // These fixtures verify source paths, not copy-command calls. Recording every call
         // would retain each closed tar pipe's 16 MiB buffer for the lifetime of this mock.
