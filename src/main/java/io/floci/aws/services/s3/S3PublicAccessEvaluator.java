@@ -41,6 +41,9 @@ final class S3PublicAccessEvaluator {
     /** Recognised like the keys above, but the value additionally has to be a narrow range. */
     private static final String SOURCE_IP_CONDITION_KEY = "aws:sourceip";
     private static final String DATA_ACCESS_POINT_ARN_CONDITION_KEY = "s3:dataaccesspointarn";
+    private static final Set<String> ARN_CONDITION_KEYS = Set.of(
+            "aws:principalarn",
+            "aws:sourcearn");
     private static final Pattern BUCKET_POLICY_ACCESS_POINT_ARN = Pattern.compile(
             "arn:[a-z0-9-]+:s3:[a-z0-9-]+:[0-9]{12}:accesspoint/[a-zA-Z0-9*?._-]+");
 
@@ -191,8 +194,10 @@ final class S3PublicAccessEvaluator {
      * containing neither a wildcard nor an IAM policy variable. A single public statement makes
      * the whole policy public, which is what {@code RestrictPublicBuckets} keys off.
      *
-     * <p>Bucket policies can use a wildcard in the access point name when the account is fixed.
-     * Floci does not model access points, so the different access-point-policy rule does not apply.
+     * <p>ARN condition keys ({@code aws:PrincipalArn}, {@code aws:SourceArn}, and
+     * {@code s3:DataAccessPointArn}) may use a wildcard in the resource part when the account is
+     * fixed. Floci does not model access points, so the different access-point-policy rule does
+     * not apply.
      */
     static boolean policyIsPublic(ObjectMapper objectMapper, String policy) {
         if (policy == null || policy.isBlank()) {
@@ -265,7 +270,7 @@ final class S3PublicAccessEvaluator {
                 }
                 if (NON_PUBLIC_CONDITION_KEYS.contains(key)
                         && !operatorName.equalsIgnoreCase("IpAddress")
-                        && allValuesFixed(entry.getValue(), PublicAccessConditions::isFixedValue)) {
+                        && allValuesFixed(entry.getValue(), isFixedConditionValue(key))) {
                     return true;
                 }
                 if (SOURCE_IP_CONDITION_KEY.equals(key)
@@ -301,6 +306,13 @@ final class S3PublicAccessEvaluator {
             return true;
         }
         return false;
+    }
+
+    private static Predicate<String> isFixedConditionValue(String key) {
+        if (ARN_CONDITION_KEYS.contains(key)) {
+            return value -> PublicAccessConditions.pinsAccount(value) && !value.contains("${");
+        }
+        return PublicAccessConditions::isFixedValue;
     }
 
     private static boolean isFixedAccountAccessPointArn(String value) {

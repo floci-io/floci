@@ -80,6 +80,34 @@ class S3PublicPolicyStatusTest {
     }
 
     @Test
+    void principalOrSourceArnResourceWildcardWithFixedAccountIsNotPublic() {
+        for (String condition : List.of(
+                "\"ArnLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}",
+                "\"StringLike\":{\"aws:PrincipalArn\":\"arn:aws:iam::111122223333:role/app-*\"}",
+                "\"ArnLike\":{\"aws:SourceArn\":\"arn:aws:lambda:us-east-1:111122223333:function:app-*\"}")) {
+            assertFalse(isPublic("""
+                    {"Statement":[{"Principal":{"AWS":"*"},"Resource":"arn:aws:s3:::b/*",
+                    "Action":"s3:GetObject","Effect":"Allow","Condition":{%s}}]}
+                    """.formatted(condition)), condition);
+        }
+    }
+
+    @Test
+    void principalOrSourceArnWithWildcardAccountOrPolicyVariableIsPublic() {
+        for (String arn : List.of(
+                "arn:aws:iam::*:role/app-*",
+                "arn:aws:iam::11112222333?:role/app",
+                "*",
+                "arn:aws:iam::111122223333:role/${aws:username}")) {
+            assertTrue(isPublic("""
+                    {"Statement":[{"Principal":{"AWS":"*"},"Resource":"arn:aws:s3:::b/*",
+                    "Action":"s3:GetObject","Effect":"Allow",
+                    "Condition":{"ArnLike":{"aws:PrincipalArn":"%s"}}}]}
+                    """.formatted(arn)), arn);
+        }
+    }
+
+    @Test
     void wildcardPrincipalPinnedToAFixedSourceAccountIsNotPublic() {
         assertFalse(isPublic("""
                 {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
