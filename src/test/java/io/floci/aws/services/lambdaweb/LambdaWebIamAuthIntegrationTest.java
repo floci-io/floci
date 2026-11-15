@@ -6,6 +6,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.EnforcementFixtures.UserCredentials;
 import io.floci.aws.testing.IamEnforcementProfile;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -18,13 +19,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -147,13 +144,7 @@ class LambdaWebIamAuthIntegrationTest {
     }
 
     private static byte[] zip() throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(APP.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+        return LambdaCodeFixtures.nodeJsZip(APP);
     }
 
     private boolean isDockerAvailable() {

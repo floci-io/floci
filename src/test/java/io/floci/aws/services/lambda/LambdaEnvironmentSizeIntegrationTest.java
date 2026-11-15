@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -26,7 +27,6 @@ import software.amazon.awssdk.services.lambda.model.InvalidParameterValueExcepti
 import software.amazon.awssdk.services.lambda.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.lambda.model.UpdateFunctionConfigurationRequest;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -35,8 +35,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Stream;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -251,16 +249,11 @@ class LambdaEnvironmentSizeIntegrationTest {
     }
 
     private static CreateFunctionRequest.Builder functionRequest(String name) throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => 1;".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
+        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => 1;");
         return CreateFunctionRequest.builder().functionName(name).runtime("nodejs20.x")
                 .role("arn:aws:iam::" + ACCOUNT + ":role/lambda-role").handler("index.handler")
                 .description("original").timeout(10).memorySize(256)
-                .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(bytes.toByteArray())).build());
+                .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(bytes)).build());
     }
 
     private GetFunctionConfigurationResponse configuration(String name) {

@@ -1,14 +1,8 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -55,7 +49,7 @@ class LambdaAccountSettingsIntegrationTest {
                         "Handler": "index.handler",
                         "Code": {"ZipFile": "%s"}
                     }
-                    """.formatted(zipBase64()))
+                    """.formatted(LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ ok: true });")))
                 .when()
                 .post("/2015-03-31/functions")
                 .then()
@@ -85,19 +79,5 @@ class LambdaAccountSettingsIntegrationTest {
 
     private static String auth(String accountId) {
         return "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260101/us-east-1/lambda/aws4_request";
-    }
-
-    private static String zipBase64() {
-        try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (ZipOutputStream zip = new ZipOutputStream(out)) {
-                zip.putNextEntry(new ZipEntry("index.js"));
-                zip.write("exports.handler = async () => ({ ok: true });".getBytes());
-                zip.closeEntry();
-            }
-            return Base64.getEncoder().encodeToString(out.toByteArray());
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
     }
 }

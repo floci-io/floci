@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
