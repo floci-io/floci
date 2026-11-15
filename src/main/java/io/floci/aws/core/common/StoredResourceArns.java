@@ -1,6 +1,7 @@
 package io.floci.aws.core.common;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -24,11 +25,12 @@ import java.util.Optional;
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
  * invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an ARN names,
- * random suffix included); looked up lazily by {@code ResourceArnBuilder} through {@code Instance<StoredResourceArns>}
- * for the namespace a request is of, so IAM never depends on that service directly.</p>
+ * random suffix included, and its tags); looked up lazily by {@code ResourceArnBuilder} and
+ * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
+ * ARN is of, so IAM never depends on that service directly.</p>
  *
  * <p>Each answer is a lookup of what the service holds, asked for by an entry of the generated table ({@code find},
- * {@code through}, a default, {@code forwarded}): never a fact about what an operation acts on, which the table alone
+ * {@code through}, a default, {@code forwarded}, a type's {@code resourceTagKeys}): never a fact about what an operation acts on, which the table alone
  * says, from botocore and the Service Reference, or from what AWS says where neither carries it.</p>
  */
 public interface StoredResourceArns {
@@ -75,6 +77,16 @@ public interface StoredResourceArns {
      */
     default Optional<String> recorded(String arn, String member) {
         return Optional.empty();
+    }
+
+    /**
+     * The tags of the resource stored under {@code arn}, in the account and Region the ARN names, by key, which the
+     * resource-tag keys the table gives the ARN's type take as their values ({@code aws:ResourceTag/<key>}); empty
+     * when the service holds no such resource or keeps no tags on it. Read on every request checked on such an ARN,
+     * so it reads the one resource the ARN names and leaves the resource as it is (a secret's last-accessed date).
+     */
+    default Map<String, String> storedTags(String arn) {
+        return Map.of();
     }
 
     /**

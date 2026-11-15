@@ -391,7 +391,7 @@ final class RequestResourceMembers {
                 }
                 type.getValue().forEach(key -> {
                     String prefix = key.asText("");
-                    if (!prefix.matches("[a-z0-9-]+:ResourceTag/") || keys.contains(prefix)) {
+                    if (!prefix.matches("[a-z0-9-]+:(?i:ResourceTag)/") || keys.contains(prefix)) {
                         throw new IllegalStateException(RESOURCE_NAME + " has malformed resource tag keys");
                     }
                     keys.add(prefix);

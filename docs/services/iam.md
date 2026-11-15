@@ -2707,7 +2707,9 @@ after the name left open, so a policy scoped to a name prefix such as `secret:ap
 ARN that matches none is evaluated as given and, where it names another Region or account, as the
 secret of that name in the request's. An operation acting on no
 resource type in the Service Authorization Reference (`ListSecrets`, `GetRandomPassword`,
-`BatchGetSecretValue`) is evaluated on `*`.
+`BatchGetSecretValue`) is evaluated on `*`. A secret's stored tags fill `aws:ResourceTag/<key>` and
+`secretsmanager:ResourceTag/<key>`, the resource-tag keys the Service Reference gives the `Secret` type,
+as described under `aws:ResourceTag/<key>` below.
 
 **KMS keys.** A request that names a key by its id, an alias name, an alias ARN or a key ARN is
 evaluated against the stored key's ARN, as the KMS API reference resolves the request's key
@@ -3019,7 +3021,13 @@ floci populates:
   once per resource and denied when any of them fails the condition, as on AWS.
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
-  `logs:DeleteRetentionPolicy` use the owning log group's tags.
+  `logs:DeleteRetentionPolicy` use the owning log group's tags. Any other ARN a request is checked on
+  takes the resource-tag keys the generated `resourceTagKeys` table in `iam-request-resources.json` gives
+  its type (`aws:ResourceTag/`, `secretsmanager:ResourceTag/`), which `regen_iam_request_resources.py`
+  reads from the Service Reference for every namespace it reads, valued from the tags the type's service
+  holds on that resource (`StoredResourceArns.storedTags`); a service that holds none leaves them absent.
+  Secrets Manager answers for its secrets. Tag keys differing only in case are one condition key holding
+  every value.
 - EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
   `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
   key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
