@@ -177,7 +177,7 @@ public class ResourceArnBuilder {
     }
 
     /**
-     * The resources a request is checked against. Scheduler, Pipes and DSQL ARNs are minted in
+     * The resources a request is checked against. Pipes and DSQL ARNs are minted in
      * {@code partition}, the request's, as those services mint theirs, so a Region no partition publishes gets
      * the deployment's partition rather than {@code aws}.
      */
@@ -210,7 +210,6 @@ public class ResourceArnBuilder {
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
-            case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
@@ -1225,37 +1224,6 @@ public class ResourceArnBuilder {
             // Not a function ARN Lambda takes, which it tags only when the ARN names the resource exactly.
             return tagged;
         }
-    }
-
-    /**
-     * The resource of an EventBridge Scheduler route: {@code schedule/<group>/<name>}, the group read where
-     * Scheduler reads it, the body's {@code GroupName} on a create or an update and {@code groupName}
-     * otherwise, and {@code default} when the request names none; {@code schedule-group/<name>}; or the
-     * ARN a tagging route names. The list routes name no resource.
-     */
-    private String buildSchedulerArn(String path, ContainerRequestContext ctx, String region, String accountId,
-                                     String partition) {
-        String schedule = segmentAfterPrefix(path, "/schedules/");
-        if (schedule != null) {
-            String group;
-            if ("POST".equalsIgnoreCase(ctx.getMethod()) || "PUT".equalsIgnoreCase(ctx.getMethod())) {
-                JsonNode body = readJsonBody(ctx);
-                group = body == null ? null : body.path("GroupName").asText(null);
-            } else {
-                group = ctx.getUriInfo().getQueryParameters().getFirst("groupName");
-            }
-            if (group == null || group.isBlank()) {
-                group = "default";
-            }
-            return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
-                    "schedule/" + group + "/" + schedule).toString();
-        }
-        String scheduleGroup = segmentAfterPrefix(path, "/schedule-groups/");
-        if (scheduleGroup != null) {
-            return new AwsArnUtils.Arn(partition, "scheduler", region, accountId,
-                    "schedule-group/" + scheduleGroup).toString();
-        }
-        return taggedResource(ctx);
     }
 
     /**

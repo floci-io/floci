@@ -451,8 +451,9 @@ class IamEnforcementFilterTest {
     }
 
     @Test
-    void schedulerResourcesAreBuiltInTheRequestsPartition() {
-        // A Region no partition publishes takes the deployment's partition, which Scheduler mints its ARNs in.
+    void schedulerResourcesAreReadFromTheTableInTheRequestsPartition() {
+        // A Region no partition publishes takes the deployment's partition, which Scheduler mints its ARNs in, on the
+        // operation the request is dispatched as, which the table of request resources reads.
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/scheduler/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
@@ -467,12 +468,13 @@ class IamEnforcementFilterTest {
                 .thenReturn(Optional.of(descriptor("scheduler", ServiceProtocol.JSON,
                         Set.of("scheduler"), SchedulerController.class)));
         when(actionRegistry.resolveRoute("scheduler", containerRequest)).thenReturn("scheduler:GetSchedule");
-        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any(), any())).thenReturn(List.of("*"));
         when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
 
         newFilter(resourceInfo(SchedulerController.class)).filter(containerRequest);
 
-        verify(arnBuilder).buildResources("scheduler", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+        verify(arnBuilder).buildResources("scheduler", "scheduler:GetSchedule", containerRequest, "xx-local-1",
+                "000000000000", "aws-cn");
     }
 
     @Test

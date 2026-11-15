@@ -1926,9 +1926,9 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
-SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
+SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
-Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
+Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
@@ -2122,8 +2122,10 @@ tagging route names, everything after `/tags/` whether its slashes are sent enco
 re-encoded, in SigV4 canonical form, as the `Tags` resource's `/tags/<UrlEncodedResourceARN>` gives it.
 
 A Scheduler request is checked against `schedule/<group>/<name>`, the group from the body's
-`GroupName` on a create or an update, from `groupName` otherwise, and `default` when neither names
-one, or `schedule-group/<name>`. A Pipes request is checked against `pipe/<name>`. A DSQL request
+`GroupName` on a create or an update, from `groupName` otherwise, and the `default` group when neither
+names one, as botocore documents ("If you omit this, the default schedule group is used"), or
+`schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
+`/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`. A DSQL request
 is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
 route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A MicroVM image
 or network connector request is checked against `microvm-image:<name>` or `network-connector:<id>`
@@ -2158,7 +2160,11 @@ The shared tagging routes, `/tags` and `/v1/tags`, hand a request to the service
 and it is checked as that service, against that ARN, or for EKS the cluster it tags, whatever scope
 it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
-`resourceArn` query parameter on the other bare routes.
+`resourceArn` query parameter on the other bare routes. A service whose resources the generated table reads
+whole is served there only on the routes its model gives, as AWS, which tells these services apart by hostname,
+serves no other: EventBridge Scheduler, EMR Serverless, GuardDuty and Security Hub tag only on
+`/tags/{resourceArn}`, the ARN encoded, and a request on the bare `/tags`, or naming an ARN whose `/` is not
+encoded, is refused with `BadRequestException` ("Invalid resource ARN") and tags nothing.
 
 A REST request names its resources in its path and its query as well as its body. For the REST
 services the table reads, OpenSearch Service, IAM Access Analyzer, Security Hub and GuardDuty among them, a member its path carries, the
