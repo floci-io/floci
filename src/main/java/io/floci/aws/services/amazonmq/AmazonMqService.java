@@ -286,8 +286,7 @@ public class AmazonMqService implements ResourceProvider {
 
     /** A broker's key in its own Region, which its ARN has always named. */
     private String brokerKey(Broker broker) {
-        return brokerKey(AwsArnUtils.regionOrDefault(broker.getBrokerArn(), config.defaultRegion()),
-                broker.getBrokerId());
+        return brokerKey(broker.region(regionResolver.getDefaultRegion()), broker.getBrokerId());
     }
 
     /**

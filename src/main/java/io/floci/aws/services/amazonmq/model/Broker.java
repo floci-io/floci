@@ -2,6 +2,7 @@ package io.floci.aws.services.amazonmq.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -137,6 +138,12 @@ public class Broker {
 
     public String getBrokerArn() { return brokerArn; }
     public void setBrokerArn(String brokerArn) { this.brokerArn = brokerArn; }
+
+    /**
+     * The Region the broker's ARN names; a broker recorded without one counts as {@code defaultRegion}'s.
+     * Not a getter, so Jackson neither persists nor returns it.
+     */
+    public String region(String defaultRegion) { return AwsArnUtils.regionOrDefault(brokerArn, defaultRegion); }
 
     public String getBrokerName() { return brokerName; }
     public void setBrokerName(String brokerName) { this.brokerName = brokerName; }

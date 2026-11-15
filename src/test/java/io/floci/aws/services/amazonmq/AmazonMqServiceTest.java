@@ -328,7 +328,6 @@ class AmazonMqServiceTest {
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.amazonmq()).thenReturn(mqConfig);
         when(mqConfig.mock()).thenReturn(mock);
-        when(config.defaultRegion()).thenReturn("us-east-1");
         return new AmazonMqService(storageFactory, config, regionResolver, rabbitMqManager);
     }
 
