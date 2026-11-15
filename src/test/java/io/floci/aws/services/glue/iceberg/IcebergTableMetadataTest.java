@@ -137,6 +137,27 @@ class IcebergTableMetadataTest {
     }
 
     @Test
+    void aRemovedSnapshotsStatisticsFilesGoWithIt() throws Exception {
+        ObjectNode metadata = created();
+        IcebergTableMetadata.apply(metadata, snapshotCommit(7L, null, 1).path("updates"), 6_000L);
+        IcebergTableMetadata.apply(metadata, snapshotCommit(8L, 7L, 2).path("updates"), 6_100L);
+        IcebergTableMetadata.apply(metadata, json("""
+                [{"action":"set-statistics","statistics":{"snapshot-id":7,"statistics-path":"s3://b/t/7.stats",
+                  "file-size-in-bytes":1,"file-footer-size-in-bytes":1,"blob-metadata":[]}},
+                 {"action":"set-statistics","statistics":{"snapshot-id":8,"statistics-path":"s3://b/t/8.stats",
+                  "file-size-in-bytes":1,"file-footer-size-in-bytes":1,"blob-metadata":[]}},
+                 {"action":"set-partition-statistics","partition-statistics":{"snapshot-id":7,
+                  "statistics-path":"s3://b/t/7.pstats","file-size-in-bytes":1}}]
+                """), 6_200L);
+
+        IcebergTableMetadata.apply(metadata, json("[{\"action\":\"remove-snapshots\",\"snapshot-ids\":[7]}]"), 7_000L);
+
+        assertEquals(1, metadata.path("statistics").size());
+        assertEquals(8L, metadata.path("statistics").get(0).path("snapshot-id").asLong());
+        assertTrue(metadata.path("partition-statistics").isEmpty(), metadata.path("partition-statistics").toString());
+    }
+
+    @Test
     void aSchemaSpecOrSortOrderIdTheTableDoesNotHaveIsRefused() throws Exception {
         ObjectNode metadata = created();
 

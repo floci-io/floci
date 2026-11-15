@@ -2,17 +2,14 @@ package io.floci.aws.services.glue.iceberg;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Answers;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
@@ -33,7 +30,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** The catalog's commit paths when Glue refuses the write, and who it answers under IAM enforcement. */
+/** The catalog's commit paths when Glue refuses the write. */
 class GlueIcebergCatalogTest {
 
     private static final String CREATE_COMMIT = """
@@ -50,18 +47,14 @@ class GlueIcebergCatalogTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private GlueService glue;
     private S3Service s3;
-    private EmulatorConfig config;
-    private RequestContext requestContext;
     private GlueIcebergCatalog catalog;
 
     @BeforeEach
     void setUp() {
         glue = Mockito.mock(GlueService.class);
         s3 = Mockito.mock(S3Service.class);
-        config = Mockito.mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
-        requestContext = Mockito.mock(RequestContext.class);
-        catalog = new GlueIcebergCatalog(glue, s3, new RegionResolver("us-east-1", "000000000000"), mapper, config,
-                requestContext, Clock.fixed(Instant.ofEpochMilli(10_000L), ZoneOffset.UTC));
+        catalog = new GlueIcebergCatalog(glue, s3, new RegionResolver("us-east-1", "000000000000"), mapper,
+                Clock.fixed(Instant.ofEpochMilli(10_000L), ZoneOffset.UTC));
         Database database = new Database("lake");
         database.setLocationUri("s3://lake-bucket/lake");
         when(glue.getDatabase("lake")).thenReturn(database);
@@ -139,29 +132,5 @@ class GlueIcebergCatalogTest {
         assertEquals("NoSuchNamespaceException", gone.type());
         String written = writtenMetadataKey();
         verify(s3).deleteObject("lake-bucket", written);
-    }
-
-    @Test
-    void underIamEnforcementOnlyRootCredentialsAndFlocisOwnCallersReachTheCatalog() {
-        when(config.services().iam().enforcementEnabled()).thenReturn(true);
-        when(requestContext.getAccountId()).thenReturn("000000000000");
-
-        when(requestContext.getAccessKeyId()).thenReturn("AKIAEXAMPLEUSER0001");
-        IcebergRestException refused = assertThrows(IcebergRestException.class, () -> catalog.config(null));
-        assertEquals(403, refused.code());
-        assertEquals("ForbiddenException", refused.type());
-
-        for (String rootOrInternal : new String[] {"test", "000000000000", null}) {
-            when(requestContext.getAccessKeyId()).thenReturn(rootOrInternal);
-            assertEquals("catalogs/:", catalog.config(null).path("overrides").path("prefix").asText());
-        }
-    }
-
-    @Test
-    void withoutEnforcementAnyCallerReachesTheCatalog() {
-        when(config.services().iam().enforcementEnabled()).thenReturn(false);
-        when(requestContext.getAccessKeyId()).thenReturn("AKIAEXAMPLEUSER0001");
-
-        assertEquals("catalogs/:", catalog.config(null).path("overrides").path("prefix").asText());
     }
 }
