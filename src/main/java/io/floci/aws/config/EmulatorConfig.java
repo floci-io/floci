@@ -244,6 +244,26 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean spoofAwsEndpoints();
+
+        /**
+         * When Floci runs natively, the UDP port of a resolver on {@code 127.0.0.1} that answers the names the
+         * embedded DNS server answers for containers, Cloud Map {@code <service>.<namespace>} and Route 53 private
+         * zones among them, so the host's own resolver can be pointed at Floci for them. It refuses every other
+         * name rather than forwarding it. Unset by default, which starts no listener. When Floci runs in Docker,
+         * publish the container's port 53/udp instead.
+         * Env: {@code FLOCI_DNS_HOST_PORT}
+         */
+        OptionalInt hostPort();
+
+        /**
+         * When Floci runs natively on a host with a {@code docker0} bridge, the embedded DNS server also listens on
+         * that bridge's address, port 53, and the containers Floci launches resolve through it, as they do when
+         * Floci runs in Docker. Port 53 needs root or {@code CAP_NET_BIND_SERVICE}; without either, Floci logs how
+         * to grant it and the containers keep resolving through Docker.
+         * Env: {@code FLOCI_DNS_BRIDGE_LISTENER_ENABLED}
+         */
+        @WithDefault("true")
+        boolean bridgeListenerEnabled();
     }
 
     interface SecurityConfig {
