@@ -80,6 +80,16 @@ class CloudWatchConsolePutMetricDataIntegrationTest {
 
         assertSum(namespace, "Single", timestamp, 7);
         assertSum(namespace, "Statistics", timestamp, 6);
+        request("GraniteServiceVersion20100801.GetMetricStatistics")
+                .body("""
+                        {"Namespace":"%s","MetricName":"Statistics","StartTime":%d,"EndTime":%d,
+                         "Period":60,"Statistics":["Minimum","Maximum","SampleCount"]}
+                        """.formatted(namespace, timestamp - 120, timestamp + 120))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Datapoints.Minimum", hasItem(2f))
+                .body("Datapoints.Maximum", hasItem(4f))
+                .body("Datapoints.SampleCount", hasItem(2f));
     }
 
     @Test
@@ -113,12 +123,86 @@ class CloudWatchConsolePutMetricDataIntegrationTest {
         long timestamp = Instant.now().getEpochSecond();
         put().body("""
                 {"Namespace":"%s","MetricData":[
-                  {"MetricName":"NullMember","Value":3,"Timestamp":%d,"Unsupported":null},
+                  {"MetricName":"NullMember","Value":3,"Timestamp":%d,"Unsupported":null,
+                   "StatisticValues":null,"Dimensions":null,"Unit":null},
                   {"MetricName":"FalseMember","Value":4,"Timestamp":%d,"Unsupported":false}]}
                 """.formatted(namespace, timestamp, timestamp))
                 .when().post("/")
                 .then().statusCode(200);
         assertSum(namespace, "NullMember", timestamp, 3);
         assertSum(namespace, "FalseMember", timestamp, 4);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{}",
+            "\"wrong\"",
+            "null",
+            "[]",
+            "[7]",
+            "[{\"MetricName\":\"Bad\",\"Value\":[1,2]}]",
+            "[{\"MetricName\":\"Bad\",\"Value\":{}}]",
+            "[{\"MetricName\":\"Bad\",\"Value\":\"2\"}]",
+            "[{\"MetricName\":\"Bad\",\"Value\":true}]"
+    })
+    void malformedBatchIsRejectedWithoutPublishingMetrics(String data) {
+        String namespace = namespace();
+        put().body("{\"Namespace\":\"" + namespace + "\",\"MetricData\":" + data + "}")
+                .when().post("/")
+                .then().statusCode(400).body("__type", equalTo("UnsupportedOperation"));
+        assertEmpty(namespace);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"Value\":[1,2]",
+            "\"Value\":1,\"Dimensions\":{}",
+            "\"Value\":1,\"Dimensions\":[7]",
+            "\"Value\":1,\"Dimensions\":[{\"Name\":12,\"Value\":\"x\"}]",
+            "\"Value\":1,\"Dimensions\":[{\"Name\":\"x\",\"Value\":12}]",
+            "\"Value\":1,\"Dimensions\":[{\"Name\":\"x\"}]",
+            "\"Value\":1,\"Dimensions\":[{\"Name\":\"x\",\"Value\":null}]",
+            "\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Minimum\":2}",
+            "\"StatisticValues\":{\"Sum\":6,\"Minimum\":2,\"Maximum\":4}",
+            "\"StatisticValues\":{\"SampleCount\":2,\"Minimum\":2,\"Maximum\":4}",
+            "\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Maximum\":4}",
+            "\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Minimum\":2,\"Maximum\":\"4\"}",
+            "\"StatisticValues\":[]",
+            "\"StatisticValues\":{\"SampleCount\":0,\"Sum\":0,\"Minimum\":2,\"Maximum\":4}",
+            "\"Value\":7,\"StatisticValues\":{\"SampleCount\":2,\"Sum\":6,\"Minimum\":2,\"Maximum\":4}",
+            "\"Value\":1e1000",
+            "\"Value\":1,\"Timestamp\":[]",
+            "\"Value\":1,\"Timestamp\":\"wrong\"",
+            "\"Value\":1,\"Timestamp\":1e30",
+            "\"Value\":1,\"Unit\":7"
+    })
+    void malformedDatumRejectsTheWholeBatchBeforePublishingTheValidDatum(String fields) {
+        String namespace = namespace();
+        put().body("""
+                {"Namespace":"%s","MetricData":[{"MetricName":"Valid","Value":7},
+                  {"MetricName":"Bad",%s}]}
+                """.formatted(namespace, fields))
+                .when().post("/")
+                .then().statusCode(400).body("__type", equalTo("UnsupportedOperation"));
+        assertEmpty(namespace);
+    }
+
+    @Test
+    void stringDimensionsKeepTheirIdentity() {
+        String namespace = namespace();
+        long timestamp = Instant.now().getEpochSecond();
+        put().body("""
+                {"Namespace":"%s","MetricData":[{"MetricName":"Dimensioned","Value":5,"Timestamp":"%s",
+                  "Dimensions":[{"Name":"Worker","Value":"12"}]}]}
+                """.formatted(namespace, Instant.ofEpochSecond(timestamp)))
+                .when().post("/")
+                .then().statusCode(200);
+        request("GraniteServiceVersion20100801.GetMetricStatistics")
+                .body("""
+                        {"Namespace":"%s","MetricName":"Dimensioned","StartTime":%d,"EndTime":%d,
+                         "Period":60,"Statistics":["Sum"],"Dimensions":[{"Name":"Worker","Value":"12"}]}
+                        """.formatted(namespace, timestamp - 120, timestamp + 120))
+                .when().post("/")
+                .then().statusCode(200).body("Datapoints.Sum", hasItem(5f));
     }
 }
