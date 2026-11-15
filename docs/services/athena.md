@@ -143,6 +143,18 @@ Not yet supported:
 - A `date` or `timestamp` key with a `format` other than ISO is not parsed, so its objects are not read.
 - The object path backs the template's values but is not exposed: Athena's `"$path"` pseudo-column cannot be selected.
 
+## Hive DDL
+
+Hive DDL runs against the Glue Data Catalog rather than the query engine, as it does on Athena, and its query reports `StatementType` `DDL`:
+
+- `CREATE EXTERNAL TABLE [IF NOT EXISTS]` creates the Glue table: its columns and `PARTITIONED BY` keys, `COMMENT`, `CLUSTERED BY ... INTO n BUCKETS`, `ROW FORMAT DELIMITED` (stored as the `LazySimpleSerDe` parameters Hive uses, `field.delim` and the rest) or `ROW FORMAT SERDE ... WITH SERDEPROPERTIES`, `STORED AS` (`TEXTFILE`, the default, `PARQUET`, `ORC`, `AVRO`, `SEQUENCEFILE`, `RCFILE`, `ION`, or `INPUTFORMAT ... OUTPUTFORMAT ...`), `LOCATION` and `TBLPROPERTIES`. Names are lower-cased and string literals take Hive's backslash escapes, so `FIELDS TERMINATED BY '\t'` stores a tab. `SORTED BY` is kept as the table's sort columns. Every format is registered, but Floci's query engine reads only Parquet, JSON and delimited text (see [Format inference](#format-inference)): an `ORC`, `AVRO`, `ION`, `RCFILE` or `SEQUENCEFILE` table serves other Glue clients, such as Spark on EMR, and Athena queries on it fail. A `CREATE TABLE` without `EXTERNAL` fails unless it creates an Iceberg table or is a `CREATE TABLE AS`, which go to the query engine.
+- `DROP TABLE [IF EXISTS]` removes a Hive table's metadata and leaves its data in S3. An Iceberg table is a managed table, so dropping it deletes the objects under its location too, as Athena does.
+- `ALTER TABLE ... ADD [IF NOT EXISTS] PARTITION (...) [LOCATION '...'] [PARTITION ...]` creates the partitions; one without a `LOCATION` is placed at `<table location>/key=value/...`. `ALTER TABLE ... DROP [IF EXISTS] PARTITION (...)[, PARTITION ...]` deletes them. A partition specification has to name every partition key.
+- `MSCK REPAIR TABLE` lists the table's location and adds a partition for every Hive-style `key=value/...` folder path that holds an object and has none yet, with that folder, spelled as it is in S3, as the partition's location. A folder name with an invalid escape is skipped. Like Athena it only adds partitions, never removes them.
+- `SHOW PARTITIONS` returns one `partition` column, a `key=value[/key=value...]` row per partition, values escaped as Hive escapes folder names.
+
+Without `IF [NOT] EXISTS`, a table or partition that already exists, or does not, fails the query. Other `ALTER TABLE` statements are not supported.
+
 ## Configuration
 
 | Property | Default | Description |
@@ -232,5 +244,7 @@ See [S3 Select](s3.md#s3-select) for details on execution modes and supported SQ
 ## Mock mode
 
 Set `FLOCI_SERVICES_ATHENA_MOCK=true` to skip DuckDB entirely for Athena. In this mode queries transition to `SUCCEEDED` immediately with an empty result set, useful for unit tests that only exercise the Athena state machine, not the query results.
+
+`CREATE DATABASE` and the [Hive DDL](#hive-ddl) statements still change the Glue catalog in mock mode, and `SHOW PARTITIONS` still returns its rows, since none of them needs the sidecar.
 
 When mock mode is enabled the sidecar does **not** start. S3 Select will use the Java evaluator for CSV and JSON. Parquet queries will fail unless `FLOCI_SERVICES_DUCK_URL` points to an already-running floci-duck instance.

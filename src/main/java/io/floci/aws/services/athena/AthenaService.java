@@ -109,6 +109,7 @@ public class AthenaService {
     private final Vertx vertx;
     private final GlueViewDdlBuilder ddlBuilder;
     private final RegionResolver regionResolver;
+    private final AthenaHiveDdlExecutor hiveDdlExecutor;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
@@ -134,6 +135,7 @@ public class AthenaService {
         this.vertx = vertx;
         this.ddlBuilder = ddlBuilder;
         this.regionResolver = regionResolver;
+        this.hiveDdlExecutor = new AthenaHiveDdlExecutor(glueService, s3Service);
     }
 
     public String startQueryExecution(String query,
@@ -149,6 +151,16 @@ public class AthenaService {
         }
 
         boolean createDatabaseStatement = CREATE_DATABASE_PREFIX_PATTERN.matcher(statementText(query)).find();
+        // Hive DDL runs against the Glue catalog, not the query engine. A statement that starts like one but
+        // does not parse fails the query with the parser's reason rather than reaching DuckDB.
+        AthenaHiveDdl.Statement hiveDdl = null;
+        AwsException invalidHiveDdl = null;
+        try {
+            hiveDdl = AthenaHiveDdl.parse(query);
+        } catch (AwsException e) {
+            invalidHiveDdl = e;
+        }
+        boolean hiveDdlStatement = hiveDdl != null || invalidHiveDdl != null;
         // AWS reports the result CSV object itself as the OutputLocation, not a
         // directory prefix — the same key is written and returned to the client.
         // Statements that do not return rows must not be wrapped in a result COPY.
@@ -160,11 +172,27 @@ public class AthenaService {
                 : null;
 
         QueryExecution execution = new QueryExecution(id, query, workGroup, resolvedResult, resolvedContext);
-        if (createDatabaseStatement) {
+        if (createDatabaseStatement || hiveDdlStatement) {
             execution.setStatementType("DDL");
         }
         execution.getStatus().setState(QueryExecutionState.RUNNING);
         queryStore.put(id, execution);
+
+        if (hiveDdlStatement) {
+            try {
+                if (invalidHiveDdl != null) {
+                    throw invalidHiveDdl;
+                }
+                List<String> rows = hiveDdlExecutor.execute(hiveDdl, database);
+                if (outputLocation != null) {
+                    writeSingleColumnResult(id, outputLocation, "partition", rows);
+                }
+                markSucceeded(id, execution);
+            } catch (Exception e) {
+                markFailed(id, execution, e);
+            }
+            return id;
+        }
 
         if (createDatabaseStatement) {
             try {
@@ -556,7 +584,8 @@ public class AthenaService {
             throw new AwsException("InvalidRequestException", "Query has not succeeded yet", 400);
         }
 
-        if (config.services().athena().mock()
+        // DDL rows (SHOW PARTITIONS) come from the Glue catalog, not the query engine, so mock mode keeps them.
+        if (config.services().athena().mock() && !"DDL".equals(execution.getStatementType())
                 || execution.getResultConfiguration() == null
                 || execution.getResultConfiguration().getOutputLocation() == null) {
             return new ResultSet(List.of(), new ResultSet.ResultSetMetadata(List.of()));
@@ -1118,6 +1147,18 @@ public class AthenaService {
             throw new AwsException("InvalidRequestException",
                     "SelectedEngineVersion must not be empty.", 400);
         }
+    }
+
+    /** Writes {@code rows} as a one-column result CSV, the shape the query engine writes, typed varchar. */
+    private void writeSingleColumnResult(String id, String outputLocation, String column, List<String> rows) {
+        ensureOutputBucket(outputLocation);
+        StringBuilder csv = new StringBuilder(column).append('\n');
+        for (String row : rows) {
+            csv.append('"').append(row.replace("\"", "\"\"")).append("\"\n");
+        }
+        s3Service.putObject(extractBucket(outputLocation), extractKey(outputLocation),
+                csv.toString().getBytes(StandardCharsets.UTF_8), "text/csv", null);
+        resultColumnTypeStore.put(id, List.of("VARCHAR"));
     }
 
     private void ensureOutputBucket(String s3Path) {
