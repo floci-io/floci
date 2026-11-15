@@ -440,6 +440,33 @@ class RedshiftServiceTest {
         assertEquals(Optional.empty(), service.clusterRegion("111111111111", "missing"));
     }
 
+    /**
+     * A managed master password rotation refuses changes to its cluster in the cluster's Region only: from another
+     * Region the cluster is not found, as for any change there, so its rotation is not seen.
+     */
+    @Test
+    void aRotatingClusterIsNotFoundFromAnotherRegion() {
+        Cluster cluster = storedCluster("managed-cluster", "us-east-1");
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-managed");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "managed-cluster", cluster)));
+        RedshiftService west = serviceIn("eu-west-1");
+
+        for (RedshiftService rotating : List.of(service, west)) {
+            rotating.reserve(cluster.getMasterPasswordSecretArn(), "us-east-1");
+            String expected = rotating == service ? "InvalidRequestException" : "ClusterNotFound";
+            try {
+                assertEquals(expected, assertThrows(AwsException.class,
+                        () -> rotating.deleteCluster("managed-cluster")).getErrorCode());
+                assertEquals(expected, assertThrows(AwsException.class,
+                        () -> rotating.rebootCluster("managed-cluster")).getErrorCode());
+            } finally {
+                rotating.release(cluster.getMasterPasswordSecretArn(), "us-east-1");
+            }
+        }
+        verify(cm, never()).stop("111111111111", "managed-cluster");
+    }
+
     /** An available cluster stored in account 111111111111, created in {@code region}; null for none recorded. */
     private Cluster storedCluster(String identifier, String region) {
         Cluster cluster = new Cluster();

@@ -167,9 +167,14 @@ public class RedshiftService implements ManagedSecretRotator {
         });
     }
 
+    /**
+     * Refuses a change to the request Region's cluster {@code identifier} while its managed master password is being
+     * rotated. A cluster of another Region is left to the change's own lookup, which answers ClusterNotFound there, so
+     * its rotation is not seen from other Regions.
+     */
     private void ensureNoManagedRotation(String accountId, String identifier) {
         ResourceKey key = new ResourceKey(accountId, "cluster", identifier);
-        if (managedRotationReservations.containsValue(key)) {
+        if (managedRotationReservations.containsValue(key) && regionalCluster(identifier).isPresent()) {
             throw new AwsException("InvalidRequestException",
                     "The cluster's managed master password is being rotated. Try again after rotation completes.", 400);
         }
