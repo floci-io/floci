@@ -45,8 +45,22 @@ public class AuthMiddleware {
             case API_KEY -> authenticateApiKey(headers, api, configured, info);
             case AWS_IAM -> authenticateIam(headers, api, configured, info);
             case BEARER_JWT -> authenticateBearer(headers, api, configured, info);
-            case AWS_LAMBDA -> authenticateLambda(headers, api, configured, info);
+            case AWS_LAMBDA -> isBareJwtForBearerModes(headers, configured)
+                    ? authenticateBearer(headers, api, configured, info)
+                    : authenticateLambda(headers, api, configured, info);
         };
+    }
+
+    /**
+     * AppSync takes the JWT itself as the {@code Authorization} value for Cognito and OIDC APIs, the
+     * {@code Bearer } scheme being optional. A bare JWT only goes to those modes when no Lambda
+     * authorizer is configured, because with one the same shape is a legitimate Lambda token.
+     */
+    private static boolean isBareJwtForBearerModes(Map<String, String> headers, Set<AuthenticationType> configured) {
+        return !configured.contains(AuthenticationType.AWS_LAMBDA)
+                && (configured.contains(AuthenticationType.AMAZON_COGNITO_USER_POOLS)
+                || configured.contains(AuthenticationType.OPENID_CONNECT))
+                && CredentialClassifier.isBareJwt(CredentialClassifier.header(headers, "authorization"));
     }
 
     private AppSyncAuthContext authenticateApiKey(

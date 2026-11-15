@@ -47,7 +47,15 @@ public final class CredentialClassifier {
         if (authorization.length() < 7 || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return false;
         }
-        String token = authorization.substring(7).trim();
+        return isBareJwt(authorization.substring(7));
+    }
+
+    /** True when the value has the three dot-separated segments of a JWT, with no scheme prefix. */
+    static boolean isBareJwt(String value) {
+        if (value == null) {
+            return false;
+        }
+        String token = value.trim();
         int first = token.indexOf('.');
         int second = token.indexOf('.', first + 1);
         if (first <= 0 || second <= first + 1) {
