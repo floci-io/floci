@@ -585,6 +585,40 @@ class LambdaTaskAuthorizerTest {
         when(iamService.findRole(SFN_ACCOUNT, "sfn-exec")).thenReturn(Optional.of(role));
     }
 
+    /** A refusal fails with the error it is given, and the message says what was refused, on what. */
+    @Test
+    void aMapRefusalFailsWithTheErrorItIsGiven() {
+        roleWithPolicies(READ_OBJECTS);
+        executionRole(STATES_TRUST);
+
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorizeMapS3(machine(), "States.ResultWriterFailed",
+                        List.of(new Permission("s3:PutObject", BUCKET))));
+
+        assertEquals("States.ResultWriterFailed", refused.error);
+        assertTrue(refused.cause.contains("s3:PutObject"), refused.cause);
+        assertTrue(refused.cause.contains(BUCKET), refused.cause);
+    }
+
+    @Test
+    void aMapAllowedEveryPermissionPasses() {
+        roleWithPolicies(READ_OBJECTS);
+        executionRole(STATES_TRUST);
+
+        authorizer.authorizeMapS3(machine(), "States.ItemReaderFailed", List.of(new Permission("s3:GetObject", BUCKET)));
+    }
+
+    @Test
+    void aMapsExecutionRoleHasToTrustStepFunctionsWhateverItAsksFor() {
+        roleWithPolicies(READ_OBJECTS);
+        executionRole(trust("{\"Service\":\"lambda.amazonaws.com\"}"));
+
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorizeMapS3(machine(), "States.ItemReaderFailed", List.of()));
+
+        assertEquals("States.Permissions", refused.error);
+    }
+
     private static StateMachine machine() {
         StateMachine machine = new StateMachine();
         machine.setStateMachineArn(STATE_MACHINE);
