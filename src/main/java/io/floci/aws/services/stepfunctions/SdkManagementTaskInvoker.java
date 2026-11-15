@@ -2,6 +2,7 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestScopes;
@@ -95,6 +96,27 @@ public class SdkManagementTaskInvoker {
         }
     }
 
+    /**
+     * The Lambda request a task's input sends, as the API models it: the mapping's {@code UUID}, the path label
+     * {@code UpdateEventSourceMapping} takes, from the task's {@code Uuid}, the Step Functions SDK spelling, and the
+     * rest of the input as its body, which holds no {@code UUID} of its own.
+     */
+    static ObjectNode lambdaRequest(JsonNode input) {
+        ObjectNode request = JsonNodeFactory.instance.objectNode();
+        if (!input.isObject()) {
+            return request;
+        }
+        input.properties().forEach(member -> {
+            if (!"Uuid".equals(member.getKey()) && !"UUID".equals(member.getKey())) {
+                request.set(member.getKey(), member.getValue());
+            }
+        });
+        if (input.hasNonNull("Uuid")) {
+            request.set("UUID", input.get("Uuid"));
+        }
+        return request;
+    }
+
     private Response dispatch(StatesIntegration integration, JsonNode input, String region) {
         return switch (integration.service()) {
             case "ecs" -> ecs.handle(AslExecutor.capitalizeFirst(integration.api()),
@@ -110,7 +132,7 @@ public class SdkManagementTaskInvoker {
                             input.path("EventSourceArn").asText(null));
                 }
                 case "updateEventSourceMapping" -> {
-                    String uuid = input.path("Uuid").asText(null);
+                    String uuid = lambdaRequest(input).path("UUID").asText(null);
                     if (uuid == null || uuid.isBlank()) {
                         throw new AwsException("InvalidParameterValueException", "Uuid is required.", 400);
                     }
