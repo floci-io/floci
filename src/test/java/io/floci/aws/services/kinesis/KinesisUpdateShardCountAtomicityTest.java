@@ -3,6 +3,7 @@ package io.floci.aws.services.kinesis;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.services.kinesis.model.KinesisRecord;
 import io.floci.aws.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.Test;
 
@@ -60,6 +61,22 @@ class KinesisUpdateShardCountAtomicityTest {
         assertEquals(0, persisted.getShardCountUpdateTimestamps().size(),
                 "rollback must restore the original rolling update history");
         assertSame(original, persisted, "rollback must retain the stored stream identity");
+    }
+
+    @Test
+    void updateShardCountFailureDoesNotReplaceRetainedRecords() {
+        FailingPutStorage store = new FailingPutStorage(4, true);
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        KinesisStream original = service.createStream("my-stream", 2, REGION);
+        service.putRecord("my-stream", new byte[]{1, 2, 3}, "partition", REGION);
+        KinesisRecord retained = original.getShards().getFirst().getRecords().getFirst();
+
+        assertThrows(RuntimeException.class,
+                () -> service.updateShardCount("my-stream", 4, "UNIFORM_SCALING", REGION));
+
+        assertSame(retained, original.getShards().getFirst().getRecords().getFirst(),
+                "rollback must preserve retained record identity");
     }
 
     @Test
