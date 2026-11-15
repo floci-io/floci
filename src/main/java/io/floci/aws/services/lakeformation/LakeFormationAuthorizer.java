@@ -36,14 +36,26 @@ public class LakeFormationAuthorizer {
 
     /**
      * Whether {@code principalArn} holds {@code SELECT} on the table, by a grant to the principal itself or
-     * to {@code IAMAllowedPrincipals}, the group that leaves the table to IAM alone.
+     * to {@code IAMAllowedPrincipals}, the group that leaves the table to IAM alone. Floci's Glue never stores
+     * that grant, so a catalog that keeps AWS's initial settings (none stored, or
+     * {@code CreateTableDefaultPermissions} naming {@code IAM_ALLOWED_PRINCIPALS}) leaves every table to IAM.
      */
     public boolean canSelect(String accountId, String principalArn, String databaseName, String tableName) {
         return RequestScopes.callAs(accountId, () -> {
             String region = regionResolver.getRegion();
             return grants(region, accountId, principalArn, databaseName, tableName)
-                    || grants(region, accountId, IAM_ALLOWED_PRINCIPALS, databaseName, tableName);
+                    || grants(region, accountId, IAM_ALLOWED_PRINCIPALS, databaseName, tableName)
+                    || newTablesAreLeftToIam(region, accountId);
         });
+    }
+
+    private boolean newTablesAreLeftToIam(String region, String catalogId) {
+        return storage.getDataLakeSettings(region, catalogId)
+                .map(settings -> settings.getCreateTableDefaultPermissions() != null
+                        && settings.getCreateTableDefaultPermissions().stream().anyMatch(permissions ->
+                        permissions.getPrincipal() != null
+                                && IAM_ALLOWED_PRINCIPALS.equals(permissions.getPrincipal().getDataLakePrincipalIdentifier())))
+                .orElse(true);
     }
 
     private boolean grants(String region, String catalogId, String principalId, String databaseName,
@@ -86,6 +98,7 @@ public class LakeFormationAuthorizer {
         return false;
     }
 
+    /** Glue resolves database and table names ignoring case, so a grant written in another case still applies. */
     private static boolean sameName(String left, String right) {
         return left != null && left.equalsIgnoreCase(right);
     }

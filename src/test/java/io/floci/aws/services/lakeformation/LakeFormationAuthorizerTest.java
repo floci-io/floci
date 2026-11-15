@@ -3,6 +3,8 @@ package io.floci.aws.services.lakeformation;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.lakeformation.model.ColumnWildcard;
 import io.floci.aws.services.lakeformation.model.DataLakePrincipal;
+import io.floci.aws.services.lakeformation.model.DataLakeSettings;
+import io.floci.aws.services.lakeformation.model.PrincipalPermissions;
 import io.floci.aws.services.lakeformation.model.PrincipalResourcePermissions;
 import io.floci.aws.services.lakeformation.model.Resource;
 import io.floci.aws.services.lakeformation.model.TableResource;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,6 +38,40 @@ class LakeFormationAuthorizerTest {
         storage = mock(LakeFormationStorage.class);
         RegionResolver regionResolver = new RegionResolver("us-east-1", ACCOUNT);
         authorizer = new LakeFormationAuthorizer(storage, regionResolver);
+        storeSettings(List.of());
+    }
+
+    @Test
+    void aCatalogWithoutStoredSettingsLeavesEveryTableToIam() {
+        when(storage.getDataLakeSettings(anyString(), anyString())).thenReturn(Optional.empty());
+        assertTrue(authorizer.canSelect(ACCOUNT, ROLE, "lake", "events"));
+    }
+
+    @Test
+    void defaultTablePermissionsNamingIamAllowedPrincipalsLeaveTablesToIam() {
+        storeSettings(List.of(defaultPermissionFor(LakeFormationAuthorizer.IAM_ALLOWED_PRINCIPALS)));
+        assertTrue(authorizer.canSelect(ACCOUNT, ROLE, "lake", "events"));
+    }
+
+    @Test
+    void defaultTablePermissionsForAnotherPrincipalDoNotLeaveTablesToIam() {
+        storeSettings(List.of(defaultPermissionFor("arn:aws:iam::000000000000:role/Other")));
+        assertFalse(authorizer.canSelect(ACCOUNT, ROLE, "lake", "events"));
+    }
+
+    private void storeSettings(List<PrincipalPermissions> createTableDefaults) {
+        DataLakeSettings settings = new DataLakeSettings();
+        settings.setCreateTableDefaultPermissions(createTableDefaults);
+        when(storage.getDataLakeSettings(anyString(), anyString())).thenReturn(Optional.of(settings));
+    }
+
+    private static PrincipalPermissions defaultPermissionFor(String principalId) {
+        DataLakePrincipal principal = new DataLakePrincipal();
+        principal.setDataLakePrincipalIdentifier(principalId);
+        PrincipalPermissions permissions = new PrincipalPermissions();
+        permissions.setPrincipal(principal);
+        permissions.setPermissions(List.of("ALL"));
+        return permissions;
     }
 
     @Test
@@ -52,6 +89,12 @@ class LakeFormationAuthorizerTest {
     void allOnTheTableAllows() {
         grant(ROLE, tableResource("lake", "events"), "ALL");
         assertTrue(authorizer.canSelect(ACCOUNT, ROLE, "lake", "events"));
+    }
+
+    @Test
+    void namesMatchIgnoringCaseLikeGlue() {
+        grant(ROLE, tableResource("salesdb", "events"), "SELECT");
+        assertTrue(authorizer.canSelect(ACCOUNT, ROLE, "SalesDB", "EVENTS"));
     }
 
     @Test

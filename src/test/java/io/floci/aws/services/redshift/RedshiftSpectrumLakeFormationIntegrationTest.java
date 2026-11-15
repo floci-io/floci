@@ -5,7 +5,9 @@ import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.lakeformation.LakeFormationService;
 import io.floci.aws.services.lakeformation.model.DataLakePrincipal;
+import io.floci.aws.services.lakeformation.model.DataLakeSettings;
 import io.floci.aws.services.lakeformation.model.GrantPermissionsRequest;
+import io.floci.aws.services.lakeformation.model.PutDataLakeSettingsRequest;
 import io.floci.aws.services.lakeformation.model.Resource;
 import io.floci.aws.services.lakeformation.model.RevokePermissionsRequest;
 import io.floci.aws.services.lakeformation.model.TableResource;
@@ -120,6 +122,12 @@ class RedshiftSpectrumLakeFormationIntegrationTest {
             ExternalStatement.CreateTable external = (ExternalStatement.CreateTable)
                     new ExternalStatementParser().parse(externalDdl).orElseThrow();
             glueService.createTable(glueDatabase, GlueTableBuilder.toGlueTable(external));
+
+            DataLakeSettings settings = new DataLakeSettings();
+            settings.setCreateTableDefaultPermissions(List.of());
+            PutDataLakeSettingsRequest managed = new PutDataLakeSettingsRequest();
+            managed.setDataLakeSettings(settings);
+            lakeFormationService.putDataLakeSettings(REGION, managed);
 
             SQLException denied = assertThrows(SQLException.class, () -> sumAmount(statement));
             assertEquals("42501", denied.getSQLState());
