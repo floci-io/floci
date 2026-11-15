@@ -162,7 +162,7 @@ public class S3VectorsService {
     }
 
     public void putVectorBucketPolicy(String bucketName, String bucketArn, String policy, String region) {
-        ResolvedBucket target = resolveBucket(bucketName, bucketArn, region);
+        ResolvedBucket target = resolvePolicyBucket(bucketName, bucketArn, region);
         validatePolicyDocument(policy);
         synchronized (lockFor(target.bucketName(), target.region())) {
             VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
@@ -173,7 +173,7 @@ public class S3VectorsService {
     }
 
     public String getVectorBucketPolicy(String bucketName, String bucketArn, String region) {
-        ResolvedBucket target = resolveBucket(bucketName, bucketArn, region);
+        ResolvedBucket target = resolvePolicyBucket(bucketName, bucketArn, region);
         synchronized (lockFor(target.bucketName(), target.region())) {
             VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
             String policy = bucket.getPolicy();
@@ -186,7 +186,7 @@ public class S3VectorsService {
     }
 
     public void deleteVectorBucketPolicy(String bucketName, String bucketArn, String region) {
-        ResolvedBucket target = resolveBucket(bucketName, bucketArn, region);
+        ResolvedBucket target = resolvePolicyBucket(bucketName, bucketArn, region);
         synchronized (lockFor(target.bucketName(), target.region())) {
             VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
             if (bucket.getPolicy() != null) {
@@ -197,14 +197,54 @@ public class S3VectorsService {
         }
     }
 
-    private ResolvedBucket resolveBucket(String bucketName, String bucketArn, String region) {
-        ResolvedBucket resolved = resolveBucket(bucketName, bucketArn, region,
-                regionResolver::partitionForRegion, "ValidationException");
+    /**
+     * As {@link #bucketTarget}, for the policy calls, which have always checked the bucket's name, first: by name or
+     * in its ARN.
+     */
+    private ResolvedBucket resolvePolicyBucket(String bucketName, String bucketArn, String region) {
+        String name = given(bucketName);
+        String arn = given(bucketArn);
+        requireBucketChoice(name, arn);
+        return inThisAccount(resolveBucket(name, arn, region, regionResolver::partitionForRegion, "ValidationException"));
+    }
+
+    /**
+     * The vector bucket a request names, by {@code vectorBucketName} or by {@code vectorBucketArn}, refused as S3
+     * Vectors refuses a request that gives neither or both. The name is read as given, as CreateVectorBucket takes
+     * it, so a bucket it made stays reachable by its name and by the ARN it was given. An ARN is looked up in the
+     * Region it names; a bucket it names in another account is not found.
+     */
+    public ResolvedBucket bucketTarget(String bucketName, String bucketArn, String region) {
+        String name = given(bucketName);
+        String arn = given(bucketArn);
+        requireBucketChoice(name, arn);
+        if (arn == null) {
+            return new ResolvedBucket(name, region, null);
+        }
+        return inThisAccount(bucketOfArn(arn, arnParts(arn, false, "ValidationException"),
+                regionResolver::partitionForRegion, "ValidationException"));
+    }
+
+    /** S3 Vectors' refusal of a request that names a bucket by neither its name nor its ARN, or by both. */
+    private static void requireBucketChoice(String name, String arn) {
+        if ((name == null) == (arn == null)) {
+            throw new AwsException("ValidationException",
+                    "Must specify either vectorBucketName or vectorBucketArn but not both", 400);
+        }
+    }
+
+    /** A bucket an ARN names in another account is not found. */
+    private ResolvedBucket inThisAccount(ResolvedBucket resolved) {
         if (resolved.accountId() != null && !store.accountId().equals(resolved.accountId())) {
             throw new AwsException("NotFoundException",
                     "The vector bucket " + resolved.bucketName() + " does not exist.", 404);
         }
         return resolved;
+    }
+
+    /** A member's value, or null when the request left it out or empty. */
+    private static String given(String member) {
+        return member == null || member.isBlank() ? null : member;
     }
 
     public static ResolvedBucket resolveBucket(String bucketName, String bucketArn,
@@ -219,13 +259,22 @@ public class S3VectorsService {
                     defaultRegion, null);
         }
         String[] parts = arnParts(bucketArn, false, errorCode);
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(bucketArn);
-        String name = validateName(parts[1], "VectorBucketArn bucket name", false, errorCode);
+        validateName(parts[1], "VectorBucketArn bucket name", false, errorCode);
+        return bucketOfArn(bucketArn, parts, partitionForRegion, errorCode);
+    }
+
+    /**
+     * The bucket an S3 Vectors ARN names, a bucket's or an index's, given its {@link #arnParts}: the ARN must name a
+     * Region and an account, in the Region's partition.
+     */
+    private static ResolvedBucket bucketOfArn(String arn, String[] parts, Function<String, String> partitionForRegion,
+                                              String errorCode) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
         if (parsed.region().isEmpty() || parsed.accountId().isEmpty()
                 || !partitionForRegion.apply(parsed.region()).equals(parsed.partition())) {
-            throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + bucketArn, 400);
+            throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + arn, 400);
         }
-        return new ResolvedBucket(name, parsed.region(), parsed.accountId());
+        return new ResolvedBucket(parts[1], parsed.region(), parsed.accountId());
     }
 
     public static String validateName(String name, String property, boolean index, String errorCode) {
@@ -267,6 +316,9 @@ public class S3VectorsService {
     }
 
     public record ResolvedBucket(String bucketName, String region, String accountId) {}
+
+    /** An index a request names: its bucket's name, its own name and the Region it is in. */
+    public record ResolvedIndex(String bucketName, String indexName, String region) {}
 
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys, String region) {
@@ -437,18 +489,32 @@ public class S3VectorsService {
      * ListVectors' "vectorBucketName + indexName, or indexArn alone" input contract.
      */
     private VectorIndex resolveIndex(String bucketName, String indexName, String indexArn, String region) {
-        if (indexName != null && !indexName.isBlank()) {
-            return getIndex(bucketName, indexName, region);
+        ResolvedIndex target = resolveIndexTarget(bucketName, indexName, indexArn, region);
+        return getIndex(target.bucketName(), target.indexName(), target.region());
+    }
+
+    /**
+     * The index a request names, by its {@code vectorBucketName} and {@code indexName} or by its {@code indexArn},
+     * refused as S3 Vectors refuses a request that gives neither or mixes them. The ARN's bucket is read as a bucket
+     * ARN is: in the Region it names, and not found in another account.
+     */
+    public ResolvedIndex resolveIndexTarget(String bucketName, String indexName, String indexArn, String region) {
+        String bucket = given(bucketName);
+        String index = given(indexName);
+        String arn = given(indexArn);
+        boolean byArn = arn != null && bucket == null && index == null;
+        boolean byName = arn == null && bucket != null && index != null;
+        if (!byArn && !byName) {
+            throw new AwsException("ValidationException",
+                    "Must specify either indexArn or both vectorBucketName and indexName", 400);
         }
-        if (indexArn == null || indexArn.isBlank()) {
-            throw new AwsException("ValidationException", "Either indexName or indexArn is required.", 400);
+        if (byName) {
+            return new ResolvedIndex(bucket, index, region);
         }
-        String[] parts = arnParts(indexArn, true, "ValidationException");
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(indexArn);
-        // The ARN carries its own region — an index in one region must resolve there regardless
-        // of which region the ListVectors request itself was signed for.
-        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
-        return getIndex(parts[1], parts[3], arnRegion);
+        String[] parts = arnParts(arn, true, "ValidationException");
+        ResolvedBucket owner = inThisAccount(bucketOfArn(arn, parts, regionResolver::partitionForRegion,
+                "ValidationException"));
+        return new ResolvedIndex(owner.bucketName(), parts[3], owner.region());
     }
 
     /**
