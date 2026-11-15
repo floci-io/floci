@@ -230,6 +230,7 @@ public class ContainerBuilder {
         private Long memorySwappiness;
         private boolean javaTrustStore;
         private String dnsName;
+        private final List<String> joinedNetworks = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -441,6 +442,17 @@ public class ContainerBuilder {
          */
         public Builder withDnsName(String name) {
             this.dnsName = name;
+            return this;
+        }
+
+        /**
+         * Joins the container to {@code network} too, a user-defined network, before it starts, with no alias of its
+         * own there, so it reaches the containers on that network from its first moment.
+         */
+        public Builder withJoinedNetwork(String network) {
+            if (network != null && !network.isBlank() && !joinedNetworks.contains(network)) {
+                joinedNetworks.add(network);
+            }
             return this;
         }
 
@@ -861,7 +873,8 @@ public class ContainerBuilder {
                     new LinuxOptions(List.copyOf(capAdd), List.copyOf(capDrop), List.copyOf(devices),
                             shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness),
                     javaTrustStore,
-                    dnsName
+                    dnsName,
+                    List.copyOf(joinedNetworks)
             );
         }
     }
