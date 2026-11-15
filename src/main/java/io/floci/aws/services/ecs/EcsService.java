@@ -553,6 +553,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         // wipes CloudWatch, so the Container Insights samples it held must be written again.
         launchFailures.clear();
         publishedInsights.clear();
+        taskSets.clear();
     }
 
     /**
@@ -3081,6 +3082,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 svc.setTags(new LinkedHashMap<>(request.getTags()));
             }
 
+            if ("CODE_DEPLOY".equals(controller)) {
+                createInitialTaskSet(svc, cluster, region);
+            }
             services.put(key, svc);
             cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
             persistCluster(region, cluster);
@@ -3473,6 +3477,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (serviceArn != null) {
                 serviceDeployments.values().removeIf(d -> serviceArn.equals(d.getServiceArn()));
                 serviceRevisions.values().removeIf(r -> serviceArn.equals(r.getServiceArn()));
+                taskSets.values().removeIf(ts -> serviceArn.equals(ts.getServiceArn()));
                 launchFailures.remove(serviceArn);
             }
             return svc;
@@ -4429,16 +4434,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     "Invalid scale unit: " + request.getScaleUnit(), 400);
         }
 
-        String setId = "ecs-svc/" + UUID.randomUUID().toString().replace("-", "");
-        String taskSetArn = regionResolver.buildArn("ecs", region, "task-set/"
-                + cluster.getClusterName() + "/" + svc.getServiceName() + "/" + setId);
-
-        TaskSet ts = new TaskSet();
-        ts.setId(setId);
-        ts.setTaskSetArn(taskSetArn);
-        ts.setServiceArn(svc.getServiceArn());
-        ts.setClusterArn(cluster.getClusterArn());
-        ts.setTaskDefinition(taskDef.getTaskDefinitionArn());
+        TaskSet ts = newTaskSet(newDeploymentId(), svc, cluster, taskDef.getTaskDefinitionArn(), region);
         ts.setStatus(STATUS_ACTIVE);
         ts.setScaleValue(request.getScaleValue() != null ? request.getScaleValue() : 100.0);
         ts.setScaleUnit(SCALE_UNIT_PERCENT);
@@ -4463,8 +4459,69 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         ts.setUpdatedAt(Instant.now());
         applyTaskSetScale(ts, svc);
 
-        taskSets.put(taskSetArn, ts);
+        taskSets.put(ts.getTaskSetArn(), ts);
         return ts;
+    }
+
+    private TaskSet newTaskSet(String id, EcsServiceModel svc, EcsCluster cluster,
+                               String taskDefinition, String region) {
+        TaskSet ts = new TaskSet();
+        ts.setId(id);
+        ts.setTaskSetArn(regionResolver.buildArn("ecs", region, "task-set/"
+                + cluster.getClusterName() + "/" + svc.getServiceName() + "/" + id));
+        ts.setServiceArn(svc.getServiceArn());
+        ts.setClusterArn(cluster.getClusterArn());
+        ts.setTaskDefinition(taskDefinition);
+        return ts;
+    }
+
+    private void createInitialTaskSet(EcsServiceModel svc, EcsCluster cluster, String region) {
+        // The service scheduler already starts these tasks under this deployment ID.
+        TaskSet ts = newTaskSet(svc.getDeploymentId(), svc, cluster, svc.getTaskDefinition(), region);
+        ts.setStatus("PRIMARY");
+        ts.setScaleUnit(SCALE_UNIT_PERCENT);
+        ts.setScaleValue(100.0);
+        ts.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
+        ts.setLaunchType(svc.getLaunchType());
+        ts.setNetworkConfiguration(svc.getNetworkConfiguration());
+        ts.setLoadBalancers(svc.getLoadBalancers());
+        ts.setServiceRegistries(svc.getServiceRegistries());
+        if (svc.getLaunchType() == LaunchType.FARGATE) {
+            ts.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
+            ts.setPlatformFamily(svc.getPlatformFamily());
+        }
+        ts.setCreatedAt(svc.getCreatedAt());
+        ts.setUpdatedAt(svc.getCreatedAt());
+        refreshScheduledTaskSet(ts, svc);
+        taskSets.put(ts.getTaskSetArn(), ts);
+    }
+
+    private void refreshScheduledTaskSet(TaskSet ts, EcsServiceModel svc) {
+        if (!"CODE_DEPLOY".equals(svc.getDeploymentController()) || !ts.getId().equals(deploymentId(svc))) {
+            return;
+        }
+        int running = 0;
+        int pending = 0;
+        for (EcsTask task : tasks.values()) {
+            if (!ts.getId().equals(task.getStartedBy())
+                    || !ts.getServiceArn().equals(task.getOwningServiceArn())) {
+                continue;
+            }
+            if (TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+                running++;
+            } else if (PENDING_TASK_STATUSES.contains(task.getLastStatus())) {
+                pending++;
+            }
+        }
+        int desired = (int) Math.ceil(svc.getDesiredCount() * ts.getScaleValue() / 100.0);
+        ts.setComputedDesiredCount(desired);
+        ts.setRunningCount(running);
+        ts.setPendingCount(pending);
+        String stability = running == desired && pending == 0 ? STABILITY_STATUS_STEADY_STATE : "STABILIZING";
+        if (!stability.equals(ts.getStabilityStatus())) {
+            ts.setStabilityStatus(stability);
+            ts.setStabilityStatusAt(Instant.now());
+        }
     }
 
     /**
@@ -4491,10 +4548,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * Stamps {@code computedDesiredCount}, which AWS derives from the service's desired count and
      * the task set's scale percentage, always rounding up: a computed 1.2 becomes 2 tasks.
      *
-     * <p>Floci places no tasks for a task set, so its running and pending counts stay at zero. A
-     * stability status derived from them would leave every set on a service with a desired count
-     * above zero in {@code STABILIZING} for ever, hanging anything that waits for the set to
-     * stabilise, so the set is reported {@code STEADY_STATE} until Floci tracks tasks for it.
+     * <p>Explicitly created task sets simulate scheduling and report {@code STEADY_STATE}.
+     * The initial CodeDeploy task set uses the service scheduler's real task counts.
      */
     private void applyTaskSetScale(TaskSet ts, EcsServiceModel svc) {
         ts.setComputedDesiredCount(
@@ -4516,6 +4571,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         ts.setScaleUnit(SCALE_UNIT_PERCENT);
         ts.setUpdatedAt(Instant.now());
         applyTaskSetScale(ts, svc);
+        refreshScheduledTaskSet(ts, svc);
         return ts;
     }
 
@@ -4554,11 +4610,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (svc == null) {
             return List.of();
         }
-        return taskSets.values().stream()
+        List<TaskSet> result = taskSets.values().stream()
                 .filter(ts -> svc.getServiceArn().equals(ts.getServiceArn()))
                 .sorted(Comparator.comparing(TaskSet::getCreatedAt,
                         Comparator.nullsLast(Comparator.naturalOrder())))
                 .toList();
+        result.forEach(ts -> refreshScheduledTaskSet(ts, svc));
+        return result;
     }
 
     public record DescribeTaskSetsResult(List<TaskSet> taskSets, List<Failure> failures) {}
@@ -4568,9 +4626,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                                            List<String> taskSetRefs, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         EcsServiceModel svc = resolveServiceOrThrow(cluster.getClusterName(), serviceRef, region);
-        List<TaskSet> ofService = taskSets.values().stream()
-                .filter(ts -> ts.getServiceArn().equals(svc.getServiceArn()))
-                .toList();
+        List<TaskSet> ofService = taskSetsFor(svc);
         if (taskSetRefs == null || taskSetRefs.isEmpty()) {
             return new DescribeTaskSetsResult(ofService, List.of());
         }
@@ -4652,10 +4708,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      *
      * <p>A task-definition change is applied in place rather than draining a previous
      * deployment, so there is never a second ACTIVE entry beside the PRIMARY one. An INACTIVE
-     * service has no deployments.
+     * service has no deployments. CodeDeploy services report their rollout in taskSets.
      */
     public List<Deployment> deploymentsFor(EcsServiceModel svc) {
-        if (svc == null || !"ACTIVE".equals(svc.getStatus())) {
+        if (svc == null || !"ACTIVE".equals(svc.getStatus())
+                || "CODE_DEPLOY".equals(svc.getDeploymentController())) {
             return List.of();
         }
 
@@ -6439,6 +6496,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (ts == null) {
             throw new AwsException("TaskSetNotFoundException", "Task set not found: " + ref, 400);
         }
+        refreshScheduledTaskSet(ts, svc);
         return ts;
     }
 
