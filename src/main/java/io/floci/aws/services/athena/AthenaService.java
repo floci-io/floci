@@ -228,13 +228,14 @@ public class AthenaService {
                     List<Table> projectionTables = tablesForProjectionCheck(database);
                     PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
                     PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
-                    String setupDdl = ddlBuilder.build(database);
+                    String setupDdl = TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database);
+                    String duckQuery = TrinoSqlCompatibility.translate(query);
                     if (outputLocation != null) {
                         ensureOutputBucket(outputLocation);
                     }
-                    duckClient.execute(query, setupDdl, outputLocation, accountId);
+                    duckClient.execute(duckQuery, setupDdl, outputLocation, accountId);
                     if (outputLocation != null) {
-                        resultColumnTypeStore.put(id, describeColumnTypes(query, setupDdl, accountId));
+                        resultColumnTypeStore.put(id, describeColumnTypes(duckQuery, setupDdl, accountId));
                     }
                     return null;
                 })
@@ -1207,7 +1208,7 @@ public class AthenaService {
             // TODO: Athena (engine v3) fails a sum past BIGINT's range with NUMERIC_VALUE_OUT_OF_RANGE;
             // DuckDB's HUGEINT holds it, so floci returns the out-of-range value typed bigint instead.
             // Casting HUGEINT result columns back to BIGINT would make DuckDB fail the query too.
-            case "BIGINT", "HUGEINT" -> "bigint";
+            case "BIGINT", "HUGEINT", "UBIGINT" -> "bigint";
             case "INTEGER" -> "integer";
             case "SMALLINT" -> "smallint";
             case "TINYINT" -> "tinyint";
@@ -1223,6 +1224,7 @@ public class AthenaService {
             case "BLOB" -> "varbinary";
             case "STRUCT" -> "row";
             case "MAP" -> "map";
+            case "JSON" -> "json";
             default -> "varchar";
         };
     }
