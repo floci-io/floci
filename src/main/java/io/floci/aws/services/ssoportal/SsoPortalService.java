@@ -3,9 +3,8 @@ package io.floci.aws.services.ssoportal;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.ssoadmin.SsoAdminService;
 import io.floci.aws.services.ssoadmin.model.Assignment;
@@ -20,7 +19,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.security.SecureRandom;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,19 +34,16 @@ public class SsoPortalService {
     private final SsoAdminService ssoAdminService;
     private final OrganizationsService organizationsService;
     private final IamService iamService;
-    private final RegionResolver regionResolver;
 
     @Inject
     public SsoPortalService(SsoOidcService oidcService,
                             SsoAdminService ssoAdminService,
                             OrganizationsService organizationsService,
-                            IamService iamService,
-                            RegionResolver regionResolver) {
+                            IamService iamService) {
         this.oidcService = oidcService;
         this.ssoAdminService = ssoAdminService;
         this.organizationsService = organizationsService;
         this.iamService = iamService;
-        this.regionResolver = regionResolver;
     }
 
     public PaginatedResult<PortalAccountInfo> listAccounts(
@@ -105,13 +100,12 @@ public class SsoPortalService {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The requested account role is not assigned to this user.", 404));
-        PermissionSet permissionSet = ssoAdminService.permissionSetForPortal(assignment.permissionSetArn());
-        Instant expiration = Instant.now().plus(Duration.parse(permissionSet.sessionDuration()));
+        IamRole role = ssoAdminService.provisionedRoleForPortal(assignment.permissionSetArn(), accountId);
+        Instant expiration = Instant.now().plusSeconds(role.getMaxSessionDuration());
         String accessKeyId = "ASIA" + random(UPPER_ALPHANUMERIC, 16);
         String secretAccessKey = random(SECRET_CHARACTERS, 40);
         String sessionToken = random(SECRET_CHARACTERS, 200);
-        String roleArn = regionResolver.buildGlobalArn("iam", accountId,
-                "role/aws-reserved/" + ServicePrincipals.of("sso") + "/AWSReservedSSO_" + roleName + "_floci");
+        String roleArn = role.getArn();
         // IAM Identity Center names the role session after the user, as GetCallerIdentity and EKS then report it.
         String sessionName = ssoAdminService.portalSessionName(assignment, session.principalId()).orElse(null);
         iamService.registerSessionForAccount(accountId, accessKeyId, secretAccessKey, sessionToken,

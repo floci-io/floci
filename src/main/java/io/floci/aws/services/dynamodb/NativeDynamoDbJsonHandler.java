@@ -52,6 +52,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -680,7 +681,7 @@ public class NativeDynamoDbJsonHandler {
             List.of("ALL_NEW", "UPDATED_OLD", "ALL_OLD", "NONE", "UPDATED_NEW");
     private static final List<String> OLDER_CONDITIONAL_OPERATORS = List.of("OR", "AND");
 
-    // The older validator lists the members in this order and leaves out a missing table name.
+    // The older validator lists the members in this order.
     private void requireValidOlderItemWrite(JsonNode request, String target) {
         String tableName = textOrNull(request, "TableName");
         String returnValues = textOrNull(request, "ReturnValues");
@@ -697,7 +698,9 @@ public class NativeDynamoDbJsonHandler {
         if ("Key".equals(target) && !request.hasNonNull(target)) {
             validationErrors.add(SmithyValidationErrors.notNull("key"));
         }
-        if ("".equals(tableName)) {
+        if (tableName == null) {
+            validationErrors.add(SmithyValidationErrors.notNull("tableName"));
+        } else if (tableName.isEmpty()) {
             validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
         }
         throwValidationErrors(validationErrors);
@@ -1388,13 +1391,13 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
-        // DynamoDB reports filter errors before projection errors, and projection before key-condition.
+        // DynamoDB reports filter errors first, then key-condition errors, then projection errors.
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
-        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         // Must run before DynamoDbAccessPathValidator below: an unresolved #name there falls
         // through to "Query condition missed key schema element" instead of the real cause.
         ExpressionEvaluator.validateSemantics(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         DynamoDbAccessPathValidator.validateKeyConditionAttributes(keyConditionExpr, exprAttrNames);
+        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw SmithyValidationErrors.validationException(
@@ -1446,8 +1449,10 @@ public class NativeDynamoDbJsonHandler {
             queryItems = applyIndexProjection(queryItems, queryTable, queryAccessPath, select);
         }
         if (projectionExpression != null) {
+            Function<JsonNode, ObjectNode> projection =
+                    ProjectionEvaluator.projector(projectionExpression, exprAttrNames);
             queryItems = queryItems.stream()
-                    .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpression, exprAttrNames))
+                    .map(i -> (JsonNode) projection.apply(i))
                     .toList();
         } else if (attributesToGet != null) {
             Set<String> keep = new HashSet<>();
@@ -1596,8 +1601,10 @@ public class NativeDynamoDbJsonHandler {
             scanItems = applyIndexProjection(scanItems, scanTable, scanAccessPath, select);
         }
         if (projectionExpressionScan != null) {
+            Function<JsonNode, ObjectNode> projection =
+                    ProjectionEvaluator.projector(projectionExpressionScan, exprAttrNames);
             scanItems = scanItems.stream()
-                    .map(i -> (JsonNode) ProjectionEvaluator.project(i, projectionExpressionScan, exprAttrNames))
+                    .map(i -> (JsonNode) projection.apply(i))
                     .toList();
         } else if (attributesToGetScan != null) {
             Set<String> keep = new HashSet<>();
@@ -1883,10 +1890,12 @@ public class NativeDynamoDbJsonHandler {
             JsonNode attrToGet = tableRequest != null && tableRequest.has("AttributesToGet")
                     ? tableRequest.get("AttributesToGet") : null;
             ArrayNode tableItems = objectMapper.createArrayNode();
+            Function<JsonNode, ObjectNode> projection = projExpr != null
+                    ? ProjectionEvaluator.projector(projExpr, exprNames) : null;
             for (JsonNode item : entry.getValue()) {
                 JsonNode projected;
-                if (projExpr != null) {
-                    projected = ProjectionEvaluator.project(item, projExpr, exprNames);
+                if (projection != null) {
+                    projected = projection.apply(item);
                 } else if (attrToGet != null) {
                     Set<String> keep = new HashSet<>();
                     attrToGet.forEach(n -> keep.add(n.asText()));
@@ -3279,6 +3288,18 @@ public class NativeDynamoDbJsonHandler {
                     "ProjectionExpression");
         }
 
+        // DynamoDB checks every ProjectionExpression before the table lookup.
+        for (JsonNode txItem : transactItemsNode) {
+            JsonNode get = txItem.has("Get") ? txItem.get("Get") : null;
+            if (get == null) {
+                continue;
+            }
+            String pe = get.has("ProjectionExpression") ? get.get("ProjectionExpression").asText() : null;
+            if (pe != null) {
+                ProjectionEvaluator.validateExpression(pe, get.get("ExpressionAttributeNames"));
+            }
+        }
+
         Map<String, TableDefinition> tableCache = new HashMap<>();
         Set<String> seenGet = new HashSet<>();
         for (JsonNode txItem : transactItemsNode) {
@@ -3300,16 +3321,6 @@ public class NativeDynamoDbJsonHandler {
                     throw e;
                 }
                 // Per-action validation error - will be surfaced via TransactionCanceledException in transactGetItems
-            }
-        }
-
-        // Validate the ProjectionExpression in each Get action before executing
-        for (JsonNode txItem : transactItemsNode) {
-            JsonNode get = txItem.has("Get") ? txItem.get("Get") : null;
-            if (get == null) continue;
-            String pe = get.has("ProjectionExpression") ? get.get("ProjectionExpression").asText() : null;
-            if (pe != null) {
-                ProjectionEvaluator.validateExpression(pe, get.get("ExpressionAttributeNames"));
             }
         }
 

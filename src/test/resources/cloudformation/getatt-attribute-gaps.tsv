@@ -52,6 +52,11 @@ AWS::EKS::Cluster	EncryptionConfigKeyArn	not modeled: Floci does not apply envel
 AWS::EKS::Cluster	Id	not modeled: Floci identifies a cluster by its Name (the primary identifier and Ref), not a separate Id
 AWS::ElastiCache::CacheCluster	ConfigurationEndpoint	the whole object has no scalar GetAtt form; its members are set under the dotted ConfigurationEndpoint.* attributes, the form AWS GetAtt exposes (memcached only)
 AWS::ElastiCache::CacheCluster	RedisEndpoint	the whole object has no scalar GetAtt form; its members are set under the dotted RedisEndpoint.* attributes, the form AWS GetAtt exposes (redis and valkey only)
+AWS::ElastiCache::ReplicationGroup	ConfigurationEndPoint	the whole object has no scalar GetAtt form; its members are set under the dotted ConfigurationEndPoint.* attributes (cluster mode enabled only)
+AWS::ElastiCache::ReplicationGroup	EffectiveDurability	not emulated: Floci does not model replication group durability
+AWS::ElastiCache::ReplicationGroup	PrimaryEndPoint	the whole object has no scalar GetAtt form; its members are set under the dotted PrimaryEndPoint.* attributes (cluster mode disabled only)
+AWS::ElastiCache::ReplicationGroup	ReadEndPoint	the whole object has no scalar GetAtt form; its members are set under the dotted ReadEndPoint.Addresses(.List) and ReadEndPoint.Ports(.List) attributes (cluster mode disabled only)
+AWS::ElastiCache::ReplicationGroup	ReaderEndPoint	the whole object has no scalar GetAtt form; its members are set under the dotted ReaderEndPoint.* attributes (cluster mode disabled only)
 AWS::IAM::Policy	Id	not published: Floci uses the policy name for Ref, AWS returns an opaque generated identifier that Floci does not model
 AWS::IAM::ManagedPolicy	AttachmentCount	not published: the attachment count is dynamic and Floci does not expose it as a stable Fn::GetAtt value
 AWS::IAM::ManagedPolicy	CreateDate	not published: Floci does not surface the policy create date as an Fn::GetAtt value

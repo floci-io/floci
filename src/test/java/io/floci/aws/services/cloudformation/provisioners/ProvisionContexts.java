@@ -13,7 +13,7 @@ import static org.mockito.Mockito.when;
  * hands scalars back as text and nodes back unchanged, and an update context carrying the previous
  * template's properties, as the stack hands them over.
  */
-final class ProvisionContexts {
+public final class ProvisionContexts {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -24,7 +24,7 @@ final class ProvisionContexts {
      * Scalar properties only: intrinsic resolution (Ref/GetAtt) is the engine's job and is covered by
      * its own tests, so a passthrough keeps a provisioner test a true isolated unit test.
      */
-    static CloudFormationTemplateEngine passthroughEngine() {
+    public static CloudFormationTemplateEngine passthroughEngine() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);

@@ -1,6 +1,7 @@
 package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
@@ -19,6 +20,7 @@ import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
+import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
@@ -49,7 +51,9 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 
 /**
@@ -70,10 +74,14 @@ import java.util.function.Function;
 public class IamConditionContextResolver {
 
     private static final Logger LOG = Logger.getLogger(IamConditionContextResolver.class);
+    /** Reads a resource EC2 holds as its fields, java.time ones included. */
+    private static final ObjectMapper RESOURCE_MAPPER = new ObjectMapper().findAndRegisterModules();
 
     /** Set by {@code ResourceArnBuilder.readJsonBody}, which runs earlier in the same filter pass. */
     static final String BUFFERED_JSON_BODY = "floci.bufferedJsonBody";
     private static final String BUFFERED_FORM_BODY = "floci.bufferedFormBody";
+    /** Prefixes the action whose numbered EC2 targets {@link #heldTargets} looked up for the request. */
+    private static final String HELD_TARGETS = "floci.heldTargets.";
     private static final String REQUEST_TAG_PREFIX = "aws:RequestTag/";
     private static final String RESOURCE_TAG_PREFIX = "aws:ResourceTag/";
     /**
@@ -103,7 +111,10 @@ public class IamConditionContextResolver {
     private final Instance<CloudWatchLogsCrossAccountService> crossAccountService;
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
+    private final Instance<RequestConditionSpelling> requestConditionSpellings;
+    private final Instance<StoredResourceArns> storedResourceArns;
     private final RequestContext requestContext;
+    private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
     private final Clock clock;
@@ -121,12 +132,15 @@ public class IamConditionContextResolver {
                                        Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
+                                       Instance<RequestConditionSpelling> requestConditionSpellings,
+                                       Instance<StoredResourceArns> storedResourceArns,
                                        RequestContext requestContext,
+                                       RegionResolver regionResolver,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
         this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
-                lambdaWebService, requestContext,
+                lambdaWebService, requestConditionSpellings, storedResourceArns, requestContext, regionResolver,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -137,7 +151,10 @@ public class IamConditionContextResolver {
                                 Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
+                                Instance<RequestConditionSpelling> requestConditionSpellings,
+                                Instance<StoredResourceArns> storedResourceArns,
                                 RequestContext requestContext,
+                                RegionResolver regionResolver,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
                                 ResolvedServiceCatalog serviceCatalog, Clock clock) {
@@ -148,11 +165,93 @@ public class IamConditionContextResolver {
         this.crossAccountService = crossAccountService;
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
+        this.requestConditionSpellings = requestConditionSpellings;
+        this.storedResourceArns = storedResourceArns;
         this.requestContext = requestContext;
+        this.regionResolver = regionResolver;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
         this.clock = clock;
         this.serviceCatalog = serviceCatalog;
+    }
+
+    /**
+     * The condition keys the tags of the resource {@code resource} names give: each resource-tag key the
+     * request-resources table gives the ARN's type ({@code aws:ResourceTag/<key>},
+     * {@code secretsmanager:ResourceTag/<key>}) for each tag the service of the ARN's namespace holds on it
+     * ({@link StoredResourceArns#storedTags}), whatever the namespace; null when the table gives the type no such keys or
+     * the service holds no tags there. Tag keys differing only in case are one condition key, as IAM's keys are,
+     * holding every value, so a set operator sees each. Read for each ARN on its own, never borrowed from another
+     * target in the same request; {@link #withResourceTags} puts them in that ARN's context.
+     */
+    public Map<String, List<String>> resourceTags(String resource) {
+        if (!AwsArnUtils.isArn(resource)) {
+            return null;
+        }
+        String namespace = AwsArnUtils.parse(resource).service();
+        Map<String, List<String>> types = RequestResourceMembers.table().resourceTagKeys()
+                .getOrDefault(namespace, Map.of());
+        StoredResourceArns stored = types.isEmpty() ? null : storedResourceArns(namespace);
+        Map<String, String> tags = stored == null ? Map.of() : stored.storedTags(resource);
+        List<String> prefixes = tags.isEmpty() ? List.of() : resourceTagPrefixes(namespace, resource, types);
+        if (prefixes.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        tags.forEach((key, value) -> prefixes.forEach(prefix ->
+                conditions.computeIfAbsent(prefix + key, ignored -> new ArrayList<>()).add(value)));
+        return conditions;
+    }
+
+    /**
+     * {@code context} with the condition keys {@link #resourceTags} read from a resource's stored tags, each in place of
+     * any key of the same name, case aside, the context held; {@code context} itself when there are none.
+     */
+    public static Map<String, List<String>> withResourceTags(Map<String, List<String>> context,
+                                                             Map<String, List<String>> resourceTags) {
+        if (resourceTags == null || resourceTags.isEmpty()) {
+            return context;
+        }
+        Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
+        resourceTags.forEach((key, values) -> {
+            result.keySet().removeIf(key::equalsIgnoreCase);
+            result.put(key, List.copyOf(values));
+        });
+        return result;
+    }
+
+    /**
+     * The resource-tag key prefixes {@code types} gives the namespace's type whose ARN format {@code resource} fits,
+     * the longest format where several do (a type whose ARN extends another's is its own); none when it fits none.
+     */
+    private static List<String> resourceTagPrefixes(String namespace, String resource,
+                                                    Map<String, List<String>> types) {
+        Map<String, RequestResourceMembers.ArnFormat> formats = RequestResourceMembers.table().formats()
+                .getOrDefault(namespace, Map.of());
+        RequestResourceMembers.ArnFormat fitted = null;
+        List<String> prefixes = List.of();
+        for (Map.Entry<String, List<String>> type : types.entrySet()) {
+            RequestResourceMembers.ArnFormat format = formats.get(type.getKey());
+            if (format != null && format.pattern().matcher(resource).matches()
+                    && (fitted == null || format.format().length() > fitted.format().length())) {
+                fitted = format;
+                prefixes = type.getValue();
+            }
+        }
+        return prefixes;
+    }
+
+    /** The registered finder of the namespace's stored resources; null when there is none. */
+    private StoredResourceArns storedResourceArns(String namespace) {
+        if (storedResourceArns == null || storedResourceArns.isUnsatisfied()) {
+            return null;
+        }
+        for (StoredResourceArns stored : storedResourceArns) {
+            if (stored.namespace().equals(namespace)) {
+                return stored;
+            }
+        }
+        return null;
     }
 
     public Map<String, List<String>> resolve(String credentialScope, String action,
@@ -164,9 +263,7 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
-            case "redshift" -> RequestConditionKeys.requestKeys(action).isEmpty() ? null
-                    : requestConditions(action, formParameters(ctx)::get);
-            default -> null;
+            default -> requestMemberConditions(action, ctx);
         };
     }
 
@@ -247,6 +344,17 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
+    /** The condition key whose value a delegation can decide rather than the request. */
+    private static final String PERMISSIONS_BOUNDARY_KEY = "iam:PermissionsBoundary";
+
+    /** The boundary the caller's delegation registered, or empty for any other caller. */
+    private Optional<String> delegatedBoundary() {
+        if (iamService.isUnsatisfied() || requestContext == null) {
+            return Optional.empty();
+        }
+        return iamService.get().delegatedRoleBoundaryArn(requestContext.getAccessKeyId());
+    }
+
     private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
         Map<String, String> targets = IamConditionKeys.targets(action);
@@ -262,6 +370,13 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        // iam:PermissionsBoundary names the boundary the request will leave on the principal, so a
+        // role created under a delegation publishes the cap that delegation registered rather than
+        // whatever the call asked for: the write applies the cap, and a policy conditioned on the
+        // boundary has to be told the same value the role ends up with.
+        if (members.containsKey(PERMISSIONS_BOUNDARY_KEY) && "iam:CreateRole".equals(action)) {
+            delegatedBoundary().ifPresent(arn -> conditions.put(PERMISSIONS_BOUNDARY_KEY, List.of(arn)));
+        }
         targets.forEach((key, target) -> {
             if (key.contains("${TagKey}")) {
                 Map<String, String> tags = storedTargetValue(target, form.get(target), IamRole::getTags, IamUser::getTags);
@@ -322,18 +437,108 @@ public class IamConditionContextResolver {
     }
 
     /**
-     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser or an
-     * OpenTunnel remotePort, read through {@code parameter} from the table in
-     * {@code request-condition-keys.json}; null when it carries none.
+     * The keys a request for {@code action} carries in its own members, such as an OpenTunnel remotePort, read
+     * through {@code parameter} from the table in {@code request-condition-keys.json}; null when it carries none.
      */
     static Map<String, List<String>> requestConditions(String action, Function<String, String> parameter) {
+        return requestConditions(action, member -> {
+            String value = parameter.apply(member);
+            return value == null ? List.of() : List.of(value);
+        }, null);
+    }
+
+    /**
+     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser, the record names
+     * of a Route 53 change batch or an EKS cluster's endpoint access, read as its namespace's protocol carries them
+     * (a Query form, an XML or JSON body), from the table in {@code request-condition-keys.json}; null when it
+     * carries none, or is sent in a protocol no reader here reads yet. A member left out, or given a JSON null, names
+     * nothing, so an update takes no value from what the resource already has.
+     */
+    private Map<String, List<String>> requestMemberConditions(String action, ContainerRequestContext ctx) {
+        List<String> keys = RequestConditionKeys.requestKeys(action);
+        if (keys.isEmpty()) {
+            return null;
+        }
+        String namespace = action.substring(0, action.indexOf(':'));
+        String protocol = RequestConditionKeys.protocol(namespace);
+        Function<String, List<String>> values;
+        if ("query".equals(protocol) || "ec2".equals(protocol)) {
+            Map<String, String> form = formParameters(ctx);
+            values = member -> form.containsKey(member) ? List.of(form.get(member)) : List.of();
+        } else if ("rest-xml".equals(protocol)) {
+            List<String> members = keys.stream()
+                    .flatMap(key -> RequestConditionKeys.members(action, key).stream()).toList();
+            Map<String, List<String>> read = XmlParser.valuesAt(bodyText(ctx), members);
+            if (read == null) {
+                // The handler refuses a body it cannot read the same elements from, so nothing is checked on it.
+                return null;
+            }
+            values = member -> read.getOrDefault(member, List.of());
+        } else if ("json".equals(protocol) || "rest-json".equals(protocol)) {
+            JsonNode body = PassedRoles.jsonBody(ctx);
+            if (body == null) {
+                return null;
+            }
+            values = member -> jsonValues(body, member.split("\\."), 0, new ArrayList<>());
+        } else {
+            return null;
+        }
+        return requestConditions(action, values, requestConditionSpelling(namespace));
+    }
+
+    /**
+     * The scalar values at {@code path} in a JSON body, a member path as the table writes it, {@code *} stepping into
+     * every element of a list or map; a JSON null, a structure or a list where the path ends names nothing.
+     */
+    private static List<String> jsonValues(JsonNode node, String[] path, int step, List<String> found) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return found;
+        }
+        if (step == path.length) {
+            if (node.isValueNode()) {
+                found.add(node.asText());
+            }
+            return found;
+        }
+        if ("*".equals(path[step])) {
+            node.forEach(element -> jsonValues(element, path, step + 1, found));
+            return found;
+        }
+        return jsonValues(node.get(path[step]), path, step + 1, found);
+    }
+
+    /**
+     * Every value {@code values} reads for each member the table names for each key {@code action} takes, spelled by
+     * {@code spelling} as the namespace's service spells the member's shape; null when there are none.
+     */
+    private static Map<String, List<String>> requestConditions(String action, Function<String, List<String>> values,
+                                                               RequestConditionSpelling spelling) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         for (String key : RequestConditionKeys.requestKeys(action)) {
             for (String member : RequestConditionKeys.members(action, key)) {
-                putIfPresent(conditions, key, parameter.apply(member));
+                String shape = RequestConditionKeys.shape(action, member);
+                for (String value : values.apply(member)) {
+                    if (value != null && !value.isBlank()) {
+                        conditions.computeIfAbsent(key, ignored -> new ArrayList<>())
+                                .add(spelling == null ? value : spelling.spell(shape, value));
+                    }
+                }
             }
         }
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    /** The registered spelling of the namespace's request members; null when there is none. */
+    private RequestConditionSpelling requestConditionSpelling(String namespace) {
+        if (requestConditionSpellings == null || requestConditionSpellings.isUnsatisfied()) {
+            return null;
+        }
+        for (RequestConditionSpelling spelling : requestConditionSpellings) {
+            if (spelling.namespace().equals(namespace)) {
+                return spelling;
+            }
+        }
+        return null;
     }
 
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
@@ -424,25 +629,28 @@ public class IamConditionContextResolver {
                     .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
         }
         if (RequestConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
-            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
+            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(action, ctx));
         }
         return conditions.isEmpty() ? null : conditions;
     }
 
-    private String storedAuthType(ContainerRequestContext ctx) {
+    /** The authType of the web function endpoint the request names, as the request resources read it. */
+    private String storedAuthType(String action, ContainerRequestContext ctx) {
         if (!lambdaWebService.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
-        String endpointArn = ResourceArnBuilder.webFunctionArn(ctx.getUriInfo().getPath(), region,
-                requestContext.getAccountId());
+        String endpointArn = RequestResources.of(action, ctx, regionResolver.partitionForRegion(region), region,
+                        requestContext.getAccountId(), null, IamActionRegistry.pathLabels("lambda", ctx)).stream()
+                .filter(arn -> arn.contains("/endpoint/")).findFirst().orElse("");
         int child = endpointArn.lastIndexOf("/endpoint/");
         if (child < 0) {
             return null;
         }
         try {
-            return lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
-                    endpointArn.substring(child + "/endpoint/".length())).authType;
+            WebFunctionEndpoint endpoint = lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
+                    endpointArn.substring(child + "/endpoint/".length()));
+            return endpoint == null ? null : endpoint.authType;
         } catch (AwsException expected) {
             // The handler refuses the same names, so the key is only left out, as for a missing endpoint on AWS.
             return null;
@@ -746,6 +954,8 @@ public class IamConditionContextResolver {
         }
         if (targets != null) {
             addResourceTags(conditions, form.get(targets.query() + ".1"), targets);
+            addResourceKeys(conditions, form.get(targets.query() + ".1"), targets,
+                    heldTargets(action, ctx, form, targets));
         }
         return conditions.isEmpty() ? null : conditions;
     }
@@ -800,15 +1010,48 @@ public class IamConditionContextResolver {
             // The handlers read numbered members from 1 up to the first gap, and so does this.
             return targets;
         }
+        Map<String, Object> held = heldTargets(action, ctx, form, generatedTargets);
         for (int i = 2; form.containsKey(idParameter + i); i++) {
             Map<String, List<String>> conditions = new LinkedHashMap<>();
             if ("ec2:CreateTags".equals(action)) {
                 addRequestTags(conditions, form, "Tag.");
             }
             addResourceTags(conditions, form.get(idParameter + i), generatedTargets);
+            addResourceKeys(conditions, form.get(idParameter + i), generatedTargets, held);
             targets.add(conditions);
         }
         return targets;
+    }
+
+    /**
+     * What EC2 holds under each numbered target of an {@code action} request whose type has generated resource keys,
+     * keyed by id. The targets are looked up together, once per request and action, so the first target's context
+     * and the remaining targets' contexts share a single pass over EC2's stores however many the request names.
+     */
+    private Map<String, Object> heldTargets(String action, ContainerRequestContext ctx, Map<String, String> form,
+                                            RequestResourceMembers.Targets targets) {
+        String property = HELD_TARGETS + action;
+        if (ctx.getProperty(property) instanceof HeldTargets cached) {
+            return cached.byId();
+        }
+        Map<String, Object> held = new LinkedHashMap<>();
+        if (ec2Service.isResolvable()) {
+            Map<String, Set<String>> idsByType = new LinkedHashMap<>();
+            for (int i = 1; form.containsKey(targets.query() + "." + i); i++) {
+                String id = form.get(targets.query() + "." + i);
+                String type = targetType(id, targets);
+                if (type != null && !ec2ResourceKeys(type).isEmpty()) {
+                    idsByType.computeIfAbsent(type, ignored -> new LinkedHashSet<>()).add(id);
+                }
+            }
+            idsByType.forEach((type, ids) -> held.putAll(ec2Service.get().heldResources(requestRegion(), type, ids)));
+        }
+        ctx.setProperty(property, new HeldTargets(held));
+        return held;
+    }
+
+    /** The resources {@link #heldTargets} found for a request, kept on it under the action they were read for. */
+    private record HeldTargets(Map<String, Object> byId) {
     }
 
     private static void addRequestTags(Map<String, List<String>> conditions, Map<String, String> form,
@@ -825,20 +1068,124 @@ public class IamConditionContextResolver {
         }
     }
 
+    /**
+     * The stored tags and the generated resource keys of one generated EC2 ARN (see {@link #putResourceKeys}), never
+     * borrowed from another target in the same request.
+     */
+    public Map<String, List<String>> withEc2ResourceContext(String scope, String action, String resource,
+                                                           String region, String accountId,
+                                                           Map<String, List<String>> context) {
+        if (!"ec2".equals(scope) || RequestResources.hasIndividualTargets(action)
+                || !AwsArnUtils.isArn(resource) || !ec2Service.isResolvable()) {
+            return context;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
+        if (!"ec2".equals(arn.service()) || !region.equals(arn.region()) || !accountId.equals(arn.accountId())) {
+            return context;
+        }
+        String[] parts = arn.resource().split("/", 2);
+        if (parts.length != 2 || parts[1].contains("*") || parts[1].contains("?")) {
+            return context;
+        }
+        List<String> prefixes = RequestResourceMembers.table().resourceTagKeys()
+                .getOrDefault("ec2", Map.of()).getOrDefault(parts[0], List.of());
+        Map<String, RequestResourceMembers.ResourceKey> keys = ec2ResourceKeys(parts[0]);
+        if (prefixes.isEmpty() && keys.isEmpty()) {
+            return context;
+        }
+        Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
+        result.keySet().removeIf(key -> prefixes.stream().anyMatch(key::startsWith) || keys.containsKey(key));
+        putStoredTags(result, region, parts[1], prefixes);
+        if (!keys.isEmpty()) {
+            putResourceKeys(result, region, parts[0],
+                    ec2Service.get().heldResources(region, parts[0], List.of(parts[1])).get(parts[1]));
+        }
+        return result;
+    }
+
     private void addResourceTags(Map<String, List<String>> conditions, String resourceId,
                                  RequestResourceMembers.Targets targets) {
         if (resourceId == null || resourceId.isBlank() || !ec2Service.isResolvable()) {
             return;
         }
-        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
-        List<String> prefixes = List.of(RESOURCE_TAG_PREFIX);
+        String type = targetType(resourceId, targets);
+        List<String> prefixes = type == null ? List.of(RESOURCE_TAG_PREFIX)
+                : RequestResourceMembers.table().resourceTagKeys().getOrDefault("ec2", Map.of())
+                .getOrDefault(type, List.of());
+        putStoredTags(conditions, requestRegion(), resourceId, prefixes);
+    }
+
+    /**
+     * The generated resource keys of the type whose id prefix {@code resourceId} carries, from what {@code held} says
+     * EC2 holds under it (see {@link #putResourceKeys}).
+     */
+    private void addResourceKeys(Map<String, List<String>> conditions, String resourceId,
+                                 RequestResourceMembers.Targets targets, Map<String, Object> held) {
+        String type = targetType(resourceId, targets);
+        if (type != null) {
+            putResourceKeys(conditions, requestRegion(), type, held.get(resourceId));
+        }
+    }
+
+    /** The generated EC2 resource type whose id prefix {@code resourceId} carries, or null when none does. */
+    private static String targetType(String resourceId, RequestResourceMembers.Targets targets) {
+        if (resourceId == null || resourceId.isBlank()) {
+            return null;
+        }
         for (Map.Entry<String, String> type : targets.prefixes().entrySet()) {
             if (resourceId.startsWith(type.getValue())) {
-                prefixes = RequestResourceMembers.table().resourceTagKeys()
-                        .getOrDefault("ec2", Map.of()).getOrDefault(type.getKey(), List.of());
-                break;
+                return type.getKey();
             }
         }
+        return null;
+    }
+
+    /** The condition keys the request-resources table reads from a member of EC2's resource {@code type}. */
+    private static Map<String, RequestResourceMembers.ResourceKey> ec2ResourceKeys(String type) {
+        return RequestResourceMembers.table().resourceKeys().getOrDefault("ec2", Map.of())
+                .getOrDefault(type, Map.of());
+    }
+
+    private String requestRegion() {
+        return requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+    }
+
+    /**
+     * Each condition key the request-resources table gives EC2's resource {@code type} as a member of its botocore
+     * shape, valued from that member of {@code held}, the resource EC2 holds under the target's id, as the ARN of the
+     * key's type where the Service Reference types the key as one. A member with no value, or no resource held,
+     * leaves the key absent.
+     */
+    private void putResourceKeys(Map<String, List<String>> conditions, String region, String type, Object held) {
+        Map<String, RequestResourceMembers.ResourceKey> keys = ec2ResourceKeys(type);
+        if (keys.isEmpty() || held == null) {
+            return;
+        }
+        JsonNode resource = RESOURCE_MAPPER.valueToTree(held);
+        String account = requestContext.getAccountId();
+        String partition = regionResolver.partitionForRegion(region);
+        keys.forEach((key, spec) -> {
+            String value = memberValue(resource, spec.member());
+            if (value != null && !value.isBlank()) {
+                conditions.put(key, List.of(spec.arn() == null ? value
+                        : RequestResources.idArn("ec2", spec.arn(), value, partition, region, account)));
+            }
+        });
+    }
+
+    /** The scalar the resource holds in the botocore member {@code member}, its field of that name, case aside. */
+    private static String memberValue(JsonNode resource, String member) {
+        for (Map.Entry<String, JsonNode> field : resource.properties()) {
+            if (field.getKey().equalsIgnoreCase(member) && field.getValue().isValueNode()
+                    && !field.getValue().isNull()) {
+                return field.getValue().asText();
+            }
+        }
+        return null;
+    }
+
+    private void putStoredTags(Map<String, List<String>> conditions, String region, String resourceId,
+                               List<String> prefixes) {
         for (Tag tag : ec2Service.get().resourceTags(region, resourceId)) {
             for (String prefix : prefixes) {
                 conditions.put(prefix + tag.getKey(), List.of(tag.getValue() == null ? "" : tag.getValue()));

@@ -1,7 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -14,16 +13,13 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.time.Instant;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 class CloudWatchAlarmHistoryIntegrationTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SCOPE =
             "AWS4-HMAC-SHA256 Credential=test/20261026/us-east-1/monitoring/aws4_request";
     private static final String RESULT = "DescribeAlarmHistoryResponse.DescribeAlarmHistoryResult.";
@@ -112,25 +108,11 @@ class CloudWatchAlarmHistoryIntegrationTest {
         return json ? response.jsonPath().getString("message") : response.xmlPath().getString("ErrorResponse.Error.Message");
     }
 
-    private Response call(boolean json, String operation, Map<String, ?> body)
-            throws JsonProcessingException {
+    private Response call(boolean json, String operation, Map<String, ?> body) throws JsonProcessingException {
         if ("PutMetricAlarm".equals(operation)) {
             String name = body.get("AlarmName").toString();
-            cleanup.register(() -> given().port(baseUri.getPort()).contentType("application/x-amz-json-1.0")
-                    .header("Authorization", SCOPE)
-                    .header("X-Amz-Target", "GraniteServiceVersion20100801.DeleteAlarms")
-                    .body(MAPPER.valueToTree(Map.of("AlarmNames", List.of(name))).toString())
-                    .post("/").then().statusCode(200));
+            cleanup.register(() -> CloudWatchTestRequests.deleteAlarmJson(baseUri, SCOPE, name));
         }
-        if (json) {
-            return given().contentType("application/x-amz-json-1.0").header("Authorization", SCOPE)
-                    .header("X-Amz-Target", "GraniteServiceVersion20100801." + operation)
-                    .body(MAPPER.writeValueAsString(body)).post("/");
-        }
-        Map<String, Object> form = new LinkedHashMap<>();
-        form.put("Action", operation);
-        form.putAll(body);
-        return given().contentType("application/x-www-form-urlencoded").header("Authorization", SCOPE)
-                .formParams(form).post("/");
+        return CloudWatchTestRequests.call(baseUri, SCOPE, json, operation, body);
     }
 }

@@ -119,11 +119,11 @@ public class Ec2QueryHandler {
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 // EBS encryption defaults
                 case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
-                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(region);
-                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(region);
+                case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(params, region);
+                case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(params, region);
                 case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
-                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(params, region);
                 // AMI block public access
                 case "EnableImageBlockPublicAccess" -> handleEnableImageBlockPublicAccess(params, region);
                 case "DisableImageBlockPublicAccess" -> handleDisableImageBlockPublicAccess(params, region);
@@ -264,6 +264,9 @@ public class Ec2QueryHandler {
                 case "DeregisterImage" -> handleDeregisterImage(params, region);
                 case "CopyImage" -> handleCopyImage(params, region);
                 case "DescribeSnapshots" -> handleDescribeSnapshots(params, region);
+                case "CreateSnapshot" -> handleCreateSnapshot(params, region);
+                case "DeleteSnapshot" -> handleDeleteSnapshot(params, region);
+                case "CopySnapshot" -> handleCopySnapshot(params, region);
                 // Tags
                 case "CreateTags" -> handleCreateTags(params, region);
                 case "DeleteTags" -> handleDeleteTags(params, region);
@@ -678,12 +681,14 @@ public class Ec2QueryHandler {
                 ebsEncryptionService.getEbsEncryptionByDefault(region));
     }
 
-    private Response handleEnableEbsEncryptionByDefault(String region) {
+    private Response handleEnableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("EnableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.enableEbsEncryptionByDefault(region));
     }
 
-    private Response handleDisableEbsEncryptionByDefault(String region) {
+    private Response handleDisableEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("DisableEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.disableEbsEncryptionByDefault(region));
     }
@@ -695,10 +700,11 @@ public class Ec2QueryHandler {
 
     private Response handleModifyEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
         return ebsKmsKeyResponse("ModifyEbsDefaultKmsKeyIdResponse",
-                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId")));
+                ebsEncryptionService.modifyEbsDefaultKmsKeyId(region, p.getFirst("KmsKeyId"), dryRun(p)));
     }
 
-    private Response handleResetEbsDefaultKmsKeyId(String region) {
+    private Response handleResetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("ResetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.resetEbsDefaultKmsKeyId(region));
     }
@@ -817,6 +823,7 @@ public class Ec2QueryHandler {
         // the instance's primary interface (network_interface { network_interface_id = ... }).
         String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
         int networkInterfaceDeviceIndex = parseIntParam(p, "NetworkInterface.1.DeviceIndex", 0);
+        Boolean explicitDeleteOnTermination = parseOptionalBoolean(p.getFirst("NetworkInterface.1.DeleteOnTermination"), "NetworkInterface.1.DeleteOnTermination");
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
         // With a primary interface spec the groups travel on it: Terraform's aws_instance sends that
@@ -944,12 +951,26 @@ public class Ec2QueryHandler {
             }
         }
 
+        // AWS only allows DeleteOnTermination=true for a newly created interface.
+        if (Boolean.TRUE.equals(explicitDeleteOnTermination) && networkInterfaceId != null && !networkInterfaceId.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You can specify true for DeleteOnTermination only when creating a new network interface.", 400);
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, dryRun(p),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
                 "spot".equals(marketType), privateIpAddress, capacitySpecification);
+
+        // Apply an explicit NetworkInterface.1.DeleteOnTermination to the launched instance.
+        if (explicitDeleteOnTermination != null) {
+            for (Instance inst : res.getInstances()) {
+                service.setNetworkInterfaceDeleteOnTermination(region, inst.getInstanceId(),
+                        explicitDeleteOnTermination);
+            }
+        }
 
         // The request's EbsOptimized wins over a launch template's. Applied after the launch, on this
         // API path only: CloudFormation, Auto Scaling and Fleet launches still read false. Passing it
@@ -1471,7 +1492,7 @@ public class Ec2QueryHandler {
 
     private Response handleTerminateInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Map<String, String>> changes = service.terminateInstances(region, ids);
+        List<Map<String, String>> changes = service.terminateInstances(region, ids, dryRun(p));
         return xmlResponse(buildInstanceStateChangeXml("TerminateInstancesResponse", changes));
     }
 
@@ -1511,7 +1532,7 @@ public class Ec2QueryHandler {
      */
     private Response handleMonitoring(MultivaluedMap<String, String> p, String region, String action,
                                       boolean enabled) {
-        List<String> changed = service.setInstanceMonitoring(region, getList(p, "InstanceId"), enabled);
+        List<String> changed = service.setInstanceMonitoring(region, getList(p, "InstanceId"), enabled, dryRun(p));
         String state = enabled ? "enabled" : "disabled";
         XmlBuilder xml = new XmlBuilder()
                 .start(action + "Response", AwsNamespaces.EC2)
@@ -1531,13 +1552,13 @@ public class Ec2QueryHandler {
 
     private Response handleStartInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Map<String, String>> changes = service.startInstances(region, ids);
+        List<Map<String, String>> changes = service.startInstances(region, ids, dryRun(p));
         return xmlResponse(buildInstanceStateChangeXml("StartInstancesResponse", changes));
     }
 
     private Response handleStopInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        List<Map<String, String>> changes = service.stopInstances(region, ids);
+        List<Map<String, String>> changes = service.stopInstances(region, ids, dryRun(p));
         return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
     }
 
@@ -1563,7 +1584,7 @@ public class Ec2QueryHandler {
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "InstanceId");
-        service.rebootInstances(region, ids);
+        service.rebootInstances(region, ids, dryRun(p));
         return booleanResponse("RebootInstances");
     }
 
@@ -1677,16 +1698,16 @@ public class Ec2QueryHandler {
         // UserData arrives base64-encoded, as on RunInstances; both forms are kept so the attribute
         // describes back exactly as sent.
         String userDataEncoded = p.getFirst("UserData.Value");
-        if (userDataEncoded != null) {
-            service.modifyInstanceUserData(region, instanceId, Ec2UserDataDecoder.decode(userDataEncoded), userDataEncoded);
-        }
+        String userData = userDataEncoded == null ? null : Ec2UserDataDecoder.decode(userDataEncoded);
         // Find which attribute is being modified
+        String attrName = null;
+        String attrValue = null;
         for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
             String val = p.getFirst(attr);
             if (val != null) {
-                String attrName = attr.replace(".Value", "");
+                attrName = attr.replace(".Value", "");
                 attrName = Character.toLowerCase(attrName.charAt(0)) + attrName.substring(1);
-                service.modifyInstanceAttribute(region, instanceId, attrName, val);
+                attrValue = val;
                 break;
             }
         }
@@ -1699,6 +1720,17 @@ public class Ec2QueryHandler {
             }
             groupIds.add(groupId);
         }
+        if (dryRun(p)) {
+            service.checkInstanceAttributeChange(region, instanceId, userDataEncoded != null, attrName != null,
+                    groupIds);
+            throw Ec2Service.dryRunOperation();
+        }
+        if (userDataEncoded != null) {
+            service.modifyInstanceUserData(region, instanceId, userData, userDataEncoded);
+        }
+        if (attrName != null) {
+            service.modifyInstanceAttribute(region, instanceId, attrName, attrValue);
+        }
         if (!groupIds.isEmpty()) {
             service.modifyInstanceGroups(region, instanceId, groupIds);
         }
@@ -1710,7 +1742,8 @@ public class Ec2QueryHandler {
         if (instanceId == null || instanceId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
         }
-        Instance inst = service.modifyInstanceMetadataOptions(region, instanceId, parseMetadataOptions(p, ""));
+        Instance inst = service.modifyInstanceMetadataOptions(region, instanceId, parseMetadataOptions(p, ""),
+                dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyInstanceMetadataOptionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2411,7 +2444,8 @@ public class Ec2QueryHandler {
                 p.getFirst("AddressFamily"),
                 p.getFirst("Description"),
                 null,
-                p.getFirst("ClientToken"));
+                p.getFirst("ClientToken"),
+                parseTagsForResource(p, "ipam-pool"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateIpamPoolResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
@@ -2502,11 +2536,13 @@ public class Ec2QueryHandler {
                 parseOptionalInt(p.getFirst("NetmaskLength"), "NetmaskLength"),
                 p.getFirst("Cidr"),
                 p.getFirst("Description"),
-                p.getFirst("ClientToken"));
+                p.getFirst("ClientToken"),
+                parseTagsForResource(p, "ipam-pool-allocation"));
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateIpamPoolCidrResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
-        writeIpamPoolAllocation(xml, "ipamPoolAllocation", allocation);
+        writeIpamPoolAllocation(xml, "ipamPoolAllocation", allocation,
+                ipamService.poolRegion(region, p.getFirst("IpamPoolId")));
         xml.end("AllocateIpamPoolCidrResponse");
         return xmlResponse(xml.build());
     }
@@ -2525,13 +2561,14 @@ public class Ec2QueryHandler {
     }
 
     private Response handleGetIpamPoolAllocations(MultivaluedMap<String, String> p, String region) {
+        String poolRegion = ipamService.poolRegion(region, p.getFirst("IpamPoolId"));
         XmlBuilder xml = new XmlBuilder()
                 .start("GetIpamPoolAllocationsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("ipamPoolAllocationSet");
         for (IpamPoolAllocation allocation
                 : ipamService.getIpamPoolAllocations(region, p.getFirst("IpamPoolId"))) {
-            writeIpamPoolAllocation(xml, "item", allocation);
+            writeIpamPoolAllocation(xml, "item", allocation, poolRegion);
         }
         xml.end("ipamPoolAllocationSet").end("GetIpamPoolAllocationsResponse");
         return xmlResponse(xml.build());
@@ -2592,18 +2629,22 @@ public class Ec2QueryHandler {
         if (pool.getAllocationDefaultNetmaskLength() != null) {
             xml.elem("allocationDefaultNetmaskLength", String.valueOf(pool.getAllocationDefaultNetmaskLength()));
         }
-        xml.end(wrapper);
+        xml.raw(tagSetXml(service.resourceTags(pool.getRegion(), pool.getIpamPoolId())))
+                .end(wrapper);
     }
 
-    private void writeIpamPoolAllocation(XmlBuilder xml, String wrapper, IpamPoolAllocation allocation) {
+    private void writeIpamPoolAllocation(XmlBuilder xml, String wrapper, IpamPoolAllocation allocation,
+                                         String poolRegion) {
         xml.start(wrapper)
                 .elem("ipamPoolAllocationId", allocation.getIpamPoolAllocationId())
                 .elem("cidr", allocation.getCidr())
-                .elem("resourceType", allocation.getResourceType());
+                .elem("resourceType", allocation.getResourceType())
+                .elem("resourceOwner", allocation.getResourceOwner());
         if (allocation.getDescription() != null) {
             xml.elem("description", allocation.getDescription());
         }
-        xml.end(wrapper);
+        xml.raw(tagSetXml(service.resourceTags(poolRegion, allocation.getIpamPoolAllocationId())))
+                .end(wrapper);
     }
 
     private Response handleCreateVpcEndpoint(MultivaluedMap<String, String> p, String region) {
@@ -3760,7 +3801,7 @@ public class Ec2QueryHandler {
             if (ruleId == null) break;
             Map<String, String> update = new LinkedHashMap<>();
             update.put("SecurityGroupRuleId", ruleId);
-            String desc = p.getFirst("SecurityGroupRule." + i + ".SecurityGroupRuleRequest.Description");
+            String desc = p.getFirst("SecurityGroupRule." + i + ".SecurityGroupRule.Description");
             if (desc != null) update.put("Description", desc);
             updates.add(update);
         }
@@ -4191,6 +4232,42 @@ public class Ec2QueryHandler {
             xml.start("item").raw(snapshotXml(snapshot)).end("item");
         }
         xml.end("snapshotSet").end("DescribeSnapshotsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * CreateSnapshot. The response reports {@code pending} with no progress yet, as AWS does for
+     * a snapshot it has just started; DescribeSnapshots then reports it {@code completed}.
+     */
+    private Response handleCreateSnapshot(MultivaluedMap<String, String> p, String region) {
+        List<Tag> snapshotTags = parseTagsForResource(p, "snapshot", Set.of("snapshot"));
+        Snapshot snapshot = service.createSnapshot(region, p.getFirst("VolumeId"),
+                p.getFirst("Description"), snapshotTags, dryRun(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateSnapshotResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .raw(snapshotXml(snapshot, "pending", ""))
+                .end("CreateSnapshotResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteSnapshot(MultivaluedMap<String, String> p, String region) {
+        service.deleteSnapshot(region, p.getFirst("SnapshotId"), dryRun(p));
+        return booleanResponse("DeleteSnapshot");
+    }
+
+    private Response handleCopySnapshot(MultivaluedMap<String, String> p, String region) {
+        List<Tag> snapshotTags = parseTagsForResource(p, "snapshot", Set.of("snapshot"));
+        boolean encrypted = Boolean.TRUE.equals(parseOptionalBoolean(p.getFirst("Encrypted"), "Encrypted"));
+        Snapshot copy = service.copySnapshot(region, p.getFirst("SourceRegion"),
+                p.getFirst("SourceSnapshotId"), p.getFirst("Description"), encrypted, snapshotTags,
+                dryRun(p));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CopySnapshotResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("snapshotId", copy.getSnapshotId())
+                .raw(tagSetXml(copy.getTags()))
+                .end("CopySnapshotResponse");
         return xmlResponse(xml.build());
     }
 
@@ -5587,7 +5664,12 @@ public class Ec2QueryHandler {
             if (eni.getAttachTime() != null) {
                 xml.elem("attachTime", eni.getAttachTime());
             }
-            xml.elem("deleteOnTermination", "true")
+            boolean deleteOnTermination = eni.isDeleteOnTermination();
+            NetworkInterface standalone = service.getNetworkInterface(inst.getRegion(), eni.getNetworkInterfaceId());
+            if (standalone != null && standalone.getAttachment() != null) {
+                deleteOnTermination = standalone.getAttachment().isDeleteOnTermination();
+            }
+            xml.elem("deleteOnTermination", String.valueOf(deleteOnTermination))
                     .end("attachment")
                     .start("privateIpAddressesSet")
                     .start("item")
@@ -6725,11 +6807,15 @@ public class Ec2QueryHandler {
     }
 
     private String snapshotXml(Snapshot snapshot) {
+        return snapshotXml(snapshot, snapshot.getState(), snapshot.getProgress());
+    }
+
+    private String snapshotXml(Snapshot snapshot, String status, String progress) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("snapshotId", snapshot.getSnapshotId())
                 .elem("ownerId", snapshot.getOwnerId())
-                .elem("status", snapshot.getState())
-                .elem("progress", snapshot.getProgress())
+                .elem("status", status)
+                .elem("progress", progress)
                 .elem("encrypted", String.valueOf(snapshot.isEncrypted()))
                 .elem("description", snapshot.getDescription());
         if (snapshot.getVolumeId() != null) {
@@ -6775,7 +6861,7 @@ public class Ec2QueryHandler {
         checkDryRun(p);
 
         Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
-                encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags);
+                encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags, p.getFirst("ClientToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVolumeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -7037,7 +7123,7 @@ public class Ec2QueryHandler {
 
         List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
                 type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,
-                spotRequestTags, instanceTags, userDataEncoded);
+                spotRequestTags, instanceTags, userDataEncoded, dryRun(p));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RequestSpotInstancesResponse", AwsNamespaces.EC2)
@@ -7070,7 +7156,7 @@ public class Ec2QueryHandler {
 
     private Response handleCancelSpotInstanceRequests(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "SpotInstanceRequestId");
-        List<SpotInstanceRequest> requests = service.cancelSpotInstanceRequests(region, ids);
+        List<SpotInstanceRequest> requests = service.cancelSpotInstanceRequests(region, ids, dryRun(p));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("CancelSpotInstanceRequestsResponse", AwsNamespaces.EC2)

@@ -37,6 +37,14 @@ public interface SparkJobRunner {
         /** The run's Spark driver runs. */
         void started();
 
+        /**
+         * The run resolved the custom image its job names for {@code workerType} ({@link Job#customImage} for its
+         * driver, {@link Executors#image} for its executors) to the image whose manifest digest is {@code digest}, and
+         * runs that image as that worker type.
+         */
+        default void imageResolved(WorkerType workerType, String digest) {
+        }
+
         /** The run has passed its timeout, and its driver is about to be stopped. */
         void timedOut();
 
@@ -45,6 +53,12 @@ public interface SparkJobRunner {
          * that runs is stopped.
          */
         boolean cancelled();
+    }
+
+    /** What a run's container runs as: its driver, or one of its executors. */
+    enum WorkerType {
+        DRIVER,
+        EXECUTOR
     }
 
     /** What a run's driver runs: Spark's {@code spark-submit}, or Hive's {@code hive}. */
@@ -162,7 +176,8 @@ public interface SparkJobRunner {
      * nodes hold it, else 0.
      */
     record Storage(String home, String mnt, String hdfsHost, String hdfsAddress, String hdfsNetwork,
-                   String hiveMetastore, String resourceManager, String flociEndpoint, int replication) {
+                   String hiveMetastore, String resourceManager, String flociEndpoint, int replication,
+                   String metadataAddress) {
 
         /**
          * The component label of an EMR cluster's HDFS container, which carries its service's labels as a driver
@@ -175,19 +190,19 @@ public interface SparkJobRunner {
 
         /** A cluster's volumes, before its HDFS runs. */
         public Storage(String home, String mnt) {
-            this(home, mnt, null, null, null, null, null, null, 0);
+            this(home, mnt, null, null, null, null, null, null, 0, null);
         }
 
         /** This storage, its HDFS's NameNode on {@code host}, at {@code address} on {@code network}. */
         public Storage withHdfs(String host, String address, String network) {
             return new Storage(home, mnt, host, address, network, hiveMetastore, resourceManager, flociEndpoint,
-                    replication);
+                    replication, metadataAddress);
         }
 
         /** This storage, its Hive metastore service at {@code uri}. */
         public Storage withHiveMetastore(String uri) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, uri, resourceManager, flociEndpoint,
-                    replication);
+                    replication, metadataAddress);
         }
 
         /**
@@ -196,13 +211,22 @@ public interface SparkJobRunner {
          */
         public Storage withYarn(String host, String flociEndpoint) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, host, flociEndpoint,
-                    replication);
+                    replication, metadataAddress);
         }
 
         /** This storage, its HDFS keeping {@code copies} copies of a block on its core nodes. */
         public Storage withReplication(int copies) {
             return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
-                    flociEndpoint, copies);
+                    flociEndpoint, copies, metadataAddress);
+        }
+
+        /**
+         * This storage, the step's container given {@code address}, a link-local one, on the HDFS's network, where its
+         * cluster's instance metadata relay answers it as the cluster's primary node.
+         */
+        public Storage withMetadataAddress(String address) {
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
+                    flociEndpoint, replication, address);
         }
     }
 

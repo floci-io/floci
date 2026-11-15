@@ -369,6 +369,73 @@ class CloudFormationLogsIntegrationTest {
     }
 
     @Test
+    void renamedLogGroupSurvivesARolledBackUpdateAndTheReplacementIsRemoved() {
+        // LogGroupName is "Update requires: Replacement": AWS creates the new group first and removes
+        // the old one only in the cleanup phase after the whole update succeeds. When a later
+        // resource fails, the rollback keeps the old group and deletes the new one.
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-logs-rename-rollback-stack-" + suffix;
+        String oldName = "/cfn/test/rb-old-" + suffix;
+        String newName = "/cfn/test/rb-new-" + suffix;
+        String failingTemplate = """
+                {"Resources":{
+                  "LogGroup":{"Type":"AWS::Logs::LogGroup","Properties":{"LogGroupName":"%s"}},
+                  "ZFail":{"Type":"AWS::CloudFormation::Stack","DependsOn":"LogGroup","Properties":{}}
+                }}
+                """.formatted(newName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", logGroupTemplate(oldName, 7))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", failingTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE", CFN_AUTH);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<PhysicalResourceId>" + oldName + "</PhysicalResourceId>"))
+            .body(not(containsString(newName)));
+
+        given()
+            .config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig()
+                    .encodeContentTypeAs("application/x-amz-json-1.1", ContentType.TEXT)))
+            .header("Authorization", LOGS_AUTH)
+            .header("X-Amz-Target", "Logs_20140328.DescribeLogGroups")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"logGroupNamePrefix\":\"/cfn/test/rb-\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("\"logGroupName\":\"" + oldName + "\""))
+            .body(not(containsString(newName)));
+    }
+
+    @Test
     void updateStackRemovingExplicitName_generatesFreshNameInsteadOfKeepingOld() {
         // Going from an explicit LogGroupName to none is a naming-mode change, which is itself a
         // replacement on real AWS - the group must get a freshly generated name, not silently keep

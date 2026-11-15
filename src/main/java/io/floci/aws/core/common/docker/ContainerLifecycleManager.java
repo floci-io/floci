@@ -3,6 +3,7 @@ package io.floci.aws.core.common.docker;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -248,6 +249,15 @@ public class ContainerLifecycleManager {
                 removeFailedContainer(containerId, e, removeAnonymousVolumes);
                 throw new IllegalStateException(
                         "Failed to attach pre-start network configuration for container " + containerId, e);
+            }
+        }
+        for (String network : spec.joinedNetworks()) {
+            try {
+                dockerClient.connectToNetworkCmd().withContainerId(containerId).withNetworkId(network).exec();
+            } catch (RuntimeException e) {
+                removeFailedContainer(containerId, e, removeAnonymousVolumes);
+                throw new IllegalStateException("Could not connect container " + containerId + " to Docker network "
+                        + network + ": " + e.getMessage(), e);
             }
         }
         return containerId;
@@ -1044,10 +1054,12 @@ public class ContainerLifecycleManager {
 
     /** Connects the created container {@code containerId} to {@code networkName} too, before it starts. */
     public void connectToNetwork(String containerId, String networkName) {
-        dockerClient.connectToNetworkCmd()
-                .withContainerId(containerId)
-                .withNetworkId(networkName)
-                .exec();
+        connectToNetwork(containerId, networkName, null);
+    }
+
+    /** Connects {@code containerId} to {@code networkName}, with {@code linkLocalIp} there too unless it is null. */
+    public void connectToNetwork(String containerId, String networkName, String linkLocalIp) {
+        connect(containerId, networkName, null, linkLocalIp);
     }
 
     /**
@@ -1055,15 +1067,30 @@ public class ContainerLifecycleManager {
      * as {@code alias}, unless it is on it already.
      */
     public void ensureConnected(String containerId, String networkName, String alias) {
+        ensureConnected(containerId, networkName, alias, null);
+    }
+
+    /** As {@link #ensureConnected(String, String, String)}, with {@code linkLocalIp} there too unless it is null. */
+    public void ensureConnected(String containerId, String networkName, String alias, String linkLocalIp) {
         if (networksOf(containerId).containsKey(networkName)) {
             return;
         }
-        dockerClient.connectToNetworkCmd()
-                .withContainerId(containerId)
-                .withNetworkId(networkName)
-                .withContainerNetwork(new ContainerNetwork().withAliases(alias))
-                .exec();
+        connect(containerId, networkName, new ContainerNetwork().withAliases(alias), linkLocalIp);
         LOG.debugv("Connected {0} to network {1} as {2}", containerId, networkName, alias);
+    }
+
+    // Connects containerId to networkName, at endpoint unless it is null, with linkLocalIp there too unless it is null.
+    private void connect(String containerId, String networkName, ContainerNetwork endpoint, String linkLocalIp) {
+        ContainerNetwork at = linkLocalIp == null ? endpoint
+                : (endpoint != null ? endpoint : new ContainerNetwork())
+                        .withIpamConfig(new LinkLocalIpam(List.of(linkLocalIp)));
+        ConnectToNetworkCmd connect = dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(networkName);
+        if (at != null) {
+            connect.withContainerNetwork(at);
+        }
+        connect.exec();
     }
 
     /**
@@ -1473,8 +1500,9 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Returns the underlying DockerClient for operations not covered by this manager.
-     * Prefer using manager methods when available.
+     * Returns the underlying control-plane DockerClient for operations not covered by this
+     * manager. Prefer using manager methods when available. A stream that stays open for a
+     * container's lifetime belongs on the {@link StreamingDocker} client instead.
      */
     public DockerClient getDockerClient() {
         return dockerClient;

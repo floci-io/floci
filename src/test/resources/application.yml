@@ -218,6 +218,8 @@ floci:
       snapshot-sweep-interval-seconds: 60
       snapshot-copy-enabled: false
       snapshot-copy-sweep-interval-seconds: 60
+      scheduled-actions-enabled: false
+      scheduled-action-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -228,6 +230,7 @@ floci:
       proxy-backend-connect-timeout-millis: 5000
       proxy-max-connections: 2000
       spectrum-max-rows: 1000000
+      spectrum-lake-formation-enforcement: false
     rds:
       enabled: true
       mock: false
@@ -290,6 +293,8 @@ floci:
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+      creating-delay-millis: 0
+      updating-delay-millis: 0
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true

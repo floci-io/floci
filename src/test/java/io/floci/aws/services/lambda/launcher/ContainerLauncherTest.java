@@ -10,6 +10,7 @@ import com.github.dockerjava.api.command.ExecStartCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
+import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.ContainerConfig;
@@ -109,6 +110,7 @@ class ContainerLauncherTest {
     @Mock EmbeddedDnsServer embeddedDnsServer;
     @Mock RuntimeApiServer runtimeApiServer;
     @Mock DockerClient dockerClient;
+    @Mock DockerClient streamingDockerClient;
     @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
     @Mock LambdaLayerService layerService;
     @Mock Ec2Service ec2Service;
@@ -256,7 +258,7 @@ class ContainerLauncherTest {
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         ContainerLauncher backgroundLauncher = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
-                lifecycleManager, logStreamer, imageResolver, runtimeApiServerFactory,
+                lifecycleManager, streamingDockerClient, logStreamer, imageResolver, runtimeApiServerFactory,
                 dockerHostResolver, config, ecrRegistryManager, layers,
                 new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service);
         LambdaFunction fn = new LambdaFunction();
@@ -509,7 +511,7 @@ class ContainerLauncherTest {
                 networkResolver, new ContainerEngineDetector(dockerClient));
         ContainerReachableEndpoint endpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
-        return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,
+        return new ContainerLauncher(builder, lifecycleManager, streamingDockerClient, logStreamer, selectedResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
                 executionRoleCredentials, ec2Service);
@@ -2448,7 +2450,7 @@ class ContainerLauncherTest {
                     launchCmds.add(launchCmd);
                     return launchCmd;
                 });
-        lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
+        lenient().when(streamingDockerClient.execStartCmd(launchedExecId()))
                 .thenAnswer(invocation -> {
                     ExecStartCmd start = mock(ExecStartCmd.class);
                     when(start.exec(any())).thenAnswer(startInvocation -> {
@@ -2463,11 +2465,16 @@ class ContainerLauncherTest {
         return launchCmds;
     }
 
+    /** Matches the id of an exec {@link #stubExtensionDiscoveryFromTar} created for an extension launch. */
+    private static String launchedExecId() {
+        return argThat(id -> id != null && id.startsWith("exec-launch-"));
+    }
+
     /** Overrides the default exec-start stub so the callback the launcher supplies is driven with a
      *  real STDOUT {@link Frame} carrying {@code output}, exercising the frame-to-CloudWatch path
      *  rather than only completing the callback. */
     private void stubExecStartEmittingFrame(String output) {
-        lenient().when(dockerClient.execStartCmd(argThat(id -> id != null && id.startsWith("exec-launch-"))))
+        lenient().when(streamingDockerClient.execStartCmd(launchedExecId()))
                 .thenAnswer(invocation -> {
                     ExecStartCmd start = mock(ExecStartCmd.class);
                     when(start.exec(any())).thenAnswer(startInvocation -> {
@@ -2517,6 +2524,28 @@ class ContainerLauncherTest {
         inOrder.verify(dockerClient, atLeastOnce()).execCreateCmd("container-123");
     }
 
+    // Catches: the extension exec or the exit watch running on the control-plane client, where
+    // each warm container would hold a lease for its whole lifetime and starve short Docker calls.
+    @Test
+    void launchFunction_holdsExtensionAndExitStreamsOnTheStreamingClient() throws Exception {
+        stubExtensionDiscovery("lambda-adapter");
+        WaitContainerCmd wait = mock(WaitContainerCmd.class);
+        when(streamingDockerClient.waitContainerCmd("container-123")).thenReturn(wait);
+        when(wait.exec(any())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("streaming-pool-fn");
+        fn.setPackageType("Image");
+        fn.setImageUri("123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:latest");
+
+        launcher.launch(fn);
+
+        verify(streamingDockerClient).execStartCmd(launchedExecId());
+        verify(streamingDockerClient).waitContainerCmd("container-123");
+        verify(dockerClient, never()).execStartCmd(anyString());
+        verify(dockerClient, never()).waitContainerCmd(anyString());
+    }
+
     /**
      * Extension stdout/stderr must reach the function's CloudWatch log group. `docker logs` — and
      * therefore ContainerLogStreamer.attach(), which uses logContainerCmd — only covers the
@@ -2534,7 +2563,8 @@ class ContainerLauncherTest {
         ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
-                new ContainerLogStreamer(dockerClient, cloudWatchLogs),
+                streamingDockerClient,
+                new ContainerLogStreamer(streamingDockerClient, cloudWatchLogs),
                 imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
                 ecrRegistryManager,
                 mock(LambdaLayerService.class),

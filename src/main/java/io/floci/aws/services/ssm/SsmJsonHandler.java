@@ -31,6 +31,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -163,7 +164,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleGetParameter(JsonNode request, String region, String authorization) {
-        String name = request.path("Name").asText();
+        String name = normalizeParameterName(request.path("Name").asText(), region);
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(List.of(name), withDecryption, region, authorization);
         Parameter param = ssmService.getParameter(name, withDecryption, region);
@@ -174,9 +175,30 @@ public class SsmJsonHandler {
         return Response.ok(response).build();
     }
 
+    private String normalizeParameterName(String name, String region) {
+        String normalized = SsmService.withoutSurroundingSpaces(name);
+        if (normalized.indexOf(' ') >= 0 && !ssmService.hasStoredParameter(normalized, region)) {
+            throw parameterNameSpaceError();
+        }
+        return normalized;
+    }
+
+    private String normalizeParameterPath(String path, String region) {
+        String normalized = SsmService.withoutSurroundingSpaces(path);
+        if (normalized.indexOf(' ') >= 0 && !ssmService.hasStoredParametersUnderPath(normalized, region)) {
+            throw parameterNameSpaceError();
+        }
+        return normalized;
+    }
+
+    private static AwsException parameterNameSpaceError() {
+        return new AwsException("ValidationException",
+                "Parameter names cannot contain spaces between characters.", 400);
+    }
+
     private Response handleGetParameters(JsonNode request, String region, String authorization) {
         List<String> names = new ArrayList<>();
-        request.path("Names").forEach(n -> names.add(n.asText()));
+        request.path("Names").forEach(n -> names.add(normalizeParameterName(n.asText(), region)));
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         authorizeSecretReads(names, withDecryption, region, authorization);
 
@@ -185,7 +207,8 @@ public class SsmJsonHandler {
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
-        for (Parameter p : params) {
+        List<Parameter> orderedParameters = params.stream().sorted(Comparator.comparing(Parameter::getName)).toList();
+        for (Parameter p : orderedParameters) {
             parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);
@@ -240,7 +263,7 @@ public class SsmJsonHandler {
             throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("path"));
         }
         PageRequest pageRequest = pageRequest(request, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
-        String path = request.path("Path").asText();
+        String path = normalizeParameterPath(request.path("Path").asText(), region);
         boolean recursive = request.path("Recursive").asBoolean(false);
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
 
@@ -301,7 +324,7 @@ public class SsmJsonHandler {
 
     private Response handleGetParameterHistory(JsonNode request, String region) {
         PageRequest pageRequest = pageRequest(request, GET_PARAMETER_HISTORY_MAX_RESULTS);
-        String name = request.path("Name").asText();
+        String name = normalizeParameterName(request.path("Name").asText(), region);
         boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
 
@@ -1152,7 +1175,7 @@ public class SsmJsonHandler {
     }
 
     private Response handleLabelParameterVersion(JsonNode request, String region) {
-        String name = request.path("Name").asText();
+        String name = normalizeParameterName(request.path("Name").asText(), region);
         Long parameterVersion = request.hasNonNull("ParameterVersion")
                 ? request.path("ParameterVersion").asLong()
                 : null;

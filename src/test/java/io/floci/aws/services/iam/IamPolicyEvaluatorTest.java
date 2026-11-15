@@ -1064,6 +1064,55 @@ class IamPolicyEvaluatorTest {
         assertEquals(ResourcePolicyDecision.ALLOW, resourceDecision(allButAlice, RequestPrincipal.anonymous()));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "\"NotPrincipal\":[]",
+        "\"NotPrincipal\":[123]",
+        "\"NotPrincipal\":{}",
+        "\"NotPrincipal\":{\"AWS\":[]}",
+        "\"NotPrincipal\":{\"AWS\":123}",
+    })
+    void aNotPrincipalThatNamesNobodyCoversNobody(String notPrincipal) {
+        // A principal is written as a string, so an element whose entries are no strings names
+        // nobody, as a NotAction or NotResource naming nothing excludes nothing and so matches
+        // nothing. An Allow sparing nobody would otherwise cover every caller there is.
+        RequestPrincipal alice = RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice");
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", notPrincipal), alice));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Allow", notPrincipal), RequestPrincipal.anonymous()));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(resourcePolicy("Deny", notPrincipal), alice));
+    }
+
+    @Test
+    void aPrincipalThatNamesNobodyDecidesTheStatementItIsWrittenIn() {
+        // A statement carrying both elements is a shape the grammar does not describe, and the
+        // Principal decides it either way, so one naming nobody leaves the statement matching
+        // nobody rather than handing the decision to the NotPrincipal beside it.
+        String both = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":[],"
+                + "\"NotPrincipal\":{\"AWS\":\"arn:aws:iam::123456789012:user/alice\"},"
+                + "\"Action\":\"*\",\"Resource\":\"*\"}]}";
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(both, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(both, RequestPrincipal.iam("arn:aws:iam::123456789012:user/bob")));
+        assertEquals(ResourcePolicyDecision.NEUTRAL, resourceDecision(both, RequestPrincipal.anonymous()));
+    }
+
+    @Test
+    void thePrincipalsNamedBesideAnEntryThatIsNoStringAreStillNamed() {
+        String allButAlice = resourcePolicy("Allow",
+                "\"NotPrincipal\":{\"AWS\":[123,\"arn:aws:iam::123456789012:user/alice\"]}");
+
+        assertEquals(ResourcePolicyDecision.NEUTRAL,
+                resourceDecision(allButAlice, RequestPrincipal.iam("arn:aws:iam::123456789012:user/alice")));
+        assertEquals(ResourcePolicyDecision.ALLOW,
+                resourceDecision(allButAlice, RequestPrincipal.iam("arn:aws:iam::123456789012:user/bob")));
+    }
+
     @Test
     void evaluatesResourcePolicyConditionsAndIdentityParity() {
         String condPolicy = """

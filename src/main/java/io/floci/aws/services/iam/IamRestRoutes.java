@@ -185,6 +185,15 @@ final class IamRestRoutes {
         return routes.containsKey(scope);
     }
 
+    /**
+     * Whether a route of the credential scope, of any method, takes the path and query: the path is one of its
+     * model's, whatever method a request sends to it.
+     */
+    boolean takesPath(String scope, String path, MultivaluedMap<String, String> query) {
+        return routes.getOrDefault(scope, Map.of()).keySet().stream()
+                .anyMatch(method -> match(scope, method, path, query).isPresent());
+    }
+
     static IamRestRoutes parse(InputStream in) throws IOException {
         JsonNode document = MAPPER.readTree(in);
         JsonNode handRouted = document == null ? null : document.path("handRouted");

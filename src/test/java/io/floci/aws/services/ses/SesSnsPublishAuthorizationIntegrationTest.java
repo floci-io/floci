@@ -54,10 +54,30 @@ class SesSnsPublishAuthorizationIntegrationTest {
     }
 
     @Test
+    void anEventDestinationIsRefusedWhileItsTopicRefusesSes() {
+        String topicArn = createSubscribedTopic(OWNER, createQueue(OWNER));
+        setTopicPolicy(OWNER, topicArn, rootOnly(topicArn));
+        String name = "authz-" + suffix();
+        ses(OWNER, "CreateConfigurationSet", Map.of("ConfigurationSet.Name", name)).statusCode(200);
+        cleanup.register(() -> ses(OWNER, "DeleteConfigurationSet", Map.of("ConfigurationSetName", name))
+                .statusCode(200));
+
+        ses(OWNER, "CreateConfigurationSetEventDestination", Map.of(
+                "ConfigurationSetName", name,
+                "EventDestination.Name", "to-sns",
+                "EventDestination.Enabled", "true",
+                "EventDestination.MatchingEventTypes.member.1", "send",
+                "EventDestination.SNSDestination.TopicARN", topicArn))
+                .statusCode(400)
+                .body(containsString("<Code>InvalidSNSDestination</Code>"))
+                .body(containsString("Access denied to SNS topic &lt;" + topicArn + "&gt;. Verify the SNS topic "
+                        + "policy grants Amazon SES the sns:Publish permission."));
+    }
+
+    @Test
     void aCallerRefusedSnsPublishCannotReachATopicThatRefusesSesThroughAConfigurationSet() {
         String queueUrl = createQueue(OWNER);
         String topicArn = createSubscribedTopic(OWNER, queueUrl);
-        setTopicPolicy(OWNER, topicArn, rootOnly(topicArn));
         String sender = createSender();
         String user = "ses-only-" + suffix();
         String accessKeyId = EnforcementFixtures.createUser(cleanup, baseUri.getPort(),
@@ -66,6 +86,9 @@ class SesSnsPublishAuthorizationIntegrationTest {
                 "PolicyName", "ses-only", "PolicyDocument", """
                         {"Version":"2012-10-17","Statement":[
                           {"Effect":"Allow","Action":"ses:*","Resource":"*"}]}""")).statusCode(200);
+        // The destination is refused while the topic refuses SES, so the policy changes after it is set.
+        String configurationSet = createConfigurationSet(accessKeyId, topicArn);
+        setTopicPolicy(OWNER, topicArn, rootOnly(topicArn));
         given()
                 .header("Authorization", EnforcementFixtures.auth(accessKeyId, "sns"))
                 .header("X-Amz-Target", "SNS_20100331.Publish")
@@ -76,7 +99,6 @@ class SesSnsPublishAuthorizationIntegrationTest {
         .then()
                 .statusCode(allOf(greaterThanOrEqualTo(400), lessThan(500)));
 
-        String configurationSet = createConfigurationSet(accessKeyId, topicArn);
         sendEmail(accessKeyId, sender, SUCCESS, configurationSet);
 
         assertEquals(0, receive(OWNER, queueUrl));

@@ -10,6 +10,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.budgets.model.BudgetActionRecord;
@@ -32,7 +33,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class BudgetsService implements Resettable {
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
-    private static final Pattern ACTION_ID = Pattern.compile("^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$");
     private static final Pattern IAM_POLICY_ARN = Pattern.compile("^arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::(?:\\d{12}|aws):policy/.+$");
     private static final Pattern SCP_POLICY_ID = Pattern.compile("^p-[0-9a-zA-Z_]{8,128}$");
     private static final Pattern SCP_TARGET_ID = Pattern.compile("^(?:ou-[0-9a-z]{4,32}-[a-z0-9]{8,32}|\\d{12})$");
@@ -834,7 +834,7 @@ public class BudgetsService implements Resettable {
         }
         String budgetName = requireBudgetNameValue(value.substring(0, actionMarker));
         String actionId = value.substring(actionMarker + "/action/".length());
-        if (!ACTION_ID.matcher(actionId).matches()) {
+        if (!UuidShapes.matchesEitherCase(actionId)) {
             throw invalid("ResourceARN contains an invalid action ID.");
         }
         return new ResourceRef(account, budgetName, actionId);
@@ -861,7 +861,7 @@ public class BudgetsService implements Resettable {
 
     private static String requireActionId(JsonNode request) {
         String actionId = text(request, "ActionId");
-        if (actionId == null || !ACTION_ID.matcher(actionId).matches()) {
+        if (!UuidShapes.matchesEitherCase(actionId)) {
             throw invalid("ActionId is invalid.");
         }
         return actionId;

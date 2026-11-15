@@ -16,8 +16,12 @@ import io.floci.aws.services.appsync.graphql.resolver.AppSyncResolverError;
 import io.floci.aws.services.appsync.graphql.resolver.AppSyncResolverExecutor;
 import io.floci.aws.services.appsync.graphql.resolver.ResolverCallbackSessions;
 import io.floci.aws.services.appsync.model.AuthenticationType;
+import io.floci.aws.services.appsync.model.DataSource;
+import io.floci.aws.services.appsync.model.DataSourceType;
+import io.floci.aws.services.appsync.model.FunctionConfiguration;
 import io.floci.aws.services.appsync.model.GraphqlApi;
 import io.floci.aws.services.appsync.model.Resolver;
+import io.floci.aws.services.appsync.model.ResolverKind;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
@@ -240,6 +244,77 @@ class AppSyncExecutionControllerTest {
                 spec.getValue().fields());
         assertEquals("http://floci.local:4566/_floci/appsync/resolve", spec.getValue().url());
         assertNotNull(spec.getValue().token());
+        assertEquals(100, spec.getValue().maxBatch());
+    }
+
+    @Test
+    void httpUnitFieldsHaveIndependentCallbackDeadlines() {
+        planTwoFieldsOneWithAResolver();
+        Resolver resolver = resolverExecutor.findResolver("api-1", "Query", "getMessages");
+        // A missing kind follows the executor's UNIT behavior.
+        resolver.setDataSourceName("Http");
+        DataSource source = new DataSource();
+        source.setType(DataSourceType.HTTP);
+        when(appSyncService.getDataSource("api-1", "Http")).thenReturn(source);
+        assertEquals(1, executeAndCaptureCallbacks().maxBatch());
+    }
+
+    @Test
+    void pipelineHttpFunctionsHaveIndependentCallbackDeadlines() {
+        planTwoFieldsOneWithAResolver();
+        Resolver resolver = resolverExecutor.findResolver("api-1", "Query", "getMessages");
+        resolver.setKind(ResolverKind.PIPELINE);
+        resolver.setPipelineConfig(Map.of("functions", List.of("local", "http")));
+        when(appSyncService.getFunction("api-1", "local")).thenReturn(new FunctionConfiguration());
+        FunctionConfiguration function = new FunctionConfiguration();
+        function.setDataSourceName("Http");
+        when(appSyncService.getFunction("api-1", "http")).thenReturn(function);
+        DataSource source = new DataSource();
+        source.setType(DataSourceType.HTTP);
+        when(appSyncService.getDataSource("api-1", "Http")).thenReturn(source);
+        assertEquals(1, executeAndCaptureCallbacks().maxBatch());
+    }
+
+    @Test
+    void nonHttpSourcesRetainNormalBatching() {
+        planTwoFieldsOneWithAResolver();
+        Resolver resolver = resolverExecutor.findResolver("api-1", "Query", "getMessages");
+        resolver.setDataSourceName("Table");
+        DataSource source = new DataSource();
+        source.setType(DataSourceType.AMAZON_DYNAMODB);
+        when(appSyncService.getDataSource("api-1", "Table")).thenReturn(source);
+        assertEquals(100, executeAndCaptureCallbacks().maxBatch());
+    }
+
+    @Test
+    void metadataFailureKeepsTheFieldWiredWithAnIndependentDeadline() {
+        planTwoFieldsOneWithAResolver();
+        when(resolverExecutor.findResolver("api-1", "Query", "getMessages"))
+                .thenThrow(new AwsException("ConflictException", "schema changing", 409));
+        GraphqlSidecarClient.ResolveSpec spec = executeAndCaptureCallbacks();
+        assertEquals(1, spec.maxBatch());
+        assertEquals(List.of(new GraphqlSidecarClient.ResolveField("Query", "getMessages")), spec.fields());
+    }
+
+    @Test
+    void dataSourceLookupFailureStillBelongsToTheCallbackField() {
+        planTwoFieldsOneWithAResolver();
+        resolverExecutor.findResolver("api-1", "Query", "getMessages").setDataSourceName("Missing");
+        when(appSyncService.getDataSource("api-1", "Missing"))
+                .thenThrow(new AwsException("NotFoundException", "missing", 404));
+        GraphqlSidecarClient.ResolveSpec spec = executeAndCaptureCallbacks();
+        assertEquals(1, spec.maxBatch());
+        assertEquals(1, spec.fields().size());
+    }
+
+    private GraphqlSidecarClient.ResolveSpec executeAndCaptureCallbacks() {
+        when(fieldAuthorizationPlanner.planDenyFields(any(), any())).thenReturn(List.of());
+        when(sidecarClient.execute(any(), any(), any(), any(), any(), any(), any())).thenReturn(Map.of("data", Map.of()));
+        controller.execute("api-1", jsonHeaders, "{\"query\":\"{ getMessages hello }\"}");
+        ArgumentCaptor<GraphqlSidecarClient.ResolveSpec> spec =
+                ArgumentCaptor.forClass(GraphqlSidecarClient.ResolveSpec.class);
+        verify(sidecarClient).execute(any(), any(), any(), any(), any(), any(), spec.capture());
+        return spec.getValue();
     }
 
     @Test
@@ -256,6 +331,8 @@ class AppSyncExecutionControllerTest {
 
         verify(sidecarClient).execute(any(), any(), any(), any(), any(), any());
         verify(sidecarClient, never()).execute(any(), any(), any(), any(), any(), any(), any());
+        verify(resolverExecutor, never()).findResolver("api-1", "Query", "getMessages");
+        verify(appSyncService, never()).getDataSource(any(), any());
     }
 
     @Test

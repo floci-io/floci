@@ -4,6 +4,7 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
@@ -11,11 +12,15 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import io.floci.aws.services.batch.model.BatchJob;
 import io.floci.aws.services.batch.model.BatchKeyValue;
 import io.floci.aws.services.batch.model.BatchNodeExecution;
 import io.floci.aws.services.batch.model.BatchResourceRequirement;
 import io.floci.aws.services.batch.model.BatchRunResult;
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.VpcContainerLeases;
+import io.floci.aws.services.ec2.VpcDependencyProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -23,13 +28,17 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class BatchDockerRunner implements ContainerTeardown {
+public class BatchDockerRunner implements ContainerTeardown, VpcDependencyProvider {
+
+    /** The label naming the Floci process that created a job container, set by {@link #jobLabels}. */
+    static final String RUN_LABEL = "io.floci.batch.run";
 
     private static final Logger LOG = Logger.getLogger(BatchDockerRunner.class);
     private static final String LOG_GROUP = "/aws/batch/job";
@@ -44,32 +53,47 @@ public class BatchDockerRunner implements ContainerTeardown {
     private final ContainerLogStreamer logStreamer;
     private final EmulatorConfig config;
     private final ContainerDetector containerDetector;
+    private final RegionResolver regionResolver;
+    /** The VPC address each running job container holds, given back once the container is gone. */
+    private final VpcContainerLeases vpcLeases;
+    /** This run's job containers, so a later run knows the ones a crash leaves for leftovers. */
+    private final RunLabelledContainers runContainers;
 
     @Inject
     public BatchDockerRunner(ContainerBuilder containerBuilder,
                              ContainerLifecycleManager lifecycleManager,
                              ContainerLogStreamer logStreamer,
                              EmulatorConfig config,
-                             ContainerDetector containerDetector) {
+                             ContainerDetector containerDetector,
+                             RegionResolver regionResolver,
+                             Ec2Service ec2Service) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.config = config;
         this.containerDetector = containerDetector;
+        this.regionResolver = regionResolver;
+        this.vpcLeases = new VpcContainerLeases(ec2Service, "Batch job", () -> lifecycleManager.getDockerClient());
+        this.runContainers = new RunLabelledContainers(lifecycleManager, config, "batch", RUN_LABEL, LOG);
     }
 
-    public BatchRunResult run(BatchJob job, int attemptNumber) {
+    /**
+     * Runs one attempt of {@code job} in a container; with a {@code subnetId}, from the job's compute environment,
+     * the container joins that subnet's VPC network first.
+     */
+    public BatchRunResult run(BatchJob job, int attemptNumber, String subnetId) {
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId());
         String containerName = ContainerStorageHelper.dockerName(config, "batch-" + job.getJobId() + "-" + attemptNumber);
         return runContainer(job, job.getJobId(), containerName, logStreamName,
                 "batch:" + job.getJobName() + ":" + job.getJobId(),
                 job.getContainerImage(), "Job definition container image is missing",
-                job.getResolvedCommand(), buildEnvironment(job, attemptNumber), job.getResourceRequirements());
+                job.getResolvedCommand(), buildEnvironment(job, attemptNumber), job.getResourceRequirements(),
+                subnetId);
     }
 
     // A distinct inFlightContainers key per node, since nodes of one job run concurrently.
-    public BatchRunResult run(BatchJob job, int attemptNumber, BatchNodeExecution node) {
+    public BatchRunResult run(BatchJob job, int attemptNumber, BatchNodeExecution node, String subnetId) {
         String logStreamName = logStreamer.generateLogStreamName(
                 job.getJobDefinitionName() + "/default/" + job.getJobId() + "/" + node.getNodeIndex());
         String containerName = ContainerStorageHelper.dockerName(config,
@@ -78,13 +102,14 @@ public class BatchDockerRunner implements ContainerTeardown {
         return runContainer(job, inFlightKey, containerName, logStreamName,
                 "batch:" + job.getJobName() + ":" + job.getJobId() + ":node" + node.getNodeIndex(),
                 node.getContainerImage(), "Node " + node.getNodeIndex() + " container image is missing",
-                node.getResolvedCommand(), buildNodeEnvironment(job, attemptNumber, node), node.getResourceRequirements());
+                node.getResolvedCommand(), buildNodeEnvironment(job, attemptNumber, node), node.getResourceRequirements(),
+                subnetId);
     }
 
     private BatchRunResult runContainer(BatchJob job, String inFlightKey, String containerName, String logStreamName,
                                         String logSourceLabel, String image, String missingImageMessage,
                                         List<String> command, List<String> env,
-                                        List<BatchResourceRequirement> resourceRequirements) {
+                                        List<BatchResourceRequirement> resourceRequirements, String subnetId) {
         long startedAt = System.currentTimeMillis();
         Closeable logHandle = null;
         String containerId = null;
@@ -105,8 +130,7 @@ public class BatchDockerRunner implements ContainerTeardown {
                     .withEmbeddedDns()
                     .withLogRotation()
                     .withJavaTrustStore()
-                    .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "batch", job.getJobId(), job.getAccountId(), job.getRegion()));
+                    .withLabels(jobLabels(job));
 
             if (command != null && !command.isEmpty()) {
                 builder.withCmd(command);
@@ -114,8 +138,14 @@ public class BatchDockerRunner implements ContainerTeardown {
             applyResourceRequirements(builder, resourceRequirements, job.getJobId());
 
             ContainerSpec spec = builder.build();
-            containerId = lifecycleManager.createAndStart(spec).containerId();
+            // Job state does not outlive the process, so a crash's job containers have nothing left to finish.
+            runContainers.removeLeftovers();
+            containerId = lifecycleManager.create(spec);
             inFlightContainers.put(inFlightKey, containerId);
+            // AWS Batch runs the job on an instance or Fargate task in its compute environment's subnets; the
+            // command is the entrypoint, so the container joins that network before it starts.
+            vpcLeases.join(job.getAccountId(), job.getRegion(), null, subnetId, containerId, job.getJobId());
+            lifecycleManager.startCreated(containerId, spec);
             if (stopRequestedJobs.contains(job.getJobId())) {
                 releaseAndStop(inFlightKey, containerId, null);
                 return stopped(startedAt, logStreamName);
@@ -143,6 +173,28 @@ public class BatchDockerRunner implements ContainerTeardown {
         }
     }
 
+    /** A job container's labels: its resource identity, and the deployment and run that created it. */
+    private Map<String, String> jobLabels(BatchJob job) {
+        Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
+                "batch", job.getJobId(), job.getAccountId(), job.getRegion()));
+        labels.putAll(runContainers.labels());
+        return labels;
+    }
+
+    /**
+     * A running job's network interface is in its subnet, so DeleteSubnet refuses it until the job's container is
+     * gone, as on AWS; a compute environment's subnets alone hold none here, since Floci runs no idle instances.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        return vpcLeases.holdsSubnet(regionResolver.getAccountId(), region, subnetId);
+    }
+
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return vpcLeases.holdsVpc(regionResolver.getAccountId(), region, vpcId);
+    }
+
     public void requestStop(String jobId) {
         stopRequestedJobs.add(jobId);
     }
@@ -155,6 +207,7 @@ public class BatchDockerRunner implements ContainerTeardown {
             if (inFlightContainers.remove(entry.getKey(), entry.getValue())) {
                 try {
                     lifecycleManager.stopAndRemove(entry.getValue(), null);
+                    vpcLeases.releaseIfGone(entry.getValue());
                 } catch (Exception e) {
                     LOG.warnv("Failed to stop Batch container for job {0}: {1}", jobId, e.getMessage());
                 }
@@ -178,6 +231,8 @@ public class BatchDockerRunner implements ContainerTeardown {
                 LOG.debugv("Error closing log stream for job {0}: {1}", jobId, e.getMessage());
             }
         }
+        // Whoever removed the container, its address goes back once Docker confirms it gone.
+        vpcLeases.releaseIfGone(containerId);
     }
 
     /**
@@ -190,6 +245,7 @@ public class BatchDockerRunner implements ContainerTeardown {
             if (inFlightContainers.remove(entry.getKey(), entry.getValue())) {
                 try {
                     lifecycleManager.stopAndRemove(entry.getValue(), null);
+                    vpcLeases.releaseIfGone(entry.getValue());
                 } catch (Exception e) {
                     LOG.warnv("Failed to stop Batch container for job {0} on shutdown: {1}",
                             entry.getKey(), e.getMessage());

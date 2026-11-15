@@ -1,14 +1,11 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -53,14 +50,7 @@ class LambdaS3DeploymentIntegrationTest {
         }
     }
 
-    private static byte[] makeZip(String body) throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(("exports.handler = async () => ({ body: '" + body + "' });")
-                    .getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+    private static byte[] makeZip(String body) {
+        return LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ body: '" + body + "' });");
     }
 }

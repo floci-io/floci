@@ -4,15 +4,17 @@ import io.floci.aws.core.common.auth.SigV4Canonicalization;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.Locale;
 
 /**
- * Shared helpers for the Maven, npm, pypi, and NuGet sidecar clients: URI construction out of
- * each one's own {@code baseUrl} plus one or more caller-supplied path segments (a repository
- * id, package coordinates, an asset filename), and a request timeout sized for forwarding a
- * large asset's real bytes rather than a small metadata-only request. Package-private: every
- * caller lives in this package, and {@link #combine} in particular requires its {@code
- * encodedPath} argument to already be fully percent-encoded, a precondition not worth exposing
- * to unrelated callers outside the four clients that know to uphold it.
+ * Shared helpers for the Maven, npm, pypi, NuGet, and Kellnr (Cargo) sidecar clients, and their
+ * external-connection siblings: URI construction out of each one's own {@code baseUrl} plus one
+ * or more caller-supplied path segments (a repository id, package coordinates, an asset
+ * filename), and a request timeout sized for forwarding a large asset's real bytes rather than a
+ * small metadata-only request. Package-private: every caller lives in this package, and {@link
+ * #combine} in particular requires its {@code encodedPath} argument to already be fully
+ * percent-encoded, a precondition not worth exposing to unrelated callers outside the clients
+ * that know to uphold it.
  */
 final class SidecarUriUtils {
 
@@ -92,5 +94,34 @@ final class SidecarUriUtils {
      */
     static Duration maxTransferTimeout() {
         return transferTimeout(CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+    }
+
+    /**
+     * The real crates.io sparse-index bucketing rule (RFC 2789), confirmed live against both
+     * Kellnr and the real {@code index.crates.io} (a 1 or 2 character name sits directly under a
+     * {@code 1}/{@code 2} directory, a 3 character name adds one more level keyed by its own
+     * first character, and a 4+ character name buckets by its own first two, then next two,
+     * characters), with no leading slash and no host-specific prefix: {@link KellnrSidecarClient}
+     * prepends its own {@code /api/v1/crates/}, {@code CargoExternalConnectionClient} prepends
+     * nothing (the real {@code index.crates.io} serves bucket paths straight off its own root).
+     * Lowercased: the Cargo Book's own registry-index page is explicit that both the bucket
+     * directory names and the index filename itself are the package name "converted to
+     * lowercase," confirmed live against the real production index (a mixed-case crate like
+     * {@code Inflector} 404s at {@code In/fl/Inflector} and only resolves at {@code in/fl/
+     * inflector}; the returned index line's own {@code name} field still preserves the original
+     * case). The {@code packageName} value itself, as used for anything other than this one path,
+     * keeps its original casing.
+     */
+    static String cratesIoBucketPath(String packageName) {
+        String lower = packageName.toLowerCase(Locale.ROOT);
+        String encoded = encodeSegment(lower);
+        int length = lower.length();
+        if (length <= 2) {
+            return length + "/" + encoded;
+        }
+        if (length == 3) {
+            return "3/" + encodeSegment(lower.substring(0, 1)) + "/" + encoded;
+        }
+        return encodeSegment(lower.substring(0, 2)) + "/" + encodeSegment(lower.substring(2, 4)) + "/" + encoded;
     }
 }

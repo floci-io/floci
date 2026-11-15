@@ -199,15 +199,18 @@ public class AthenaJsonHandler {
             }
             case "ListDatabases" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 yield Response.ok(Map.of("DatabaseList", athenaService.listDatabases(catalog))).build();
             }
             case "ListTableMetadata" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 yield Response.ok(Map.of("TableMetadataList", athenaService.listTableMetadata(catalog, database))).build();
             }
             case "GetTableMetadata" -> {
                 String catalog = catalogName(request);
+                athenaService.requireGlueCatalog(region, catalog);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();

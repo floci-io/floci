@@ -148,14 +148,16 @@ class S3ControlTest {
 
     @Test
     @Order(4)
-    @DisplayName("tagResource: replaces all existing tags (not a merge)")
-    void tagResourceReplacesAllTags() {
-        // tagResource replaces — only the new tags should remain
+    @DisplayName("tagResource: adds and updates tags while preserving unrelated keys")
+    void tagResourceMergesTags() {
         s3control.tagResource(TagResourceRequest.builder()
                 .accountId(ACCOUNT_ID)
                 .resourceArn(bucketArn())
-                .tags(software.amazon.awssdk.services.s3control.model.Tag.builder()
-                        .key("NewOnly").value("yes").build())
+                .tags(
+                        software.amazon.awssdk.services.s3control.model.Tag.builder()
+                                .key("Team").value("storage").build(),
+                        software.amazon.awssdk.services.s3control.model.Tag.builder()
+                                .key("NewOnly").value("yes").build())
                 .build());
 
         ListTagsForResourceResponse response = s3control.listTagsForResource(
@@ -169,7 +171,8 @@ class S3ControlTest {
                         software.amazon.awssdk.services.s3control.model.Tag::key,
                         software.amazon.awssdk.services.s3control.model.Tag::value));
 
-        assertThat(tags).containsOnlyKeys("NewOnly");
+        assertThat(tags).containsExactlyInAnyOrderEntriesOf(
+                Map.of("Team", "storage", "CostCenter", "engineering", "NewOnly", "yes"));
     }
 
     @Test

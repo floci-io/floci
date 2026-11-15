@@ -8,6 +8,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.AuthenticationConfiguration;
@@ -2406,7 +2407,9 @@ class GlueServiceTest {
                 ACCOUNT_ID + "/db1:neighbor:legacy", function("db1:neighbor", "legacy")));
         PersistentStorage<String, UserDefinedFunction> reloaded = new PersistentStorage<>(file, new TypeReference<>() {});
         reloaded.load();
-        setUp(new InMemoryStorage<>(), new AccountAwareStorageBackend<>(reloaded, null, ACCOUNT_ID));
+        // As GlueService's own constructor builds it: the Region view over the account store.
+        setUp(new InMemoryStorage<>(), new RegionScopedStorage<>(
+                new AccountAwareStorageBackend<>(reloaded, null, ACCOUNT_ID), new RegionResolver(REGION, ACCOUNT_ID)));
 
         glueService.deleteDatabase("db1");
         glueService.createDatabase(new Database("db1"));

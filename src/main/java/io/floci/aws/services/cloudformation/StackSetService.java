@@ -208,6 +208,20 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         return getStackSetOrThrow(name);
     }
 
+    /** The stack set's ARN, {@code stackset/<name>:<id>} in the request's Region, as AWS gives its StackSetARN. */
+    /** The stack set's ARN in the Region given, the one the request naming it is in, whatever context runs it. */
+    public String stackSetArn(StackSet stackSet, String region) {
+        return regionResolver.buildArn("cloudformation", region, "stackset/" + stackSet.getStackSetId());
+    }
+
+    /**
+     * The ARN of the caller's stack set of that name in the Region given, which IAM checks a request naming it on;
+     * empty for none.
+     */
+    public Optional<String> stackSetArn(String name, String region) {
+        return name == null ? Optional.empty() : stackSets.get(name).map(stackSet -> stackSetArn(stackSet, region));
+    }
+
     /** The StackSet's permission model, which says whether an update naming no administration role passes the default one. */
     @Override
     public Optional<String> stackSetPermissionModel(String stackSetName) {

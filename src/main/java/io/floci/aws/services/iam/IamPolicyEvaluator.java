@@ -506,7 +506,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         for (PolicyStatement stmt : parseAll(List.of(policyDocument))) {
-            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+            if (!stmt.isAllow()) {
                 continue;
             }
             if (stmt.getActions() != null) {
@@ -543,7 +543,7 @@ public class IamPolicyEvaluator {
     public List<String> servicesGrantedBy(List<String> policyDocuments) {
         Set<String> granted = new TreeSet<>();
         for (PolicyStatement stmt : parseAll(policyDocuments)) {
-            if (!"Allow".equalsIgnoreCase(stmt.getEffect())) {
+            if (!stmt.isAllow()) {
                 continue;
             }
             if (stmt.getNotActions() != null) {
@@ -664,7 +664,7 @@ public class IamPolicyEvaluator {
             for (PolicyStatement stmt : parsed.statements()) {
                 if (stmt.isDeny()) {
                     denials.add(stmt);
-                } else {
+                } else if (stmt.isAllow()) {
                     allows.add(stmt);
                 }
             }
@@ -791,7 +791,14 @@ public class IamPolicyEvaluator {
         return false;
     }
 
-    /** Whether a {@code Deny} applies to every request, rather than to some of them. */
+    /**
+     * Whether a {@code Deny} applies to every request, rather than to some of them. A statement
+     * reaches through whichever resource element it names, so one that names neither reaches no
+     * request at all: {@link #matchesResource} answers no for it, and this answers the same way
+     * rather than reading the absence as every resource. Taking an entry that is no string for no
+     * value is what leaves that shape, so the two readings have to agree, or a report would drop a
+     * service over a {@code Deny} that the decision it reports never applies.
+     */
     private static boolean deniesEveryRequest(PolicyStatement stmt) {
         if (stmt.getConditions() != null && !stmt.getConditions().isEmpty()) {
             return false;
@@ -800,7 +807,7 @@ public class IamPolicyEvaluator {
             return false;
         }
         List<String> resources = stmt.getResources();
-        return resources == null || resources.isEmpty() || resources.contains("*");
+        return resources != null && resources.contains("*");
     }
 
     /** Appends the key name inside every {@code ${key}} policy variable found in {@code values}. */
@@ -1050,18 +1057,24 @@ public class IamPolicyEvaluator {
         return match;
     }
 
-    /** A {@code NotPrincipal} statement applies to every caller it does not spare. */
+    /**
+     * A {@code NotPrincipal} statement applies to every caller it does not spare. A {@code
+     * Principal} the statement carries decides it instead, naming nobody included, and an element
+     * that names nobody carves nobody out, so the statement covers no caller.
+     */
     private PrincipalMatch principalMatch(PolicyStatement stmt, RequestPrincipal principal) {
-        if (stmt.getPrincipals() != null) {
-            return matchAnyPrincipal(stmt.getPrincipals(), principal);
+        Map<String, List<String>> principals = stmt.getPrincipals();
+        if (principals != null) {
+            return matchAnyPrincipal(principals, principal);
         }
-        if (stmt.getNotPrincipals() != null) {
-            boolean spared = stmt.isDeny()
-                    ? sparedFromDeny(stmt.getNotPrincipals(), principal)
-                    : matchAnyPrincipal(stmt.getNotPrincipals(), principal) != PrincipalMatch.NONE;
-            return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
+        Map<String, List<String>> notPrincipals = stmt.getNotPrincipals();
+        if (notPrincipals == null || notPrincipals.isEmpty()) {
+            return PrincipalMatch.NONE;
         }
-        return PrincipalMatch.NONE;
+        boolean spared = stmt.isDeny()
+                ? sparedFromDeny(notPrincipals, principal)
+                : matchAnyPrincipal(notPrincipals, principal) != PrincipalMatch.NONE;
+        return spared ? PrincipalMatch.NONE : PrincipalMatch.CALLER;
     }
 
     /**
@@ -1873,15 +1886,23 @@ public class IamPolicyEvaluator {
     }
 
     private PolicyStatement parseStatement(JsonNode stmt, String version) {
-        String effect = stmt.path("Effect").asText("Allow");
+        // A statement states one of the two effects the policy language defines or it states
+        // nothing. An Effect that is absent, is not a string, or names neither is read as neither:
+        // the statement grants nothing, denies nothing, and leaves the request to the rest of the
+        // document. Reading an absent Effect as an Allow would grant on a statement that describes
+        // no permission. The two words are the words themselves, "The Effect value is case
+        // sensitive" (IAM User Guide, "AWS JSON policy elements: Effect"), which is the comparison
+        // IamPolicyDocuments makes of a document being written, so "allow" states nothing here
+        // rather than granting what no write of this package would have stored.
+        String effect = stmt.path("Effect").isTextual() ? stmt.get("Effect").asText() : "";
         Map<String, List<String>> principals = parsePrincipals(stmt.get("Principal"));
         Map<String, List<String>> notPrincipals = parsePrincipals(stmt.get("NotPrincipal"));
         // Action names are case-insensitive on AWS, so they are lowercased once here instead of
         // on every request. Resource ARNs are case-sensitive on AWS and are kept as written.
-        List<String> actions     = lowercaseAll(nodeToList(stmt.get("Action")));
-        List<String> notActions  = lowercaseAll(nodeToList(stmt.get("NotAction")));
-        List<String> resources   = nodeToList(stmt.get("Resource"));
-        List<String> notResources= nodeToList(stmt.get("NotResource"));
+        List<String> actions     = lowercaseAll(patternValues(stmt.get("Action")));
+        List<String> notActions  = lowercaseAll(patternValues(stmt.get("NotAction")));
+        List<String> resources   = patternValues(stmt.get("Resource"));
+        List<String> notResources= patternValues(stmt.get("NotResource"));
         Map<String, Map<String, List<String>>> conditions = parseConditions(stmt.get("Condition"));
         return new PolicyStatement(
                 effect,
@@ -1896,29 +1917,47 @@ public class IamPolicyEvaluator {
                 stmt.path("Sid").isTextual() ? stmt.get("Sid").asText() : null);
     }
 
+    /**
+     * The callers a {@code Principal} or {@code NotPrincipal} element names, by principal type.
+     * Each of them is written as a {@code <principal_id_string>}, so an entry that is no string
+     * names nobody, as {@link #patternValues} reads the action and resource patterns beside it. An
+     * element naming nobody at all is no principal element rather than one naming an empty list,
+     * which the typed spelling already came to by dropping a type whose entries named nobody and
+     * the string and list spellings are read the same way here.
+     *
+     * <p>Where it tells is {@code NotPrincipal}, the element whose statement covers every caller it
+     * does not name: one naming nobody spared nobody, so an {@code Allow} whose {@code
+     * NotPrincipal} was an empty list, or a list of entries that are no strings, granted to anyone
+     * the statement otherwise covered. A statement whose principal element names nobody matches no
+     * caller now, which is how a {@code NotAction} or {@code NotResource} naming nothing already
+     * leaves a statement matching neither.
+     *
+     * <p>An element that is written and names nobody is still the element the statement carries, so
+     * this answers an empty map rather than null and only an absent element answers null. A
+     * statement carrying both elements is a shape the grammar does not describe, and the {@code
+     * Principal} it names decides it either way, so writing that one as an empty list leaves the
+     * statement matching nobody instead of handing the decision to the {@code NotPrincipal} beside
+     * it.
+     */
     private Map<String, List<String>> parsePrincipals(JsonNode node) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return null;
         }
         Map<String, List<String>> result = new LinkedHashMap<>();
-        if (node.isTextual()) {
-            result.put("*", List.of(node.asText()));
-            return result;
-        }
-        if (node.isArray()) {
-            result.put("*", nodeToList(node));
-            return result;
-        }
-        if (node.isObject()) {
+        if (node.isTextual() || node.isArray()) {
+            List<String> values = patternValues(node);
+            if (!values.isEmpty()) {
+                result.put("*", values);
+            }
+        } else if (node.isObject()) {
             node.fields().forEachRemaining(entry -> {
-                List<String> values = nodeToList(entry.getValue());
+                List<String> values = patternValues(entry.getValue());
                 if (!values.isEmpty()) {
                     result.put(entry.getKey(), values);
                 }
             });
-            return result.isEmpty() ? null : result;
         }
-        return null;
+        return result;
     }
 
     private Map<String, Map<String, List<String>>> parseConditions(JsonNode condNode) {
@@ -1931,7 +1970,7 @@ public class IamPolicyEvaluator {
             opEntry.getValue().fields().forEachRemaining(kvEntry -> {
                 JsonNode value = kvEntry.getValue();
                 kvMap.put(kvEntry.getKey(), value.isBoolean() || value.isNumber()
-                        ? List.of(value.asText()) : nodeToList(value));
+                        ? List.of(value.asText()) : conditionValues(value));
             });
             result.put(opEntry.getKey(), kvMap);
         });
@@ -1946,7 +1985,43 @@ public class IamPolicyEvaluator {
         return lowered;
     }
 
-    private List<String> nodeToList(JsonNode node) {
+    /**
+     * The values a pattern element names. The grammar writes each of them as a string: an action is
+     * an {@code <action_string>}, a resource a {@code <resource_string>} and a principal a
+     * {@code <principal_id_string>}, so an entry that is no string names no value and is left out.
+     * A bare non-string element was read that way already, while a list carrying one took its text
+     * for a pattern, so {@code "Resource": 123} named no resource and {@code "Resource": [123]}
+     * named the pattern {@code 123}. The list is read like the bare element now.
+     *
+     * <p>It tells most where a pattern carves an exception out, since the element the statement
+     * matches on is whichever of the two it names: a {@code NotAction} or {@code NotResource} whose
+     * entries name nothing excludes nothing, and a statement excluding nothing covers every action
+     * or every resource there is. Naming no value leaves the statement matching neither instead.
+     */
+    private List<String> patternValues(JsonNode node) {
+        List<String> values = new ArrayList<>();
+        if (node == null) {
+            return values;
+        }
+        if (node.isTextual()) {
+            values.add(node.asText());
+        } else if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (item.isTextual()) {
+                    values.add(item.asText());
+                }
+            }
+        }
+        return values;
+    }
+
+    /**
+     * The values a condition element names, where a number and a boolean are values of their own:
+     * the grammar's JSON rules say quotation marks "are optional for numeric and Boolean values",
+     * and an operator reads what it is given as the text of the value either way. A lone number or
+     * boolean is read by the caller, so what is left here is the list a key may carry.
+     */
+    private List<String> conditionValues(JsonNode node) {
         List<String> list = new ArrayList<>();
         if (node == null) {
             return list;

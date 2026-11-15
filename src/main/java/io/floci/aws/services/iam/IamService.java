@@ -420,6 +420,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private final Object mfaDeviceLock = new Object();
     private final RegionResolver regionResolver;
+    /**
+     * The partner permissions boundaries configuration registered, by ARN. Empty unless a file was
+     * configured, which is the account that never onboarded with AWS for temporary delegation.
+     */
+    private final Map<String, String> partnerPermissionBoundaries;
     private final Clock clock;
     private final boolean seedDeployerPrincipal;
     private final String seededAccountAlias;
@@ -492,6 +497,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             regionResolver,
             config.services().iam().seedDeployerPrincipal(),
             config.services().iam().accountAlias().orElse(null),
+            PartnerPermissionBoundaries.load(config.services().iam().partnerPermissionBoundariesPath())
+                    .documentsByArn(),
             clock
         );
     }
@@ -620,7 +627,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
                 credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
                 serviceCredentials, accountProperties, stsPreferences, outboundFederation,
-                regionResolver, seedDeployerPrincipal, seededAccountAlias, Clock.systemUTC());
+                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), Clock.systemUTC());
     }
 
     IamService(StorageBackend<String, IamUser> users,
@@ -649,6 +656,44 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                boolean seedDeployerPrincipal,
                String seededAccountAlias,
                Clock clock) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, accountAliases,
+                passwordPolicies, loginProfiles, oidcProviders, serviceLinkedRoleDeletions, orgRootFeatures,
+                credentialReports, virtualMfaDevices, serverCertificates, signingCertificates, sshPublicKeys,
+                serviceCredentials, accountProperties, stsPreferences, outboundFederation,
+                regionResolver, seedDeployerPrincipal, seededAccountAlias, Map.of(), clock);
+    }
+
+    /**
+     * The same with the permissions boundaries registered for a delegation partner, which no
+     * account holds and no caller can create. Every other constructor registers none.
+     */
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               StorageBackend<String, String> accountAliases,
+               StorageBackend<String, AccountPasswordPolicy> passwordPolicies,
+               StorageBackend<String, LoginProfile> loginProfiles,
+               StorageBackend<String, OpenIDConnectProvider> oidcProviders,
+               StorageBackend<String, String> serviceLinkedRoleDeletions,
+               StorageBackend<String, OrganizationRootFeatures> orgRootFeatures,
+               StorageBackend<String, CredentialReport> credentialReports,
+               StorageBackend<String, VirtualMfaDevice> virtualMfaDevices,
+               StorageBackend<String, ServerCertificate> serverCertificates,
+               StorageBackend<String, SigningCertificate> signingCertificates,
+               StorageBackend<String, SshPublicKey> sshPublicKeys,
+               StorageBackend<String, ServiceSpecificCredential> serviceCredentials,
+               StorageBackend<String, String> accountProperties,
+               StorageBackend<String, String> stsPreferences,
+               StorageBackend<String, OutboundWebIdentityFederation> outboundFederation,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal,
+               String seededAccountAlias,
+               Map<String, String> partnerPermissionBoundaries,
+               Clock clock) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -674,6 +719,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         this.regionResolver = regionResolver;
         this.seedDeployerPrincipal = seedDeployerPrincipal;
         this.seededAccountAlias = seededAccountAlias;
+        this.partnerPermissionBoundaries = Map.copyOf(partnerPermissionBoundaries);
         this.clock = clock;
     }
 
@@ -1187,7 +1233,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         IamPolicyDocuments.checkTrustPolicy(assumeRolePolicyDocument);
         validateRoleDescription(description);
         if (permissionsBoundaryArn != null) {
-            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+            requireBoundaryPolicy(permissionsBoundaryArn); // validate before anything is created
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
@@ -1408,9 +1454,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void deleteRole(String roleName) {
+        deleteRole(roleName, null);
+    }
+
+    /** A service cleanup must not delete a different role that has since taken the name. */
+    public void deleteRole(String roleName, String expectedRoleId) {
         synchronized (resourceNameLock) {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
             if (!role.getAttachedPolicyArns().isEmpty() || !role.getInlinePolicies().isEmpty()) {
                 throw new AwsException("DeleteConflict",
@@ -1701,6 +1753,43 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return Optional.ofNullable(awsManagedPoliciesFor(arn).get(arn));
         }
         return policies.get(arn);
+    }
+
+    /**
+     * The document a permissions boundary ARN resolves to, which is the registered partner
+     * boundary when configuration holds one and the stored policy's default version otherwise.
+     *
+     * <p>A registered boundary is read here and nowhere else. It is not a policy of any account:
+     * {@code GetPolicy} does not answer it, {@code Attach*Policy} cannot attach it, no list
+     * reports it, and a policy someone stores under the same ARN cannot shadow it, because the
+     * registration is read first. It caps, and that is all it does.
+     */
+    private String boundaryDocument(String boundaryArn) {
+        if (boundaryArn == null) {
+            return null;
+        }
+        String registered = partnerPermissionBoundaries.get(boundaryArn);
+        if (registered != null) {
+            return registered;
+        }
+        return resolvePolicy(boundaryArn).map(IamPolicy::getDefaultDocument).orElse(null);
+    }
+
+    /** Whether a boundary ARN is one configuration registered for a delegation partner. */
+    boolean registeredPartnerBoundary(String boundaryArn) {
+        return boundaryArn != null && partnerPermissionBoundaries.containsKey(boundaryArn);
+    }
+
+    /**
+     * Holds a boundary ARN to existing, which a registered partner boundary satisfies without
+     * being a policy of the account: configuration holds its document and
+     * {@link #boundaryDocument} reads it, so every write that sets a boundary accepts the same
+     * ARNs rather than the create accepting one the put refuses.
+     */
+    private void requireBoundaryPolicy(String permissionsBoundaryArn) {
+        if (!registeredPartnerBoundary(permissionsBoundaryArn)) {
+            requirePolicy(permissionsBoundaryArn);
+        }
     }
 
     private int managedPolicyAttachmentCount(String policyArn) {
@@ -2120,27 +2209,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     public void attachRolePolicy(String roleName, String policyArn) {
-        validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        IamPolicy policy = requirePolicy(policyArn);
-        if (!role.getAttachedPolicyArns().contains(policyArn)) {
-            role.getAttachedPolicyArns().add(policyArn);
-            roles.put(roleName, role);
-            incrementCustomerManagedPolicyAttachmentCount(policy);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            IamPolicy policy = requirePolicy(policyArn);
+            if (!role.getAttachedPolicyArns().contains(policyArn)) {
+                role.getAttachedPolicyArns().add(policyArn);
+                roles.put(roleName, role);
+                incrementCustomerManagedPolicyAttachmentCount(policy);
+            }
         }
     }
 
     public void detachRolePolicy(String roleName, String policyArn) {
-        validateRoleName(roleName);
-        IamRole role = getRole(roleName);
-        requireNotServiceLinked(role, roleName);
-        if (!role.getAttachedPolicyArns().remove(policyArn)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireNotServiceLinked(role, roleName);
+            if (!role.getAttachedPolicyArns().remove(policyArn)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
+            }
+            roles.put(roleName, role);
+            decrementCustomerManagedPolicyAttachmentCount(policyArn);
         }
-        roles.put(roleName, role);
-        decrementCustomerManagedPolicyAttachmentCount(policyArn);
     }
 
     public List<IamPolicy> listAttachedRolePolicies(String roleName, String pathPrefix) {
@@ -2149,6 +2242,51 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .flatMap(arn -> resolvePolicy(arn).stream())
                 .filter(p -> pathPrefix == null || p.getPath().startsWith(pathPrefix))
                 .toList();
+    }
+
+    /** Reprovisions a service-managed role only after the complete desired policy set validates. */
+    public void replaceRolePolicies(String roleName, String expectedRoleId, List<String> policyArns,
+                                    Map<String, String> inlinePolicies, String boundaryArn, int maxSessionDuration) {
+        synchronized (resourceNameLock) {
+            validateRoleName(roleName);
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            requireNotServiceLinked(role, roleName);
+            List<String> desired = policyArns.stream().distinct().toList();
+            for (String arn : desired) {
+                requirePolicy(arn);
+            }
+            if (boundaryArn != null) {
+                requirePolicy(boundaryArn);
+            }
+            Map<String, String> checkedInline = new LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : inlinePolicies.entrySet()) {
+                IamPolicyDocuments.checkInlinePolicy(entry.getValue());
+                checkInlinePolicyQuota(checkedInline, entry.getKey(), entry.getValue(),
+                        ROLE_INLINE_POLICY_SIZE_LIMIT, "role " + roleName);
+                checkedInline.put(entry.getKey(), entry.getValue());
+            }
+            for (String arn : new ArrayList<>(role.getAttachedPolicyArns())) {
+                if (!desired.contains(arn)) {
+                    decrementCustomerManagedPolicyAttachmentCount(arn);
+                }
+            }
+            for (String arn : desired) {
+                if (!role.getAttachedPolicyArns().contains(arn)) {
+                    incrementCustomerManagedPolicyAttachmentCount(requirePolicy(arn));
+                }
+            }
+            Set<String> changedInline = new HashSet<>(role.getInlinePolicies().keySet());
+            changedInline.addAll(checkedInline.keySet());
+            changedInline.forEach(name -> invalidateInlinePolicyOwner("Role", role.getRoleId(), name));
+            role.setAttachedPolicyArns(desired);
+            role.setInlinePolicies(checkedInline);
+            role.setPermissionsBoundaryArn(boundaryArn);
+            if (maxSessionDuration > 0) {
+                role.setMaxSessionDuration(maxSessionDuration);
+            }
+            roles.put(roleName, role);
+        }
     }
 
     // =========================================================================
@@ -3850,28 +3988,35 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      *
      * <p>The secret half is returned here and by the reset, and nowhere else: there is no get
      * operation, and the list is defined without it.
+     *
+     * <p>A request wrong in both halves is answered for the user: recordings validated against AWS
+     * answer a user that does not exist beside a service that is not supported with the user, so
+     * the user is confirmed before the service name is read. What the bounds of
+     * {@code CredentialAgeDays} say is settled ahead of either, by the constraints every request
+     * is held to; what is left here is whether the service this is takes the member at all, which
+     * cannot be asked before the service is known.
      */
     public ServiceSpecificCredential createServiceSpecificCredential(
             String userName, String requestedServiceName, Integer credentialAgeDays) {
-        String serviceName = supportedServiceName(requestedServiceName);
-        boolean longTermKey = LONG_TERM_API_KEY_SERVICES.contains(serviceName);
-        if (credentialAgeDays != null) {
-            if (!longTermKey) {
-                throw new AwsException("ValidationError",
-                        "CredentialAgeDays is only valid for services that support long-term API "
-                                + "keys.", 400);
-            }
-            if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
-                    || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
-                throw IamValidationErrors.validationError("credentialAgeDays",
-                        String.valueOf(credentialAgeDays), "Member must be between "
-                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS);
-            }
-        }
         synchronized (serviceCredentialLock) {
             // Confirmed under the lock, as the other per-user credentials are: DeleteUser checks
             // for these holding the same lock.
             getUser(userName);
+            String serviceName = supportedServiceName(requestedServiceName);
+            boolean longTermKey = LONG_TERM_API_KEY_SERVICES.contains(serviceName);
+            if (credentialAgeDays != null) {
+                if (!longTermKey) {
+                    throw new AwsException("ValidationError",
+                            "CredentialAgeDays is only valid for services that support long-term "
+                                    + "API keys.", 400);
+                }
+                if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
+                        || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
+                    throw IamValidationErrors.validationError("credentialAgeDays",
+                            String.valueOf(credentialAgeDays), "Member must be between "
+                                    + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS);
+                }
+            }
             // One scan serves both checks: the quota counts this user's credentials for this
             // service, the name search needs every name in the account, and no write can land
             // between them while this holds the lock.
@@ -4015,8 +4160,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     /** Every credential of a user, or of every user when the caller asked for all of them. */
     public List<ServiceSpecificCredential> listServiceSpecificCredentials(
             String userName, String requestedServiceName, boolean allUsers) {
-        String serviceName = requestedServiceName == null
-                ? null : supportedServiceName(requestedServiceName);
+        // The user before the service name, as on the create: a request wrong in both halves is
+        // answered for the user. Under AllUsers there is no user to look up, and the filter is
+        // then the only thing the request can be wrong about.
         List<ServiceSpecificCredential> found;
         if (allUsers) {
             found = serviceCredentials.scan(key -> true);
@@ -4024,6 +4170,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             getUser(userName); // validates existence
             found = userServiceCredentials(userName);
         }
+        String serviceName = requestedServiceName == null
+                ? null : supportedServiceName(requestedServiceName);
         return found.stream()
                 .filter(c -> serviceName == null || serviceName.equals(c.getServiceName()))
                 .sorted(Comparator.comparing(
@@ -4843,10 +4991,45 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void registerDelegatedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
                                          String delegatedApproverArn, Instant expiration,
                                          String sessionPolicyDocument, String ownerAccountId) {
+        registerDelegatedSession(sessionAccessKeyId, secretAccessKey, sessionToken, delegatedApproverArn,
+                expiration, sessionPolicyDocument, ownerAccountId, List.of());
+    }
+
+    /**
+     * The same with the boundaries the delegation request restricts a role to, which the guide
+     * calls the long-term half of the feature: they "limit the permissions of any roles that are
+     * created or managed through temporary access", so the session carries them and a role created
+     * with it takes one.
+     */
+    public void registerDelegatedSession(String sessionAccessKeyId, String secretAccessKey, String sessionToken,
+                                         String delegatedApproverArn, Instant expiration,
+                                         String sessionPolicyDocument, String ownerAccountId,
+                                         List<String> roleBoundaryArns) {
         SessionCredential session = new SessionCredential(sessionAccessKeyId, secretAccessKey, sessionToken,
                 null, expiration, sessionPolicyDocument, ownerAccountId);
         session.setDelegatedApproverArn(delegatedApproverArn);
+        session.setDelegatedRoleBoundaryArns(roleBoundaryArns);
         sessions.put(sessionAccessKeyId, session);
+    }
+
+    /**
+     * The boundary a role created by {@code callerAccessKeyId} has to carry, or empty for a caller
+     * holding no delegated session or one whose request restricted nothing. A request may name
+     * several and a role carries one, so the first is the one applied, which this emulator's own
+     * reading documents. Only a boundary still registered is applied: a request stored before the
+     * registration changed names an ARN with no document, and a role bounded by a document nobody
+     * can read would be a role nothing can use.
+     */
+    public Optional<String> delegatedRoleBoundaryArn(String callerAccessKeyId) {
+        if (callerAccessKeyId == null) {
+            return Optional.empty();
+        }
+        // The session was minted in the partner's namespace and the request it bounds runs in the
+        // customer's, so this is one of the lookups that has to span accounts, as
+        // findSessionAnyAccount describes: an account-scoped get would miss it.
+        return findSessionAnyAccount(callerAccessKeyId)
+                .map(SessionCredential::getDelegatedRoleBoundaryArns)
+                .flatMap(arns -> arns.stream().filter(partnerPermissionBoundaries::containsKey).findFirst());
     }
 
     /** Stores a temporary session in an explicit account namespace. */
@@ -5314,7 +5497,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return arn != null && "root".equals(AwsArnUtils.parse(arn).resource());
     }
 
-    /** One policy document holding only the Deny statements of a user's policies and boundary. */
+    /**
+     * One policy document holding only the Deny statements of a user's policies and boundary. A
+     * statement is a Deny when its {@code Effect} is that word as written, which is the reading
+     * the policy evaluator makes of the same element.
+     */
     private String denyStatementsOf(String userName) {
         List<String> documents = new ArrayList<>();
         List<String> userPolicies = collectUserPolicies(userName);
@@ -5330,7 +5517,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             try {
                 JsonNode statements = POLICY_MAPPER.readTree(document).path("Statement");
                 for (JsonNode statement : statements.isArray() ? statements : List.of(statements)) {
-                    if ("Deny".equalsIgnoreCase(statement.path("Effect").asText())) {
+                    if ("Deny".equals(statement.path("Effect").asText())) {
                         denies.add(statement);
                     }
                 }
@@ -5903,8 +6090,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return userFromArnOrName(userArnOrName)
                 .map(IamUser::getPermissionsBoundaryArn)
                 .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
-                .flatMap(this::resolvePolicy)
-                .map(IamPolicy::getDefaultDocument)
+                .map(this::boundaryDocument)
                 .orElse(null);
     }
 
@@ -5919,8 +6105,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return roleFromArnOrName(roleArn)
                 .map(IamRole::getPermissionsBoundaryArn)
                 .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
-                .flatMap(this::resolvePolicy)
-                .map(IamPolicy::getDefaultDocument)
+                .map(this::boundaryDocument)
                 .orElse(null);
     }
 
@@ -5938,7 +6123,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * {@link #updateUser(String, String, String, String)}. A null ID skips the check.
      */
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn, String expectedUserId) {
-        requirePolicy(permissionsBoundaryArn); // validate policy exists
+        requireBoundaryPolicy(permissionsBoundaryArn);
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
             requireSameUser(user, userName, expectedUserId);
@@ -5982,7 +6167,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            requirePolicy(permissionsBoundaryArn); // validate policy exists
+            requireBoundaryPolicy(permissionsBoundaryArn);
             role.setPermissionsBoundaryArn(permissionsBoundaryArn);
             roles.put(roleName, role);
         }

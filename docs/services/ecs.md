@@ -356,6 +356,15 @@ reported as `STOPPED` while its container may still be serving. `StopTask` answe
 has landed, and on a task the scheduler is already stopping it waits for that stop rather than
 starting a second one.
 
+In Docker mode, an essential container exiting stops the other containers in its task,
+including when it exits successfully. An omitted `essential` flag defaults to true. Floci reports
+`EssentialContainerExited` and `Essential container in task exited`, retaining each container's
+exit code. A nonessential container's exit updates that container to `STOPPED` without stopping
+its still-running siblings. Remaining containers are stopped through the same background stop
+and retry path described above. When an essential exit initiates the stop, Floci deregisters its
+load-balancer targets but stops the siblings without waiting for the service-replacement drain
+period. Graceful service replacements retain their configured drain delay.
+
 Every `awsvpc` task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
 and reports it as an `attachments` entry with its `networkInterfaceId`, `privateIPv4Address` and
 `subnetId`; the task's containers report the same interface in `networkInterfaces`. A subnet that
@@ -504,6 +513,11 @@ held in memory. The service scheduler starts at boot, so within a few seconds of
 persisted service is brought back to its `desiredCount`, re-registering load balancer targets
 and Cloud Map instances as its tasks start, without waiting for an ECS request.
 
+Before shared container teardown, Floci pauses ECS reconciliation and waits for its current
+pass to finish. It also interrupts and waits for background task launches before other services
+retire their credentials or networking. A state reset starts fresh executors after the old tasks
+have been drained.
+
 #### Service deployments
 
 An `ACTIVE` service reports exactly one `PRIMARY` entry in `services[].deployments`,
@@ -541,6 +555,13 @@ Known differences from AWS:
   and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
+- A rolling deployment of a service with `loadBalancers` stops a stale task only once every
+  replacement's targets report `healthy`. A replacement that never turns healthy holds the
+  deployment.
+- A stale or scaled-in task of a service with `loadBalancers` stays `DEACTIVATING`, its
+  containers still running, for the longest `deregistration_delay.timeout_seconds` of its target
+  groups (300 seconds by default), then turns `STOPPING` on the next reconciler tick. A `StopTask`
+  call does not wait. The target leaves its target group at once rather than reporting `draining`.
 - `updatedAt` starts at `createdAt` and advances when the deployment status changes.
 - `deploymentConfiguration` is stored and reported as given. The deployment circuit breaker
   counts tasks that fail to start and moves a deployment through `STOP_REQUESTED` to `STOPPED`,
@@ -728,10 +749,14 @@ The task set round-trips `networkConfiguration` (defaulting to the service's), `
 scale percentage, always rounded up: 3 desired at 50 percent is 2 tasks, not 1. `UpdateTaskSet`
 recomputes it.
 
-Floci places no tasks for a task set, so `runningCount` and `pendingCount` stay at 0 and
-`stabilityStatus` is always `STEADY_STATE`. On AWS the status reaches `STEADY_STATE` once the
-running count matches the computed one; reporting `STABILIZING` here would hang anything that
-waits for the set to stabilise, since no count ever moves.
+Creating a service with the `CODE_DEPLOY` controller creates an initial `PRIMARY` task set
+at 100 percent scale. Its running and pending counts track the tasks launched by the service
+scheduler. The set reaches `STEADY_STATE` when the running count matches its computed desired
+count and no tasks are pending. `CreateService` and `DescribeServices` return the task set and an
+empty `deployments` list for this controller.
+
+Sets added through `CreateTaskSet` have simulated scheduling. Their running and pending counts
+stay at zero, and they report `STEADY_STATE` so deployment tools can continue.
 
 `DeleteTaskSet` refuses a task set that has not been scaled down to zero unless `force` is set.
 `DescribeTaskSets` returns tags only for `include: ["TAGS"]` and reports a reference naming no
@@ -890,6 +915,22 @@ with `maxResults` (1 to 100) and `nextToken`.
 | `SubmitContainerStateChange` | Agent callback stub |
 | `SubmitAttachmentStateChanges` | Agent callback stub |
 | `DiscoverPollEndpoint` | Returns the agent polling endpoint |
+
+## IAM Enforcement
+
+With IAM enforcement on, each ECS request is checked on the resources it names, from the generated request
+resources: a cluster, service, task, container instance, task set or capacity provider by its name or its ARN; a
+service, task or container instance in the request's `cluster`, given by name or ARN, or in the `default` cluster
+when the request names none, as ECS does; an attribute on the container instance its `targetId` names; a service
+deployment or revision by its ARN, which Floci mints under its service as AWS does
+(`service-deployment/<cluster>/<service>/<id>`); and a task definition as the revision ECS resolves its reference to, a
+family alone being its latest revision, so `web`, `web:3` and the revision's ARN are the same resource. A service or
+task given by its ARN is checked on that ARN and, when the request's cluster is another, on the one of its name in
+that cluster too, which `UpdateService` acts on. A task definition ECS does not have is checked on any revision,
+`task-definition/*:*`. An operation whose action has no
+resource type in the Service Authorization Reference (`ListClusters`, `ListServices`, `DescribeTaskDefinition`,
+`DeregisterTaskDefinition`, the account settings) is checked on `*`. The roles a request passes are checked as
+`iam:PassRole` and the tags it sets as `ecs:TagResource`.
 
 ## Configuration
 

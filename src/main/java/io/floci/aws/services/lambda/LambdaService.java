@@ -116,6 +116,7 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_TOPICS = 1;
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
+    private static final int FUNCTION_URL_CONFIGS_PAGE_SIZE = 50;
     private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
     private static final int MAX_ENVIRONMENT_BYTES = 4096;
     private static final int MAX_ENVIRONMENT_DIAGNOSTIC_BYTES = 5120;
@@ -221,6 +222,7 @@ public class LambdaService implements ResourceProvider {
     private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
     private final SignedMarkers listFunctionMarkers = new SignedMarkers();
     private final SignedMarkers codeSigningFunctionMarkers = new SignedMarkers();
+    private final SignedMarkers functionUrlMarkers = new SignedMarkers();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -1251,13 +1253,15 @@ public class LambdaService implements ResourceProvider {
     /**
      * DeleteFunction. A Qualifier names a single published version to remove, leaving the
      * function and its other versions in place; without one the whole function goes.
+     * AWS answers 202 for a durable function and keeps it Deleting for about a minute.
+     *
+     * @return true when a durable function or an existing version of it was deleted
      */
-    public void deleteFunction(String region, String functionName, String qualifier) {
+    public boolean deleteFunction(String region, String functionName, String qualifier) {
         if (qualifier != null && !qualifier.isEmpty()) {
-            deleteFunctionVersion(region, functionName, qualifier);
-            return;
+            return deleteFunctionVersion(region, functionName, qualifier);
         }
-        deleteWholeFunction(region, functionName);
+        return deleteWholeFunction(region, functionName);
     }
 
     /**
@@ -1265,7 +1269,7 @@ public class LambdaService implements ResourceProvider {
      * {@code $LATEST} or naming an alias is rejected, a version an alias points at is a
      * conflict, and a version that does not exist is a silent success rather than a 404.
      */
-    private void deleteFunctionVersion(String region, String functionName, String qualifier) {
+    private boolean deleteFunctionVersion(String region, String functionName, String qualifier) {
         if (!QUALIFIER.matcher(qualifier).matches()) {
             throw SmithyValidationErrors.validationException(
                     "Value '" + qualifier + "' at 'qualifier' failed"
@@ -1296,7 +1300,7 @@ public class LambdaService implements ResourceProvider {
         }
         Optional<LambdaFunction> version = functionStore.get(region, name, qualifier);
         if (version.isEmpty()) {
-            return;
+            return false;
         }
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             warmPool.deleteProvisionedQualifier(fn, qualifier);
@@ -1308,9 +1312,10 @@ public class LambdaService implements ResourceProvider {
             reclaimLegacyCodeDirectoryIfUnused(name);
         }
         LOG.infov("Deleted version {0} of Lambda function: {1}", qualifier, name);
+        return fn.isDurable();
     }
 
-    private void deleteWholeFunction(String region, String functionName) {
+    private boolean deleteWholeFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
@@ -1358,6 +1363,7 @@ public class LambdaService implements ResourceProvider {
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
+        return fn.isDurable();
     }
 
     /**
@@ -3531,6 +3537,45 @@ public class LambdaService implements ResourceProvider {
 
         LOG.infov("Created Function URL for {0} (qualifier: {1}): {2}", functionName, qualifier, url);
         return urlConfig;
+    }
+
+    public PaginatedResult<LambdaUrlConfig> listFunctionUrlConfigs(
+            String region, String functionName, String maxItems, String marker) {
+        requireFunctionUrlsAvailable(region);
+        List<String> errors = new ArrayList<>();
+        Integer requested = LambdaPagination.parseMaxItems(maxItems, FUNCTION_URL_CONFIGS_PAGE_SIZE, errors);
+        if (!errors.isEmpty()) {
+            throw SmithyValidationErrors.validationException(errors);
+        }
+
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, null);
+        validateFunctionUrlQualifier(ref.qualifier());
+        if (AwsArnUtils.looksLikeArn(functionName)
+                && AwsArnUtils.isForeignPartition(AwsArnUtils.parse(functionName),
+                        regionResolver.partitionForRegion(region))) {
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
+        }
+        String accountId = regionResolver.getAccountId();
+        if (ref.account() != null && !accountId.equals(ref.account())) {
+            throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
+        }
+        LambdaFunction function = functionStore.get(region, ref.name())
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Function not found: " + functionName, 404));
+        List<LambdaUrlConfig> urls = new ArrayList<>();
+        if (function.getUrlConfig() != null) {
+            urls.add(function.getUrlConfig());
+        }
+        if (aliasStore != null) {
+            for (LambdaAlias alias : aliasStore.list(region, function.getFunctionName())) {
+                if (alias.getUrlConfig() != null) {
+                    urls.add(alias.getUrlConfig());
+                }
+            }
+        }
+        String scope = accountId + "\n" + region + "\n" + function.getFunctionName() + "\n";
+        return LambdaPagination.paginate(urls, LambdaUrlConfig::getFunctionArn, requested,
+                FUNCTION_URL_CONFIGS_PAGE_SIZE, marker, functionUrlMarkers, scope);
     }
 
     public LambdaUrlConfig getFunctionUrlConfig(String region, String functionName, String qualifier) {

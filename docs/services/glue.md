@@ -332,6 +332,37 @@ ARN `arn:aws:glue:<region>:<account>:dataQualityRuleset/<name>`.
 
 Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
 
+## Iceberg REST endpoint
+
+Floci serves AWS Glue's [Iceberg REST endpoint](https://docs.aws.amazon.com/glue/latest/dg/connect-glu-iceberg-rest.html) at `/iceberg` on the Floci endpoint (`https://glue.<region>.amazonaws.com/iceberg` on AWS), signed for the `glue` service. An Iceberg REST catalog client (Spark's `SparkCatalog` with `type=rest`, PyIceberg, Trino) uses it as it uses AWS's: the warehouse is the account id, and the path prefix is `/v1/catalogs/{catalog}`, where `{catalog}` is `:` (the caller's default catalog) or the caller's account id.
+
+```python
+spark = (SparkSession.builder
+    .config("spark.sql.catalog.glue", "org.apache.iceberg.spark.SparkCatalog")
+    .config("spark.sql.catalog.glue.type", "rest")
+    .config("spark.sql.catalog.glue.uri", "http://localhost:4566/iceberg")
+    .config("spark.sql.catalog.glue.warehouse", "000000000000")
+    .config("spark.sql.catalog.glue.rest.sigv4-enabled", "true")
+    .config("spark.sql.catalog.glue.rest.signing-name", "glue")
+    .getOrCreate())
+```
+
+The operations are the twelve AWS lists: `GetConfig`, `ListNamespaces`, `CreateNamespace`, `LoadNamespaceMetadata`, `UpdateNamespaceProperties`, `DeleteNamespace`, `ListTables`, `CreateTable`, `LoadTable`, `TableExists`, `UpdateTable` and `DeleteTable`. A namespace is a Glue database (single-level, as on AWS); its `location` and `comment` properties are the database's `LocationUri` and `Description`. A table is a Glue table whose `Parameters.table_type` is `ICEBERG` and whose `Parameters.metadata_location` names its current metadata file in S3. The writer writes data files and manifests itself. Each commit checks the request's requirements, applies its updates, writes the next metadata file beside the last one (`<location>/metadata/00001-<uuid>.metadata.json`), and moves `metadata_location` to it, with `previous_metadata_location` set to the old one. If the Glue table changed since the commit's base, the commit is refused with `CommitFailedException` (409). A commit that fails after writing its metadata file (Glue refuses it, or it was not the last commit) removes that file again. Because every commit lands on the Glue table, Spark's `GlueCatalog` and Athena read each committed snapshot. A staged create (`stage-create`) creates nothing until its commit (`assert-create`), the way Spark and DuckDB create tables. A table with no location takes its namespace's location plus its name. `DeleteTable` drops the Glue table and leaves its files in S3.
+
+[Athena](athena.md#iceberg-tables) creates and writes Iceberg tables through this endpoint: its query engine attaches it with a bearer token Floci issues for one statement, acting as the calling account in its Region.
+
+Not yet: IAM policies are not checked on this endpoint, so under IAM enforcement it answers only the account's root credentials and Floci's own query engine, and refuses IAM principals (`ForbiddenException`, 403) rather than let them through unchecked. Other accounts' catalogs and nested catalogs (`s3tablescatalog/<bucket>`) are not served. DuckDB signs SigV4 catalog requests only over HTTPS, so DuckDB attaches this endpoint with SigV4 only when Floci serves TLS (`floci.tls.enabled`).
+
+## Catalogs and Amazon S3 Tables
+
+`CreateCatalog`, `GetCatalog`, `GetCatalogs`, `UpdateCatalog` and `DeleteCatalog` manage catalogs beside the account's default one. Integrating table buckets with AWS analytics services creates the federated catalog `s3tablescatalog`:
+
+```bash
+aws glue create-catalog --cli-input-json '{"Name":"s3tablescatalog","CatalogInput":{"FederatedCatalog":{"Identifier":"arn:aws:s3tables:us-east-1:000000000000:bucket/*","ConnectionName":"aws:s3tables"},"AllowFullTableExternalDataAccess":"True"}}'
+```
+
+Each table bucket of the account is then a child catalog, `s3tablescatalog/<bucket>` (or `<account>:s3tablescatalog/<bucket>`), listed by `GetCatalogs` with `ParentCatalogId` `s3tablescatalog`, whose `FederatedCatalog.Identifier` is the bucket's ARN. With that `CatalogId`, `GetDatabases` and `GetDatabase` answer the bucket's namespaces, and `GetTables` and `GetTable` its tables, read from S3 Tables: Iceberg tables whose `metadata_location` and columns come from the table's current metadata file. A table without metadata yet has neither. Catalog ids answer as `<account>:<catalog>[/<child>]`. Writing through a federated catalog (`CreateDatabase`, `CreateTable` with its `CatalogId`), a federated catalog's IAM resources, and the Iceberg REST endpoint's federated catalogs are not served yet.
+
 ## Configuration
 
 | Variable | Default | Description |

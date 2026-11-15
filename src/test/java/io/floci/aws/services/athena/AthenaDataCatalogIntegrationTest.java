@@ -2,6 +2,7 @@ package io.floci.aws.services.athena;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -499,5 +500,66 @@ class AthenaDataCatalogIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"));
+    }
+
+    /**
+     * Floci reads databases and tables from the account's Glue Data Catalog alone, so the metadata reads refuse a
+     * catalog whose metadata is elsewhere: one of another type, or a Glue one registered for another account.
+     */
+    @Test
+    @Order(20)
+    void metadataReadsRefuseACatalogThatIsNotTheAccountsGlueCatalog() {
+        String federated = "floci-metadata-federated";
+        String foreignGlue = "floci-metadata-foreign-glue";
+        String ownGlue = "floci-metadata-own-glue";
+        createCatalog(federated, "FEDERATED", "\"connection-type\": \"MYSQL\", "
+                + "\"connection-arn\": \"arn:aws:glue:us-east-1:000000000000:connection/mysql\"");
+        createCatalog(foreignGlue, "GLUE", "\"catalog-id\": \"111122223333\"");
+        createCatalog(ownGlue, "GLUE", "\"catalog-id\": \"000000000000\"");
+        try {
+            for (String catalog : new String[] {federated, foreignGlue}) {
+                for (String read : new String[] {"ListDatabases", "ListTableMetadata", "GetTableMetadata"}) {
+                    metadataRead(read, catalog)
+                        .statusCode(400)
+                        .body("__type", equalTo("MetadataException"));
+                }
+            }
+            for (String catalog : new String[] {ownGlue, "AwsDataCatalog"}) {
+                metadataRead("ListDatabases", catalog).statusCode(200);
+            }
+            metadataRead("ListDatabases", "floci-metadata-absent")
+                .statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"));
+        } finally {
+            for (String catalog : new String[] {federated, foreignGlue, ownGlue}) {
+                given()
+                    .header("X-Amz-Target", "AmazonAthena.DeleteDataCatalog")
+                    .contentType(CONTENT_TYPE)
+                    .body("{ \"Name\": \"" + catalog + "\" }")
+                .when()
+                    .post("/");
+            }
+        }
+    }
+
+    private static void createCatalog(String name, String type, String parameters) {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateDataCatalog")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Type\": \"" + type + "\", \"Parameters\": { " + parameters + " } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static ValidatableResponse metadataRead(String operation, String catalog) {
+        return given()
+            .header("X-Amz-Target", "AmazonAthena." + operation)
+            .contentType(CONTENT_TYPE)
+            .body("{ \"CatalogName\": \"" + catalog + "\", \"DatabaseName\": \"default\", \"TableName\": \"t\" }")
+        .when()
+            .post("/")
+        .then();
     }
 }

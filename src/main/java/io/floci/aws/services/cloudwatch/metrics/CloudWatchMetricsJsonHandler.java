@@ -28,6 +28,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -53,11 +54,18 @@ public class CloudWatchMetricsJsonHandler {
      * stay refused here until the console's API is known to give them the same shapes.
      */
     private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
+            "PutMetricData", Set.of("Namespace", "MetricData"),
             "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken"),
             "DescribeAlarms", Set.of("AlarmNames", "AlarmNamePrefix", "MaxRecords", "NextToken"),
             "GetMetricStatistics", Set.of("Namespace", "MetricName", "Dimensions", "StartTime", "EndTime",
                     "Period", "Statistics", "Unit"),
             "DeleteAlarms", Set.of("AlarmNames"));
+
+    private static final Set<String> CONSOLE_METRIC_DATUM_MEMBERS = Set.of(
+            "MetricName", "Dimensions", "Timestamp", "Unit", "Value", "StatisticValues");
+    private static final Set<String> CONSOLE_STATISTIC_MEMBERS = Set.of(
+            "SampleCount", "Sum", "Minimum", "Maximum");
+    private static final Set<String> CONSOLE_DIMENSION_MEMBERS = Set.of("Name", "Value");
 
     private final CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
@@ -85,6 +93,8 @@ public class CloudWatchMetricsJsonHandler {
             case "PutCompositeAlarm" -> handlePutCompositeAlarm(request, region);
             case "DescribeAlarms" -> handleDescribeAlarms(request, region);
             case "DeleteAlarms" -> handleDeleteAlarms(request, region);
+            case "DisableAlarmActions" -> handleAlarmActions(request, region, false);
+            case "EnableAlarmActions" -> handleAlarmActions(request, region, true);
             case "SetAlarmState" -> handleSetAlarmState(request, region);
             case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
@@ -115,8 +125,10 @@ public class CloudWatchMetricsJsonHandler {
      * {@code Alias} and {@code MetricName}. So only the operations and top-level members in
      * {@code CONSOLE_TARGET_OPERATIONS} are served: any other operation, and any other member set
      * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
-     * were unset, and a top-level {@code null} member is dropped. Members nested inside the served
-     * ones are passed on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
+     * were unset, and a top-level {@code null} member is dropped. {@code PutMetricData} also checks
+     * the complete batch for supported scalar or statistic-set shapes before storing any metrics;
+     * {@code Values} and {@code Counts} are refused because this handler does not parse them.
+     * Other operations pass nested members on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
      * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
      * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The
      * name matches {@code DynamoDbJsonHandler.handleLegacy}, the entry point of the other JSON-only
@@ -139,6 +151,17 @@ public class CloudWatchMetricsJsonHandler {
                 return unsupportedWithConsoleTarget("Parameter " + member.getKey() + " of " + action);
             }
         }
+        if ("PutMetricData".equals(action)) {
+            if (!served.path("Namespace").isTextual() || !served.path("MetricData").isArray()
+                    || served.path("MetricData").isEmpty()) {
+                return unsupportedWithConsoleTarget("PutMetricData request shape");
+            }
+            for (JsonNode datum : served.path("MetricData")) {
+                if (!isSupportedConsoleMetricDatum(datum)) {
+                    return unsupportedWithConsoleTarget("PutMetricData datum shape");
+                }
+            }
+        }
         Response response = handle(action, served, region);
         if ("DescribeAlarms".equals(action) && response.getEntity() instanceof JsonNode body) {
             for (JsonNode alarm : body.path("MetricAlarms")) {
@@ -149,6 +172,71 @@ public class CloudWatchMetricsJsonHandler {
             }
         }
         return response;
+    }
+
+    private boolean isSupportedConsoleMetricDatum(JsonNode datum) {
+        if (!hasOnlyConsoleMembers(datum, CONSOLE_METRIC_DATUM_MEMBERS)
+                || !datum.path("MetricName").isTextual()) {
+            return false;
+        }
+        boolean scalar = datum.hasNonNull("Value");
+        boolean statistics = datum.hasNonNull("StatisticValues");
+        if (scalar == statistics || scalar && !isConsoleNumber(datum.path("Value"))) {
+            return false;
+        }
+        if (statistics) {
+            JsonNode values = datum.path("StatisticValues");
+            if (!hasOnlyConsoleMembers(values, CONSOLE_STATISTIC_MEMBERS)
+                    || !CONSOLE_STATISTIC_MEMBERS.stream().allMatch(name -> isConsoleNumber(values.path(name)))
+                    || values.path("SampleCount").doubleValue() <= 0) {
+                return false;
+            }
+        }
+        if (datum.hasNonNull("Timestamp")) {
+            JsonNode timestamp = datum.path("Timestamp");
+            if (!timestamp.isTextual() && !isConsoleNumber(timestamp)) {
+                return false;
+            }
+            try {
+                if (parseInstantNode(timestamp) == null) {
+                    return false;
+                }
+            } catch (DateTimeException invalid) {
+                LOG.debug("Refusing a console metric timestamp outside the supported range", invalid);
+                return false;
+            }
+        }
+        JsonNode dimensions = datum.path("Dimensions");
+        if (!dimensions.isMissingNode() && !dimensions.isNull()) {
+            if (!dimensions.isArray()) {
+                return false;
+            }
+            for (JsonNode dimension : dimensions) {
+                if (!hasOnlyConsoleMembers(dimension, CONSOLE_DIMENSION_MEMBERS)
+                        || !dimension.path("Name").isTextual() || !dimension.path("Value").isTextual()) {
+                    return false;
+                }
+            }
+        }
+        return !datum.hasNonNull("Unit") || datum.path("Unit").isTextual();
+    }
+
+    private static boolean hasOnlyConsoleMembers(JsonNode node, Set<String> supported) {
+        if (!node.isObject()) {
+            return false;
+        }
+        for (Map.Entry<String, JsonNode> member : node.properties()) {
+            JsonNode value = member.getValue();
+            if (!supported.contains(member.getKey()) && !value.isNull()
+                    && (!value.isBoolean() || value.booleanValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isConsoleNumber(JsonNode node) {
+        return node.isNumber() && Double.isFinite(node.doubleValue());
     }
 
     private static Response unsupportedWithConsoleTarget(String subject) {
@@ -437,6 +525,25 @@ public class CloudWatchMetricsJsonHandler {
             namesNode.forEach(n -> alarmNames.add(n.asText()));
         }
         metricsService.deleteAlarms(alarmNames, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleAlarmActions(JsonNode request, String region, boolean enabled) {
+        JsonNode names = request.get("AlarmNames");
+        List<String> alarmNames = null;
+        if (names != null && !names.isNull()) {
+            if (!names.isArray()) {
+                throw new AwsException("SerializationException", "AlarmNames must be an array", 400);
+            }
+            alarmNames = new ArrayList<>();
+            for (JsonNode name : names) {
+                if (!name.isTextual() && !name.isNull()) {
+                    throw new AwsException("SerializationException", "AlarmNames members must be strings", 400);
+                }
+                alarmNames.add(name.asText(null));
+            }
+        }
+        metricsService.setAlarmActionsEnabled(alarmNames, enabled, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

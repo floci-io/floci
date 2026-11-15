@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
@@ -66,19 +67,19 @@ public class AppConfigService {
     AppConfigService(StorageFactory storageFactory, RegionResolver regions, Clock clock) {
         this.clock = clock;
         this.regions = regions;
-        this.applicationStore = new AppConfigStorage<>(storageFactory, regions,
+        this.applicationStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-applications.json", new TypeReference<>() {});
-        this.environmentStore = new AppConfigStorage<>(storageFactory, regions,
+        this.environmentStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-environments.json", new TypeReference<>() {});
-        this.profileStore = new AppConfigStorage<>(storageFactory, regions,
+        this.profileStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-profiles.json", new TypeReference<>() {});
-        this.strategyStore = new AppConfigStorage<>(storageFactory, regions,
+        this.strategyStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-strategies.json", new TypeReference<>() {});
-        this.versionStore = new AppConfigStorage<>(storageFactory, regions,
+        this.versionStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-versions.json", new TypeReference<>() {});
-        this.deploymentStore = new AppConfigStorage<>(storageFactory, regions,
+        this.deploymentStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-deployments.json", new TypeReference<>() {});
-        this.activeConfigStore = new AppConfigStorage<>(storageFactory, regions,
+        this.activeConfigStore = new RegionScopedStorage<>(storageFactory, regions,
                 "appconfig", "appconfig-active-configs.json", new TypeReference<>() {});
     }
 

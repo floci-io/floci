@@ -1,12 +1,14 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -39,6 +41,9 @@ class CloudFormationDeletionPolicyIntegrationTest {
     /** CUSTOM_AUTH signs for eu-west-1, whose S3 endpoint requires a matching LocationConstraint, as on AWS. */
     private static final String EU_WEST_1_BUCKET =
             "<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>";
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
 
     @Test
     void deletingNestedStacksDoesNotExhaustOperationWorkers() throws InterruptedException {
@@ -108,6 +113,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(bucket);
 
         String stackId = createStack(stackName, template);
+        cleanup.register(() -> deleteBucket(bucket, "object.txt"));
 
         given()
             .contentType("text/plain")
@@ -153,6 +159,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(bucket);
 
         String stackId = createStack(stackName, template);
+        cleanup.register(() -> deleteBucket(bucket));
         deleteStack(stackName);
         awaitStackStatus(stackId, "DELETE_COMPLETE");
 
@@ -160,7 +167,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     @Test
-    void rollingBackAFailedCreateDeletesRetainExceptOnCreateButKeepsRetain() {
+    void rollingBackAFailedCreateDeletesRetainExceptOnCreateButKeepsRetain() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String keptBucket = "cfn-rollback-retain-bucket-" + suffix;
         String rolledBackBucket = "cfn-rollback-reoc-bucket-" + suffix;
@@ -196,8 +203,10 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(keptBucket, rolledBackBucket, suffix);
 
         String stackId = createStack(stackName, template);
+        cleanup.register(() -> deleteBucket(keptBucket));
+        cleanup.register(() -> deleteStack(stackName));
 
-        assertThat(describeStacks(stackId), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+        awaitStackStatus(stackId, "ROLLBACK_COMPLETE");
         assertBucketExists(keptBucket);
         assertBucketDeleted(rolledBackBucket);
     }
@@ -264,6 +273,8 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(bucket1, bucket2);
 
         String stackId = createStack(stackName, template1);
+        cleanup.register(() -> deleteBucket(bucket1));
+        cleanup.register(() -> deleteStack(stackName));
         awaitStackStatus(stackId, "CREATE_COMPLETE");
 
         String template2 = """
@@ -732,7 +743,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
         String parentStackId = createStack(stackName, template);
         try {
-            assertThat(describeStacks(parentStackId), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+            awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
             assertBucketDeleted(bucketName);
         } finally {
             deleteStack(stackName);
@@ -890,6 +901,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
             """.formatted(suffix);
 
         String parentStackId = createStack(stackName, template);
+        cleanup.register(() -> deleteBucket(keptBucket));
         try {
             awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
             cfnQuery("DescribeStacks", stackName + "-ChildStack").then().statusCode(400);
@@ -1479,7 +1491,10 @@ class CloudFormationDeletionPolicyIntegrationTest {
             .statusCode(200);
     }
 
-    /** DeleteStack runs asynchronously, and a deleted stack stays describable by its stack ID. */
+    /**
+     * CreateStack, UpdateStack and DeleteStack answer before their execution ends, and a deleted stack
+     * stays describable by its stack ID.
+     */
     private static void awaitStackStatus(String stackId, String status) throws InterruptedException {
         awaitStackStatus(stackId, status, null);
     }
@@ -1531,5 +1546,16 @@ class CloudFormationDeletionPolicyIntegrationTest {
 
     private static Response bucketRequest(String bucket) {
         return given().header("Host", bucket + ".localhost").when().get("/");
+    }
+
+    /**
+     * Deletes a bucket a retaining policy kept, and the {@code keys} put in it. Every {@code @QuarkusTest} class
+     * shares one emulator, so a kept bucket would outlive the test.
+     */
+    private static void deleteBucket(String bucket, String... keys) {
+        for (String key : keys) {
+            given().header("Host", bucket + ".localhost").when().delete("/" + key).then().statusCode(204);
+        }
+        given().header("Host", bucket + ".localhost").when().delete("/").then().statusCode(204);
     }
 }

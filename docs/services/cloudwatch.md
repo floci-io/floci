@@ -149,8 +149,9 @@ configuration and does not deliver the source's logs.
   this account." (likewise for a Delivery Destination and a Delivery).
 - With IAM enforcement on, each action is authorized on the resources the AWS Service Authorization
   Reference lists for it: the source, destination or delivery it names, and for `CreateDelivery` the
-  source, the destination and the new delivery; `DeleteDeliverySource` on the source it deletes. The
-  Describe actions are authorized on `*`, as the reference lists no resource for them.
+  source, the destination and the new delivery; `DeleteDeliverySource` on the delivery destinations the
+  deliveries from the source it deletes send to, the type the reference lists for it, and on `*` for a source
+  with none. The Describe actions are authorized on `*`, as the reference lists no resource for them.
 
 Not modelled: delivery destination policies (`PutDeliveryDestinationPolicy` and its siblings), and
 record field defaults for sources other than an EventBridge event bus.
@@ -465,9 +466,9 @@ HTTP 404 `UnknownOperationException`. IAM policies use the `cloudwatch` action p
 JSON `PutMetricData` accepts a gzip-compressed body (`Content-Encoding: gzip`), which the AWS
 CLI, boto3 and the other SDKs that call CloudWatch over JSON send by default for any body of
 10 KiB or more. With signature validation and IAM enforcement on, the signature is checked over
-the compressed bytes as sent and IAM decides the request before the body is decompressed. As on
-the CBOR protocol, the decompressed body is limited to 10 MiB: a larger one returns HTTP 413
-`PayloadTooLargeException`, a body that cannot be decompressed returns HTTP 400
+the compressed bytes as sent and IAM decides the request before the body is decompressed. The
+decompressed body is limited to 5 MiB: a larger one returns HTTP 413
+`RequestEntityTooLargeException`, a body that cannot be decompressed returns HTTP 400
 `InvalidRequestException`, and an empty body reads as no input. Other JSON operations do not
 decompress their body.
 
@@ -476,11 +477,19 @@ decompress their body.
 JSON 1.0 requests name their operation in `X-Amz-Target` with the `GraniteServiceVersion20100801.`
 prefix the AWS SDKs send, or with `CloudWatchVersion20130116.`, the prefix of the CloudWatch
 console's API. Both get the same signature validation and IAM checks. The console prefix serves
-four operations on the same metrics and alarms, with these request members: `ListMetrics`
+five operations on the same metrics and alarms, with these request members: `PutMetricData`
+(`Namespace`, `MetricData`), `ListMetrics`
 (`Namespace`, `MetricName`, `Dimensions`, `NextToken`), `DescribeAlarms` (`AlarmNames`,
 `AlarmNamePrefix`, `MaxRecords`, `NextToken`), `GetMetricStatistics` (`Namespace`, `MetricName`,
 `Dimensions`, `StartTime`, `EndTime`, `Period`, `Statistics`, `Unit`) and `DeleteAlarms`
 (`AlarmNames`). Every result comes back at once, so `MaxRecords` and `NextToken` change nothing.
+Console metric publication accepts a nonempty array of metric objects with either a finite
+numeric `Value` or a complete numeric `StatisticValues` object (`SampleCount`, `Sum`, `Minimum`,
+`Maximum`, with positive sample count), with string dimension names and values. Timestamps may
+be finite numeric epochs or valid ISO-8601/epoch strings. It rejects malformed batches, conflicting
+scalar/statistic-set readings, and unsupported datum fields such as `Values`, `Counts` and
+`StorageResolution` before storing any metrics. This supported subset is not complete console
+API parity.
 It returns HTTP 400 `UnsupportedOperation` for every other operation, such as the console's
 `GetMetricData` with `Defaults` and `Metrics`; for a request that sets any other member, such as
 `StateValue`, `ExtendedStatistics` or the console's `CountOnlyRequest`, to a value other than
@@ -505,6 +514,8 @@ returns HTTP 404.
 | `PutCompositeAlarm` | Create or update a composite alarm rule |
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
+| `DisableAlarmActions` | Disable actions for named metric and composite alarms |
+| `EnableAlarmActions` | Re-enable actions for named metric and composite alarms |
 | `SetAlarmState` | Manually set alarm state |
 | `DescribeAlarmHistory` | List alarm state transitions and configuration changes (see [Alarm history](#alarm-history)) |
 | `PutMetricStream` | Create or update a metric stream definition |
@@ -581,7 +592,15 @@ alarms before their children. Names that match no alarm are ignored.
 
 State transitions publish to same-account standard SNS topics in `AlarmActions`, `OKActions`, or
 `InsufficientDataActions`, including transitions from `SetAlarmState`. Unchanged states and
-`ActionsEnabled=false` suppress notifications. Scaling action retries remain independent.
+`ActionsEnabled=false` suppress notifications. `DisableAlarmActions` and `EnableAlarmActions`
+update this setting through the Query and current JSON APIs, preserving the alarm's state,
+actions, tags, and other configuration. They accept up to 100 names, ignore nonexistent
+alarms, and validate the whole request before updating any alarm. Enabling actions does not
+replay notifications for transitions that occurred while disabled.
+Query requests validate all supplied numeric member indexes, including names after a gap.
+The metric evaluator checks current stored action settings before dispatch; disabling does
+not cancel actions that have already passed that check.
+Scaling action retries remain independent.
 Failures are logged per target without blocking other targets. Notifications include a
 single-metric `Trigger`; durable retries, FIFO topics, and metric-math payloads are not covered.
 
@@ -621,8 +640,9 @@ empty or over-long `ActionPrefix`, and an empty or over-long alarm name in eithe
   evaluator or a composite alarm's rule. Setting an alarm to the state it already has records
   nothing. `HistoryData` carries the old and new state with their reasons and reason data.
 - `ConfigurationUpdate` when `PutMetricAlarm` or `PutCompositeAlarm` creates or updates an alarm,
-  and when `DeleteAlarms` deletes one. An update lists the previous value of each changed field
-  under `originalUpdatedFields`.
+  when `EnableAlarmActions` or `DisableAlarmActions` changes its action setting, and when
+  `DeleteAlarms` deletes one. An update lists the previous value of each changed field under
+  `originalUpdatedFields`.
 
 History survives the deletion of its alarm and is kept for 30 days. Without `AlarmTypes` only
 metric alarm history is listed; request `CompositeAlarm` to include composite alarms. `Action`,

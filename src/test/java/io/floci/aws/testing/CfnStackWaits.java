@@ -5,6 +5,7 @@ import io.restassured.path.xml.element.Node;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.DeleteStackRequest;
 import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 
@@ -128,13 +129,9 @@ public final class CfnStackWaits {
     public static Stack awaitStatus(CloudFormationClient client, String stackName, String expectedStatus) {
         DescribeStacksRequest request = DescribeStacksRequest.builder().stackName(stackName).build();
         return await("Stack " + stackName + " to reach " + expectedStatus)
-                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).until(() -> {
-                    List<Stack> stacks = client.describeStacks(request).stacks();
-                    if (stacks.isEmpty()) {
-                        fail("DescribeStacks " + stackName + " returned no stacks");
-                    }
-                    return stacks.getFirst();
-                }, stack -> hasExpectedStatus(stackName, expectedStatus,
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50))
+                .until(() -> describeStack(client, request),
+                        stack -> hasExpectedStatus(stackName, expectedStatus,
                         new StackState(stack.stackStatusAsString(),
                                 stack.stackStatusReason() == null ? "" : stack.stackStatusReason())));
     }
@@ -151,6 +148,29 @@ public final class CfnStackWaits {
                                     String expectedStatus) {
         client.updateStack(request -> request.stackName(stackName).templateBody(template));
         return awaitStatus(client, stackName, expectedStatus);
+    }
+
+    /** Waits for prior work, deletes through the SDK, and follows the retained stack id until deletion completes. */
+    public static void deleteStack(CloudFormationClient client, String stackName) {
+        DescribeStacksRequest request = DescribeStacksRequest.builder().stackName(stackName).build();
+        Stack stack = await("Stack " + stackName + " to finish before cleanup")
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50))
+                .until(() -> describeStack(client, request),
+                        current -> TERMINAL.contains(current.stackStatusAsString()));
+        if ("DELETE_COMPLETE".equals(stack.stackStatusAsString())) {
+            return;
+        }
+        String stackId = stack.stackId();
+        client.deleteStack(DeleteStackRequest.builder().stackName(stackId).build());
+        awaitStatus(client, stackId, "DELETE_COMPLETE");
+    }
+
+    private static Stack describeStack(CloudFormationClient client, DescribeStacksRequest request) {
+        List<Stack> stacks = client.describeStacks(request).stacks();
+        if (stacks.isEmpty()) {
+            fail("DescribeStacks " + request.stackName() + " returned no stacks");
+        }
+        return stacks.getFirst();
     }
 
     /**

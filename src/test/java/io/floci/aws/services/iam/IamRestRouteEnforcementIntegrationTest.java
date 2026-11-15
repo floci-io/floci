@@ -118,6 +118,8 @@ class IamRestRouteEnforcementIntegrationTest {
         created.then().statusCode(201);
         String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
         String etag = created.header("ETag");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "cloudfront")).header("If-Match", etag)
+                .delete("/2020-05-31/key-value-store/" + name).then().statusCode(204));
 
         policy(user, allow("cloudfront:*", "*") + "," +
                 "{\"Effect\":\"Deny\",\"Action\":\"cloudfront:DeleteKeyValueStore\",\"Resource\":\"" + arn + "\"}");
@@ -142,28 +144,39 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void schedulerTaggingIsCheckedOnTheBareTagsRouteToo() {
-        // The shared tagging routes also take the ARN in the body of POST /tags.
+    void schedulerTaggingIsCheckedOnTheGroupItsModeledRouteNamesAndServedOnNoOtherRoute() {
+        // Scheduler tags the group whose ARN its modeled /tags/{ResourceArn} carries, which the generated request
+        // resources read, so a Deny on that group holds against an Allow on every resource. The shared controller's
+        // bare POST /tags is no route of Scheduler's model, as AWS gives it none: let through, it is refused as an
+        // ARN that path does not serve, and tags nothing.
         String user = user("route-scheduler-tags");
         String group = scheduleGroup("route-group-" + suffix());
+        String tagsPath = "/tags/" + encoded(group);
+        String tags = "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
 
         policy(user, allow("scheduler:ListTagsForResource", "*"));
-        refused(as(user, "scheduler").body(tagBody(group)).post("/tags").then(), "scheduler:TagResource");
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
         policy(user, allow("scheduler:TagResource", group));
         // Allowed on that group, the request reaches Scheduler, which has no such group.
-        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(not(403));
+        as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then().statusCode(not(403));
+        policy(user, allow("scheduler:TagResource", "*") + "," + deny("scheduler:TagResource", group));
+        refused(as(user, "scheduler").urlEncodingEnabled(false).body(tags).post(tagsPath).then(),
+                "scheduler:TagResource");
+        as(user, "scheduler").body(tagBody(group)).post("/tags").then().statusCode(400)
+                .body(containsString("Invalid resource ARN"));
     }
 
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
         // POST /tags tags the ARN its body names: one named in the query does not move the check.
         String user = user("route-tags-body");
-        String allowed = scheduleGroup("route-allowed-" + suffix());
-        String other = scheduleGroup("route-other-" + suffix());
+        String allowed = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-allowed-" + suffix();
+        String other = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-other-" + suffix();
 
-        policy(user, allow("scheduler:TagResource", allowed));
-        refused(as(user, "scheduler").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
-                "scheduler:TagResource");
+        policy(user, allow("pipes:TagResource", allowed));
+        refused(as(user, "pipes").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
+                "pipes:TagResource");
     }
 
     @Test
@@ -402,9 +415,10 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void lambdaTaggingIsCheckedAgainstTheCallersOwnResourceWhateverAccountTheArnNames() {
-        // Lambda tags the caller's own function or MicroVM image of the ARN's name, so a grant on another
-        // account's ARN of that name does not cover it, and a grant on the caller's own does.
+    void lambdaTaggingByAnotherAccountsArnIsCheckedOnThatArnAndTheCallersOwnResourceOfItsName() {
+        // The ARN names another account's function or MicroVM image, which is checked, and Lambda tags the caller's
+        // own of that name, which is checked too, so a grant on either alone does not cover it; one on the caller's
+        // own covers a request naming its own ARN.
         String user = user("route-lambda-tags-account");
         String name = "route-tagged-" + suffix();
         String body = "{\"Tags\":{\"team\":\"a\"}}";
@@ -415,7 +429,8 @@ class IamRestRouteEnforcementIntegrationTest {
             policy(user, allow("lambda:TagResource", foreign));
             refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
             policy(user, allow("lambda:TagResource", own));
-            as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then().statusCode(not(403));
+            refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
+            as(user, "lambda").body(body).post("/2017-03-31/tags/" + own).then().statusCode(not(403));
         }
     }
 
@@ -603,22 +618,25 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
-     * Macie's {@code CreateMember} is checked on the member its {@code account.accountId} names: a grant scoped to the
-     * member lets the request reach Macie, which answers that this account has no session, a request naming another
-     * member is refused, and a deny on the member holds under an allow on everything.
+     * Macie's {@code CreateMember} is checked on the account's members, {@code member/*}: nothing botocore or the
+     * Service Reference says names the member it makes by its {@code account.accountId}, so a grant scoped to one
+     * member does not reach it, a grant on the members lets the request reach Macie, which answers that this account
+     * has no session, and a deny on them holds under an allow on everything.
      */
     @Test
-    void macieCreateMemberIsCheckedOnTheMemberItNames() {
+    void macieCreateMemberIsCheckedOnTheAccountsMembers() {
         String user = user("route-macie-member");
-        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+        String members = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/*";
 
-        policy(user, allow("macie2:CreateMember", member));
-        createMember(user, "111122223333", null).statusCode(404);
-        refused(createMember(user, "444455556666", null), "macie2:CreateMember");
-
-        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", member));
+        policy(user, allow("macie2:CreateMember", "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333"));
         refused(createMember(user, "111122223333", null), "macie2:CreateMember");
+
+        policy(user, allow("macie2:CreateMember", members));
+        createMember(user, "111122223333", null).statusCode(404);
         createMember(user, "444455556666", null).statusCode(404);
+
+        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", members));
+        refused(createMember(user, "111122223333", null), "macie2:CreateMember");
     }
 
     /**
@@ -628,7 +646,7 @@ class IamRestRouteEnforcementIntegrationTest {
     @Test
     void macieCreateMemberIsCheckedWithTheTagsItCarries() {
         String user = user("route-macie-tags");
-        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/*";
 
         policy(user, allow("macie2:CreateMember", member));
         createMember(user, "111122223333", null).statusCode(404);
@@ -842,6 +860,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
         checkedAs(user, "account", "POST", "/getAlternateContact", "{\"AlternateContactType\":\"BILLING\"}",
                 "account:GetAlternateContact");
+        checkedAs(user, "account", "POST", "/getContactInformation", "{}", "account:GetContactInformation");
+        checkedAs(user, "account", "POST", "/putContactInformation", "{}", "account:PutContactInformation");
         checkedAs(user, "controlcatalog", "POST", "/list-controls", "{}", "controlcatalog:ListControls");
         checkedAs(user, "fis", "GET", "/experimentTemplates", null, "fis:ListExperimentTemplates");
         checkedAs(user, "oam", "POST", "/ListSinks", "{}", "oam:ListSinks");
@@ -895,11 +915,15 @@ class IamRestRouteEnforcementIntegrationTest {
     void accountIsCheckedOnTheMemberAccountOfTheCallersOrganization() {
         OrganizationsRequests.request(MANAGEMENT, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
                 .when().post("/").then().statusCode(200);
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "DeleteOrganization", "{}")
+                .when().post("/").then().statusCode(200));
         String organization = OrganizationsRequests.request(MANAGEMENT, "DescribeOrganization", "{}")
                 .when().post("/").then().statusCode(200).extract().path("Organization.Id");
         String member = OrganizationsRequests.request(MANAGEMENT, "CreateAccount",
                         "{\"Email\":\"route-contact@example.com\",\"AccountName\":\"RouteContact\"}")
                 .when().post("/").then().statusCode(200).extract().path("CreateAccountStatus.AccountId");
+        cleanup.register(() -> OrganizationsRequests.request(MANAGEMENT, "RemoveAccountFromOrganization",
+                "{\"AccountId\":\"" + member + "\"}").when().post("/").then().statusCode(200));
         OrganizationsRequests.request(MANAGEMENT, "EnableAWSServiceAccess",
                         "{\"ServicePrincipal\":\"account.amazonaws.com\"}")
                 .when().post("/").then().statusCode(200);
@@ -1014,8 +1038,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void ramIsCheckedOnTheResourceShareItNamesInItsBodyAndQuery() {
-        String share = adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}").post("/createresourceshare")
-                .then().statusCode(200).extract().path("resourceShare.resourceShareArn");
+        String share = madeShare(adminOf("ram").body("{\"name\":\"route-share-" + suffix() + "\"}")
+                .post("/createresourceshare").then());
         String other = "arn:aws:ram:us-east-1:" + ACCOUNT + ":resource-share/other";
         String user = user("route-ram");
 
@@ -1244,10 +1268,11 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(request(user, service, "POST", path, body.apply("red")), action);
     }
 
-    /** A create that got past the check and made a resource share, removed afterwards. */
-    private void madeShare(ValidatableResponse response) {
+    /** A create that got past the check and made a resource share, removed afterwards; returns the share's ARN. */
+    private String madeShare(ValidatableResponse response) {
         String share = response.statusCode(200).extract().path("resourceShare.resourceShareArn");
         cleanup.register(() -> adminOf("ram").queryParam("resourceShareArn", share).delete("/deleteresourceshare"));
+        return share;
     }
 
     /** Refuses a request until the caller holds the action, then lets it past the check. */

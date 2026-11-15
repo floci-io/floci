@@ -33,7 +33,6 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -627,13 +626,8 @@ public class OpenSearchService implements ResourceProvider {
      * own region; a record whose ARN cannot be parsed is left where it is.
      */
     private void migrateLegacyDomainKeys() {
-        Set<String> accounts = new LinkedHashSet<>();
-        for (String rawKey : domainStore.scanAllAccountsWithRawKeys().keySet()) {
-            accounts.add(AccountAwareStorageBackend.hasAccountPrefix(rawKey)
-                    ? rawKey.substring(0, 12)
-                    : regionResolver.getDefaultAccountId());
-        }
-        accounts.forEach(this::migrateLegacyDomainKeys);
+        domainStore.migrateLegacyEntriesInAllAccounts(key -> !key.contains("::"),
+                this::legacyDomainDestinationKey, (accountId, domain) -> ownsAccount(domain, accountId));
     }
 
     private void migrateLegacyDomainKeys(String accountId) {

@@ -6,8 +6,10 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A durable execution with its checkpointed operations and history. One stored object per
@@ -64,6 +66,29 @@ public class DurableExecution {
     @JsonIgnore
     public boolean isClosed() {
         return status.isClosed();
+    }
+
+    /** AWS leaves out the operations under a closed CONTEXT that did not ask to replay its children. */
+    public List<DurableOperation> replayedOperations() {
+        List<DurableOperation> replayed = new ArrayList<>(operations.size());
+        Set<String> leftOut = new HashSet<>();
+        for (DurableOperation operation : operations.values()) {
+            String parentId = operation.getParentId();
+            if (parentId != null) {
+                DurableOperation parent = operations.get(parentId);
+                boolean parentClosedWithoutReplay = parent != null
+                        && parent.getType() == DurableOperationType.CONTEXT
+                        && (parent.getStatus() == DurableOperationStatus.SUCCEEDED
+                        || parent.getStatus() == DurableOperationStatus.FAILED)
+                        && !Boolean.TRUE.equals(parent.getReplayChildren());
+                if (leftOut.contains(parentId) || parentClosedWithoutReplay) {
+                    leftOut.add(operation.getId());
+                    continue;
+                }
+            }
+            replayed.add(operation);
+        }
+        return replayed;
     }
 
     @JsonIgnore

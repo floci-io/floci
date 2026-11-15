@@ -418,6 +418,14 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
+     * The id of the live stack a name or a stack id names in the caller's account and the Region, its ARN with the id
+     * CloudFormation minted, which IAM checks a request naming the stack on; empty when there is none. Reads only.
+     */
+    public Optional<String> stackArn(String stackNameOrArn, String region) {
+        return Optional.ofNullable(resolveStack(stackNameOrArn, region, currentAccount())).map(Stack::getStackId);
+    }
+
+    /**
      * The stack's current parameter values, or an empty map if it does not exist (yet). Used to
      * resolve {@code UsePreviousValue} on an update before the stack lookup that
      * {@code createChangeSet}/{@code executeChangeSet} would otherwise perform.
@@ -1655,8 +1663,15 @@ public class CloudFormationService implements ResourceProvider {
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
                                         Set<String> changedParams, Set<String> changedConditions) {
-        if (oldProps == null || newProps == null || oldProps.isMissingNode() || newProps.isMissingNode()) {
+        if (oldProps == null || oldProps.isMissingNode()) {
             return false;
+        }
+        if (newProps == null || newProps.isMissingNode()) {
+            // A dropped Properties block removes every property in it, as removing them one by one does.
+            if (!oldProps.isObject()) {
+                return false;
+            }
+            newProps = objectMapper.createObjectNode();
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
             // The registry table names the exact pointers; only a value at one of them replaces.
@@ -1729,6 +1744,24 @@ public class CloudFormationService implements ResourceProvider {
      * The execute {@code CreateStack} and {@code UpdateStack} run, as
      * {@link #executeChangeSet(String, String, String)}, for a request that carries a token.
      */
+    /**
+     * Records the permissions boundary a delegation registered for the caller asking for this
+     * deployment, so a role the stack provisions carries it. Provisioning runs after the request
+     * returns, so the cap cannot be read from the caller then and travels with the stack instead.
+     * Null leaves the stack as it was, which is every stack an ordinary caller deploys.
+     */
+    public void recordDelegatedRoleBoundary(String stackNameOrId, String region, String boundaryArn) {
+        if (boundaryArn == null) {
+            return;
+        }
+        Stack stack = resolveStackForDescribe(stackNameOrId, region);
+        if (stack == null) {
+            return;
+        }
+        stack.setDelegatedRoleBoundaryArn(boundaryArn);
+        persistStack(stack);
+    }
+
     public Future<?> executeChangeSetWithToken(String stackName, String changeSetName, String region,
                                                String clientRequestToken) {
         return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), false,
@@ -2856,7 +2889,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes);
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

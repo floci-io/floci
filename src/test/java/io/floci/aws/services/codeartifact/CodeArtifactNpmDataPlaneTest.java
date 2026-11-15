@@ -913,8 +913,11 @@ class CodeArtifactNpmDataPlaneTest {
         givenStoredVersion(verdaccioClient, null, "big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content, Map.of());
         startDataPlane(service, verdaccioClient);
 
-        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/big-pkg", "good-token",
-                npmPublishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content));
+        // This streams roughly 94 MiB through HTTP and disk before hashing it. Its correctness
+        // assertion needs a separate deadline from the small routing requests on a busy runner.
+        HttpResponse response = request(HttpMethod.PUT,
+                "/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/big-pkg", "good-token",
+                npmPublishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content), null, 30);
 
         assertEquals(200, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
@@ -1596,8 +1599,14 @@ class CodeArtifactNpmDataPlaneTest {
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
         when(serviceConfigAccess.isEnabled("codeartifact")).thenReturn(codeArtifactEnabled);
         Router router = Router.router(vertx);
-        new CodeArtifactNpmDataPlane(service, verdaccioClient, externalConnectionImporter, serviceConfigAccess,
-                vertx, new ObjectMapper())
+        // A fresh, unstubbed mock, the same convention the overload above already documents for
+        // externalConnectionImporter: every test here that never configures it relies on
+        // Mockito's own default (Optional.empty()/false) to mean "no upstreams configured,
+        // proceed with the ordinary proxy" exactly as if this importer did not exist.
+        CodeArtifactNpmUpstreamRepositoryImporter upstreamRepositoryImporter =
+                mock(CodeArtifactNpmUpstreamRepositoryImporter.class);
+        new CodeArtifactNpmDataPlane(service, verdaccioClient, externalConnectionImporter, upstreamRepositoryImporter,
+                serviceConfigAccess, vertx, new ObjectMapper())
                 .register(router);
         dataPlane = vertx.createHttpServer().requestHandler(router)
                 .listen(0, "127.0.0.1")
@@ -1633,6 +1642,11 @@ class CodeArtifactNpmDataPlaneTest {
 
     private HttpResponse request(HttpMethod method, String path, String bearerToken, String body, String accept)
             throws Exception {
+        return request(method, path, bearerToken, body, accept, 6);
+    }
+
+    private HttpResponse request(HttpMethod method, String path, String bearerToken, String body, String accept,
+            int timeoutSeconds) throws Exception {
         RequestOptions options = new RequestOptions()
                 .setHost("127.0.0.1")
                 .setPort(dataPlane.actualPort())
@@ -1653,12 +1667,8 @@ class CodeArtifactNpmDataPlaneTest {
                     resp.headers().forEach(h -> headers.put(h.getKey().toLowerCase(), h.getValue()));
                     return new HttpResponse(resp.statusCode(), buffer.toString(StandardCharsets.UTF_8), headers);
                 }));
-        // 6 seconds, not the 2 used elsewhere in this file: this single wait now covers every
-        // stage of the chain above (request creation, send, body read) rather than one stage each
-        // getting its own 2-second budget the way three separate blocking calls used to, so it
-        // needs the combined allowance to avoid trading the body-read flake this replaced for a
-        // tighter timeout on a busy runner.
-        return responseFuture.toCompletionStage().toCompletableFuture().get(6, TimeUnit.SECONDS);
+        // Bound the complete request chain, including sending and reading the response body.
+        return responseFuture.toCompletionStage().toCompletableFuture().get(timeoutSeconds, TimeUnit.SECONDS);
     }
 
     private record HttpResponse(int statusCode, String body, Map<String, String> headers) {}

@@ -528,6 +528,41 @@ class ContainerBuilderTest {
         assertEquals(imageId, fixture.builder.newContainer(imageId).build().image());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "localhost:4566/000000000000/us-east-1/spark/custom:7.5.0",
+            "000000000000.dkr.ecr.us-east-1.localhost:4566/spark/custom:7.5.0",
+            "000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/spark/custom:7.5.0",
+            "localhost.floci.io:4566/000000000000/us-east-1/spark/custom:7.5.0"})
+    void imageRegistryBaseLeavesAnImageInFlocisOwnEcrAlone(String image) {
+        TestFixture fixture = new TestFixture();
+        when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror"));
+
+        assertEquals(image, fixture.builder.resolveImage(image));
+        assertEquals(image, fixture.builder.newContainer(image).build().image());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"localhost/team/app:1", "LOCALHOST:5000/team/app:1", "registry.LOCALHOST:5000/team/app:1",
+            "127.0.0.1:5000/team/app:1",
+            "127.1.2.3:5000/team/app:1", "[::1]:5000/team/app:1", "[0:0:0:0:0:0:0:1]:5000/team/app:1"})
+    void imageRegistryBaseLeavesAnImageInAnotherLoopbackRegistryAlone(String image) {
+        TestFixture fixture = new TestFixture();
+        when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror"));
+
+        assertEquals(image, fixture.builder.newContainer(image).build().image());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"localhost:16", "team/localhost:16", "localhost.example.com/team/app:1",
+            "mylocalhost.example.com/team/app:1", "127.0.0.1.nip.io/team/app:1"})
+    void imageRegistryBasePrefixesAnImageOnlyNamedLikeALoopbackOne(String image) {
+        TestFixture fixture = new TestFixture();
+        when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror"));
+
+        assertEquals("ghcr.io/floci-io/mirror/" + image, fixture.builder.newContainer(image).build().image());
+    }
+
     private static class TestFixture {
         final EmulatorConfig config = mock(EmulatorConfig.class);
         final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

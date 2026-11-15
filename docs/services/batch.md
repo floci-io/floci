@@ -40,6 +40,10 @@ Batch uses `floci.services.batch.runner-mode`.
 
 `process` mode is not implemented.
 
+### VPC (`computeResources.subnets`)
+
+AWS Batch runs a job on an instance or Fargate task in the subnets of its queue's compute environment. In `docker` mode, Floci puts the job's container (each node's, for a multi-node job) on that VPC's Docker network, at an address leased from the first subnet of the first compute environment, in the queue's order, that names any, the way it places EC2 instances and VPC-configured Lambda functions, so a job reaches a database or anything else in the VPC by its private IP. A queue of unmanaged compute environments, a subnet EC2 does not know, or `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=false` leaves the container on its own network. Security groups are not enforced, as for EC2. While a job's container runs, `DeleteSubnet` refuses its subnet and `DeleteVpc` its VPC (`DependencyViolation`); Floci runs no idle instances, so a compute environment's subnets alone hold nothing.
+
 ## Submit Behavior
 
 Supported `SubmitJob` fields:
@@ -150,7 +154,7 @@ IAM roles, VPC fields, Fargate declarations, log configuration, storage, and res
 ## Limitations
 
 - No IAM enforcement.
-- No VPC/subnet/security-group simulation.
+- Security groups are not enforced, and only `docker` mode places jobs on their VPC's network.
 - No AWS-faithful capacity scheduling.
 - No job dependencies (`dependsOn`).
 - EventBridge input transformers work through the existing EventBridge target input path; full Batch-specific input-transformer parity is not implemented.

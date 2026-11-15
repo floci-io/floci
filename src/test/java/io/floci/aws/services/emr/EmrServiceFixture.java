@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
@@ -16,11 +17,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -83,6 +87,50 @@ final class EmrServiceFixture {
         final List<ClusterStorage.Yarn> resizes = new ArrayList<>();
         boolean refuse;
         Runnable whileCreating = () -> { };
+        // Whether a cluster's network has an instance metadata relay, as where its steps have a network of Floci's.
+        boolean metadata;
+        // What a relay's start throws, if anything.
+        RuntimeException metadataFailure;
+        // Each relay started: its cluster and image; each instance given an address, by id; each address released.
+        final List<List<String>> relays = new ArrayList<>();
+        final List<Instance> given = new ArrayList<>();
+        final List<String> released = new ArrayList<>();
+        // How each cluster's nodes are known as EC2 instances.
+        final Map<String, Function<String, Instance>> identities = new HashMap<>();
+
+        @Override
+        public boolean metadataServed(String dockerNetwork) {
+            return metadata;
+        }
+
+        @Override
+        public String metadataNetwork(String clusterId, String accountId, String region, String relayImage,
+                                      String dockerNetwork) {
+            if (!metadata) {
+                return null;
+            }
+            relays.add(List.of(clusterId, relayImage));
+            if (metadataFailure != null) {
+                throw metadataFailure;
+            }
+            return HDFS_NETWORK;
+        }
+
+        @Override
+        public String metadataAddress(String clusterId, Instance instance) {
+            given.add(instance);
+            return "169.254.0." + given.size();
+        }
+
+        @Override
+        public void releaseMetadataAddress(String address) {
+            released.add(address);
+        }
+
+        @Override
+        public void identify(String clusterId, Function<String, Instance> nodes) {
+            identities.put(clusterId, nodes);
+        }
 
         @Override
         public SparkJobRunner.Storage volumes(String clusterId) {
@@ -151,6 +199,8 @@ final class EmrServiceFixture {
         static final String IMAGE = "sha256:" + "3".repeat(64);
         // Each image asked for: its release, then the two it is made of, then whether it has Hive.
         final List<List<String>> asked = new ArrayList<>();
+        // Each image released, by id.
+        final List<String> released = new ArrayList<>();
         RuntimeException failure;
 
         @Override
@@ -160,6 +210,11 @@ final class EmrServiceFixture {
                 throw failure;
             }
             return IMAGE;
+        }
+
+        @Override
+        public void released(String imageId) {
+            released.add(imageId);
         }
     }
 
@@ -175,7 +230,7 @@ final class EmrServiceFixture {
     // The docker runner mode's step threads, not yet run.
     private final List<Runnable> stepThreads = new ArrayList<>();
     private boolean waking;
-    private final InMemoryStorageFactory storage;
+    final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
     private final BootstrapRunner bootstrap;
     // The docker runner mode's; null in the immediate one.
@@ -246,6 +301,11 @@ final class EmrServiceFixture {
     /** A new service on the same storage and clock, as after a restart of Floci with persistent storage. */
     EmrServiceFixture restart() {
         return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, releaseImages, iam, durations);
+    }
+
+    /** A new service on the same storage and clock, as {@link #restart} builds, in the {@code immediate} mode. */
+    EmrServiceFixture restartImmediate() {
+        return new EmrServiceFixture(storage, clock, null, null, null, null, iam, durations);
     }
 
     /**
@@ -332,6 +392,11 @@ final class EmrServiceFixture {
                     ? detail.path("state").asText() + " " + detail.path("name").asText()
                     : detail.path("state").asText();
         }).toList();
+    }
+
+    /** Each step's state, in order. */
+    static List<String> stepStates(List<EmrStep> steps) {
+        return steps.stream().map(EmrStep::getState).toList();
     }
 
     static EmrCluster cluster(String name, boolean keepAlive, EmrStep... steps) {

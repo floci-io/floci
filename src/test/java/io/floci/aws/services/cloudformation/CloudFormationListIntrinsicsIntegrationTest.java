@@ -6,6 +6,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -93,9 +95,9 @@ class CloudFormationListIntrinsicsIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200).body("Tags", equalTo(expected));
 
-                given()
-                    .queryParam("resourceArn", "arn:aws:scheduler:us-east-1:000000000000:schedule-group/" + name)
-                .when().get("/tags")
+                given().urlEncodingEnabled(false)
+                .when().get("/tags/" + URLEncoder.encode(
+                        "arn:aws:scheduler:us-east-1:000000000000:schedule-group/" + name, StandardCharsets.UTF_8))
                 .then().statusCode(200).body("Tags", equalTo(expected));
             }
         } finally {

@@ -337,6 +337,41 @@ class BagetterSidecarClientTest {
         assertTrue(result.isEmpty());
     }
 
+    @Test
+    void listPackageVersionDependenciesReadsTheRealNuspecDependenciesGroups() throws Exception {
+        BagetterSidecarManager manager = manager();
+        seedPooledContainer(manager, "nuget-repo-1", "tracked-bagetter-1", backendUrl);
+        respondWithVersions("demo-pkg", "1.0.0");
+        String nuspec = "<?xml version=\"1.0\"?><package><metadata><id>demo-pkg</id><version>1.0.0</version>"
+                + "<dependencies><group targetFramework=\"net6.0\">"
+                + "<dependency id=\"Newtonsoft.Json\" version=\"13.0.1\"/></group></dependencies>"
+                + "</metadata></package>";
+        backend.createContext("/v3/package/demo-pkg/1.0.0/demo-pkg.nuspec", exchange -> {
+            byte[] body = nuspec.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "nuget-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0");
+
+        assertEquals(List.of(new CodeArtifactService.PackageDependency(null, "Newtonsoft.Json", null, "13.0.1")),
+                dependencies);
+    }
+
+    @Test
+    void listPackageVersionDependenciesIsEmptyWhenTheVersionWasNeverPublished() throws Exception {
+        BagetterSidecarManager manager = manager();
+        seedPooledContainer(manager, "nuget-repo-1", "tracked-bagetter-1", backendUrl);
+        respondWithVersions("demo-pkg", "1.0.0");
+
+        List<CodeArtifactService.PackageDependency> dependencies = client(manager).listPackageVersionDependencies(
+                "nuget-repo-1", "dom", "repo", null, "demo-pkg", "9.9.9");
+
+        assertTrue(dependencies.isEmpty());
+    }
+
     /**
      * BaGetter's flat container (what {@link #respondWithVersions} fakes) always returns
      * normalized, lowercased version strings, but its registration resource's {@code

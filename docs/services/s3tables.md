@@ -9,13 +9,26 @@ convergence, and SDK integration tests. It is a separate AWS service from S3:
 S3 Tables requests are signed as `s3tables` and use REST JSON routes such as
 `/buckets` and `/tables/{tableBucketARN}/{namespace}`.
 
-## Metadata-only scope
+## Scope
 
 This service stores table-bucket, namespace, table, policy, maintenance
-configuration, and metadata-location state. It does **not** run an Apache
-Iceberg engine or create data-plane artifacts: manifests, warehouse objects,
-queries, compaction, snapshot expiry, replication, encryption-management, and
-metrics are intentionally outside this implementation.
+configuration, and metadata-location state, and gives every table a warehouse:
+a bucket of its own, named like the ones AWS creates (`<id>--table-s3`), which
+`GetTable` and `GetTableMetadataLocation` report as `warehouseLocation`. An
+Iceberg client such as Spark's `S3TablesCatalog` writes the table's data and
+metadata files there through Floci's S3 and commits each new metadata file
+with `UpdateTableMetadataLocation`. Deleting the table deletes its warehouse
+and everything in it, every object version included. A warehouse bucket is the
+table's storage, not a general purpose bucket, so `ListBuckets` leaves it out. Floci does not run an Iceberg engine itself: compaction,
+snapshot expiry, replication, encryption management, and metrics are outside
+this implementation.
+
+A table's ARN ends in an id Floci mints when it creates the table
+(`arn:aws:s3tables:<region>:<account>:bucket/<bucket>/table/<id>`), as AWS's
+do, so two tables of one name in different namespaces have their own ARNs, and
+a rename keeps it. `GetTable` takes either `tableArn` or the table bucket's
+ARN, namespace and name. A table created by an earlier Floci keeps the ARN it
+was stored with, which ends in its name.
 
 ## Supported operations
 

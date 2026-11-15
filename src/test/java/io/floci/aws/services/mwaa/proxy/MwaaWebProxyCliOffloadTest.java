@@ -37,6 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class MwaaWebProxyCliOffloadTest {
 
+    private static final MwaaWebProxy.AirflowAccount NO_ACCOUNT = new MwaaWebProxy.AirflowAccount("admin", "unused");
+
     private Vertx vertx;
 
     @AfterEach
@@ -66,7 +68,7 @@ class MwaaWebProxyCliOffloadTest {
         };
 
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", backend.actualPort(),
-                (environmentName, token) -> true, slowExecutor);
+                (environmentName, token) -> true, slowExecutor, (environmentName, token) -> false, NO_ACCOUNT);
         int proxyPort = FreePorts.anyInterfacePort();
         proxy.start(proxyPort);
 
@@ -138,7 +140,7 @@ class MwaaWebProxyCliOffloadTest {
             return new ContainerExec.Result(0, "", "", false);
         };
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", 1,
-                (environmentName, token) -> true, slowExecutor);
+                (environmentName, token) -> true, slowExecutor, (environmentName, token) -> false, NO_ACCOUNT);
         int proxyPort = FreePorts.anyInterfacePort();
         proxy.start(proxyPort);
 
@@ -185,7 +187,7 @@ class MwaaWebProxyCliOffloadTest {
             throw new IllegalStateException("exec timed out in container abc123");
         };
         MwaaWebProxy proxy = new MwaaWebProxy("env1", vertx, "127.0.0.1", 1,
-                (environmentName, token) -> true, failingExecutor);
+                (environmentName, token) -> true, failingExecutor, (environmentName, token) -> false, NO_ACCOUNT);
         int proxyPort = FreePorts.anyInterfacePort();
         proxy.start(proxyPort);
 

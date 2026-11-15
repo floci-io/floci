@@ -89,6 +89,17 @@ public final class CfnRollback {
     public static final String TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupTargetsUpdateSnapshot";
 
     /**
+     * Holds what an update that kept an ELBv2 listener certificate resource changed on its listener:
+     * the certificates it added that the listener's list did not hold, the ones it removed, and the
+     * certificates the resource declared before, so a failed stack update can put them back. Written
+     * by {@code ElbV2CfnProvisioner} between its AddListenerCertificates and RemoveListenerCertificates
+     * and spent by the undo of a failed provision or by its {@code rollbackUpdate}, retained across a
+     * failed put back.
+     */
+    public static final String LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR =
+            "__FlociListenerCertificatesUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
@@ -151,6 +162,11 @@ public final class CfnRollback {
      * {@code Route53CfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
      */
     public static final String HEALTH_CHECK_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53HealthCheckUpdateSnapshot";
+    /**
+     * The record a record set update displaced and the record it wrote, for that update's rollback. The
+     * commit's cleanup walk reaches every resource, and the record set drops it there.
+     */
+    public static final String ROUTE53_RECORD_UPDATE_SNAPSHOT_ATTR = "__FlociRoute53RecordUpdate";
     public static final String S3_BUCKET_UPDATE_SNAPSHOT_ATTR = "__FlociS3BucketUpdateSnapshot";
 
     /**

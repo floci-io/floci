@@ -539,6 +539,74 @@ class Ec2ServiceTest {
                         .collect(Collectors.toSet()));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"terminate", "settle", "rollback"})
+    void logicalRootDeletionDoesNotRequireABlockDeviceHelper(String operation) {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        when(devices.isAvailable()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(),
+                null, null, devices);
+        Reservation launch = service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null);
+        Instance instance = launch.getInstances().getFirst();
+        String rootId = instance.getRootVolumeId();
+        service.createTags("us-east-1", List.of(rootId), List.of(new Tag("Owner", "root")));
+
+        switch (operation) {
+            case "terminate" -> service.terminateInstances("us-east-1", List.of(instance.getInstanceId()));
+            case "rollback" -> service.rollBackLaunch("us-east-1", launch);
+            case "settle" -> instance.setState(InstanceState.terminated());
+            default -> throw new IllegalArgumentException(operation);
+        }
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootId))).isEmpty());
+        verify(devices, never()).deleteVolume(anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rollbackDeletesRetainedLogicalRootWithoutBlockDeviceCleanup(boolean settleFirst) {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        when(devices.isAvailable()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(),
+                null, null, devices);
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(5);
+        ebs.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping root = new LaunchTemplateData.BlockDeviceMapping();
+        root.setDeviceName("/dev/xvda");
+        root.setEbs(ebs);
+        LaunchTemplateData.BlockDeviceMapping data = new LaunchTemplateData.BlockDeviceMapping();
+        data.setDeviceName("/dev/sdf");
+        data.setEbs(ebs);
+        Reservation launch = service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null,
+                null, null, 0, null, null, null, null, false, null, null,
+                List.of(root, data), false, null, null);
+        Instance instance = launch.getInstances().getFirst();
+        String rootId = instance.getRootVolumeId();
+        String dataId = launch.getLaunchVolumeIds().stream()
+                .filter(id -> !rootId.equals(id)).findFirst().orElseThrow();
+        service.createTags("us-east-1", List.of(rootId, dataId), List.of(new Tag("Owner", "launch")));
+        if (settleFirst) {
+            instance.setState(InstanceState.terminated());
+            assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                    .allMatch(volume -> volume.getAttachments().isEmpty()));
+        }
+
+        service.rollBackLaunch("us-east-1", launch);
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootId, dataId))).isEmpty());
+        verify(devices, never()).deleteVolume(rootId);
+        verify(devices).deleteVolume(dataId);
+    }
+
     private static Reservation launchKeepingADataVolume(Ec2Service service) {
         LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
         ebs.setVolumeSize(5);
@@ -3557,6 +3625,25 @@ class Ec2ServiceTest {
 
         assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
         assertEquals(reservation.getOwnerId(), reservation.getInstances().getFirst().getOwnerId());
+    }
+
+    @Test
+    void runInstancesRefusesAnImageWhoseArchitectureTheInstanceTypeCannotRun() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException graviton = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-amd64", "m6g.large", 1, 1, null, List.of(), null, null, List.of(), null, null));
+        AwsException intel = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-arm64", "t3.micro", 1, 1, null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", graviton.getErrorCode());
+        assertEquals("The architecture 'arm64' of the specified instance type does not match the architecture "
+                + "'x86_64' of the specified AMI.", graviton.getMessage());
+        assertEquals("The architecture 'x86_64' of the specified instance type does not match the architecture "
+                + "'arm64' of the specified AMI.", intel.getMessage());
     }
 
     @Test
@@ -9930,6 +10017,41 @@ class Ec2ServiceTest {
         }
     }
 
+    /**
+     * A cluster node found by its id keeps the address its provider recorded for the container behind it, which an
+     * ELB instance target naming the node connects to.
+     */
+    @Test
+    void aClusterNodeFoundByIdKeepsTheContainerAddressItsProviderRecorded() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance nodeInstance = new Instance();
+        nodeInstance.setInstanceId("i-0de1234567890abd");
+        nodeInstance.setRegion("us-east-1");
+        nodeInstance.setPlacement(new Placement("us-east-1a"));
+        nodeInstance.setState(InstanceState.running());
+        nodeInstance.setPrivateIpAddress("10.10.80.10");
+        nodeInstance.setDockerContainerId("node-container");
+        nodeInstance.setContainerBridgeIp("10.10.80.10");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return "i-0de1234567890abd".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return List.of(nodeInstance);
+            }
+        });
+
+        Instance found = service.findInstanceById("123456789012", "i-0de1234567890abd");
+
+        assertEquals("node-container", found.getDockerContainerId());
+        assertEquals("10.10.80.10", found.getContainerBridgeIp());
+    }
+
     @Test
     void attachVolumeResolvesClusterNodeInstance() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
@@ -10103,6 +10225,41 @@ class Ec2ServiceTest {
         AwsException terminateEx = assertThrows(AwsException.class, () ->
                 service.terminateInstances("us-east-1", List.of("i-node1234567890abc")));
         assertEquals("OperationNotPermitted", terminateEx.getErrorCode());
+    }
+
+    @Test
+    void providerInstancesSharingAReservationAreDescribedTogether() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        List<Instance> nodes = new ArrayList<>();
+        for (String id : List.of("i-node1111111111111", "i-node2222222222222")) {
+            Instance node = new Instance();
+            node.setInstanceId(id);
+            node.setRegion("us-east-1");
+            node.setPlacement(new Placement("us-east-1a"));
+            node.setState(InstanceState.running());
+            node.setInstanceType("m5.large");
+            node.setReservationId("r-sharedprovider01");
+            nodes.add(node);
+        }
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return nodes.stream().filter(node -> node.getInstanceId().equals(instanceId)).findFirst();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return nodes;
+            }
+        });
+
+        List<Reservation> reservations = service.describeInstances("us-east-1", List.of(), Map.of());
+
+        assertEquals(1, reservations.size());
+        assertEquals("r-sharedprovider01", reservations.getFirst().getReservationId());
+        assertEquals(2, reservations.getFirst().getInstances().size());
     }
 
     @Test

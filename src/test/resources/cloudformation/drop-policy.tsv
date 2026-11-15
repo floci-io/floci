@@ -136,7 +136,7 @@ AWS::EC2::Subnet	VpcId	create-only	a drop is refused
 AWS::ECS::Service	CapacityProviderStrategy	keep:AWS documents a removed strategy as no update; a declared empty list clears it
 AWS::ECS::Service	Cluster	create-only
 AWS::ECS::Service	DeploymentConfiguration	clear	it is stored as none, so it reads back as never set; a declared {} is stored as given
-AWS::ECS::Service	DesiredCount	default:1
+AWS::ECS::Service	DesiredCount	keep:AWS omits it from the update, so the stored count stays
 AWS::ECS::Service	LaunchType	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::ECS::Service	LoadBalancers	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::ECS::Service	NetworkConfiguration	keep:the update leaves a missing network configuration unchanged

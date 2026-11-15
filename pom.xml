@@ -6,7 +6,7 @@
 
     <groupId>io.floci</groupId>
     <artifactId>floci</artifactId>
-    <version>2.4.0</version>
+    <version>2.5.0</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>
@@ -460,6 +460,12 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudwatch</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudwatchlogs</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -473,6 +479,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>controltower</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>config</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -568,6 +580,12 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudfront</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -587,6 +605,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticloadbalancingv2</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eks</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>

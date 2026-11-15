@@ -42,6 +42,12 @@ public class AccountContextFilter implements ContainerRequestFilter {
      */
     public static final String PINNED_ACCOUNT_PROPERTY = AccountContextFilter.class.getName() + ".accountId";
 
+    /**
+     * Set beside {@link #PINNED_ACCOUNT_PROPERTY} by a filter that resolved the request to a Region as well (a token
+     * that acts in one), which the request then runs in instead of the default Region.
+     */
+    public static final String PINNED_REGION_PROPERTY = AccountContextFilter.class.getName() + ".region";
+
     private static final Logger LOG = Logger.getLogger(AccountContextFilter.class);
 
     /** The signing names S3 answers to; an S3 client expects S3's XML error document. */
@@ -90,7 +96,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
             requestContext.setAccountId(pinnedAccount.toString());
             requestContext.setAccessKeyId(null);
             requestContext.setSessionToken(null);
-            applyRegion(regionResolver.resolveRegionFromAuth(null));
+            Object pinnedRegion = ctx.getProperty(PINNED_REGION_PROPERTY);
+            applyRegion(pinnedRegion != null ? pinnedRegion.toString() : regionResolver.resolveRegionFromAuth(null));
             return;
         }
         MultivaluedMap<String, String> query = ResteasyRequests.queryParameters(ctx);

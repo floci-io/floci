@@ -347,8 +347,7 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static Boolean optionalBoolean(JsonNode node, String name, ProvisionContext ctx) {
-        String value = ctx.resolveOptional(node.isObject() ? node : null, name);
-        return value == null || value.isBlank() ? null : Boolean.valueOf(value);
+        return ctx.resolveOptionalBoolean(node.isObject() ? node : null, name);
     }
 
 }

@@ -47,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
@@ -872,7 +873,7 @@ class RedshiftServerlessServiceTest {
         assertThrows(IllegalStateException.class,
                 () -> service.updateNamespace("undo-ns", null, "Changed123", null, null, null, null, REGION));
 
-        verify(runtime).restoreMasterPassword(ACCOUNT_ID, REGION, "undo-wg", "root", "dev", "Secret123");
+        verify(runtime).changeMasterPassword(ACCOUNT_ID, REGION, "undo-wg", "root", "dev", null, "Secret123");
     }
 
     @Test
@@ -881,8 +882,9 @@ class RedshiftServerlessServiceTest {
         createWorkgroup("mask-wg", "mask-ns");
         IllegalStateException storageFailure = new IllegalStateException("disk full");
         doThrow(storageFailure).when(store).put(eq(REGION + "::mask-ns"), any(Namespace.class));
+        // a restore names no previous password, which tells it from the change that came first
         doThrow(new RuntimeException("psql failed")).when(runtime)
-                .restoreMasterPassword(any(), any(), any(), any(), any(), any());
+                .changeMasterPassword(any(), any(), any(), any(), any(), isNull(), any());
 
         IllegalStateException thrown = assertThrows(IllegalStateException.class,
                 () -> service.updateNamespace("mask-ns", null, "Changed123", null, null, null, null, REGION));
@@ -1061,6 +1063,19 @@ class RedshiftServerlessServiceTest {
         AwsException noSnapshot = assertThrows(AwsException.class,
                 () -> service.restoreFromSnapshot("restore-ns", "restore-wg", "missing-snap", null, REGION));
         assertEquals("ResourceNotFoundException", noSnapshot.getErrorCode());
+    }
+
+    @Test
+    void tableRestoreRefusesAWorkgroupOfAnotherNamespace() {
+        create("table-ns-a");
+        create("table-ns-b");
+        service.createSnapshot("table-snap", "table-ns-a", null, null, REGION);
+        createWorkgroup("table-wg-b", "table-ns-b");
+
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> service.tableRestoreSource("table-ns-a", "table-wg-b", "table-snap", REGION));
+
+        assertEquals("ValidationException", mismatch.getErrorCode());
     }
 
     @Test

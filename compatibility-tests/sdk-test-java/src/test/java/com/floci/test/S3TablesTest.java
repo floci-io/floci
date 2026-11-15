@@ -21,6 +21,7 @@ class S3TablesTest {
     private static String bucketArn;
     private static String tableName;
     private static String versionToken;
+    private static String tableArn;
     private static final String NAMESPACE = "analytics";
 
     @BeforeAll
@@ -93,7 +94,9 @@ class S3TablesTest {
                 .tags(Map.of("suite", "sdk-java"))
                 .build());
         versionToken = table.versionToken();
-        assertThat(table.tableARN()).isEqualTo(bucketArn + "/table/" + tableName);
+        // AWS ends a table's ARN in an id it mints, not the table's name.
+        tableArn = table.tableARN();
+        assertThat(tableArn).startsWith(bucketArn + "/table/").isNotEqualTo(bucketArn + "/table/" + tableName);
         assertThat(versionToken).isNotBlank();
 
         GetTableResponse fetched = client.getTable(GetTableRequest.builder()
@@ -198,6 +201,7 @@ class S3TablesTest {
         GetTableResponse renamed = client.getTable(GetTableRequest.builder()
                 .tableBucketARN(bucketArn).namespace(NAMESPACE).name(renamedTableName).build());
         assertThat(renamed.name()).isEqualTo(renamedTableName);
+        assertThat(renamed.tableARN()).isEqualTo(tableArn);
         assertThat(renamed.versionToken()).isNotEqualTo(originalToken);
         assertThatThrownBy(() -> client.getTable(GetTableRequest.builder()
                 .tableBucketARN(bucketArn).namespace(NAMESPACE).name(tableName).build()))

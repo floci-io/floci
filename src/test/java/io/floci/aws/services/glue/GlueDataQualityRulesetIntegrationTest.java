@@ -3,14 +3,13 @@ package io.floci.aws.services.glue;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.GlueRequests.call;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -29,7 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GlueDataQualityRulesetIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String REGION = "us-east-1";
     private static final String RULESET = "Rules = [ RowCount > 0, IsComplete \"id\", "
             + "(ColumnValues \"age\" > 0) and (ColumnValues \"age\" < 150) ]";
@@ -253,25 +251,11 @@ class GlueDataQualityRulesetIntegrationTest {
                 .extract().jsonPath().getList("Rulesets.Name", String.class);
     }
 
-    private static ValidatableResponse call(String action, String account, String region, String body) {
-        return given().contentType(CONTENT_TYPE)
-                .header("X-Amz-Target", "AWSGlue." + action)
-                .header("Authorization", authorization(account, region))
-                .body(body)
-        .when().post("/")
-        .then();
-    }
-
     private static String json(String text) {
         return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
     }
 
     private static String unique(String prefix) {
         return prefix + "-" + UUID.randomUUID().toString().substring(0, 8);
-    }
-
-    private static String authorization(String account, String region) {
-        return "AWS4-HMAC-SHA256 Credential=" + account
-                + "/20260918/" + region + "/glue/aws4_request, SignedHeaders=host, Signature=abc";
     }
 }

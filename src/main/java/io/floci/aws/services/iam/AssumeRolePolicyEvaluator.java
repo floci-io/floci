@@ -120,7 +120,7 @@ public class AssumeRolePolicyEvaluator {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return principals;
         }
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return principals;
         }
         Iterable<JsonNode> statementList = statements.isArray() ? statements : List.of(statements);
@@ -181,7 +181,7 @@ public class AssumeRolePolicyEvaluator {
             return TrustDecision.NEUTRAL;
         }
         JsonNode statements = root.path("Statement");
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return TrustDecision.NEUTRAL;
         }
         String version = root.path("Version").asText(null);
@@ -220,7 +220,7 @@ public class AssumeRolePolicyEvaluator {
             LOG.warnv("Failed to parse trust policy: {0}", e.getMessage());
             return false;
         }
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return false;
         }
         boolean allow = false;
@@ -257,7 +257,7 @@ public class AssumeRolePolicyEvaluator {
             return false;
         }
         JsonNode statements = root.path("Statement");
-        if (!isWellFormed(statements)) {
+        if (!TrustPolicyStatements.wellFormed(statements)) {
             return false;
         }
         String version = root.path("Version").asText(null);
@@ -279,50 +279,6 @@ public class AssumeRolePolicyEvaluator {
     }
 
     private enum Match { ALLOW, DENY, NO_MATCH }
-
-    /**
-     * A statement without a valid {@code Effect}, or with a {@code Condition} that is not an object
-     * of non-empty operator objects, invalidates the whole document. IAM refuses such a document
-     * when it is written; Floci stores it as given, so it is refused here instead of being read as
-     * a statement with no condition.
-     */
-    private boolean isWellFormed(JsonNode statements) {
-        if (statements.isArray()) {
-            if (statements.isEmpty()) {
-                return false;
-            }
-            for (JsonNode statement : statements) {
-                if (!validStatement(statement)) {
-                    return false;
-                }
-            }
-            return true;
-        }
-        return validStatement(statements);
-    }
-
-    private boolean validStatement(JsonNode statement) {
-        if (!statement.isObject()) {
-            return false;
-        }
-        String effect = statement.path("Effect").asText("");
-        if (!"Allow".equals(effect) && !"Deny".equals(effect)) {
-            return false;
-        }
-        JsonNode condition = statement.get("Condition");
-        if (condition == null) {
-            return true;
-        }
-        if (!condition.isObject() || condition.isEmpty()) {
-            return false;
-        }
-        for (JsonNode operator : condition) {
-            if (!operator.isObject() || operator.isEmpty()) {
-                return false;
-            }
-        }
-        return true;
-    }
 
     private TrustDecision evaluateStatement(JsonNode stmt, String callerArn, String principalArn,
                                             String callerAccount, Map<String, List<String>> context,

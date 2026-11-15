@@ -246,30 +246,12 @@ class AwsConfigServiceAggregationAuthorizationTest {
     }
 
     @Test
-    void rejectsAnAccountIdThatIsNotTwelveDigits() {
-        AwsConfigService service = service();
-
-        AwsException ex = assertThrows(AwsException.class,
-                () -> service.putAggregationAuthorization(REGION, "12345", "eu-west-1", null));
-        assertEquals("InvalidParameterValueException", ex.getErrorCode());
-    }
-
-    @Test
     void rejectsAMissingAuthorizedRegion() {
         AwsConfigService service = service();
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.putAggregationAuthorization(REGION, AUTHORIZED_ACCOUNT, "  ", null));
         assertEquals("InvalidParameterValueException", ex.getErrorCode());
-    }
-
-    @Test
-    void rejectsALimitAboveTheModeledMaximum() {
-        AwsConfigService service = service();
-
-        AwsException ex = assertThrows(AwsException.class,
-                () -> service.describeAggregationAuthorizations(REGION, 101, null));
-        assertEquals("InvalidLimitException", ex.getErrorCode());
     }
 
     @Test

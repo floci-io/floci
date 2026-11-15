@@ -174,7 +174,7 @@ DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { ex
 starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransactionAgeIntegrationTest \
     && [ -n "$DSQL_IMAGE" ] && pull "$DSQL_IMAGE"
 # CodeArtifact's real registry fixtures each use one configured sidecar image.
-# Keep unrelated unit-test shards from pulling all four registries.
+# Keep unrelated unit-test shards from pulling registries they do not use.
 starts CodeArtifactMavenDockerIntegrationTest CodeArtifactMavenExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact maven-image
 starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
@@ -182,6 +182,8 @@ starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDoc
 starts CodeArtifactNuGetDockerIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact nuget-image
 starts CodeArtifactPypiDockerIntegrationTest && configured_image codeartifact pypi-image
+starts CodeArtifactCargoDockerIntegrationTest CodeArtifactCargoExternalConnectionDockerIntegrationTest \
+    CodeArtifactCargoUpstreamRepositoryDockerIntegrationTest && configured_image codeartifact cargo-image
 # RDS's engine fixture starts MySQL at the default and explicitly requested versions.
 # Read both sources rather than duplicating their version pins here.
 if starts RdsParameterGroupEngineIntegrationTest; then

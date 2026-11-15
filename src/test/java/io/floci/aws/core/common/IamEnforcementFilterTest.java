@@ -96,6 +96,7 @@ class IamEnforcementFilterTest {
         iamService = mock(IamService.class);
         evaluator = mock(IamPolicyEvaluator.class);
         actionRegistry = mock(IamActionRegistry.class);
+        when(actionRegistry.operationForRoute(any(), any(), any())).thenAnswer(inv -> inv.getArgument(1));
         arnBuilder = mock(ResourceArnBuilder.class);
         requestContext = new RequestContext();
         conditionContextResolver = mock(IamConditionContextResolver.class);
@@ -450,8 +451,9 @@ class IamEnforcementFilterTest {
     }
 
     @Test
-    void schedulerResourcesAreBuiltInTheRequestsPartition() {
-        // A Region no partition publishes takes the deployment's partition, which Scheduler mints its ARNs in.
+    void schedulerResourcesAreReadFromTheTableInTheRequestsPartition() {
+        // A Region no partition publishes takes the deployment's partition, which Scheduler mints its ARNs in, on the
+        // operation the request is dispatched as, which the table of request resources reads.
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/scheduler/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
@@ -466,12 +468,13 @@ class IamEnforcementFilterTest {
                 .thenReturn(Optional.of(descriptor("scheduler", ServiceProtocol.JSON,
                         Set.of("scheduler"), SchedulerController.class)));
         when(actionRegistry.resolveRoute("scheduler", containerRequest)).thenReturn("scheduler:GetSchedule");
-        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any(), any())).thenReturn(List.of("*"));
         when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
 
         newFilter(resourceInfo(SchedulerController.class)).filter(containerRequest);
 
-        verify(arnBuilder).buildResources("scheduler", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+        verify(arnBuilder).buildResources("scheduler", "scheduler:GetSchedule", containerRequest, "xx-local-1",
+                "000000000000", "aws-cn");
     }
 
     @Test
@@ -1691,7 +1694,7 @@ class IamEnforcementFilterTest {
         S3Service s3Service = mock(S3Service.class);
         when(s3ServiceProvider.isResolvable()).thenReturn(true);
         when(s3ServiceProvider.get()).thenReturn(s3Service);
-        when(s3Service.isScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)).thenReturn(false);
+        when(s3Service.isScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "222233334444")).thenReturn(false);
 
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
@@ -1750,7 +1753,7 @@ class IamEnforcementFilterTest {
         S3Service s3 = mock(S3Service.class);
         when(provider.isResolvable()).thenReturn(true);
         when(provider.get()).thenReturn(s3);
-        when(s3.isScratchBucket(space.bucketName())).thenReturn(internalBucket);
+        when(s3.isScratchBucket(space.bucketName(), "222233334444")).thenReturn(internalBucket);
         return newFilterWithRealEvaluator(provider);
     }
 

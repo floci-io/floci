@@ -18,6 +18,7 @@ import io.floci.aws.services.lambda.zip.ZipExtractor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -643,6 +644,22 @@ class LambdaServiceTest {
         service.createFunction(REGION, baseRequest("del-fn"));
         service.deleteFunction(REGION, "del-fn");
         assertThrows(AwsException.class, () -> service.getFunction(REGION, "del-fn"));
+    }
+
+    @Test
+    void deleteFunctionReportsWhetherADurableFunctionOrItsVersionWasDeleted() {
+        Map<String, Object> durable = baseRequest("del-durable-fn");
+        durable.put("DurableConfig", Map.of("ExecutionTimeout", 3600));
+        service.createFunction(REGION, durable);
+        service.publishVersion(REGION, "del-durable-fn", null);
+        service.createFunction(REGION, baseRequest("del-plain-fn"));
+        service.publishVersion(REGION, "del-plain-fn", null);
+
+        assertFalse(service.deleteFunction(REGION, "del-durable-fn", "5"));
+        assertTrue(service.deleteFunction(REGION, "del-durable-fn", "1"));
+        assertTrue(service.deleteFunction(REGION, "del-durable-fn", null));
+        assertFalse(service.deleteFunction(REGION, "del-plain-fn", "1"));
+        assertFalse(service.deleteFunction(REGION, "del-plain-fn", null));
     }
 
     @Test
@@ -2847,14 +2864,8 @@ class LambdaServiceTest {
                 .map(LambdaFunction::getVersion).collect(Collectors.toSet()));
     }
 
-    private static String zipWithBody(String body) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write((body + "\n").getBytes(StandardCharsets.UTF_8));
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
+    private static String zipWithBody(String body) {
+        return LambdaCodeFixtures.nodeJsZipBase64(body + "\n");
     }
 
     @Test

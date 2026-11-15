@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
 /**
@@ -349,7 +350,26 @@ final class PassedRoles {
             return List.of();
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? jsonBody(ctx) : null;
+        return fromTable(members, form, form.isEmpty() ? jsonBody(ctx) : null,
+                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)));
+    }
+
+    /**
+     * The roles a JSON request for {@code action} passes, for a call that is not an HTTP request of its own (a state
+     * machine's task to its integrated service), read from the members the table gives its operation as a direct
+     * request's are, a role given by name being the one {@code named} gives. An operation whose roles are read by
+     * hand here, from a request of its own, is not read so, and fails.
+     */
+    static List<PassedRole> ofBody(String action, JsonNode body, UnaryOperator<String> named) {
+        if (PassedRoleMembers.table().byHand().contains(action)) {
+            throw new IllegalArgumentException(action + " passes roles read by hand, from a request of its own");
+        }
+        List<PassedRoleMembers.Member> members = PassedRoleMembers.of(action);
+        return members == null ? List.of() : fromTable(members, Map.of(), body, named);
+    }
+
+    private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, Map<String, String> form,
+                                              JsonNode body, UnaryOperator<String> named) {
         List<PassedRole> passed = new ArrayList<>();
         for (PassedRoleMembers.Member member : members) {
             List<String> roles = new ArrayList<>();
@@ -364,7 +384,7 @@ final class PassedRoles {
             } else {
                 collect(body, member.steps(), 0, roles);
             }
-            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, lookups) : roles,
+            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, named) : roles,
                     member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo())));
         }
         return passed;
@@ -395,13 +415,12 @@ final class PassedRoles {
         }
     }
 
-    /** Roles given by ARN or by name: a name is the role IAM holds under it, or else the one it gives. */
-    private static List<String> heldOrNamedRoles(List<String> roles, Lookups lookups) {
+    /** Roles given by ARN or by name, a name being the role {@code named} gives for it. */
+    private static List<String> heldOrNamedRoles(List<String> roles, UnaryOperator<String> named) {
         List<String> arns = new ArrayList<>();
         for (String role : roles) {
             if (!role.isBlank()) {
-                arns.add(AwsArnUtils.looksLikeArn(role) ? role
-                        : lookups.heldRoleArn(role).orElseGet(() -> lookups.roleArn(role)));
+                arns.add(AwsArnUtils.looksLikeArn(role) ? role : named.apply(role));
             }
         }
         return arns;
