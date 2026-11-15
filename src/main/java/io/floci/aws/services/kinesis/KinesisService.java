@@ -238,8 +238,9 @@ public class KinesisService implements ResourceProvider {
         consumer.getTags().putAll(tags);
         // Same lock order as deleteStream (stream monitor, then consumerStore), so a registration
         // cannot land between a delete's consumer sweep and its removal of the stream.
-        String streamKey = regionKey(region, streamArn.substring(streamArn.lastIndexOf('/') + 1));
+        String streamKey = regionKey(region, streamNameFromTagArn(streamArn));
         synchronized (lockFor(streamKey)) {
+            describeStreamByArn(streamArn, region);
             synchronized (consumerStore) {
                 consumerStore.put(regionKey(region, consumerArn), consumer);
             }

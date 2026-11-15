@@ -169,6 +169,19 @@ class KinesisServiceTest {
     }
 
     @Test
+    void registerStreamConsumer_deletedStream_throwsResourceNotFoundAndStoresNothing() {
+        KinesisStream stream = kinesisService.createStream("short-lived", 1, REGION);
+        kinesisService.deleteStream("short-lived", false, REGION);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> kinesisService.registerStreamConsumer(stream.getStreamArn(), "late", REGION));
+
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        KinesisStream recreated = kinesisService.createStream("short-lived", 1, REGION);
+        assertTrue(kinesisService.listStreamConsumers(recreated.getStreamArn(), REGION).isEmpty());
+    }
+
+    @Test
     void deleteStream_withConsumersAndEnforcement_deletesStreamAndConsumers() {
         KinesisStream stream = kinesisService.createStream("with-consumer", 1, REGION);
         kinesisService.registerStreamConsumer(stream.getStreamArn(), "c1", REGION);
