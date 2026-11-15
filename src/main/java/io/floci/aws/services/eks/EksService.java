@@ -665,14 +665,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             return;
         }
-        Set<String> accounts = new LinkedHashSet<>();
-        for (String rawKey : aware.scanAllAccountsWithRawKeys().keySet()) {
-            accounts.add(AccountAwareStorageBackend.hasAccountPrefix(rawKey)
-                    ? rawKey.substring(0, 12) : config.defaultAccountId());
-        }
-        for (String accountId : accounts) {
-            aware.migrateLegacyEntries(accountId, key -> !key.contains(KEY_SEPARATOR), destinationKey, value -> true);
-        }
+        aware.migrateLegacyEntriesInAllAccounts(key -> !key.contains(KEY_SEPARATOR), destinationKey);
     }
 
     private static String randomHex(int len) {

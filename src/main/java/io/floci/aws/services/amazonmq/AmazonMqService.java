@@ -5,12 +5,13 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.amazonmq.model.Broker;
@@ -42,11 +43,14 @@ public class AmazonMqService implements ResourceProvider {
     private static final String ENGINE_RABBITMQ = "RABBITMQ";
     private static final String DEFAULT_ENGINE_VERSION = "3.13";
     private static final String DEPLOYMENT_SINGLE_INSTANCE = "SINGLE_INSTANCE";
+    private static final String KEY_SEPARATOR = "::";
 
-    private final StorageBackend<String, Broker> storage;
+    /** Brokers by {@code region::brokerId}, in their owner's account partition: brokers are Regional. */
+    private final AccountAwareStorageBackend<Broker> storage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final RabbitMqManager rabbitMqManager;
+    private final StripedLocks brokerLocks = new StripedLocks(256);
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
@@ -61,6 +65,7 @@ public class AmazonMqService implements ResourceProvider {
 
     @PostConstruct
     public void init() {
+        migrateLegacyKeys();
         startReadinessPoller();
     }
 
@@ -114,75 +119,83 @@ public class AmazonMqService implements ResourceProvider {
         }
         validateUserPassword(admin.getPassword());
 
-        if (storage.scan(k -> true).stream().anyMatch(b -> name.equals(b.getBrokerName()))) {
-            throw new AwsException("ConflictException", "Broker already exists: " + name, 409);
-        }
-
-        String brokerId = "b-" + UUID.randomUUID();
+        String region = regionResolver.getRegion();
         String accountId = regionResolver.getAccountId();
-        String brokerArn = AwsArnUtils.Arn.of("mq", regionResolver.getRegion(), accountId,
-                "broker:" + name + ":" + brokerId).toString();
-        String engineVersion = (params.engineVersion() == null || params.engineVersion().isBlank())
-                ? DEFAULT_ENGINE_VERSION : params.engineVersion();
-
-        Broker broker = new Broker(brokerId, brokerArn, name, ENGINE_RABBITMQ,
-                engineVersion, deploymentMode, params.hostInstanceType());
-        broker.setAccountId(accountId);
-        broker.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
-        // Stamp the volume name now, with the current prefix, so it is persisted rather than
-        // recomputed later. Only records predating this field fall back to the legacy name.
-        broker.setDockerVolumeName(ContainerStorageHelper.resourceName(
-                config, "amazonmq", broker.getVolumeId(), broker.getBrokerId()));
-        broker.setPubliclyAccessible(params.publiclyAccessible());
-        broker.setAutoMinorVersionUpgrade(params.autoMinorVersionUpgrade());
-        if (params.users() != null) {
-            broker.setUsers(new ArrayList<>(params.users()));
-        }
-        if (params.tags() != null) {
-            broker.setTags(new HashMap<>(params.tags()));
-        }
-        broker.setSecurityGroups(params.securityGroups());
-        broker.setSubnetIds(params.subnetIds());
-        broker.setLogs(params.logs());
-        broker.setMaintenanceWindowStartTime(params.maintenanceWindowStartTime());
-        broker.setStorageType(params.storageType());
-        broker.setAuthenticationStrategy(params.authenticationStrategy());
-        broker.setEncryptionOptions(params.encryptionOptions());
-        broker.setConfiguration(params.configuration());
-
-        if (config.services().amazonmq().mock()) {
-            // No backing container: come up immediately with synthetic endpoints.
-            applyLocalEndpoints(broker);
-            broker.setBrokerState(BrokerState.RUNNING);
-        } else {
-            try {
-                // Start the container; the broker stays CREATION_IN_PROGRESS until
-                // the readiness poller observes the management API answering.
-                rabbitMqManager.startContainer(broker);
-            } catch (RuntimeException e) {
-                broker.setBrokerState(BrokerState.CREATION_FAILED);
-                storage.put(brokerId, broker);
-                // Keep the cause in the logs; don't leak internal details (or a null
-                // message) into the AWS error envelope returned to the client.
-                LOG.errorv(e, "Failed to provision broker {0} ({1})", name, brokerId);
-                throw new AwsException("InternalServerErrorException",
-                        "Failed to provision broker " + name, 500);
+        // A broker name is unique in the account, across its Regions, as the CreateBroker reference documents.
+        // The name check and the store hold one lock for the name in its account, so two creates of one name
+        // can't both find it free.
+        synchronized (brokerLocks.lockFor(accountId + ":" + name)) {
+            if (storage.scan(key -> true).stream().anyMatch(b -> name.equals(b.getBrokerName()))) {
+                throw new AwsException("ConflictException", "Broker already exists: " + name, 409);
             }
-        }
 
-        storage.put(brokerId, broker);
-        LOG.infov("Created Amazon MQ broker {0} ({1})", name, brokerId);
-        return broker;
+            String brokerId = "b-" + UUID.randomUUID();
+            String brokerArn = AwsArnUtils.Arn.of("mq", region, accountId,
+                    "broker:" + name + ":" + brokerId).toString();
+            String engineVersion = (params.engineVersion() == null || params.engineVersion().isBlank())
+                    ? DEFAULT_ENGINE_VERSION : params.engineVersion();
+
+            Broker broker = new Broker(brokerId, brokerArn, name, ENGINE_RABBITMQ,
+                    engineVersion, deploymentMode, params.hostInstanceType());
+            broker.setAccountId(accountId);
+            broker.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+            // Stamp the volume name now, with the current prefix, so it is persisted rather than
+            // recomputed later. Only records predating this field fall back to the legacy name.
+            broker.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                    config, "amazonmq", broker.getVolumeId(), broker.getBrokerId()));
+            broker.setPubliclyAccessible(params.publiclyAccessible());
+            broker.setAutoMinorVersionUpgrade(params.autoMinorVersionUpgrade());
+            if (params.users() != null) {
+                broker.setUsers(new ArrayList<>(params.users()));
+            }
+            if (params.tags() != null) {
+                broker.setTags(new HashMap<>(params.tags()));
+            }
+            broker.setSecurityGroups(params.securityGroups());
+            broker.setSubnetIds(params.subnetIds());
+            broker.setLogs(params.logs());
+            broker.setMaintenanceWindowStartTime(params.maintenanceWindowStartTime());
+            broker.setStorageType(params.storageType());
+            broker.setAuthenticationStrategy(params.authenticationStrategy());
+            broker.setEncryptionOptions(params.encryptionOptions());
+            broker.setConfiguration(params.configuration());
+
+            if (config.services().amazonmq().mock()) {
+                // No backing container: come up immediately with synthetic endpoints.
+                applyLocalEndpoints(broker);
+                broker.setBrokerState(BrokerState.RUNNING);
+            } else {
+                try {
+                    // Start the container; the broker stays CREATION_IN_PROGRESS until
+                    // the readiness poller observes the management API answering.
+                    rabbitMqManager.startContainer(broker);
+                } catch (RuntimeException e) {
+                    broker.setBrokerState(BrokerState.CREATION_FAILED);
+                    storage.put(brokerKey(region, brokerId), broker);
+                    // Keep the cause in the logs; don't leak internal details (or a null
+                    // message) into the AWS error envelope returned to the client.
+                    LOG.errorv(e, "Failed to provision broker {0} ({1})", name, brokerId);
+                    throw new AwsException("InternalServerErrorException",
+                            "Failed to provision broker " + name, 500);
+                }
+            }
+
+            storage.put(brokerKey(region, brokerId), broker);
+            LOG.infov("Created Amazon MQ broker {0} ({1})", name, brokerId);
+            return broker;
+        }
     }
 
     public Broker describeBroker(String brokerId) {
-        return storage.get(brokerId)
+        return storage.get(brokerKey(regionResolver.getRegion(), brokerId))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Broker not found: " + brokerId, 404));
     }
 
+    /** The calling account's brokers in the request's Region. */
     public List<Broker> listBrokers() {
-        return storage.scan(k -> true);
+        String prefix = regionResolver.getRegion() + KEY_SEPARATOR;
+        return storage.scan(key -> key.startsWith(prefix));
     }
 
     @Override
@@ -215,7 +228,7 @@ public class AmazonMqService implements ResourceProvider {
             rabbitMqManager.stopContainer(broker);
             rabbitMqManager.removeBrokerStorage(broker);
         }
-        storage.delete(brokerId);
+        storage.delete(brokerKey(regionResolver.getRegion(), brokerId));
         LOG.infov("Deleted Amazon MQ broker {0}", brokerId);
     }
 
@@ -244,38 +257,48 @@ public class AmazonMqService implements ResourceProvider {
     }
 
     private void startReadinessPoller() {
-        poller.scheduleAtFixedRate(() -> {
-            try {
-                if (config.services().amazonmq().mock()) {
-                    return;
-                }
-                for (Broker broker : allBrokers()) {
-                    if (broker.getBrokerState() == BrokerState.CREATION_IN_PROGRESS
-                            && rabbitMqManager.isReady(broker)) {
-                        LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
-                        broker.setBrokerState(BrokerState.RUNNING);
-                        putBroker(broker);
-                    }
-                }
-            } catch (Exception e) {
-                LOG.error("Error in Amazon MQ readiness poller", e);
+        poller.scheduleAtFixedRate(this::pollReadiness, 1, 2, TimeUnit.SECONDS);
+    }
+
+    /** One pass of the readiness poller: marks each starting broker whose container answers {@code RUNNING}. */
+    void pollReadiness() {
+        try {
+            if (config.services().amazonmq().mock()) {
+                return;
             }
-        }, 1, 2, TimeUnit.SECONDS);
+            // Every account's brokers, each written back under the account and key it is stored
+            // under: the poller has no request context, so a plain put would land in the default
+            // account. Brokers stored under a bare id have moved to their Region's key at startup.
+            for (AccountEntry<Broker> entry : storage.scanAllAccountEntries(key -> true)) {
+                Broker broker = entry.value();
+                if (broker.getBrokerState() == BrokerState.CREATION_IN_PROGRESS
+                        && rabbitMqManager.isReady(broker)) {
+                    LOG.infov("Amazon MQ broker {0} is now RUNNING", broker.getBrokerName());
+                    broker.setBrokerState(BrokerState.RUNNING);
+                    storage.putForAccount(entry.accountId(), entry.key(), broker);
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("Error in Amazon MQ readiness poller", e);
+        }
     }
 
-    private List<Broker> allBrokers() {
-        if (storage instanceof AccountAwareStorageBackend<Broker> aware) {
-            return aware.scanAllAccounts();
-        }
-        return storage.scan(k -> true);
+    static String brokerKey(String region, String brokerId) {
+        return region + KEY_SEPARATOR + brokerId;
     }
 
-    private void putBroker(Broker broker) {
-        if (broker.getAccountId() != null && storage instanceof AccountAwareStorageBackend<Broker> aware) {
-            aware.putForAccount(broker.getAccountId(), broker.getBrokerId(), broker);
-        } else {
-            storage.put(broker.getBrokerId(), broker);
-        }
+    /** A broker's key in its own Region, which its ARN has always named. */
+    private String brokerKey(Broker broker) {
+        return brokerKey(broker.region(regionResolver.getDefaultRegion()), broker.getBrokerId());
+    }
+
+    /**
+     * Moves brokers persisted before they were keyed by Region, in every account, from the bare
+     * broker id onto the Region-scoped key, in the Region their ARN names. Each stays in the
+     * account partition that stored it.
+     */
+    private void migrateLegacyKeys() {
+        storage.migrateLegacyEntriesInAllAccounts(key -> !key.contains(KEY_SEPARATOR), this::brokerKey);
     }
 
     // --- Users ---

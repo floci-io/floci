@@ -4,6 +4,7 @@ import io.floci.aws.core.common.RequestContext;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -361,6 +362,48 @@ class AccountAwareStorageBackendTest {
 
         assertEquals("current", raw.get("111111111111/us-east-1/current").orElseThrow());
         assertFalse(raw.get("111111111111/legacy").isPresent());
+    }
+
+    /**
+     * Every account's legacy entries move within that account, an unprefixed one counting as the default's,
+     * and the owner check is handed the account holding each legacy entry.
+     */
+    @Test
+    void migrateLegacyEntriesInAllAccountsMovesEachWithinItsOwnAccount() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("gen0", "default-owned");
+        raw.put("123456789012/gen1", "account-owned");
+        raw.put("123456789012/kept", "not-owned");
+        raw.put("123456789012/us-east-1::current", "current");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        List<String> ownerChecks = new ArrayList<>();
+
+        storage.migrateLegacyEntriesInAllAccounts(key -> !key.contains("::"), value -> "us-east-1::" + value,
+                (account, value) -> {
+                    ownerChecks.add(account + " " + value);
+                    return !value.equals("not-owned");
+                });
+
+        assertEquals(List.of("000000000000 default-owned", "123456789012 account-owned", "123456789012 not-owned"),
+                ownerChecks.stream().sorted().toList());
+        assertEquals(Set.of("000000000000/us-east-1::default-owned", "123456789012/us-east-1::account-owned",
+                "123456789012/kept", "123456789012/us-east-1::current"), Set.copyOf(raw.keys()));
+    }
+
+    /** Without an owner check, every account's legacy entries move. */
+    @Test
+    void migrateLegacyEntriesInAllAccountsWithoutAnOwnerCheckMovesEveryLegacyEntry() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("gen0", "default");
+        raw.put("123456789012/gen1", "account");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        storage.migrateLegacyEntriesInAllAccounts(key -> !key.contains("::"), value -> "us-east-1::" + value);
+
+        assertEquals(Set.of("000000000000/us-east-1::default", "123456789012/us-east-1::account"),
+                Set.copyOf(raw.keys()));
     }
 
     /**
