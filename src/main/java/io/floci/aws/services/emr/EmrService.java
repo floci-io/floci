@@ -11,6 +11,7 @@ import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.MemoizedSupplier;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -21,6 +22,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.StorageJson;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.Placement;
@@ -52,6 +54,7 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -125,9 +128,15 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // which publishes none. Hadoop keeps its wire protocols compatible across a major version's minor releases, so
     // a newer client, such as the runtime's, reaches its NameNode.
     static final String SPARK_RUNTIME_HDFS_RELEASE = "emr-7.5.0";
+    // Separates a security configuration key's Region from its name.
+    private static final String KEY_SEPARATOR = "::";
+    // A key of a Region's configuration: a name may hold "::" itself, so a key stored before is told apart by its
+    // missing Region rather than by the separator alone.
+    private static final Pattern REGIONAL_KEY = Pattern.compile("[a-z]{2}(-[a-z]+)+-\\d+" + KEY_SEPARATOR);
 
     private final AccountAwareStorageBackend<EmrCluster> clusterStore;
-    private final StorageBackend<String, SecurityConfiguration> secConfigStore;
+    // A security configuration is Regional: keyed by Region and name (securityConfigurationKey).
+    private final AccountAwareStorageBackend<SecurityConfiguration> secConfigStore;
     // Block public access is an account setting per Region, so this store is keyed by Region.
     private final StorageBackend<String, EmrBlockPublicAccess> blockPublicAccessStore;
     private final RegionResolver regionResolver;
@@ -279,6 +288,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         this.blockPublicAccessStore = storageFactory.create("emr", "emr-block-public-access.json",
                 new TypeReference<Map<String, EmrBlockPublicAccess>>() {});
         this.regionResolver = regionResolver;
+        migrateLegacySecurityConfigurations();
         this.eventPublisher = eventPublisher;
         this.defaultReleaseLabel = config.services().emr().defaultReleaseLabel();
         this.sparkRunner = sparkRunner;
@@ -416,8 +426,6 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 throw new AwsException("ValidationException", "The RunJobFlow request can contain InstanceFleets"
                         + " parameters or InstanceGroups parameters, but not both.", 400);
             }
-            // A security configuration is created first and named here; no source gives AWS's answer for one that is
-            // not there, so the code is RunJobFlow's own for its input and the wording that of the other calls.
             if (outOfStepConcurrencyRange(cluster.getStepConcurrencyLevel())) {
                 throw new AwsException("ValidationException",
                         stepConcurrencyOutOfRange(cluster.getStepConcurrencyLevel()), 400);
@@ -426,8 +434,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             if (cluster.getSteps().size() > MAX_ACTIVE_STEPS) {
                 throw new AwsException("ValidationException", tooManyActiveSteps(cluster.getSteps().size()), 400);
             }
+            // A security configuration of the cluster's Region is created first and named here; no source gives
+            // AWS's answer for one that is not there, so the code is RunJobFlow's own for its input and the wording
+            // that of the other calls.
             if (cluster.getSecurityConfiguration() != null
-                    && secConfigStore.get(cluster.getSecurityConfiguration()).isEmpty()) {
+                    && secConfigStore.get(securityConfigurationKey(region, cluster.getSecurityConfiguration()))
+                    .isEmpty()) {
                 throw new AwsException("ValidationException",
                         "Security configuration does not exist: " + cluster.getSecurityConfiguration(), 400);
             }
@@ -835,11 +847,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     // ──────────────────────────── Security configurations ────────────────────────────
 
-    public SecurityConfiguration createSecurityConfiguration(String name, String json) {
+    public SecurityConfiguration createSecurityConfiguration(String name, String json, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidRequestException", "Name is required.", 400);
         }
-        if (secConfigStore.get(name).isPresent()) {
+        String key = securityConfigurationKey(region, name);
+        if (secConfigStore.get(key).isPresent()) {
             throw new AwsException("InvalidRequestException",
                     "Security configuration already exists: " + name, 400);
         }
@@ -847,21 +860,54 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         sc.setName(name);
         sc.setSecurityConfiguration(json);
         sc.setCreationDateTime(Instant.now());
-        secConfigStore.put(name, sc);
+        secConfigStore.put(key, sc);
         return sc;
     }
 
-    public SecurityConfiguration describeSecurityConfiguration(String name) {
-        return secConfigStore.get(name).orElseThrow(() -> new AwsException(
+    public SecurityConfiguration describeSecurityConfiguration(String name, String region) {
+        return secConfigStore.get(securityConfigurationKey(region, name)).orElseThrow(() -> new AwsException(
                 "InvalidRequestException", "Security configuration does not exist: " + name, 400));
     }
 
-    public void deleteSecurityConfiguration(String name) {
-        if (secConfigStore.get(name).isEmpty()) {
+    public void deleteSecurityConfiguration(String name, String region) {
+        String key = securityConfigurationKey(region, name);
+        if (secConfigStore.get(key).isEmpty()) {
             throw new AwsException("InvalidRequestException",
                     "Security configuration does not exist: " + name, 400);
         }
-        secConfigStore.delete(name);
+        secConfigStore.delete(key);
+    }
+
+    private static String securityConfigurationKey(String region, String name) {
+        return region + KEY_SEPARATOR + name;
+    }
+
+    /**
+     * Moves the security configurations stored before they were keyed by Region from their bare name onto the
+     * default Region's key: they recorded no Region, and every Region saw them. Every other Region where one of its
+     * account's clusters names one gets a copy of its own, so the cluster's configuration is still described there.
+     */
+    private void migrateLegacySecurityConfigurations() {
+        // Built only if a configuration is still stored under its bare name.
+        Supplier<Map<String, Set<String>>> regionsUsing = new MemoizedSupplier<>(this::securityConfigurationUses);
+        secConfigStore.migrateLegacyEntriesToRegions(key -> !REGIONAL_KEY.matcher(key).lookingAt(),
+                regionResolver.getDefaultRegion(),
+                (accountId, sc) -> regionsUsing.get().getOrDefault(accountId + "/" + sc.getName(), Set.of()),
+                (region, sc) -> sc.getName() == null ? null : securityConfigurationKey(region, sc.getName()),
+                StorageJson::copy);
+    }
+
+    /** The Regions where each account's clusters name each security configuration, by account and name. */
+    private Map<String, Set<String>> securityConfigurationUses() {
+        Map<String, Set<String>> uses = new HashMap<>();
+        for (AccountAwareStorageBackend.AccountEntry<EmrCluster> cluster : clusterStore.scanAllAccountEntries(k -> true)) {
+            String name = cluster.value().getSecurityConfiguration();
+            String region = cluster.value().getRegion();
+            if (name != null && region != null) {
+                uses.computeIfAbsent(cluster.accountId() + "/" + name, ignored -> new LinkedHashSet<>()).add(region);
+            }
+        }
+        return uses;
     }
 
     // ──────────────────────────── Release catalogue ────────────────────────────
@@ -955,8 +1001,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return new AwsException("InvalidRequestException", "Invalid pagination token: " + token, 400);
     }
 
-    public List<SecurityConfiguration> listSecurityConfigurations() {
-        return new ArrayList<>(secConfigStore.scan(k -> true));
+    /** The security configurations of {@code region}. */
+    public List<SecurityConfiguration> listSecurityConfigurations(String region) {
+        String prefix = region + KEY_SEPARATOR;
+        return new ArrayList<>(secConfigStore.scan(k -> k.startsWith(prefix)));
     }
 
     // ──────────────────────────── Tags ────────────────────────────

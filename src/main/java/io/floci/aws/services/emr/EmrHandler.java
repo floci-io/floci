@@ -78,10 +78,10 @@ public class EmrHandler {
                 case "AddInstanceFleet" -> handleAddInstanceFleet(request);
                 case "ListInstanceFleets" -> handleListInstanceFleets(request);
                 case "ListInstances" -> handleListInstances(request);
-                case "CreateSecurityConfiguration" -> handleCreateSecurityConfiguration(request);
-                case "DescribeSecurityConfiguration" -> handleDescribeSecurityConfiguration(request);
-                case "DeleteSecurityConfiguration" -> handleDeleteSecurityConfiguration(request);
-                case "ListSecurityConfigurations" -> handleListSecurityConfigurations();
+                case "CreateSecurityConfiguration" -> handleCreateSecurityConfiguration(request, region);
+                case "DescribeSecurityConfiguration" -> handleDescribeSecurityConfiguration(request, region);
+                case "DeleteSecurityConfiguration" -> handleDeleteSecurityConfiguration(request, region);
+                case "ListSecurityConfigurations" -> handleListSecurityConfigurations(region);
                 case "AddTags" -> handleAddTags(request);
                 case "RemoveTags" -> handleRemoveTags(request);
                 case "ModifyInstanceGroups" -> handleModifyInstanceGroups(request, region);
@@ -485,17 +485,17 @@ public class EmrHandler {
 
     // ──────────────────────────── Security configurations ────────────────────────────
 
-    private Response handleCreateSecurityConfiguration(JsonNode request) {
+    private Response handleCreateSecurityConfiguration(JsonNode request, String region) {
         SecurityConfiguration sc = service.createSecurityConfiguration(
-                text(request, "Name"), text(request, "SecurityConfiguration"));
+                text(request, "Name"), text(request, "SecurityConfiguration"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Name", sc.getName());
         response.put("CreationDateTime", epoch(sc.getCreationDateTime()));
         return Response.ok(response).build();
     }
 
-    private Response handleDescribeSecurityConfiguration(JsonNode request) {
-        SecurityConfiguration sc = service.describeSecurityConfiguration(text(request, "Name"));
+    private Response handleDescribeSecurityConfiguration(JsonNode request, String region) {
+        SecurityConfiguration sc = service.describeSecurityConfiguration(text(request, "Name"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Name", sc.getName());
         response.put("SecurityConfiguration", sc.getSecurityConfiguration());
@@ -503,8 +503,8 @@ public class EmrHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteSecurityConfiguration(JsonNode request) {
-        service.deleteSecurityConfiguration(text(request, "Name"));
+    private Response handleDeleteSecurityConfiguration(JsonNode request, String region) {
+        service.deleteSecurityConfiguration(text(request, "Name"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -573,10 +573,10 @@ public class EmrHandler {
         return node.asInt();
     }
 
-    private Response handleListSecurityConfigurations() {
+    private Response handleListSecurityConfigurations(String region) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("SecurityConfigurations");
-        for (SecurityConfiguration sc : service.listSecurityConfigurations()) {
+        for (SecurityConfiguration sc : service.listSecurityConfigurations(region)) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", sc.getName());
             node.put("CreationDateTime", epoch(sc.getCreationDateTime()));
