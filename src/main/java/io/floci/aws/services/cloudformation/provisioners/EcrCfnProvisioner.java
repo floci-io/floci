@@ -24,6 +24,7 @@ import java.util.Set;
 @ApplicationScoped
 public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final String REPOSITORY = "AWS::ECR::Repository";
     private static final int REPOSITORY_NAME_MAX_LENGTH = 256;
     /** What CreateRepository applies when ImageTagMutability is omitted. */
     private static final String DEFAULT_IMAGE_TAG_MUTABILITY = "MUTABLE";
@@ -36,7 +37,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::ECR::Repository");
+        return Set.of(REPOSITORY);
     }
 
     @Override
@@ -50,11 +51,53 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        return ReplacementCleanup.rollback(resource, this::delete);
+    }
+
+    @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            // Rolling this update back undoes it alone; only ContinueUpdateRollback retries the
+            // delete the last rollback could not make.
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        // The engine's change decides whether the update replaces the repository: RepositoryName and
+        // EncryptionConfiguration are create-only in the registry. A named repository cannot be
+        // replaced under the same name.
+        boolean replaces = ctx.isUpdate() && ctx.changes(REPOSITORY, props).requiresReplacement();
+        String explicitName = ctx.resolveOptional(props, "RepositoryName");
         // CDK bootstrap requires lower-case repository names; CFN-generated suffixes can include
-        // upper-case characters. Normalize to satisfy the AWS ECR repository name pattern.
-        String repoName = ctx.stablePhysicalName(ctx.resolveOptional(props, "RepositoryName"),
-                r.getLogicalId(), REPOSITORY_NAME_MAX_LENGTH, true).toLowerCase();
+        // upper-case characters. Normalize to satisfy the AWS ECR repository name pattern. A
+        // replacing update that names nothing gets a fresh generated name, not the prior one.
+        String repoName = (replaces && (explicitName == null || explicitName.isBlank())
+                ? ctx.generatePhysicalName(r.getLogicalId(), REPOSITORY_NAME_MAX_LENGTH, true)
+                : ctx.stablePhysicalName(explicitName, r.getLogicalId(), REPOSITORY_NAME_MAX_LENGTH, true))
+                .toLowerCase();
+        if (replaces && ctx.reusesPriorEntity(repoName)) {
+            throw CfnExceptions.customNamedReplacement(repoName);
+        }
 
         String mutability = ctx.resolveOptional(props, "ImageTagMutability");
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
@@ -93,11 +136,17 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(repoName);
         r.getAttributes().put("Arn", repo.getRepositoryArn());
         r.getAttributes().put("RepositoryUri", repo.getRepositoryUri());
+        // The repository the prior physical id named is deleted once the update commits, by the
+        // forced delete below, or the new one is when a later resource fails the update. A create
+        // under an existing name fails, so a replacement here is always one this update created.
+        ReplacementCleanup.record(r, ctx, attributesBefore, replaces && !reusing);
     }
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        ecrService.deleteRepository(physicalId, null, true, region);
+        CfnDeletes.safeDelete("ECR repository", physicalId,
+                () -> ecrService.deleteRepository(physicalId, null, true, region),
+                "RepositoryNotFoundException");
     }
 
     /**
