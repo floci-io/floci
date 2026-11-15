@@ -14,6 +14,8 @@ import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -219,31 +221,14 @@ class AutoScalingEksManagedGroupTest {
         verifyNoMoreInteractions(targets);
     }
 
-    @Test
-    void deletingAGroupLeavesTheSharedNodeInTheTargetGroupsAnotherGroupHolds() {
-        groupsSharingTheNode();
-        service.attachLoadBalancerTargetGroups(REGION, FIRST, List.of("tg-first", "tg-shared"));
-        service.attachLoadBalancerTargetGroups(REGION, SECOND, List.of("tg-shared"));
-        clearInvocations(targets);
-
-        service.deleteEksManagedGroup(REGION, FIRST);
-
-        assertEquals(List.of(), service.describeAutoScalingGroups(REGION, List.of(FIRST)));
-        assertEquals(List.of(NODE), memberIds(SECOND));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), onlyTarget(NODE));
-        verifyNoMoreInteractions(targets);
-
-        service.deleteEksManagedGroup(REGION, SECOND);
-
-        assertEquals(List.of(), service.describeAutoScalingGroups(REGION, null));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-shared"), onlyTarget(NODE));
-        verifyNoMoreInteractions(targets);
-        // The node is EKS's: deleting its groups terminates nothing.
-        verifyNoInteractions(ec2);
-    }
-
-    @Test
-    void deletingAnEksGroupThroughAutoScalingTerminatesNothingAndKeepsSharedTargetGroups() {
+    /**
+     * Each group is deleted as EKS deletes it with its node group, or through DeleteAutoScalingGroup with
+     * ForceDelete, which is refused without it while the group holds the node.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void deletingAGroupLeavesTheSharedNodeInTheTargetGroupsAnotherGroupHoldsAndTerminatesNothing(
+            boolean throughAutoScaling) {
         groupsSharingTheNode();
         service.attachLoadBalancerTargetGroups(REGION, FIRST, List.of("tg-first", "tg-shared"));
         service.attachLoadBalancerTargetGroups(REGION, SECOND, List.of("tg-shared"));
@@ -253,11 +238,19 @@ class AutoScalingEksManagedGroupTest {
                 () -> service.deleteAutoScalingGroup(REGION, FIRST, false));
         assertEquals("ResourceInUse", inUse.getErrorCode());
 
-        service.deleteAutoScalingGroup(REGION, FIRST, true);
+        delete(FIRST, throughAutoScaling);
 
         assertEquals(List.of(), service.describeAutoScalingGroups(REGION, List.of(FIRST)));
+        assertEquals(List.of(NODE), memberIds(SECOND));
         verify(targets).deregisterTargets(eq(REGION), eq("tg-first"), onlyTarget(NODE));
         verifyNoMoreInteractions(targets);
+
+        delete(SECOND, throughAutoScaling);
+
+        assertEquals(List.of(), service.describeAutoScalingGroups(REGION, null));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-shared"), onlyTarget(NODE));
+        verifyNoMoreInteractions(targets);
+        // The node is EKS's: deleting its groups terminates nothing.
         verifyNoInteractions(ec2);
     }
 
@@ -343,6 +336,15 @@ class AutoScalingEksManagedGroupTest {
         assertEquals("Auto Scaling group '" + FIRST + "' is managed by Amazon EKS for a node group. Its instance is"
                 + " the cluster's node, which the cluster's node groups share.", refused.getMessage());
         assertEquals(400, refused.getHttpStatus());
+    }
+
+    /** Deletes {@code group} as EKS does with its node group, or with DeleteAutoScalingGroup and ForceDelete. */
+    private void delete(String group, boolean throughAutoScaling) {
+        if (throughAutoScaling) {
+            service.deleteAutoScalingGroup(REGION, group, true);
+        } else {
+            service.deleteEksManagedGroup(REGION, group);
+        }
     }
 
     /** FIRST and SECOND, the groups of two node groups of one cluster, both holding its node. */
