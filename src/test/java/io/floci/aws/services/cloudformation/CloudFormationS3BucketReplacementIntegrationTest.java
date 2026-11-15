@@ -1,11 +1,19 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
 import java.util.regex.Matcher;
+import java.util.List;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.executeAndAwaitUpdate;
+import static io.floci.aws.services.cloudformation.CfnStackTestSupport.replacement;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -152,6 +160,69 @@ class CloudFormationS3BucketReplacementIntegrationTest {
         assertBucketPresent(ownedBucket);
 
         deleteStack(stackName);
+    }
+
+    /**
+     * In the account regional namespace the bucket is named {@code <prefix>-<account>-<region>-an}
+     * and that name is its physical id and {@code Ref}; changing the prefix replaces the bucket and
+     * deletes the one under the old derived name once the update commits.
+     */
+    @Test
+    void anAccountRegionalPrefixNamesTheBucketAndChangingItReplacesTheBucket() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "s3-nsp-" + suffix;
+        String oldBucket = "nsp-a-" + suffix + "-000000000000-us-east-1-an";
+        String newBucket = "nsp-b-" + suffix + "-000000000000-us-east-1-an";
+
+        createStack(stackName, prefixTemplate("\"BucketNamePrefix\": \"nsp-a-" + suffix + "\", "
+                + "\"BucketNamespace\": \"account-regional\""));
+        assertEquals(oldBucket, output(describeStack(stackName), "BucketRef"));
+        assertBucketPresent(oldBucket);
+
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            createUpdateChangeSet(client, stackName, "prefix", prefixTemplate("\"BucketNamePrefix\": \"nsp-b-"
+                    + suffix + "\", \"BucketNamespace\": \"account-regional\""));
+            assertEquals(List.of("True"), replacement(client, stackName, "prefix", "Bucket"));
+            executeAndAwaitUpdate(client, stackName, "prefix");
+        }
+
+        assertEquals(newBucket, output(describeStack(stackName), "BucketRef"));
+        assertBucketPresent(newBucket);
+        assertBucketMissing(oldBucket);
+
+        deleteStack(stackName);
+    }
+
+    /**
+     * A prefix together with {@code BucketName}, and a prefix without the account regional
+     * namespace, are both rejected: the resource fails and the stack rolls back.
+     */
+    @Test
+    void aPrefixWithABucketNameOrOutsideTheAccountRegionalNamespaceFailsTheCreate() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        List<String> invalid = List.of(
+                "\"BucketName\": \"nsp-both-" + suffix + "\", \"BucketNamePrefix\": \"nsp-both\", "
+                        + "\"BucketNamespace\": \"account-regional\"",
+                "\"BucketNamePrefix\": \"nsp-global-" + suffix + "\"");
+        for (int i = 0; i < invalid.size(); i++) {
+            String stackName = "s3-nsp-bad-" + i + "-" + suffix;
+            given().contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack").formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName).formParam("TemplateBody", prefixTemplate(invalid.get(i)))
+            .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
+            deleteStack(stackName);
+        }
+    }
+
+    private static String prefixTemplate(String properties) {
+        return """
+            {
+              "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": { %s } } },
+              "Outputs": { "BucketRef": { "Value": { "Ref": "Bucket" } } }
+            }
+            """.formatted(properties);
     }
 
     private static String inPlaceTemplate(String bucketName, String versioningStatus, String extraResources) {
