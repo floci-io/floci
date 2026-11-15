@@ -115,6 +115,16 @@ class LogCaptureTest {
     }
 
     @Test
+    void warningsKeepsWarnAndMoreSevereRecordsFormatted() {
+        LogRecord severe = new LogRecord(Level.SEVERE, "lost {0}");
+        severe.setParameters(new Object[]{"the node"});
+        List<LogRecord> records = List.of(new LogRecord(Level.INFO, "started"),
+                new LogRecord(Level.WARNING, "slow"), severe, new LogRecord(Level.FINE, "detail"));
+
+        assertEquals(List.of("slow", "lost the node"), LogCapture.warnings(records));
+    }
+
+    @Test
     void awaitRestoresLoggerWhenActionThrows() {
         Logger logger = Logger.getLogger(LogCaptureTest.class.getName());
         Level originalLevel = logger.getLevel();

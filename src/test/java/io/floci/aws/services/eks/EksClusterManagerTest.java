@@ -83,7 +83,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -1350,11 +1349,7 @@ class EksClusterManagerTest {
             verify(portAllocator).allocate(6440, 6499);
             String warning = "API server port 6457 of EKS cluster demo is taken; moving the cluster to another port "
                     + "changes its endpoint";
-            // Compared by severity, not identity: JBoss LogManager has its own Level constants.
-            List<String> warnings = logs.stream()
-                    .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
-                    .map(record -> MessageFormat.format(record.getMessage(), record.getParameters()))
-                    .toList();
+            List<String> warnings = LogCapture.warnings(logs);
             assertTrue(warnings.contains(warning), String.valueOf(warnings));
         }
 

@@ -41,6 +41,22 @@ public final class LogCapture {
                 : MessageFormat.format(record.getMessage(), parameters);
     }
 
+    /**
+     * The text of each WARN or more severe record among {@code records}, as {@link #formatted} gives it. Severity
+     * is compared by value, not identity: JBoss LogManager has its own {@link Level} constants.
+     */
+    public static List<String> warnings(List<LogRecord> records) {
+        return records.stream()
+                .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
+                .map(LogCapture::formatted)
+                .toList();
+    }
+
+    /** The {@link #warnings(List)} {@code source} logs while {@code action} runs. */
+    public static List<String> warnings(Class<?> source, Runnable action) {
+        return warnings(capture(source, action));
+    }
+
     /** Runs the action with capture installed, then waits for a matching asynchronous record. */
     public static <T> T awaitRecord(Class<?> source, Duration timeout, Predicate<LogRecord> matches,
                                     Supplier<T> action) {
