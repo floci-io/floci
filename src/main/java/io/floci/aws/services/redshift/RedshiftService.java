@@ -167,9 +167,14 @@ public class RedshiftService implements ManagedSecretRotator {
         });
     }
 
+    /**
+     * Refuses a change to the request Region's cluster {@code identifier} while its managed master password is being
+     * rotated. A cluster of another Region is left to the change's own lookup, which answers ClusterNotFound there, so
+     * its rotation is not seen from other Regions.
+     */
     private void ensureNoManagedRotation(String accountId, String identifier) {
         ResourceKey key = new ResourceKey(accountId, "cluster", identifier);
-        if (managedRotationReservations.containsValue(key)) {
+        if (managedRotationReservations.containsValue(key) && regionalCluster(identifier).isPresent()) {
             throw new AwsException("InvalidRequestException",
                     "The cluster's managed master password is being rotated. Try again after rotation completes.", 400);
         }
@@ -1163,13 +1168,9 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public List<Cluster> describeClusters(String identifier) {
         if (identifier != null) {
-            Optional<Cluster> cluster = clusters.get(identifier);
-            if (cluster.isEmpty()) {
-                throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
-            }
-            return List.of(cluster.get());
+            return List.of(requireCluster(identifier));
         }
-        return clusters.scan(k -> true);
+        return regionalClusters();
     }
 
     /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in this Region. */
@@ -1182,7 +1183,7 @@ public class RedshiftService implements ManagedSecretRotator {
             return Optional.empty();
         }
         String identifier = arn.resource().substring("cluster:".length());
-        return clusters.get(identifier).filter(cluster -> clusterArn.equals(clusterArn(identifier)));
+        return regionalCluster(identifier).filter(cluster -> clusterArn.equals(clusterArn(identifier)));
     }
 
     /** Sets, or with {@code null} removes, the resource policy of the caller's cluster an ARN names. */
@@ -1247,11 +1248,7 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("InvalidRetentionPeriodFault",
                     "FinalClusterSnapshotRetentionPeriod must be -1 or between 1 and 3653", 400);
         }
-        Optional<Cluster> clusterOpt = clusters.get(identifier);
-        if (clusterOpt.isEmpty()) {
-            throw new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404);
-        }
-        Cluster cluster = clusterOpt.get();
+        Cluster cluster = requireCluster(identifier);
 
         if (!skipSnapshot) {
             if (!"available".equals(cluster.getClusterStatus())) {
@@ -1355,8 +1352,7 @@ public class RedshiftService implements ManagedSecretRotator {
                                                String masterUserPassword, String clusterParameterGroupName,
                                                List<String> vpcSecurityGroupIds, Boolean multiAZ,
                                                Integer automatedRetention) {
-        Cluster cluster = clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Cluster cluster = requireCluster(clusterIdentifier);
         rejectPausedCluster(cluster);
         validateAutomatedRetention(nodeType == null ? cluster.getNodeType() : nodeType,
                 automatedRetention == null ? cluster.getAutomatedSnapshotRetentionPeriod() : automatedRetention);
@@ -1432,8 +1428,7 @@ public class RedshiftService implements ManagedSecretRotator {
 
     private Cluster modifyClusterIamRolesLocked(String clusterIdentifier, List<String> addIamRoles,
                                                       List<String> removeIamRoles, String defaultIamRoleArn) {
-        Cluster cluster = clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Cluster cluster = requireCluster(clusterIdentifier);
 
         // Validate every ARN before mutating: the cluster object is a live reference from HybridStorage.
         addIamRoles.forEach(RedshiftService::requireIamRoleArn);
@@ -1598,8 +1593,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public Cluster describeLoggingStatus(String clusterIdentifier) {
-        return clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        return requireCluster(clusterIdentifier);
     }
 
     public Cluster enableLogging(String clusterIdentifier, String bucketName, String s3KeyPrefix,
@@ -1617,8 +1611,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private Cluster enableLoggingLocked(String clusterIdentifier, String bucketName, String s3KeyPrefix,
                                               String logDestinationType, List<String> logExports,
                                               String s3TableKmsKeyId, String s3TableGranularity) {
-        Cluster cluster = clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Cluster cluster = requireCluster(clusterIdentifier);
 
         String destination = "s3";
         if (logDestinationType != null && !logDestinationType.isBlank()) {
@@ -1725,8 +1718,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private Cluster disableLoggingLocked(String clusterIdentifier) {
-        Cluster cluster = clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Cluster cluster = requireCluster(clusterIdentifier);
         cluster.setLoggingEnabled(false);
         cluster.setLoggingGeneration(cluster.getLoggingGeneration() + 1);
         cluster.setLoggingBucketName(null);
@@ -1837,8 +1829,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private Cluster clusterInState(String identifier, String requiredState) {
-        Cluster cluster = clusters.get(identifier).orElseThrow(() ->
-                new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404));
+        Cluster cluster = requireCluster(identifier);
         if (!requiredState.equals(cluster.getClusterStatus())) {
             throw new AwsException("InvalidClusterState", "Cluster " + identifier
                     + " must be " + requiredState + " for this operation", 400);
@@ -1873,8 +1864,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private Cluster rebootClusterLocked(String clusterIdentifier) {
-        Cluster cluster = clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Cluster cluster = requireCluster(clusterIdentifier);
         rejectPausedCluster(cluster);
 
         // Replacement containers do not reattach the old anonymous volume, so a plain stop+recreate
@@ -2027,12 +2017,8 @@ public class RedshiftService implements ManagedSecretRotator {
     private Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Integer retentionPeriod,
                                     Map<String, String> tags) {
         validateSnapshotIdentifier(snapshotIdentifier);
-        Optional<Cluster> clusterOpt = clusters.get(clusterIdentifier);
-        if (clusterOpt.isEmpty()) {
-            throw new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404);
-        }
-        return createSnapshot(clusters.accountId(), snapshotIdentifier, clusterOpt.get(), retentionPeriod,
-                Instant.now(), null, tags);
+        return createSnapshot(clusters.accountId(), snapshotIdentifier, requireCluster(clusterIdentifier),
+                retentionPeriod, Instant.now(), null, tags);
     }
 
     private Snapshot createSnapshot(String accountId, String snapshotIdentifier, Cluster cluster,
@@ -2195,6 +2181,30 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }
         return named;
+    }
+
+    /**
+     * The calling account's cluster {@code identifier}, when it is in the request's Region. Clusters are
+     * Regional, each in the Region it was created in ({@link #clusterRegion(Cluster)}); identifiers stay unique
+     * across an account's Regions, so the checks that a new one is free still look in every Region.
+     */
+    private Optional<Cluster> regionalCluster(String identifier) {
+        return clusters.get(identifier).filter(this::isInRequestRegion);
+    }
+
+    /** {@link #regionalCluster}, answering ClusterNotFound when the request's Region has no such cluster. */
+    private Cluster requireCluster(String clusterIdentifier) {
+        return regionalCluster(clusterIdentifier)
+                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+    }
+
+    /** The calling account's clusters in the request's Region. */
+    private List<Cluster> regionalClusters() {
+        return clusters.scan(k -> true).stream().filter(this::isInRequestRegion).toList();
+    }
+
+    private boolean isInRequestRegion(Cluster cluster) {
+        return clusterRegion(cluster).equals(regionResolver.getRegion());
     }
 
     /**
@@ -2955,7 +2965,7 @@ public class RedshiftService implements ManagedSecretRotator {
     /** Whether the named source exists; Floci does not model cluster security groups or scheduled actions. */
     private boolean eventSourceExists(String sourceType, String sourceIdentifier) {
         return switch (sourceType) {
-            case RedshiftEventCatalog.CLUSTER -> clusters.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.CLUSTER -> regionalCluster(sourceIdentifier).isPresent();
             case RedshiftEventCatalog.PARAMETER_GROUP -> DEFAULT_PARAMETER_GROUP_NAME.equals(sourceIdentifier)
                     || parameterGroups.get(sourceIdentifier).isPresent();
             case RedshiftEventCatalog.SNAPSHOT -> findSnapshot(sourceIdentifier).isPresent();
@@ -3186,11 +3196,6 @@ public class RedshiftService implements ManagedSecretRotator {
     private static final int DEFAULT_SNAPSHOT_COPY_RETENTION_DAYS = 7;
     // AWS reports -1 ("retain indefinitely") when ManualSnapshotRetentionPeriod is not given.
     private static final int RETAIN_MANUAL_SNAPSHOTS_INDEFINITELY = -1;
-
-    private Cluster requireCluster(String clusterIdentifier) {
-        return clusters.get(clusterIdentifier)
-                .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
-    }
 
     // Automated snapshots: 1 to 35 days.
     private static void validateAutomatedRetention(int days) {
@@ -3793,7 +3798,7 @@ public class RedshiftService implements ManagedSecretRotator {
                                                                        Integer maxRecords, String marker) {
         String clusterSchedule = null;
         if (clusterIdentifier != null && !clusterIdentifier.isBlank()) {
-            clusterSchedule = clusters.get(clusterIdentifier).map(Cluster::getSnapshotScheduleIdentifier).orElse(null);
+            clusterSchedule = regionalCluster(clusterIdentifier).map(Cluster::getSnapshotScheduleIdentifier).orElse(null);
             if (clusterSchedule == null) {
                 return new PaginatedResult<>(List.of(), null);
             }
@@ -3911,7 +3916,7 @@ public class RedshiftService implements ManagedSecretRotator {
             return result;
         }
         if (resourceType == null || "cluster".equalsIgnoreCase(resourceType)) {
-            for (Cluster c : clusters.scan(k -> true)) {
+            for (Cluster c : regionalClusters()) {
                 addTaggedResources(result, clusterArn(c.getClusterIdentifier()), "cluster", c.getTags(), tagKeysFilter);
             }
         }
@@ -4068,8 +4073,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 yield new TagHandle(subscription.getTags(), updated -> eventService().replaceSubscriptionTags(id, updated));
             }
             case "cluster" -> {
-                Cluster cluster = clusters.get(id)
-                        .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + id + " not found", 404));
+                Cluster cluster = requireCluster(id);
                 yield new TagHandle(cluster.getTags(), updated -> {
                     cluster.setTags(updated);
                     clusters.put(id, cluster);
