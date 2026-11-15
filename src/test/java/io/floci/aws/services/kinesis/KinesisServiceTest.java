@@ -131,6 +131,41 @@ class KinesisServiceTest {
     }
 
     @Test
+    void deleteStream_missingStream_throwsResourceNotFound() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> kinesisService.deleteStream("nope", false, REGION));
+
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void deleteStream_withConsumersAndNoEnforcement_throwsResourceInUseAndKeepsStream() {
+        KinesisStream stream = kinesisService.createStream("with-consumer", 1, REGION);
+        kinesisService.registerStreamConsumer(stream.getStreamArn(), "c1", REGION);
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> kinesisService.deleteStream("with-consumer", false, REGION));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+        assertEquals(1, kinesisService.listStreamDetails(REGION).size());
+        assertEquals(1, kinesisService.listStreamConsumers(stream.getStreamArn(), REGION).size());
+    }
+
+    @Test
+    void deleteStream_withConsumersAndEnforcement_deletesStreamAndConsumers() {
+        KinesisStream stream = kinesisService.createStream("with-consumer", 1, REGION);
+        kinesisService.registerStreamConsumer(stream.getStreamArn(), "c1", REGION);
+
+        kinesisService.deleteStream("with-consumer", true, REGION);
+
+        assertTrue(kinesisService.listStreamDetails(REGION).isEmpty());
+        assertTrue(kinesisService.listStreamConsumers(stream.getStreamArn(), REGION).isEmpty());
+        KinesisStream recreated = kinesisService.createStream("with-consumer", 1, REGION);
+        assertTrue(kinesisService.listStreamConsumers(recreated.getStreamArn(), REGION).isEmpty());
+    }
+
+    @Test
     void putAndGetRecord() {
         kinesisService.createStream("my-stream", 1, REGION);
         String seqNum = kinesisService.putRecord("my-stream",

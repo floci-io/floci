@@ -215,7 +215,8 @@ public class KinesisJsonHandler {
 
     private Response handleDeleteStream(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        service.deleteStream(streamName, region);
+        boolean enforceConsumerDeletion = request.path("EnforceConsumerDeletion").asBoolean(false);
+        service.deleteStream(streamName, enforceConsumerDeletion, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

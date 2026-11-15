@@ -276,11 +276,30 @@ public class KinesisService implements ResourceProvider {
     }
 
     public void deleteStream(String streamName, String region) {
+        // Internal callers (CloudFormation delete) treat an already-gone stream as deleted.
+        if (store.get(regionKey(region, streamName)).isEmpty()) {
+            return;
+        }
+        deleteStream(streamName, true, region);
+    }
+
+    public void deleteStream(String streamName, boolean enforceConsumerDeletion, String region) {
         String storageKey = regionKey(region, streamName);
         // Delete under the per-stream monitor every writer takes, so the delete is serialized with
         // any in-flight append, split, merge or metadata write on this stream. See lockFor for why
         // the monitor is deliberately left in the map.
         synchronized (lockFor(storageKey)) {
+            KinesisStream stream = resolveStream(streamName, region);
+            synchronized (consumerStore) {
+                List<KinesisConsumer> consumers = listStreamConsumers(stream.getStreamArn(), region);
+                if (!consumers.isEmpty() && !enforceConsumerDeletion) {
+                    throw new AwsException("ResourceInUseException",
+                            "Stream " + streamName + " has registered consumers", 400);
+                }
+                for (KinesisConsumer consumer : consumers) {
+                    consumerStore.delete(regionKey(region, consumer.getConsumerArn()));
+                }
+            }
             store.delete(storageKey);
         }
         LOG.infov("Deleted Kinesis stream: {0}", streamName);

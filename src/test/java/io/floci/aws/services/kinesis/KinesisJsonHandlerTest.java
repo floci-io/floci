@@ -114,6 +114,29 @@ class KinesisJsonHandlerTest {
         assertEquals("99", event.path("ChildShards").get(0).path("HashKeyRange").path("EndingHashKey").asText());
     }
 
+    @Test
+    void deleteStream_missingStream_returnsResourceNotFound() {
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "nope");
+
+        AwsException e = assertThrows(AwsException.class, () -> handler.handle("DeleteStream", request, REGION));
+
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void deleteStream_withConsumers_honoursEnforceConsumerDeletion() {
+        createStream("test-stream");
+        service.registerStreamConsumer(STREAM_ARN, "c1", REGION);
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+
+        AwsException e = assertThrows(AwsException.class, () -> handler.handle("DeleteStream", request, REGION));
+        assertEquals("ResourceInUseException", e.getErrorCode());
+
+        request.put("EnforceConsumerDeletion", true);
+        assertThat(handler.handle("DeleteStream", request, REGION).getStatus(), is(200));
+        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
+    }
+
     // Retention is measured against the service clock, so a test that plants a fixed arrival
     // timestamp pins the clock just after it instead of relying on the wall clock.
     private void useClockFixedAt(Instant now) {
