@@ -16378,6 +16378,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * another instance since stays.
      */
     public List<Map<String, String>> rollBackLaunch(String region, Reservation launch) {
+        Set<String> rootVolumeIds = launch.getInstances().stream()
+                .map(Instance::getRootVolumeId).filter(Objects::nonNull).collect(Collectors.toSet());
         try {
             return terminateInstances(region, launch.getInstances().stream().map(Instance::getInstanceId).toList());
         } finally {
@@ -16385,7 +16387,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 String k = key(region, volumeId);
                 withVolumeLock(volumeId, () -> volumes.get(k)
                         .filter(current -> current.getAttachments().isEmpty())
-                        .ifPresent(current -> deleteVolumeRecord(region, k, current)));
+                        .ifPresent(current -> deleteVolumeRecord(region, k, current, rootVolumeIds.contains(volumeId))));
             }
         }
     }
@@ -16428,7 +16430,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 boolean attachedElsewhere = vol.getAttachments().stream()
                         .anyMatch(other -> !inst.getInstanceId().equals(other.getInstanceId()));
                 if (att.isDeleteOnTermination() && !attachedElsewhere) {
-                    deleteVolumeRecord(region, storeKey, vol);
+                    deleteVolumeRecord(region, storeKey, vol, root);
                     return;
                 }
                 vol.getAttachments().remove(att);
@@ -16441,9 +16443,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /** Deletes a volume, its block device and its tags. Called under the volume's lock. */
-    private void deleteVolumeRecord(String region, String storeKey, Volume vol) {
-        if (volumeBlockDeviceManager != null) {
+    /** Deletes metadata and tags, plus backing storage for data volumes. Called under the volume's lock. */
+    private void deleteVolumeRecord(String region, String storeKey, Volume vol, boolean logicalRoot) {
+        if (!logicalRoot && volumeBlockDeviceManager != null) {
             volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
         }
         volumes.delete(storeKey);
