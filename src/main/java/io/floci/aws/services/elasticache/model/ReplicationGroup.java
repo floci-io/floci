@@ -43,8 +43,13 @@ public class ReplicationGroup {
     private int numNodeGroups = 1;
     private int replicasPerNodeGroup;
     private int numCacheClusters = 1;
-    /** The member a cluster-mode-disabled group reports as primary, 1-based; TestFailover moves it. */
-    private int primaryMemberIndex = 1;
+    /**
+     * The numbers of a cluster-mode-disabled group's members, {@code <id>-001} upward, once a replica count
+     * change has added or removed one. Empty until then, while the members are 1 to {@link #numCacheClusters}.
+     */
+    private List<Integer> memberNumbers = new ArrayList<>();
+    /** The number of the member a cluster-mode-disabled group reports as primary; TestFailover moves it. */
+    private int primaryMemberNumber = 1;
     private String engine;
     private String engineVersion;
     private String cacheNodeType;
@@ -172,8 +177,13 @@ public class ReplicationGroup {
     public int getNumCacheClusters() { return numCacheClusters; }
     public void setNumCacheClusters(int numCacheClusters) { this.numCacheClusters = numCacheClusters; }
 
-    public int getPrimaryMemberIndex() { return primaryMemberIndex; }
-    public void setPrimaryMemberIndex(int primaryMemberIndex) { this.primaryMemberIndex = primaryMemberIndex; }
+    public List<Integer> getMemberNumbers() { return memberNumbers; }
+    public void setMemberNumbers(List<Integer> memberNumbers) {
+        this.memberNumbers = memberNumbers == null ? new ArrayList<>() : new ArrayList<>(memberNumbers);
+    }
+
+    public int getPrimaryMemberNumber() { return primaryMemberNumber; }
+    public void setPrimaryMemberNumber(int primaryMemberNumber) { this.primaryMemberNumber = primaryMemberNumber; }
 
     public String getEngine() { return engine; }
     public void setEngine(String engine) { this.engine = engine; }

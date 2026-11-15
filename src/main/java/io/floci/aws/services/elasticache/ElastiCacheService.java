@@ -2126,54 +2126,81 @@ public class ElastiCacheService implements ResourceProvider {
             }
             return members;
         }
-        int primary = primaryMember(group);
-        for (int i = 1; i <= group.getNumCacheClusters(); i++) {
+        List<Integer> numbers = memberNumbers(group);
+        int primary = primaryMember(group, numbers);
+        for (int number : numbers) {
             members.add(new MemberCacheCluster(group,
-                    group.getReplicationGroupId() + "-" + String.format("%03d", i),
-                    group.getProxyPort(), i == primary));
+                    group.getReplicationGroupId() + "-" + String.format("%03d", number),
+                    group.getProxyPort(), number == primary));
         }
         return members;
     }
 
+    /** A cluster-mode-disabled group's member numbers, in order: 1 to NumCacheClusters until a count change. */
+    private static List<Integer> memberNumbers(ReplicationGroup group) {
+        if (!group.getMemberNumbers().isEmpty()) {
+            return group.getMemberNumbers();
+        }
+        List<Integer> numbers = new ArrayList<>();
+        for (int number = 1; number <= group.getNumCacheClusters(); number++) {
+            numbers.add(number);
+        }
+        return numbers;
+    }
+
     /** The member a cluster-mode-disabled group reports as primary: the first, unless TestFailover moved it. */
-    private static int primaryMember(ReplicationGroup group) {
-        int index = group.getPrimaryMemberIndex();
-        return index >= 1 && index <= group.getNumCacheClusters() ? index : 1;
+    private static int primaryMember(ReplicationGroup group, List<Integer> numbers) {
+        return numbers.contains(group.getPrimaryMemberNumber()) ? group.getPrimaryMemberNumber() : numbers.getFirst();
     }
 
     // ── Replicas and failover ─────────────────────────────────────────────────
 
     /**
      * IncreaseReplicaCount and DecreaseReplicaCount for a cluster-mode-disabled group. Its members
-     * share one backend, so a replica is a member cache cluster the group reports, and the count is
-     * what changes, at once. Up to five replicas, as on AWS, and at least one while automatic failover
-     * is enabled. A decrease removes the highest-numbered members; when the primary was one of them,
-     * the first member becomes primary.
+     * share one backend, so a replica is a member cache cluster the group reports, added or removed at
+     * once, since {@code ApplyImmediately=False} is not supported. Up to five replicas, and at least one
+     * while Multi-AZ is enabled. New members take the next numbers; a decrease removes the
+     * highest-numbered replicas and never the primary, which AWS does not delete.
      */
-    public ReplicationGroup changeReplicaCount(String groupId, Integer newReplicaCount, boolean increase) {
+    public ReplicationGroup changeReplicaCount(String groupId, Integer newReplicaCount, Boolean applyImmediately,
+                                               boolean increase) {
         requireGroupId(groupId);
+        if (applyImmediately == null) {
+            throw new AwsException("InvalidParameterValue", "The parameter ApplyImmediately must be provided.", 400);
+        }
+        if (!applyImmediately) {
+            throw new AwsException("InvalidParameterValue", "ApplyImmediately=False is not currently supported.", 400);
+        }
         if (newReplicaCount == null) {
             throw new AwsException("InvalidParameterValue", "The parameter NewReplicaCount must be provided.", 400);
         }
         synchronized (lockFor("rg:" + groupId)) {
             ReplicationGroup group = requireFailoverCapable(groupId,
                     increase ? "IncreaseReplicaCount" : "DecreaseReplicaCount");
-            int current = group.getNumCacheClusters() - 1;
-            if (newReplicaCount < 0 || newReplicaCount > 5) {
-                throw new AwsException("InvalidParameterValue", "NewReplicaCount must be between 0 and 5.", 400);
-            }
+            validateRange("NewReplicaCount", newReplicaCount, group.isMultiAzEnabled() ? 1 : 0, 5);
+            List<Integer> numbers = new ArrayList<>(memberNumbers(group));
+            int primary = primaryMember(group, numbers);
+            int current = numbers.size() - 1;
             if (increase ? newReplicaCount <= current : newReplicaCount >= current) {
                 throw new AwsException("InvalidParameterValue", "NewReplicaCount " + newReplicaCount + " must be "
                         + (increase ? "greater" : "less") + " than the " + current + " replica(s) replication group "
                         + groupId + " has.", 400);
             }
-            if (group.isAutomaticFailoverEnabled() && newReplicaCount < 1) {
-                throw new AwsException("InvalidParameterCombination", "Replication group " + groupId
-                        + " has automatic failover enabled, so it needs at least one replica.", 400);
+            if (increase) {
+                int next = numbers.getLast();
+                while (numbers.size() < newReplicaCount + 1) {
+                    numbers.add(++next);
+                }
+            } else {
+                for (int i = numbers.size() - 1; i >= 0 && numbers.size() > newReplicaCount + 1; i--) {
+                    if (numbers.get(i) != primary) {
+                        numbers.remove(i);
+                    }
+                }
             }
-            int primary = primaryMember(group);
-            group.setNumCacheClusters(newReplicaCount + 1);
-            group.setPrimaryMemberIndex(primary <= group.getNumCacheClusters() ? primary : 1);
+            group.setMemberNumbers(numbers);
+            group.setNumCacheClusters(numbers.size());
+            group.setPrimaryMemberNumber(primary);
             groups.put(groupId, group);
             LOG.infov("Replication group {0} now has {1} replica(s)", groupId, String.valueOf(newReplicaCount));
             return group;
@@ -2196,14 +2223,16 @@ public class ElastiCacheService implements ResourceProvider {
                 throw new AwsException("NodeGroupNotFoundFault", "Node group " + nodeGroupId
                         + " not found in replication group " + groupId + ".", 404);
             }
-            if (!group.isAutomaticFailoverEnabled() || group.getNumCacheClusters() < 2) {
+            List<Integer> numbers = memberNumbers(group);
+            if (!group.isAutomaticFailoverEnabled() || numbers.size() < 2) {
                 throw new AwsException("InvalidReplicationGroupState", "Replication group " + groupId
                         + " needs automatic failover enabled and at least one replica to fail over.", 400);
             }
-            group.setPrimaryMemberIndex(primaryMember(group) % group.getNumCacheClusters() + 1);
+            int primary = primaryMember(group, numbers);
+            group.setPrimaryMemberNumber(numbers.get((numbers.indexOf(primary) + 1) % numbers.size()));
             groups.put(groupId, group);
             LOG.infov("Replication group {0} failed over to member {1}", groupId,
-                    String.valueOf(group.getPrimaryMemberIndex()));
+                    String.valueOf(group.getPrimaryMemberNumber()));
             return group;
         }
     }

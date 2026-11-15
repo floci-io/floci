@@ -278,7 +278,7 @@ public class ElastiCacheQueryHandler {
                         "Floci decreases the replica count by NewReplicaCount only, not by ReplicasToRemove.", 400);
             }
             ReplicationGroup group = service.changeReplicaCount(params.getFirst("ReplicationGroupId"),
-                    intParam(params, "NewReplicaCount"), increase);
+                    intParam(params, "NewReplicaCount"), boolParam(params, "ApplyImmediately"), increase);
             return Response.ok(AwsQueryResponse.envelope(action, AwsNamespaces.EC, replicationGroupXml(group))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
