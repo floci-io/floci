@@ -2003,6 +2003,38 @@ public interface EmulatorConfig {
 
         /** Docker network for the database containers. Defaults to Floci's own network. */
         Optional<String> dockerNetwork();
+
+        /**
+         * Where cluster databases live: {@code docker} runs a PostgreSQL container per cluster,
+         * {@code external} uses one PostgreSQL server that already runs, see {@link External}.
+         */
+        @WithDefault("docker")
+        String backend();
+
+        /** The PostgreSQL server of the {@code external} backend. */
+        External external();
+
+        /** Kinds of backend {@link #backend()} accepts. */
+        enum Backend { DOCKER, EXTERNAL }
+
+        interface External {
+            /** Host of the PostgreSQL server. Required with the {@code external} backend. */
+            Optional<String> host();
+
+            @WithDefault("5432")
+            int port();
+
+            /** Database that holds the clusters' schemas. */
+            @WithDefault("postgres")
+            String database();
+
+            /** Role Floci connects as; it must be able to create roles and schemas. */
+            @WithDefault("postgres")
+            String username();
+
+            /** Password of {@link #username()}; none when the server trusts the connection. */
+            Optional<String> password();
+        }
     }
 
     interface RdsDataServiceConfig {
