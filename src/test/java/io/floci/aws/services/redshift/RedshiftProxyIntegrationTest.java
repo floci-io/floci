@@ -3,8 +3,6 @@ package io.floci.aws.services.redshift;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -13,9 +11,8 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.util.Objects;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,19 +36,6 @@ class RedshiftProxyIntegrationTest {
         // Use 127.0.0.1 explicitly instead of c.getEndpoint().getAddress() to avoid UnknownHostException
         // in CI environments where floci.emulator.hostname is set to host.docker.internal.
         return "jdbc:postgresql://127.0.0.1:" + c.getEndpoint().getPort() + "/dev";
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        try {
-            return Awaitility.await()
-                    .atMost(Duration.ofSeconds(30))
-                    .pollDelay(Duration.ZERO)
-                    .pollInterval(Duration.ofMillis(500))
-                    .ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl(cluster), username, password), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(jdbcUrl(cluster), username, password); // throw original
-        }
     }
 
     @Test

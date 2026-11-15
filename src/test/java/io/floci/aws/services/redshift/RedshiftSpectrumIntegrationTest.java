@@ -47,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -800,13 +801,6 @@ class RedshiftSpectrumIntegrationTest {
                 .then().statusCode(200).extract().path("Id");
         assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
                 "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Status"));
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
-        return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, username, password), Objects::nonNull);
     }
 
     private static long concurrentTotal(Cluster cluster, CountDownLatch ready, CountDownLatch start) throws Exception {
