@@ -280,12 +280,13 @@ public class ApiGatewayController {
     public Response getAuthorizers(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
                                    @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        ApiGatewayService.AuthorizerPage page = service.getAuthorizerPage(region, apiId, limit, position);
+        // Authorizer clashes with the imported API Gateway v2 model
+        PaginatedResult<io.floci.aws.services.apigateway.model.Authorizer> page = service.getAuthorizerPage(region, apiId, limit, position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         page.items().forEach(a -> items.add(toAuthorizerNode(a)));
-        if (page.position() != null) {
-            root.put("position", page.position());
+        if (page.nextToken() != null) {
+            root.put("position", page.nextToken());
         }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
@@ -1252,13 +1253,13 @@ public class ApiGatewayController {
                                           @QueryParam("locationStatus") String locationStatus,
                                           @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        ApiGatewayService.DocumentationPartPage page = service.getDocumentationParts(region, apiId, type, name,
+        PaginatedResult<DocumentationPart> page = service.getDocumentationParts(region, apiId, type, name,
                 path, locationStatus, limit, position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         page.items().forEach(part -> items.add(objectMapper.valueToTree(part)));
-        if (page.position() != null) {
-            root.put("position", page.position());
+        if (page.nextToken() != null) {
+            root.put("position", page.nextToken());
         }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }

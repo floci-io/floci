@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegionFacts;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.common.Resettable;
@@ -1251,28 +1252,34 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return authorizerStore.scan(k -> k.startsWith(prefix));
     }
 
-    public record AuthorizerPage(List<Authorizer> items, String position) {}
-
-    public AuthorizerPage getAuthorizerPage(String region, String apiId, Integer limit, String position) {
+    public PaginatedResult<Authorizer> getAuthorizerPage(String region, String apiId, Integer limit,
+                                                         String position) {
         List<Authorizer> authorizers = getAuthorizers(region, apiId).stream()
                 .sorted(Comparator.comparing(Authorizer::getId))
                 .toList();
-        if (limit != null && limit < 1) {
-            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
-        }
-        int pageSize = limit == null ? 25 : Math.min(limit, 500);
-        if (position != null && position.isBlank()) {
-            throw new AwsException("BadRequestException", "Invalid position parameter", 400);
-        }
+        return pageById(authorizers, Authorizer::getId, limit, position);
+    }
+
+    /**
+     * One page of a list already sorted by id. The token is the id of the last item returned, and
+     * an unrecognised token is a {@code BadRequestException}, as on AWS.
+     */
+    private static <T> PaginatedResult<T> pageById(List<T> sorted, Function<T, String> idOf, Integer limit,
+                                                   String position) {
+        int pageSize = resolveUsageLimit(limit);
         int start = 0;
-        if (position != null) {
-            while (start < authorizers.size() && authorizers.get(start).getId().compareTo(position) <= 0) {
+        if (position != null && !position.isBlank()) {
+            while (start < sorted.size() && !position.equals(idOf.apply(sorted.get(start)))) {
                 start++;
             }
+            if (start == sorted.size()) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            start++;
         }
-        int end = Math.min(start + pageSize, authorizers.size());
-        String nextPosition = end < authorizers.size() ? authorizers.get(end - 1).getId() : null;
-        return new AuthorizerPage(List.copyOf(authorizers.subList(start, end)), nextPosition);
+        int end = Math.min(start + pageSize, sorted.size());
+        String nextPosition = end < sorted.size() ? idOf.apply(sorted.get(end - 1)) : null;
+        return new PaginatedResult<>(List.copyOf(sorted.subList(start, end)), nextPosition);
     }
 
     public void deleteAuthorizer(String region, String apiId, String authorizerId) {
@@ -2467,9 +2474,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Invalid documentation part id specified", 404));
     }
 
-    public record DocumentationPartPage(List<DocumentationPart> items, String position) {}
-
-    public DocumentationPartPage getDocumentationParts(String region, String apiId, String type, String name,
+    public PaginatedResult<DocumentationPart> getDocumentationParts(String region, String apiId, String type, String name,
                                                         String path, String locationStatus, Integer limit,
                                                         String position) {
         getRestApi(region, apiId);
@@ -2493,10 +2498,6 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             modeledRequest.put("position", position);
         }
         ApiGatewayDocumentationRequestShapes.check("GetDocumentationParts", modeledRequest);
-        if (limit != null && limit < 1) {
-            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
-        }
-        int pageSize = limit == null ? 25 : Math.min(limit, 500);
         String prefix = region + "::" + apiId + "::";
         List<DocumentationPart> parts = documentationPartStore.scan(key -> key.startsWith(prefix)).stream()
                 .filter(part -> type == null || type.equals(part.getLocation().get("type")))
@@ -2506,19 +2507,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .sorted(Comparator.comparing(DocumentationPart::getId))
                 .toList();
 
-        int start = 0;
-        if (position != null && !position.isBlank()) {
-            while (start < parts.size() && !position.equals(parts.get(start).getId())) {
-                start++;
-            }
-            if (start == parts.size()) {
-                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
-            }
-            start++;
-        }
-        int end = Math.min(start + pageSize, parts.size());
-        String nextPosition = end < parts.size() ? parts.get(end - 1).getId() : null;
-        return new DocumentationPartPage(List.copyOf(parts.subList(start, end)), nextPosition);
+        return pageById(parts, DocumentationPart::getId, limit, position);
     }
 
     public synchronized DocumentationPart updateDocumentationPart(String region, String apiId, String partId,

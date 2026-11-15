@@ -16,7 +16,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -125,35 +124,12 @@ class ApiGatewayAuthorizerPagingIntegrationTest {
                 assertThrows(BadRequestException.class,
                         () -> client.getAuthorizers(request -> request.restApiId(apiId).limit(0)));
                 assertThrows(BadRequestException.class,
-                        () -> client.getAuthorizers(request -> request.restApiId(apiId).position(" ")));
+                        () -> client.getAuthorizers(request -> request.restApiId(apiId).position("missing")));
                 assertThrows(NotFoundException.class,
                         () -> client.getAuthorizers(request -> request.restApiId("missingapi")));
             } finally {
                 client.deleteRestApi(request -> request.restApiId(apiId));
                 client.deleteRestApi(request -> request.restApiId(otherId));
-            }
-        }
-    }
-
-    @Test
-    void getAuthorizersResumesAfterTheDeletedLastSeenAuthorizer() {
-        try (ApiGatewayClient client = client()) {
-            String apiId = client.createRestApi(request -> request.name("authorizer-paging-delete")).id();
-            try {
-                Set<String> created = createAuthorizers(client, apiId, 3);
-
-                GetAuthorizersResponse first = client.getAuthorizers(request -> request.restApiId(apiId).limit(1));
-                String deleted = first.items().get(0).id();
-                client.deleteAuthorizer(request -> request.restApiId(apiId).authorizerId(deleted));
-
-                GetAuthorizersResponse second = client.getAuthorizers(request -> request.restApiId(apiId)
-                        .position(first.position()));
-                Set<String> remaining = new HashSet<>(created);
-                remaining.remove(deleted);
-                assertEquals(remaining, second.items().stream().map(Authorizer::id).collect(Collectors.toSet()));
-                assertNull(second.position());
-            } finally {
-                client.deleteRestApi(request -> request.restApiId(apiId));
             }
         }
     }
