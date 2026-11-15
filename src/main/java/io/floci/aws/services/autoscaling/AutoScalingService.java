@@ -1718,29 +1718,42 @@ public class AutoScalingService implements PassedRoleLookup {
                 classicDetached.removeAll(classicAttached);
                 classicAttached.removeAll(classicBefore);
                 List<String> members = memberIds(current);
+                List<String> inService = current.getInstances().stream()
+                        .filter(member -> "InService".equals(member.getLifecycleState()))
+                        .map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
                 // The members leave the target groups and Classic Load Balancers the change detached before the change
-                // is stored: when a load balancer refuses, the group keeps them all attached, and sending the detach
-                // again finishes it. An ordinary group's instances are its own, so they leave every one it detached.
+                // is stored, one load balancer at a time. When one refuses, the in-service members rejoin those they
+                // had already left and the group keeps them all attached, as it was, so the detach can be sent again.
+                // An ordinary group's instances are its own, so they leave every one it detached.
+                List<Runnable> rejoin = new ArrayList<>();
                 try {
-                    if (current.isEksManaged()) {
-                        deregisterFromUnsharedTargetGroups(current, members, detached);
-                        deregisterFromUnsharedClassicLoadBalancers(current, members, classicDetached);
-                    } else if (!members.isEmpty()) {
-                        if (!detached.isEmpty()) {
-                            deregisterFromTargetGroups(elbV2Service, current, detached, members);
+                    for (String targetGroup : detached) {
+                        if (current.isEksManaged()) {
+                            deregisterFromUnsharedTargetGroups(current, members, Set.of(targetGroup));
+                        } else if (!members.isEmpty()) {
+                            deregisterFromTargetGroups(elbV2Service, current, List.of(targetGroup), members);
                         }
-                        deregisterFromClassicLoadBalancers(elbClassicService, current, classicDetached, members);
+                        rejoin.add(() -> registerWithTargetGroups(elbV2Service, current, List.of(targetGroup),
+                                inService, false));
+                    }
+                    for (String loadBalancer : classicDetached) {
+                        if (current.isEksManaged()) {
+                            deregisterFromUnsharedClassicLoadBalancers(current, members, Set.of(loadBalancer));
+                        } else {
+                            deregisterFromClassicLoadBalancers(elbClassicService, current, List.of(loadBalancer),
+                                    members);
+                        }
+                        rejoin.add(() -> registerWithClassicLoadBalancers(elbClassicService, current,
+                                List.of(loadBalancer), inService, false));
                     }
                 } catch (RuntimeException e) {
+                    rejoin.forEach(Runnable::run);
                     current.setTargetGroupARNs(targetGroupsBefore);
                     current.setLoadBalancerNames(loadBalancersBefore);
                     current.setTrafficSourceTypeByIdentifier(trafficSourcesBefore);
                     throw e;
                 }
                 groups.put(key, current);
-                List<String> inService = current.getInstances().stream()
-                        .filter(member -> "InService".equals(member.getLifecycleState()))
-                        .map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
                 registerWithTargetGroups(elbV2Service, current, attached, inService, false);
                 registerWithClassicLoadBalancers(elbClassicService, current, classicAttached, inService, false);
             }

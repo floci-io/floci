@@ -10,17 +10,20 @@ import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 import static io.floci.aws.services.autoscaling.TargetMatchers.exactlyTargets;
+import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -134,11 +137,12 @@ class AutoScalingClassicLoadBalancerAttachmentTest {
     }
 
     /**
-     * A detach whose Classic Load Balancer refuses after the members left the target group it also named leaves both
-     * attached, as a refused target group does, and sending the detach again finishes it.
+     * A detach whose Classic Load Balancer refuses after the members left the target group it also named puts the
+     * in-service member back in that target group and leaves both attached, as they were, and sending the detach
+     * again finishes it.
      */
     @Test
-    void aDetachWhoseClassicLoadBalancerRefusesLeavesWhatItNamedAttachedUntilItIsSentAgain() {
+    void aDetachWhoseClassicLoadBalancerRefusesPutsTheMembersBackInWhatTheyAlreadyLeft() {
         group.getTrafficSourceTypeByIdentifier().put("tg-source", "elbv2");
         group.getTrafficSourceTypeByIdentifier().put("lb-source", "elb");
         AwsException refusal = new AwsException("Throttling", "Rate exceeded", 400);
@@ -152,6 +156,9 @@ class AutoScalingClassicLoadBalancerAttachmentTest {
                 () -> service.detachTrafficSources(REGION, GROUP, both)));
 
         assertEquals(Map.of("tg-source", "elbv2", "lb-source", "elb"), group.getTrafficSourceTypeByIdentifier());
+        InOrder order = inOrder(targets);
+        order.verify(targets).deregisterTargets(eq(REGION), eq("tg-source"), exactlyTargets(IN_SERVICE, STANDBY));
+        order.verify(targets).registerTargets(eq(REGION), eq("tg-source"), onlyTarget(IN_SERVICE));
 
         service.detachTrafficSources(REGION, GROUP, both);
 
