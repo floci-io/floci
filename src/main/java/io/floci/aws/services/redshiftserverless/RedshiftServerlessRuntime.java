@@ -161,9 +161,10 @@ public class RedshiftServerlessRuntime {
     }
 
     /**
-     * Applies a new master password to the PostgreSQL role and to the proxy's backend leg. When the
-     * proxy step fails the role is put back to {@code oldPassword}, so the backend never requires a
-     * password the stored namespace does not hold.
+     * Applies a master password to the PostgreSQL role and to the proxy's backend leg. When the
+     * proxy step fails the role is put back to {@code oldPassword} when one is given, so the backend
+     * never requires a password the stored namespace does not hold. Putting a previous password back
+     * is the same change with the two passwords the other way round.
      */
     public void changeMasterPassword(String accountId, String region, String workgroupName,
                                      String masterUsername, String dbName, String oldPassword,
@@ -178,35 +179,6 @@ public class RedshiftServerlessRuntime {
                     containerManager.alterUserPassword(accountId, backendId, masterUsername, oldPassword, dbName);
                 } catch (RuntimeException restoreFailure) {
                     e.addSuppressed(restoreFailure);
-                }
-            }
-            throw e;
-        }
-    }
-
-    public void restoreMasterPassword(String accountId, String region, String workgroupName,
-                                      String masterUsername, String dbName, String password) {
-        restoreMasterPassword(accountId, region, workgroupName, masterUsername, dbName, password, null);
-    }
-
-    /**
-     * Puts the role and the proxy back to {@code password} after a rotation the caller could not
-     * store. If the proxy refuses {@code password} after the role changed and {@code failedPassword}
-     * is given, the role is put back to {@code failedPassword} so the two never disagree.
-     */
-    public void restoreMasterPassword(String accountId, String region, String workgroupName,
-                                      String masterUsername, String dbName, String password,
-                                      String failedPassword) {
-        String backendId = backendId(region, workgroupName);
-        containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
-        try {
-            proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
-        } catch (RuntimeException e) {
-            if (failedPassword != null) {
-                try {
-                    containerManager.alterUserPassword(accountId, backendId, masterUsername, failedPassword, dbName);
-                } catch (RuntimeException revertFailure) {
-                    e.addSuppressed(revertFailure);
                 }
             }
             throw e;

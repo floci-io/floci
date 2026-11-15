@@ -3,6 +3,7 @@ package io.floci.aws.services.redshiftserverless;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.redshift.model.Endpoint;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -12,8 +13,6 @@ import org.awaitility.Awaitility;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
 import software.amazon.awssdk.services.redshiftserverless.model.Namespace;
@@ -63,12 +62,8 @@ class RedshiftServerlessSecretRotationIntegrationTest {
 
     @BeforeEach
     void setup() {
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        redshift = RedshiftServerlessClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(credentials).build();
-        secrets = SecretsManagerClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(credentials).build();
+        redshift = AwsTestClients.create(RedshiftServerlessClient.builder(), "test", Region.US_EAST_1, endpoint);
+        secrets = AwsTestClients.create(SecretsManagerClient.builder(), "test", Region.US_EAST_1, endpoint);
         cleanup.register(redshift::close);
         cleanup.register(secrets::close);
         when(runtime.generatePassword()).thenReturn(INITIAL_PASSWORD, ROTATED_PASSWORD);
@@ -114,24 +109,24 @@ class RedshiftServerlessSecretRotationIntegrationTest {
     void aBackendFailureLeavesTheSecretAndTheBackendOnTheCurrentPassword() throws Exception {
         Namespace namespace = managedNamespaceWithWorkgroup(name());
         String secretArn = namespace.adminPasswordSecretArn();
+        // only the change to the rotated password fails, so the rollback to the current one can run
         doThrow(new IllegalStateException("backend refused the password")).when(runtime).changeMasterPassword(
-                anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString(), anyString(), anyString(), eq(INITIAL_PASSWORD),
+                eq(ROTATED_PASSWORD));
 
         secrets.rotateSecret(request -> request.secretId(secretArn));
 
-        verify(runtime, timeout(10_000)).restoreMasterPassword(anyString(), eq("us-east-1"), anyString(),
-                eq("admin"), eq("dev"), eq(INITIAL_PASSWORD), eq(ROTATED_PASSWORD));
+        verify(runtime, timeout(10_000)).changeMasterPassword(anyString(), eq("us-east-1"), anyString(),
+                eq("admin"), eq("dev"), eq(ROTATED_PASSWORD), eq(INITIAL_PASSWORD));
         assertEquals(INITIAL_PASSWORD, passwordOf(secretArn));
     }
 
     @Test
     void aNamespaceOfAnotherAccountIsRotatedOnTheRotationThread() {
-        StaticCredentialsProvider other = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("222222222222", "test"));
-        RedshiftServerlessClient otherRedshift = RedshiftServerlessClient.builder().endpointOverride(endpoint)
-                .region(Region.US_EAST_1).credentialsProvider(other).build();
-        SecretsManagerClient otherSecrets = SecretsManagerClient.builder().endpointOverride(endpoint)
-                .region(Region.US_EAST_1).credentialsProvider(other).build();
+        RedshiftServerlessClient otherRedshift = AwsTestClients.create(RedshiftServerlessClient.builder(),
+                "222222222222", Region.US_EAST_1, endpoint);
+        SecretsManagerClient otherSecrets = AwsTestClients.create(SecretsManagerClient.builder(),
+                "222222222222", Region.US_EAST_1, endpoint);
         cleanup.register(otherRedshift::close);
         cleanup.register(otherSecrets::close);
         String namespaceName = name();
@@ -155,9 +150,9 @@ class RedshiftServerlessSecretRotationIntegrationTest {
     void aFailedBackendRestoreKeepsTheRotatedPasswordOnTheNamespace() {
         String namespaceName = name();
         String secretArn = managedNamespaceWithWorkgroup(namespaceName).adminPasswordSecretArn();
-        doThrow(new IllegalStateException("restore failed")).when(runtime).restoreMasterPassword(
-                anyString(), eq("us-east-1"), anyString(), eq("admin"), eq("dev"), eq(INITIAL_PASSWORD),
-                eq(ROTATED_PASSWORD));
+        doThrow(new IllegalStateException("restore failed")).when(runtime).changeMasterPassword(
+                anyString(), eq("us-east-1"), anyString(), eq("admin"), eq("dev"), eq(ROTATED_PASSWORD),
+                eq(INITIAL_PASSWORD));
 
         assertThrows(IllegalStateException.class, () -> service.rotate(secretArn, "us-east-1",
                 (changeBackend, rollbackBackend) -> {

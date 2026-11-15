@@ -1470,8 +1470,8 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
                 || previous.getAdminUserPassword() == null) {
             return;
         }
-        runtime.restoreMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
-                attached.get().getMasterUsername(), previous.getDbName(), previous.getAdminUserPassword());
+        runtime.changeMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                attached.get().getMasterUsername(), previous.getDbName(), null, previous.getAdminUserPassword());
     }
 
     @Override
@@ -1516,9 +1516,9 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             namespaces.putForAccount(accountId, entry.key(), rotated);
             return requireAdminSecrets().value(rotated);
         }, () -> {
-            runtime.restoreMasterPassword(accountId, region, workgroup.getWorkgroupName(),
-                    workgroup.getMasterUsername(), current.getDbName(), current.getAdminUserPassword(),
-                    rotated.getAdminUserPassword());
+            runtime.changeMasterPassword(accountId, region, workgroup.getWorkgroupName(),
+                    workgroup.getMasterUsername(), current.getDbName(), rotated.getAdminUserPassword(),
+                    current.getAdminUserPassword());
             namespaces.putForAccount(accountId, entry.key(), current);
         });
     }
