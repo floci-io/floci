@@ -90,8 +90,18 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionBucket(StackResource r, JsonNode props, ProvisionContext ctx) {
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
-        String bucketName = ctx.stablePhysicalName(ctx.resolveOptional(props, "BucketName"),
-                r.getLogicalId(), BUCKET_NAME_MAX_LENGTH, true);
+        String explicitName = ctx.resolveOptional(props, "BucketName");
+        // The engine's change decides, as it does for the change set's Replacement: BucketName,
+        // BucketNamePrefix and BucketNamespace are create-only in the registry. A bucket named in the
+        // template cannot be replaced under that name; an unnamed one gets a fresh generated name.
+        boolean replaces = ctx.isUpdate() && ctx.priorPhysicalId() != null
+                && ctx.changes(BUCKET, props).requiresReplacement();
+        if (replaces && explicitName != null && explicitName.equals(ctx.priorPhysicalId())) {
+            throw CfnExceptions.customNamedReplacement(explicitName);
+        }
+        String bucketName = replaces && (explicitName == null || explicitName.isBlank())
+                ? ctx.generatePhysicalName(r.getLogicalId(), BUCKET_NAME_MAX_LENGTH, true)
+                : ctx.stablePhysicalName(explicitName, r.getLogicalId(), BUCKET_NAME_MAX_LENGTH, true);
         // provision is also the update path. CreateBucket on a bucket this account already owns is
         // idempotent only in us-east-1; every other region answers BucketAlreadyOwnedByYou, as on
         // AWS. With the name now stable across updates, the second UpdateStack must skip the create
@@ -328,6 +338,10 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             if (ctx.isUpdate()) {
                 r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
                         "Could not restore bucket " + bucketName + ": " + e.getMessage());
+                if (unwind.created) {
+                    // The bucket this update created stays listed, so a later commit or the stack delete removes it.
+                    ReplacementCleanup.recordOrphan(r, bucketName, BUCKET, ctx.region());
+                }
             }
         }
     }
