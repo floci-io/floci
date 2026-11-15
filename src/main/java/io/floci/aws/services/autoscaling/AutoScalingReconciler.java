@@ -299,7 +299,8 @@ public class AutoScalingReconciler {
                 if ("running".equals(ec2State)) {
                     String standbyActivityId = asgInst.getStandbyActivityId();
                     boolean returningFromStandby = standbyActivityId != null;
-                    AutoScalingService.registerWithTargetGroups(elbV2Service, asg, asg.getTargetGroupARNs(),
+                    AutoScalingService.registerWithTargetGroups(elbV2Service, asg,
+                            AutoScalingService.attachedTargetGroups(asg),
                             asgInst.getInstanceId(), returningFromStandby);
                     registerWithClassicLoadBalancers(asg, asgInst, returningFromStandby);
                     asgInst.setLifecycleState("InService");

@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.autoscaling.TargetMatchers.exactlyTargets;
 import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -67,8 +68,8 @@ class AutoScalingTargetGroupAttachmentTest {
 
         service.detachLoadBalancerTargetGroups(REGION, GROUP, List.of("tg-attached"));
 
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-attached"), onlyTarget(IN_SERVICE));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-attached"), onlyTarget(STANDBY));
+        // In one call: the group's instances are its own, so none stays in the target group for another group.
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-attached"), exactlyTargets(IN_SERVICE, STANDBY));
         verifyNoMoreInteractions(targets);
         assertEquals(List.of("tg-kept"), group.getTargetGroupARNs());
     }
@@ -82,8 +83,7 @@ class AutoScalingTargetGroupAttachmentTest {
         service.detachTrafficSources(REGION, GROUP, List.of(
                 new AutoScalingService.TrafficSourceIdentifier("tg-source", "elbv2")));
 
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-source"), onlyTarget(IN_SERVICE));
-        verify(targets).deregisterTargets(eq(REGION), eq("tg-source"), onlyTarget(STANDBY));
+        verify(targets).deregisterTargets(eq(REGION), eq("tg-source"), exactlyTargets(IN_SERVICE, STANDBY));
         verifyNoMoreInteractions(targets);
         assertEquals(Map.of(), group.getTrafficSourceTypeByIdentifier());
     }
@@ -91,8 +91,7 @@ class AutoScalingTargetGroupAttachmentTest {
     @Test
     void aDetachElbV2RefusesLeavesTheTargetGroupAttachedSoTheDetachCanBeSentAgain() {
         AwsException refusal = new AwsException("Throttling", "Rate exceeded", 400);
-        doThrow(refusal).doNothing().when(targets).deregisterTargets(eq(REGION), eq("tg-attached"),
-                onlyTarget(IN_SERVICE));
+        doThrow(refusal).doNothing().when(targets).deregisterTargets(eq(REGION), eq("tg-attached"), anyList());
 
         assertSame(refusal, assertThrows(AwsException.class,
                 () -> service.detachLoadBalancerTargetGroups(REGION, GROUP, List.of("tg-attached"))));
@@ -100,7 +99,8 @@ class AutoScalingTargetGroupAttachmentTest {
 
         service.detachLoadBalancerTargetGroups(REGION, GROUP, List.of("tg-attached"));
 
-        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-attached"), onlyTarget(IN_SERVICE));
+        verify(targets, times(2)).deregisterTargets(eq(REGION), eq("tg-attached"),
+                exactlyTargets(IN_SERVICE, STANDBY));
         assertEquals(List.of(), group.getTargetGroupARNs());
     }
 
