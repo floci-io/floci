@@ -19,6 +19,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -57,6 +58,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+    private static final String DOCUMENT_PREFIX = "document/";
     private static final String ECS_AL2023_RECOMMENDED =
             "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
     private static final String ECS_AL2023_ARM64_RECOMMENDED =
@@ -1509,6 +1511,58 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     // raises InvalidDocument instead of silently minting or reporting share state for
     // a document that does not exist.
 
+    /**
+     * The accounts the document of that name in the owner's account and Region is shared with; empty when there is no
+     * such document.
+     */
+    public List<String> documentSharedWith(String ownerAccountId, String name, String region) {
+        String key = regionKey(region, name);
+        if (inAccount(documentStore, ownerAccountId, key).isEmpty()) {
+            return List.of();
+        }
+        return inAccount(documentPermissionStore, ownerAccountId, key).map(List::copyOf).orElse(List.of());
+    }
+
+    /**
+     * The document an association runs: the caller's by its name or ARN, or, by its ARN, one another account shared
+     * with the caller. A document of another account not shared with the caller does not exist for it.
+     */
+    private SsmDocument associatedDocument(String nameOrArn, String region) {
+        if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
+            return getDocument(nameOrArn, region);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(nameOrArn);
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("Failed to parse document name as ARN: {0}", nameOrArn);
+            return getDocument(nameOrArn, region);
+        }
+        if (!"ssm".equals(arn.service()) || !arn.resource().startsWith(DOCUMENT_PREFIX)
+                || !arn.region().equals(region)) {
+            return getDocument(nameOrArn, region);
+        }
+        String name = arn.resource().substring(DOCUMENT_PREFIX.length());
+        String caller = regionResolver.getAccountId();
+        if (arn.accountId().equals(caller)) {
+            return getDocument(name, region);
+        }
+        if (!documentSharedWith(arn.accountId(), name, region).contains(caller)) {
+            throw new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.", 400);
+        }
+        return inAccount(documentStore, arn.accountId(), regionKey(region, name))
+                .orElseThrow(() -> new AwsException("InvalidDocument", "Document " + nameOrArn + " does not exist.",
+                        400));
+    }
+
+    /** The entry of the key in the account's partition of an account-aware store. */
+    private <V> Optional<V> inAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (store instanceof AccountAwareStorageBackend<V> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return accountId.equals(regionResolver.getAccountId()) ? store.get(key) : Optional.empty();
+    }
+
     public SsmDocument getDocument(String name, String region) {
         SsmDocument document = documentStore.get(regionKey(region, name))
                 .orElseThrow(() -> new AwsException("InvalidDocument",
@@ -1728,7 +1782,7 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
             Map<String, String> tags,
             String region) {
         validateTagKeys(tags);
-        SsmDocument document = getDocument(name, region);
+        SsmDocument document = associatedDocument(name, region);
         validateDocumentVersion(document, documentVersion);
 
         if (instanceId != null && !instanceId.isBlank()) {
@@ -2054,6 +2108,19 @@ public class SsmService implements ResourceProvider, StoredResourceArns {
     @Override
     public String namespace() {
         return "ssm";
+    }
+
+    /** A document another account owns, which {@code CreateAssociation} runs from that account when it is shared. */
+    @Override
+    public boolean reachedInItsAccount(String arn, String accountId) {
+        if (!AwsArnUtils.isArnFor(arn, "ssm")) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return !parsed.accountId().isEmpty() && !parsed.accountId().equals(accountId)
+                && parsed.resource().startsWith(DOCUMENT_PREFIX)
+                && inAccount(documentStore, parsed.accountId(),
+                        regionKey(parsed.region(), parsed.resource().substring(DOCUMENT_PREFIX.length()))).isPresent();
     }
 
     /**
