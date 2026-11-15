@@ -245,7 +245,7 @@ class CloudWatchDescribeAlarmsFiltersIntegrationTest {
     private void put(boolean json, String operation, Map<String, Object> request) throws Exception {
         call(json, operation, request).then().statusCode(200);
         String name = request.get("AlarmName").toString();
-        cleanup.register(() -> CloudWatchTestRequests.deleteAlarm(baseUri, SCOPE, name));
+        cleanup.register(() -> CloudWatchTestRequests.deleteAlarmJson(baseUri, SCOPE, name));
     }
 
     private void setState(boolean json, String name, String state) throws Exception {

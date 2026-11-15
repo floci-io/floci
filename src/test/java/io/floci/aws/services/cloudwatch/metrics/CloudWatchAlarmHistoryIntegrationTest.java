@@ -111,7 +111,7 @@ class CloudWatchAlarmHistoryIntegrationTest {
     private Response call(boolean json, String operation, Map<String, ?> body) throws JsonProcessingException {
         if ("PutMetricAlarm".equals(operation)) {
             String name = body.get("AlarmName").toString();
-            cleanup.register(() -> CloudWatchTestRequests.deleteAlarm(baseUri, SCOPE, name));
+            cleanup.register(() -> CloudWatchTestRequests.deleteAlarmJson(baseUri, SCOPE, name));
         }
         return CloudWatchTestRequests.call(baseUri, SCOPE, json, operation, body);
     }

@@ -18,7 +18,7 @@ final class CloudWatchTestRequests {
     private CloudWatchTestRequests() {
     }
 
-    static void deleteAlarm(URI endpoint, String scope, String name) {
+    static void deleteAlarmJson(URI endpoint, String scope, String name) {
         try {
             call(endpoint, scope, true, "DeleteAlarms", Map.of("AlarmNames", List.of(name)))
                     .then().statusCode(200);
