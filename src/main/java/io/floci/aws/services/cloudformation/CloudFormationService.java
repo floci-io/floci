@@ -1744,6 +1744,24 @@ public class CloudFormationService implements ResourceProvider {
      * The execute {@code CreateStack} and {@code UpdateStack} run, as
      * {@link #executeChangeSet(String, String, String)}, for a request that carries a token.
      */
+    /**
+     * Records the permissions boundary a delegation registered for the caller asking for this
+     * deployment, so a role the stack provisions carries it. Provisioning runs after the request
+     * returns, so the cap cannot be read from the caller then and travels with the stack instead.
+     * Null leaves the stack as it was, which is every stack an ordinary caller deploys.
+     */
+    public void recordDelegatedRoleBoundary(String stackNameOrId, String region, String boundaryArn) {
+        if (boundaryArn == null) {
+            return;
+        }
+        Stack stack = resolveStackForDescribe(stackNameOrId, region);
+        if (stack == null) {
+            return;
+        }
+        stack.setDelegatedRoleBoundaryArn(boundaryArn);
+        persistStack(stack);
+    }
+
     public Future<?> executeChangeSetWithToken(String stackName, String changeSetName, String region,
                                                String clientRequestToken) {
         return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), false,
@@ -2871,7 +2889,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes);
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

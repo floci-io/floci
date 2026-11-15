@@ -726,7 +726,7 @@ public class StsQueryHandler {
         // redeemed the token.
         iamService.registerDelegatedSession(accessKeyId, secretKey, sessionToken, request.getApproverId(),
                 redeemed.credentialExpiry(), request.getPermissionPolicy(),
-                request.getOwnerAccountId());
+                request.getOwnerAccountId(), request.getRolePermissionRestrictionArns());
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, redeemed.credentialExpiry()))

@@ -22,7 +22,18 @@ import java.util.function.Consumer;
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
                                Consumer<StackEvent> progress, JsonNode priorProperties,
-                               PropertyChanges changes) {
+                               PropertyChanges changes, String delegatedRoleBoundaryArn) {
+
+    /**
+     * The context as every provisioner but the IAM role one needs it: no delegation cap, which is
+     * what a stack created by any ordinary caller carries.
+     */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties,
+                            PropertyChanges changes) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, changes, null);
+    }
 
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
                             String accountId, String stackName, String priorPhysicalId,
