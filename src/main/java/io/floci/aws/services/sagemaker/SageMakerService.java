@@ -12,7 +12,6 @@ import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.EndpointConfigResource;
@@ -33,6 +32,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
+
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
 
 @ApplicationScoped
 public class SageMakerService {
@@ -528,23 +530,6 @@ public class SageMakerService {
         }
         putInAccount(trainingJobStore, job.accountId, key, job);
         return true;
-    }
-
-    // #8373: the endpoint and training workers call back outside any request, where an account-aware
-    // store falls back to the default account, so they name the account that owns the resource.
-    private static <V> Optional<V> getInAccount(StorageBackend<String, V> store, String accountId, String key) {
-        if (accountId != null && store instanceof AccountAwareStorageBackend<V> accountAware) {
-            return accountAware.getForAccount(accountId, key);
-        }
-        return store.get(key);
-    }
-
-    private static <V> void putInAccount(StorageBackend<String, V> store, String accountId, String key, V value) {
-        if (accountId != null && store instanceof AccountAwareStorageBackend<V> accountAware) {
-            accountAware.putForAccount(accountId, key, value);
-        } else {
-            store.put(key, value);
-        }
     }
 
     private Map<String, String> resourceTags(String arn) {

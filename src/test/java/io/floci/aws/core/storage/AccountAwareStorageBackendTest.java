@@ -34,6 +34,49 @@ import static org.mockito.Mockito.when;
 class AccountAwareStorageBackendTest {
 
     @Test
+    void getInAccountReadsTheNamedAccountOutsideAnyRequest() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        raw.put("000000000000/resource", "default");
+        raw.put("111111111111/resource", "owned");
+
+        assertEquals(Optional.of("owned"), AccountAwareStorageBackend.getInAccount(storage, "111111111111", "resource"));
+        assertEquals(Optional.empty(), AccountAwareStorageBackend.getInAccount(storage, "222222222222", "resource"));
+    }
+
+    @Test
+    void putInAccountWritesTheNamedAccountOutsideAnyRequest() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        AccountAwareStorageBackend.putInAccount(storage, "111111111111", "resource", "owned");
+
+        assertEquals(Optional.of("owned"), raw.get("111111111111/resource"));
+        assertEquals(Optional.empty(), raw.get("000000000000/resource"));
+    }
+
+    @Test
+    void inAccountHelpersUseTheAmbientAccountWithoutAnAccountId() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> storage = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        AccountAwareStorageBackend.putInAccount(storage, null, "resource", "ambient");
+
+        assertEquals(Optional.of("ambient"), raw.get("000000000000/resource"));
+        assertEquals(Optional.of("ambient"), AccountAwareStorageBackend.getInAccount(storage, null, "resource"));
+    }
+
+    @Test
+    void inAccountHelpersUseAPlainStoreAsIs() {
+        InMemoryStorage<String, String> plain = new InMemoryStorage<>();
+
+        AccountAwareStorageBackend.putInAccount(plain, "111111111111", "resource", "value");
+
+        assertEquals(Set.of("resource"), plain.keys());
+        assertEquals(Optional.of("value"), AccountAwareStorageBackend.getInAccount(plain, "111111111111", "resource"));
+    }
+
+    @Test
     void accountIdReturnsDefaultOutsideRequestScope() {
         AccountAwareStorageBackend<String> storage =
                 new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "111111111111");

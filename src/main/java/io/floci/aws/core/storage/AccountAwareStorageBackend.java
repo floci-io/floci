@@ -72,6 +72,27 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, defaultAccountId);
     }
 
+    /**
+     * Reads {@code key} in {@code accountId}, for a caller outside any request (an async worker)
+     * that knows the account owning the resource. A store that is not account-aware, or a null
+     * {@code accountId}, falls back to {@link StorageBackend#get}.
+     */
+    public static <V> Optional<V> getInAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return store.get(key);
+    }
+
+    /** Writes {@code value} in {@code accountId}; the counterpart of {@link #getInAccount}. */
+    public static <V> void putInAccount(StorageBackend<String, V> store, String accountId, String key, V value) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            aware.putForAccount(accountId, key, value);
+        } else {
+            store.put(key, value);
+        }
+    }
+
     @Override
     public void put(String key, V value) {
         String account = prefix();
