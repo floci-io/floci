@@ -151,6 +151,19 @@ class AuthMiddlewareTest {
         verify(lambdaAuthorizerValidator, never()).authorize(any(), any(), any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"prefix:%s", "%s:suffix"})
+    void wrappedJwtStillReachesLambdaWhenCognitoIsConfigured(String wrapper) {
+        GraphqlApi api = cognitoAndLambdaApi();
+        String token = wrapper.formatted(JwtClaimsDecoder.encode(new HashMap<>(Map.of("sub", "s")), new ObjectMapper()));
+        when(lambdaAuthorizerValidator.authorize(eq("api-1"), eq(token), any(), any()))
+                .thenReturn(new LambdaAuthorizerResult(true, List.of(), Map.of(), null, 10));
+
+        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", token), api, info);
+
+        assertEquals(AppSyncAuth.AUTH_TYPE_LAMBDA, ctx.authType());
+    }
+
     @Test
     void opaqueTokenInvokesLambda() {
         GraphqlApi api = api(AuthenticationType.AWS_LAMBDA);

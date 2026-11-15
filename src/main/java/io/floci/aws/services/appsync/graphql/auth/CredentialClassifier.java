@@ -47,11 +47,30 @@ public final class CredentialClassifier {
         if (authorization.length() < 7 || !authorization.regionMatches(true, 0, "Bearer ", 0, 7)) {
             return false;
         }
-        return isBareJwt(authorization.substring(7));
+        return hasJwtShape(authorization.substring(7));
     }
 
-    /** True when the value has the three dot-separated segments of a JWT, with no scheme prefix. */
+    /**
+     * True when the value is three dot-separated base64url segments, so a Lambda token wrapped with
+     * a prefix or suffix (for example {@code prefix:<jwt>}) is not taken for a JWT.
+     */
     static boolean isBareJwt(String value) {
+        if (!hasJwtShape(value)) {
+            return false;
+        }
+        String token = value.trim();
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            boolean base64Url = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '-' || c == '_';
+            if (c != '.' && !base64Url) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean hasJwtShape(String value) {
         if (value == null) {
             return false;
         }
