@@ -114,11 +114,21 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         // reconciled in place; a replacing update derives a different name and creates, and a name
         // that already belongs to another repository fails the create as on CloudFormation.
         boolean reusing = ctx.reusesPriorEntity(repoName);
+        // EncryptionConfiguration is create-only, so it is read only when the repository is created.
+        JsonNode encryption = props != null ? props.get("EncryptionConfiguration") : null;
         Repository repo = reusing
                 ? reconcileExisting(repoName, mutability, tags, region)
-                : ecrService.createRepository(repoName, null, mutability, null, null, null, tags, region);
+                : ecrService.createRepository(repoName, null, mutability, null,
+                        ctx.resolveOptional(encryption, "EncryptionType"), ctx.resolveOptional(encryption, "KmsKey"),
+                        tags, region);
+        if (!reusing) {
+            r.setPhysicalId(repoName);
+        }
 
-        try {
+        // A repository this provision created and could not finish setting up is removed, or left
+        // to the create rollback or the next cleanup when that fails too.
+        CfnRollback.guarded(r, ctx, !reusing, () -> ecrService.deleteRepository(repoName, null, true, region),
+                () -> { }, () -> {
             // Both policies are updatable: a template that declares one sets it, and on the update
             // path a template that no longer declares one deletes it, tolerating "none set".
             if (lifecyclePolicy != null) {
@@ -136,18 +146,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
                         () -> ecrService.deleteRepositoryPolicy(repoName, null, region),
                         "RepositoryPolicyNotFoundException");
             }
-        } catch (RuntimeException failure) {
-            // A repository this provision created and could not finish setting up is not left behind.
-            if (!reusing) {
-                try {
-                    ecrService.deleteRepository(repoName, null, true, region);
-                } catch (RuntimeException cleanupFailure) {
-                    ReplacementCleanup.recordOrphan(r, repoName, REPOSITORY, region);
-                    failure.addSuppressed(cleanupFailure);
-                }
-            }
-            throw failure;
-        }
+        });
 
         r.setPhysicalId(repoName);
         r.getAttributes().put("Arn", repo.getRepositoryArn());
