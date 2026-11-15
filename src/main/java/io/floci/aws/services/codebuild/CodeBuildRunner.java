@@ -16,10 +16,10 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
-import io.floci.aws.core.common.docker.ContainerReconciler;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.core.common.docker.RunLabelledContainers;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedArtifacts;
 import io.floci.aws.services.codebuild.BuildspecParser.ParsedBuildspec;
 import io.floci.aws.services.codebuild.model.Build;
@@ -57,7 +57,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -89,10 +88,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
     private final ContainerReachableEndpoint containerEndpoint;
     /** The VPC address each running build's container holds, given back once the container is gone. */
     private final VpcContainerLeases vpcLeases;
-    private final ContainerReconciler containerReconciler;
-    /** This process's run, labelled on its build containers, so a later run knows them for leftovers. */
-    private final String runId = UUID.randomUUID().toString();
-    private final AtomicBoolean leftoversRemoved = new AtomicBoolean();
+    /** This run's build containers, so a later run knows the ones a crash leaves for leftovers. */
+    private final RunLabelledContainers runContainers;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -122,7 +119,7 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
         this.regionResolver = regionResolver;
         this.containerEndpoint = containerEndpoint;
         this.vpcLeases = new VpcContainerLeases(ec2Service, "CodeBuild build", () -> dockerClient);
-        this.containerReconciler = new ContainerReconciler(lifecycleManager, LOG);
+        this.runContainers = new RunLabelledContainers(lifecycleManager, config, "codebuild", RUN_LABEL, LOG);
     }
 
     /**
@@ -254,7 +251,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
                     .withLabels(buildLabels(buildId, region))
                     .build();
 
-            removeLeftoverContainers();
+            // Build state does not outlive the process, so a crash's build containers have nothing left to finish.
+            runContainers.removeLeftovers();
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
             containerId = info.containerId();
             runningContainers.put(executionId, containerId);
@@ -446,24 +444,8 @@ public class CodeBuildRunner implements ContainerTeardown, VpcDependencyProvider
     private Map<String, String> buildLabels(String buildId, String region) {
         Map<String, String> labels = new LinkedHashMap<>(ContainerStorageHelper.resourceIdentityLabels(
                 "codebuild", buildId, regionResolver.getAccountId(), region));
-        labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
-        labels.put(RUN_LABEL, runId);
+        labels.putAll(runContainers.labels());
         return labels;
-    }
-
-    /**
-     * Removes the build containers an earlier run of this Floci left, which a crash keeps running with no build to
-     * finish, and their VPC addresses with them; build state does not outlive the process. Done before builds start
-     * until one pass removes them all.
-     */
-    private void removeLeftoverContainers() {
-        if (!leftoversRemoved.get() && containerReconciler.reconcile(
-                Map.of(ContainerStorageHelper.SERVICE_LABEL, "codebuild",
-                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)),
-                container -> !runId.equals(ContainerStorageHelper.CONTAINER_LABEL_ALIASES
-                        .labelValue(container.getLabels(), RUN_LABEL)))) {
-            leftoversRemoved.set(true);
-        }
     }
 
     /**
