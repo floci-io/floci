@@ -13,12 +13,11 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -201,31 +200,9 @@ class CloudFormationUnsupportedResourceTypeTest {
     /** Runs {@code action} with a handler on the provisioner's logger, collecting every record. */
     private <T> T whileCapturingProvisionerLogs(List<LogRecord> collected,
                                                 Supplier<T> action) {
-        Logger logger =
-                Logger.getLogger(CfnResourceDispatcher.class.getName());
-        Level original = logger.getLevel();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                collected.add(logRecord);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        logger.setLevel(Level.ALL);
-        try {
-            return action.get();
-        } finally {
-            logger.setLevel(original);
-            logger.removeHandler(handler);
-        }
+        AtomicReference<T> result = new AtomicReference<>();
+        collected.addAll(LogCapture.capture(CfnResourceDispatcher.class, () -> result.set(action.get())));
+        return result.get();
     }
 
     private static List<String> rendered(List<LogRecord> records) {

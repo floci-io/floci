@@ -31,10 +31,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -222,15 +220,8 @@ class StepFunctionsServicePersistenceTest {
         executions.putForAccount(OTHER_ACCOUNT, OTHER_ACCOUNT_EXECUTION_ARN,
                 running(OTHER_ACCOUNT_EXECUTION_ARN));
 
-        List<LogRecord> logRecords = new ArrayList<>();
-        Handler collector = collectorInto(logRecords);
-        Logger serviceLogger = Logger.getLogger(StepFunctionsService.class.getName());
-        serviceLogger.addHandler(collector);
-        try {
-            serviceWithStorage(storage).abortAbandonedExecutions();
-        } finally {
-            serviceLogger.removeHandler(collector);
-        }
+        List<LogRecord> logRecords = LogCapture.capture(StepFunctionsService.class,
+                () -> serviceWithStorage(storage).abortAbandonedExecutions());
 
         List<LogRecord> warnings = warningsIn(logRecords);
         assertEquals(1, warnings.size(),
@@ -271,15 +262,8 @@ class StepFunctionsServicePersistenceTest {
 
         // Nothing is RUNNING any more, so the second sweep retires nothing and says nothing: a WARN
         // on every clean boot is the noise the repo's logging rule forbids.
-        List<LogRecord> logRecords = new ArrayList<>();
-        Handler collector = collectorInto(logRecords);
-        Logger serviceLogger = Logger.getLogger(StepFunctionsService.class.getName());
-        serviceLogger.addHandler(collector);
-        try {
-            afterRestart.abortAbandonedExecutions();
-        } finally {
-            serviceLogger.removeHandler(collector);
-        }
+        List<LogRecord> logRecords = LogCapture.capture(StepFunctionsService.class,
+                afterRestart::abortAbandonedExecutions);
         assertEquals(List.of(), warningsIn(logRecords),
                 "expected no WARN record from a sweep that found nothing RUNNING, got: "
                         + formattedAll(logRecords));
@@ -296,25 +280,6 @@ class StepFunctionsServicePersistenceTest {
         assertEquals(1, afterRestart.getExecutionHistory(EXECUTION_ARN).size());
 
         verifyNoInteractions(aslExecutor, mockLoader, regionResolver);
-    }
-
-    private static Handler collectorInto(List<LogRecord> records) {
-        Handler collector = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                records.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        collector.setLevel(Level.ALL);
-        return collector;
     }
 
     private static List<LogRecord> warningsIn(List<LogRecord> records) {
