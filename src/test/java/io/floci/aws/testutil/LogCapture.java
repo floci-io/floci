@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -26,7 +27,8 @@ public final class LogCapture {
     }
 
     public static List<LogRecord> capture(Class<?> source, Runnable action) {
-        List<LogRecord> records = new ArrayList<>();
+        // A record logged from another thread while the action runs is collected too.
+        List<LogRecord> records = new CopyOnWriteArrayList<>();
         withHandler(source, records::add, () -> {
             action.run();
             return null;

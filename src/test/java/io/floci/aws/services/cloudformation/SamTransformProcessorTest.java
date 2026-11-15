@@ -10,11 +10,9 @@ import org.junit.jupiter.api.Test;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -3247,32 +3245,8 @@ class SamTransformProcessorTest {
             }
             """);
 
-        List<LogRecord> logged = new CopyOnWriteArrayList<>();
-        Logger logger =
-                Logger.getLogger(SamTransformProcessor.class.getName());
-        Level original = logger.getLevel();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                logged.add(logRecord);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        logger.setLevel(Level.ALL);
-        try {
-            processor.expandSamTemplate(template);
-        } finally {
-            logger.setLevel(original);
-            logger.removeHandler(handler);
-        }
+        List<LogRecord> logged = LogCapture.capture(SamTransformProcessor.class,
+                () -> processor.expandSamTemplate(template));
 
         String expected = "Unsupported SAM resource type AWS::Serverless::Application (MyApp): "
                 + "left in the template for the CloudFormation provisioner.";

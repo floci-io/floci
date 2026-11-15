@@ -66,10 +66,6 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.logging.Handler;
-import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -786,29 +782,7 @@ class EmulatorLifecycleTest {
 
     /** Collects the messages EmulatorLifecycle logs while {@code action} runs. */
     private List<String> lifecycleLogMessages(Runnable action) {
-        Logger logger = Logger.getLogger(EmulatorLifecycle.class.getName());
-        List<String> messages = new CopyOnWriteArrayList<>();
-        Handler handler = new Handler() {
-            @Override
-            public void publish(LogRecord logRecord) {
-                messages.add(LogCapture.formatted(logRecord));
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        logger.addHandler(handler);
-        try {
-            action.run();
-        } finally {
-            logger.removeHandler(handler);
-        }
-        return messages;
+        return LogCapture.capture(EmulatorLifecycle.class, action).stream().map(LogCapture::formatted).toList();
     }
 
     @Test
