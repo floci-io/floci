@@ -14,14 +14,13 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import java.time.Instant;
 import java.util.Map;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
 @TestProfile(KinesisStatusWindowIntegrationTest.WindowProfile.class)
 class KinesisStatusWindowIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String KINESIS_TARGET = "Kinesis_20131202";
     private static final String STREAM_NAME = "kinesis-status-window-test";
 
     @Inject
@@ -37,51 +36,30 @@ class KinesisStatusWindowIntegrationTest {
 
     @Test
     void createStreamReportsCreatingUntilItsConfiguredDeadline() {
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + STREAM_NAME + "\",\"ShardCount\":1}")
-        .when()
-            .post("/")
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "CreateStream",
+                "{\"StreamName\":\"" + STREAM_NAME + "\",\"ShardCount\":1}")
         .then()
             .statusCode(200);
-        cleanup.register(() -> given()
-            .header("X-Amz-Target", "Kinesis_20131202.DeleteStream")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + STREAM_NAME + "\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200));
+        cleanup.register(() -> RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "DeleteStream",
+                "{\"StreamName\":\"" + STREAM_NAME + "\"}")
+                .then().statusCode(200));
 
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + STREAM_NAME + "\"}")
-        .when()
-            .post("/")
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "DescribeStream",
+                "{\"StreamName\":\"" + STREAM_NAME + "\"}")
         .then()
             .statusCode(200)
             .body("StreamDescription.StreamStatus", equalTo("CREATING"));
 
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + STREAM_NAME + "\"}")
-        .when()
-            .post("/")
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "DescribeStreamSummary",
+                "{\"StreamName\":\"" + STREAM_NAME + "\"}")
         .then()
             .statusCode(200)
             .body("StreamDescriptionSummary.StreamStatus", equalTo("CREATING"));
 
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.SplitShard")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + STREAM_NAME
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "SplitShard",
+                "{\"StreamName\":\"" + STREAM_NAME
                     + "\",\"ShardToSplit\":\"shardId-000000000000\","
                     + "\"NewStartingHashKey\":\"170141183460469231731687303715884105728\"}")
-        .when()
-            .post("/")
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceInUseException"));
@@ -90,52 +68,31 @@ class KinesisStatusWindowIntegrationTest {
     @Test
     void updateStreamModeReportsUpdatingThenActiveOnTheWire() {
         String name = STREAM_NAME + "-update";
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + name + "\",\"ShardCount\":1}")
-        .when()
-            .post("/")
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "CreateStream",
+                "{\"StreamName\":\"" + name + "\",\"ShardCount\":1}")
         .then()
             .statusCode(200);
-        cleanup.register(() -> given()
-            .header("X-Amz-Target", "Kinesis_20131202.DeleteStream")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + name + "\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200));
+        cleanup.register(() -> RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "DeleteStream",
+                "{\"StreamName\":\"" + name + "\"}")
+                .then().statusCode(200));
 
         KinesisStream stream = service.describeStream(name, "us-east-1");
         stream.setStatusTransitionDeadline(Instant.EPOCH);
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.UpdateStreamMode")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamARN\":\"" + stream.getStreamArn()
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "UpdateStreamMode",
+                "{\"StreamARN\":\"" + stream.getStreamArn()
                     + "\",\"StreamModeDetails\":{\"StreamMode\":\"ON_DEMAND\"}}")
-        .when()
-            .post("/")
         .then()
             .statusCode(200);
 
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + name + "\"}")
-        .when()
-            .post("/")
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "DescribeStreamSummary",
+                "{\"StreamName\":\"" + name + "\"}")
         .then()
             .statusCode(200)
             .body("StreamDescriptionSummary.StreamStatus", equalTo("UPDATING"));
 
         stream.setStatusTransitionDeadline(Instant.EPOCH);
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
-            .contentType(CONTENT_TYPE)
-            .body("{\"StreamName\":\"" + name + "\"}")
-        .when()
-            .post("/")
+        RestAssuredJsonUtils.awsAction(KINESIS_TARGET, "DescribeStream",
+                "{\"StreamName\":\"" + name + "\"}")
         .then()
             .statusCode(200)
             .body("StreamDescription.StreamStatus", equalTo("ACTIVE"));

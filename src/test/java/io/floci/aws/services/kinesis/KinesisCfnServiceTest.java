@@ -1,16 +1,15 @@
 package io.floci.aws.services.kinesis;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cloudformation.provisioners.KinesisCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.ProvisionContext;
+import io.floci.aws.services.cloudformation.provisioners.ProvisionContexts;
 import io.floci.aws.services.kinesis.model.KinesisStream;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.Test;
@@ -24,9 +23,6 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class KinesisCfnServiceTest {
 
@@ -139,18 +135,13 @@ class KinesisCfnServiceTest {
     }
 
     private static void provision(KinesisService service, String json, String priorPhysicalId) throws Exception {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(invocation -> {
-            JsonNode node = invocation.getArgument(0);
-            return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
-        });
-        when(engine.resolveNode(any())).thenAnswer(invocation -> invocation.getArgument(0));
         StackResource resource = new StackResource();
         resource.setLogicalId("Stream");
         resource.setResourceType("AWS::Kinesis::Stream");
         resource.setPhysicalId(priorPhysicalId);
         resource.setAttributes(new HashMap<>());
         new KinesisCfnProvisioner(service).provision(resource, MAPPER.readTree(json),
-                new ProvisionContext(engine, REGION, "000000000000", "my-stack", priorPhysicalId));
+                new ProvisionContext(ProvisionContexts.passthroughEngine(), REGION, "000000000000",
+                        "my-stack", priorPhysicalId));
     }
 }

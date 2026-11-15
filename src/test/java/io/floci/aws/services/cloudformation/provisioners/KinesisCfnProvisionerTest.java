@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -19,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -77,14 +79,14 @@ class KinesisCfnProvisionerTest {
 
     @Test
     void createUsesTheExplicitNameAndExposesTheArn() {
-        when(kinesis.createStream(eq("s"), anyInt(), any(), eq(REGION)))
+        when(kinesis.createStream(eq("s"), anyInt(), any(), any(), anyMap(), any(), eq(REGION)))
                 .thenReturn(stream("arn:aws:kinesis:us-east-1:000000000000:stream/s", 24));
 
         StackResource r = provision("""
                 {"Name": "s", "ShardCount": "3"}
                 """, null);
 
-        verify(kinesis).createStream("s", 3, null, REGION);
+        verify(kinesis).createStream("s", 3, null, null, Map.of(), null, REGION);
         assertEquals("s", r.getPhysicalId(), "Ref is the stream name");
         // aws-kinesis-stream.json readOnlyProperties
         assertEquals(Map.of("Arn", "arn:aws:kinesis:us-east-1:000000000000:stream/s"), r.getAttributes());
@@ -92,28 +94,30 @@ class KinesisCfnProvisionerTest {
 
     @Test
     void shardCountDefaultsToOneWhenAbsentOrUnparseable() {
-        when(kinesis.createStream(anyString(), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
 
         provision("""
                 {"Name": "a"}
                 """, null);
-        verify(kinesis).createStream("a", 1, null, REGION);
+        verify(kinesis).createStream("a", 1, null, null, Map.of(), null, REGION);
 
         provision("""
                 {"Name": "b", "ShardCount": "many"}
                 """, null);
-        verify(kinesis).createStream("b", 1, null, REGION);
+        verify(kinesis).createStream("b", 1, null, null, Map.of(), null, REGION);
     }
 
     @Test
     void streamModeDetailsAreForwarded() {
-        when(kinesis.createStream(anyString(), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
 
         provision("""
                 {"Name": "s", "StreamModeDetails": {"StreamMode": "ON_DEMAND"}}
                 """, null);
 
-        verify(kinesis).createStream("s", 1, "ON_DEMAND", REGION);
+        verify(kinesis).createStream("s", 1, "ON_DEMAND", null, Map.of(), null, REGION);
     }
 
     /**
@@ -128,7 +132,7 @@ class KinesisCfnProvisionerTest {
                 {"Name": "s"}
                 """, "s");
 
-        verify(kinesis, never()).createStream(anyString(), anyInt(), any(), anyString());
+        verify(kinesis, never()).createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString());
         verify(kinesis, never()).updateStreamMode("s", "PROVISIONED", REGION);
     }
 
@@ -166,23 +170,49 @@ class KinesisCfnProvisionerTest {
         verify(kinesis).addTagsToStream("s", Map.of("kept", "2"), REGION);
     }
 
+    @Test
+    void reconcileAllowsReplacingOneTagAtTheFiftyTagLimit() throws Exception {
+        when(kinesis.describeStream("s", REGION)).thenReturn(stream("arn", 24));
+        Map<String, String> existingTags = new LinkedHashMap<>();
+        Map<String, String> desiredTags = new LinkedHashMap<>();
+        for (int i = 0; i < 50; i++) {
+            existingTags.put("tag-" + i, "old");
+            if (i < 49) {
+                desiredTags.put("tag-" + i, "old");
+            }
+        }
+        desiredTags.put("tag-new", "new");
+        when(kinesis.listTagsForStream("s", REGION)).thenReturn(existingTags);
+        List<Map<String, String>> desiredTagEntries = desiredTags.entrySet().stream()
+                .map(entry -> Map.of("Key", entry.getKey(), "Value", entry.getValue()))
+                .toList();
+        String body = MAPPER.writeValueAsString(Map.of("Name", "s", "Tags", desiredTagEntries));
+
+        provision(body, "s");
+
+        verify(kinesis).removeTagsFromStream("s", List.of("tag-49"), REGION);
+        verify(kinesis).addTagsToStream("s", desiredTags, REGION);
+    }
+
     /** A stream deleted out of band since the last update falls back to a fresh create. */
     @Test
     void aMissingStreamFallsBackToCreate() {
         when(kinesis.describeStream("s", REGION))
                 .thenThrow(new AwsException("ResourceNotFoundException", "gone", 400));
-        when(kinesis.createStream(anyString(), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
 
         provision("""
                 {"Name": "s"}
                 """, "s");
 
-        verify(kinesis).createStream("s", 1, null, REGION);
+        verify(kinesis).createStream("s", 1, null, null, Map.of(), null, REGION);
     }
 
     @Test
     void aRenameCreatesTheNewStreamAndBestEffortDeletesTheOld() {
-        when(kinesis.createStream(eq("new"), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
+        when(kinesis.createStream(eq("new"), anyInt(), any(), any(), anyMap(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
 
         StackResource r = provision("""
                 {"Name": "new"}
@@ -195,7 +225,8 @@ class KinesisCfnProvisionerTest {
     /** A failure deleting the renamed-away stream must not fail the resource. */
     @Test
     void aFailedCleanupOfTheRenamedStreamIsSwallowed() {
-        when(kinesis.createStream(eq("new"), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
+        when(kinesis.createStream(eq("new"), anyInt(), any(), any(), anyMap(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
         Mockito.doThrow(new RuntimeException("boom"))
                 .when(kinesis).deleteStream("old", REGION);
 
@@ -208,7 +239,8 @@ class KinesisCfnProvisionerTest {
 
     @Test
     void anUnnamedStreamGetsAGeneratedNameKeptAcrossUpdates() {
-        when(kinesis.createStream(anyString(), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
 
         StackResource created = provision("{}", null);
         assertTrue(created.getPhysicalId().startsWith("my-stack-Stream-"), created.getPhysicalId());

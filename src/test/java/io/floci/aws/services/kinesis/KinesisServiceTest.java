@@ -1584,46 +1584,46 @@ class KinesisServiceTest {
         }
     }
 
-    private static final class ParkOnCloseShard extends KinesisShard {
+    private abstract static class ParkedShard extends KinesisShard {
         final CountDownLatch parked = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
 
-        ParkOnCloseShard(KinesisShard shard) {
+        ParkedShard(KinesisShard shard) {
             super(shard.getShardId(), shard.getHashKeyRange().startingHashKey(),
                     shard.getHashKeyRange().endingHashKey(),
                     shard.getSequenceNumberRange().startingSequenceNumber());
+        }
+
+        final void parkAndWait() {
+            parked.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static final class ParkOnCloseShard extends ParkedShard {
+        ParkOnCloseShard(KinesisShard shard) {
+            super(shard);
         }
 
         @Override
         public void setClosed(boolean closed) {
-            parked.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            parkAndWait();
             super.setClosed(closed);
         }
     }
 
-    private static final class ParkOnRangeNormalizationShard extends KinesisShard {
-        final CountDownLatch parked = new CountDownLatch(1);
-        final CountDownLatch release = new CountDownLatch(1);
-
+    private static final class ParkOnRangeNormalizationShard extends ParkedShard {
         ParkOnRangeNormalizationShard(KinesisShard shard) {
-            super(shard.getShardId(), shard.getHashKeyRange().startingHashKey(),
-                    shard.getHashKeyRange().endingHashKey(),
-                    shard.getSequenceNumberRange().startingSequenceNumber());
+            super(shard);
         }
 
         @Override
         public void setHashKeyRange(HashKeyRange range) {
-            parked.countDown();
-            try {
-                release.await();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            parkAndWait();
             super.setHashKeyRange(range);
         }
     }

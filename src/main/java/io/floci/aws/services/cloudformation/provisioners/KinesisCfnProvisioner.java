@@ -94,9 +94,13 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
         if (stream != null) {
             String desiredMode = streamMode != null ? streamMode : DEFAULT_STREAM_MODE;
             KinesisService.validateStreamMode(desiredMode);
-            if (tags.size() > 50) {
-                throw new AwsException("LimitExceededException", "A Kinesis resource can have at most 50 tags", 400);
-            }
+            Map<String, String> existingTags = kinesisService.listTagsForStream(name, ctx.region());
+            List<String> tagsToRemove = existingTags.keySet().stream()
+                    .filter(key -> !tags.containsKey(key))
+                    .toList();
+            Map<String, String> remainingTags = new LinkedHashMap<>(existingTags);
+            tagsToRemove.forEach(remainingTags::remove);
+            KinesisService.validateTagCapacity(remainingTags, tags);
             if (retention != null) {
                 if (retention > stream.getRetentionPeriodHours()) {
                     kinesisService.increaseStreamRetentionPeriod(name, retention, ctx.region());
@@ -104,10 +108,6 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
                     kinesisService.decreaseStreamRetentionPeriod(name, retention, ctx.region());
                 }
             }
-            Map<String, String> existingTags = kinesisService.listTagsForStream(name, ctx.region());
-            List<String> tagsToRemove = existingTags.keySet().stream()
-                    .filter(key -> !tags.containsKey(key))
-                    .toList();
             if (!tagsToRemove.isEmpty()) {
                 kinesisService.removeTagsFromStream(name, tagsToRemove, ctx.region());
             }
@@ -119,13 +119,7 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
             }
             stream = kinesisService.describeStream(name, ctx.region());
         } else {
-            if (retention != null) {
-                stream = kinesisService.createStream(name, shardCount, streamMode, null, tags, retention, ctx.region());
-            } else if (tags.isEmpty()) {
-                stream = kinesisService.createStream(name, shardCount, streamMode, ctx.region());
-            } else {
-                stream = kinesisService.createStream(name, shardCount, streamMode, null, tags, ctx.region());
-            }
+            stream = kinesisService.createStream(name, shardCount, streamMode, null, tags, retention, ctx.region());
             deleteRenamedResource(priorPhysicalId, name,
                     id -> kinesisService.deleteStream(id, ctx.region()), "Kinesis stream");
         }

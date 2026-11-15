@@ -475,7 +475,7 @@ public class KinesisService implements ResourceProvider {
         validateTagCapacity(current, added);
     }
 
-    private static void validateTagCapacity(Map<String, String> current, Map<String, String> added) {
+    public static void validateTagCapacity(Map<String, String> current, Map<String, String> added) {
         Set<String> keys = new HashSet<>(current.keySet());
         keys.addAll(added.keySet());
         if (keys.size() > 50 && added.keySet().stream().anyMatch(key -> !current.containsKey(key))) {
