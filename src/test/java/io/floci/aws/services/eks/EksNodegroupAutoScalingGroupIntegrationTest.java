@@ -33,8 +33,6 @@ class EksNodegroupAutoScalingGroupIntegrationTest {
     private static final String SUBNET = "subnet-0123456789abcdef0";
     private static final String GROUP =
             "DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult.AutoScalingGroups.member";
-    private static final String TARGETS =
-            "DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member";
 
     @Inject
     EksService eksService;
@@ -90,12 +88,12 @@ class EksNodegroupAutoScalingGroupIntegrationTest {
                     "AutoScalingGroupName", groupName, "TargetGroupARNs.member.1", targetGroupArn)
                     .post("/").then().statusCode(200);
 
-            assertEquals(List.of(nodeId), targetIds(targetGroupArn));
+            assertEquals(List.of(nodeId), AlbFixtures.targetIds(account, targetGroupArn));
 
             eks(account, REGION).delete("/clusters/" + clusterName + "/node-groups/workers").then().statusCode(200);
 
             assertEquals(List.of(), describeGroup(groupName).getList(GROUP + ".AutoScalingGroupName", String.class));
-            assertEquals(List.of(), targetIds(targetGroupArn));
+            assertEquals(List.of(), AlbFixtures.targetIds(account, targetGroupArn));
         } finally {
             eks(account, REGION).delete("/clusters/" + clusterName + "/node-groups/workers");
             eks(account, REGION).delete("/clusters/" + clusterName);
@@ -125,11 +123,5 @@ class EksNodegroupAutoScalingGroupIntegrationTest {
             tags.put(keys.get(i), values.get(i));
         }
         return tags;
-    }
-
-    private List<String> targetIds(String targetGroupArn) {
-        return query("elasticloadbalancing", "DescribeTargetHealth", "TargetGroupArn", targetGroupArn)
-                .post("/").then().statusCode(200).extract().xmlPath()
-                .getList(TARGETS + ".Target.Id", String.class);
     }
 }
