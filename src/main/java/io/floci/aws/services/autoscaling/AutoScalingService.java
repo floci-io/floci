@@ -1494,9 +1494,10 @@ public class AutoScalingService implements PassedRoleLookup {
     // AttachTrafficSources/DetachTrafficSources/DescribeTrafficSources is the modern,
     // unified ASG-to-load-balancer wiring API (elb, elbv2, vpc-lattice), which
     // aws_autoscaling_traffic_source_attachment uses instead of the older
-    // AttachLoadBalancerTargetGroups. "accept and remember" like the target-group
-    // attachment above - Floci has no real health-checking loop, so every attached
-    // traffic source is reported InService immediately.
+    // AttachLoadBalancerTargetGroups. Like the target-group attachment above, each source is
+    // stored with its type, and only an EKS group's node is registered with an elbv2 source as
+    // it is attached and deregistered as it is detached. Floci has no real health-checking loop,
+    // so every attached traffic source is reported InService immediately.
 
     public record TrafficSourceIdentifier(String identifier, String type) {}
 
