@@ -115,16 +115,25 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
                     bootstrap.clusterId() + "-bootstrap");
             String image = EmrServerlessSparkRunner.image(bootstrap.imageTemplate(), bootstrap.releaseLabel());
             Map<String, String> labels = labels(bootstrap);
-            ContainerSpec spec = containerBuilder.newContainer(image)
+            ContainerBuilder.Builder container = containerBuilder.newContainer(image)
                     .withName(ContainerStorageHelper.dockerName(config,
                             SERVICE + "-" + bootstrap.clusterId() + "-bootstrap"))
                     .withUser("root")
                     .withEntrypoint(List.of("sleep", "infinity"))
-                    .withDockerNetwork(Optional.ofNullable(bootstrap.dockerNetwork()))
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
-                    .withLabels(labels)
-                    .build();
+                    .withLabels(labels);
+            if (bootstrap.metadataNetwork() != null) {
+                // On its cluster's network, where the relay answers its address as the primary node's metadata, and on
+                // its steps' too, where it reaches Floci.
+                container.withDockerNetwork(Optional.of(bootstrap.metadataNetwork()))
+                        .withLinkLocalIp(bootstrap.metadataAddress())
+                        .withJoinedNetwork(containerBuilder.resolveDockerNetwork(
+                                Optional.ofNullable(bootstrap.dockerNetwork())).orElse(null));
+            } else {
+                container.withDockerNetwork(Optional.ofNullable(bootstrap.dockerNetwork()));
+            }
+            ContainerSpec spec = container.build();
             String containerId = lifecycleManager.createAndStart(spec).containerId();
             launch.started(containerId);
             // In before the first action, for the actions' JVMs to find it. Not through the spec: the container is

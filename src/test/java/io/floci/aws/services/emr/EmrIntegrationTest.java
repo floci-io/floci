@@ -549,4 +549,25 @@ class EmrIntegrationTest {
         cluster.setKeepJobFlowAliveWhenNoSteps(true);
         return emrService.runJobFlow(cluster, "us-east-1");
     }
+    @Test
+    @Order(20)
+    void aClustersAvailabilityZoneIsTheOneItsPlacementNamesElseItsRegionsFirst() {
+        String placed = emr("RunJobFlow", "{\"Name\":\"placed\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"Placement\":{\"AvailabilityZone\":\"us-east-1c\"}}}").then().statusCode(200).extract()
+                .path("JobFlowId");
+        String unplaced = emr("RunJobFlow",
+                "{\"Name\":\"unplaced\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        try {
+            emr("DescribeCluster", "{\"ClusterId\":\"" + placed + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.Ec2InstanceAttributes.Ec2AvailabilityZone", equalTo("us-east-1c"));
+            emr("DescribeCluster", "{\"ClusterId\":\"" + unplaced + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.Ec2InstanceAttributes.Ec2AvailabilityZone", equalTo("us-east-1a"));
+        } finally {
+            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + placed + "\",\"" + unplaced + "\"]}")
+                    .then().statusCode(200);
+        }
+    }
 }

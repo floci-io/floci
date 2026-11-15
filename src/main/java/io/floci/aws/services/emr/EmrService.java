@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.ContainerTeardown;
@@ -19,6 +21,9 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceState;
+import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrErrorDetail;
@@ -1570,6 +1575,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             if ((hive != null || application != null || command != null) && clusterStorage != null) {
                 storage = clusterStorage.volumes(cluster.getId());
                 cluster.setStorageCreated(true);
+                String known = cluster.getId();
+                clusterStorage.identify(known, node -> nodeIdentity(known, accountId, region, node));
             }
             // The image a cluster's bootstrap left, which holds what its release's does; else a cluster with Hive's or
             // YARN's, which the step's thread makes, or the release's.
@@ -1620,7 +1627,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     teardowns.get());
             executing.add(stepKey(accountId, step.getId()));
             String containerLogs = yarn ? EmrSparkSteps.containerLogFolder(cluster) : null;
-            stepExecutor.execute(() -> runStep(job, launch, releaseImage, hdfs, containerLogs));
+            Instance primary = nodeInstance(cluster, accountId, 0, 1);
+            stepExecutor.execute(() -> runStep(job, launch, releaseImage, hdfs, containerLogs, primary));
         }
 
         @Override
@@ -1633,7 +1641,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     // cluster with Hive's or YARN's image is made first, when it is not there yet, so a failure to make it fails the
     // step.
     private void runStep(SparkJobRunner.Job job, StepLaunch launch, Supplier<String> releaseImage,
-                         BiFunction<String, BooleanSupplier, SparkJobRunner.Storage> hdfs, String containerLogs) {
+                         BiFunction<String, BooleanSupplier, SparkJobRunner.Storage> hdfs, String containerLogs,
+                         Instance primary) {
         String failure;
         if (job == null) {
             failure = EmrSparkSteps.NOT_RUN;
@@ -1641,14 +1650,20 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             SparkJobRunner.Outcome outcome;
             StepProgress progress = new StepProgress(launch);
             String image = null;
+            String address = null;
             try {
                 image = releaseImage != null && !progress.cancelled() ? releaseImage.get() : null;
                 SparkJobRunner.Job running = image != null ? job.inImage(image) : job;
                 // The cluster's storage is there, its HDFS running, before its first step's container mounts it. A step
-                // a cancel, its cluster's end or a reset has passed does not start, so it makes none.
+                // a cancel, its cluster's end or a reset has passed does not start, so it makes none. Its container
+                // reads the primary node's instance metadata, as a step on EMR's primary node does.
                 if (job.storage() != null && !progress.cancelled()) {
                     clusterStorage.create(launch.clusterId(), launch.accountId(), launch.region());
-                    running = running.onStorage(hdfs.apply(running.imageTemplate(), progress::cancelled));
+                    MetadataPlace place = metadataPlace(launch.clusterId(), launch.accountId(), launch.region(),
+                            running.imageTemplate(), running.releaseLabel(), primary);
+                    address = place != null ? place.address() : null;
+                    SparkJobRunner.Storage storage = hdfs.apply(running.imageTemplate(), progress::cancelled);
+                    running = running.onStorage(address != null ? storage.withMetadataAddress(address) : storage);
                 }
                 outcome = sparkRunner.run(running, progress);
             } catch (ClusterStorage.Stopped e) {
@@ -1665,9 +1680,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
                 }
             } finally {
-                // Its containers have come and gone, or never came, so a newer image of its kind may remove this one.
+                // Its containers have come and gone, or never came, so a newer image of its kind may remove this one,
+                // and its address on the cluster's network may go to another.
                 if (image != null) {
                     releaseImages.released(image);
+                }
+                if (address != null) {
+                    clusterStorage.releaseMetadataAddress(address);
                 }
             }
             // A reset since the step started has swept the storage and wiped its cluster, so nothing would remove
@@ -1730,7 +1749,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     teardowns.get());
             Supplier<String> releaseImage = releaseImage(cluster);
             bootstrapping.add(clusterKey(accountId, cluster.getId()));
-            stepExecutor.execute(() -> runBootstrap(bootstrap, launch, releaseImage));
+            Instance primary = nodeInstance(cluster, accountId, 0, 1);
+            stepExecutor.execute(() -> runBootstrap(bootstrap, launch, releaseImage, primary));
         }
 
         @Override
@@ -1911,19 +1931,57 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return actions;
     }
 
+    /**
+     * A link-local address on the cluster's network, where its instance metadata relay, started first in the image the
+     * container runs, answers a container given it as {@code instance}; null where the cluster's containers have no
+     * such network. A relay that cannot start is thrown, so what would read it fails, as no EC2 instance runs without
+     * its metadata.
+     */
+    private MetadataPlace metadataPlace(String clusterId, String accountId, String region, String imageTemplate,
+                                        String releaseLabel, Instance instance) {
+        if (clusterStorage == null || instance == null) {
+            return null;
+        }
+        try {
+            String network = clusterStorage.metadataNetwork(clusterId, accountId, region,
+                    EmrServerlessSparkRunner.image(imageTemplate, releaseLabel), dockerNetwork);
+            String address = network == null ? null : clusterStorage.metadataAddress(clusterId, instance);
+            return address == null ? null : new MetadataPlace(network, address);
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("The instance metadata of EMR cluster " + clusterId + " could not start: "
+                    + e.getMessage(), e);
+        }
+    }
+
+    /** Where a container reads its node's instance metadata: its link-local address on its cluster's network. */
+    private record MetadataPlace(String network, String address) {}
+
     // A cluster's bootstrap thread: its actions run to their end, which then ends its BOOTSTRAPPING. They run in
     // a cluster with Hive's image, which is made first when it is not there yet, unless the cluster ended, or a reset
     // removed it, before the thread ran; a failure to make it ends the cluster as one to run the bootstrap does.
     private void runBootstrap(BootstrapRunner.Bootstrap bootstrap, BootstrapLaunch launch,
-                              Supplier<String> releaseImage) {
+                              Supplier<String> releaseImage, Instance primary) {
         // A teardown since the bootstrap was handed off stops it as it does a step, before it runs or as it goes.
         BooleanSupplier cancelled = () -> teardowns.get() != launch.teardownsBefore()
                 || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillBootstrapping(launch));
         BootstrapRunner.Outcome outcome;
         String image = null;
+        String address = null;
+        boolean metadataMade = false;
         try {
             image = releaseImage != null && !cancelled.getAsBoolean() ? releaseImage.get() : null;
-            outcome = bootstrapRunner.run(image != null ? bootstrap.inImage(image) : bootstrap, cancelled);
+            BootstrapRunner.Bootstrap running = image != null ? bootstrap.inImage(image) : bootstrap;
+            // The actions run as on the primary node, whose instance metadata they read.
+            MetadataPlace place = null;
+            if (!cancelled.getAsBoolean()) {
+                metadataMade = clusterStorage != null && primary != null
+                        && clusterStorage.metadataServed(dockerNetwork);
+                place = metadataPlace(running.clusterId(), running.accountId(), running.region(),
+                        running.imageTemplate(), running.releaseLabel(), primary);
+            }
+            address = place != null ? place.address() : null;
+            outcome = bootstrapRunner.run(place != null ? running.onMetadata(place.network(), place.address())
+                    : running, cancelled);
         } catch (RuntimeException e) {
             LOG.warnv(e, "The bootstrap actions of EMR cluster {0} could not run", launch.clusterId());
             outcome = BootstrapRunner.Outcome.couldNotRun(e.getMessage());
@@ -1933,14 +1991,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             if (image != null) {
                 releaseImages.released(image);
             }
+            if (address != null) {
+                clusterStorage.releaseMetadataAddress(address);
+            }
         }
         BootstrapRunner.Outcome ended = outcome;
+        boolean storageMade = metadataMade;
         // One that ended, however, after a teardown began ends as one Floci stopped, which starts no step: the
         // service's lock orders the two.
         AtomicBoolean tornDownSince = new AtomicBoolean();
         RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> {
             tornDownSince.set(teardowns.get() != launch.teardownsBefore());
-            bootstrapEnded(bootstrap, launch, tornDownSince.get() ? BootstrapRunner.Outcome.halted() : ended);
+            bootstrapEnded(bootstrap, launch, tornDownSince.get() ? BootstrapRunner.Outcome.halted() : ended,
+                    storageMade);
         }));
         // An image it committed as the teardown began goes, as no cluster starts from it.
         if (tornDownSince.get() && ended.image() != null) {
@@ -1962,10 +2025,18 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
      * wipes it, and a restart ends it.
      */
     private void bootstrapEnded(BootstrapRunner.Bootstrap bootstrap, BootstrapLaunch launch,
-                                BootstrapRunner.Outcome outcome) {
+                                BootstrapRunner.Outcome outcome, boolean storageMade) {
         Optional<EmrCluster> current = launch.launchedIn() == generation
                 ? findCluster(launch.clusterId()) : Optional.empty();
         Optional<EmrCluster> found = current.filter(EmrService::bootstrapsInContainer);
+        if (storageMade && current.isPresent() && !current.get().isStorageCreated()) {
+            // The network and the instance metadata relay its bootstrap had are the cluster's storage, which goes as
+            // the cluster ends, though no step of it runs, and now on one that ended meanwhile.
+            EmrCluster made = current.get();
+            made.setStorageCreated(true);
+            clusterStore.put(made.getId(), made);
+            releaseStorage(made);
+        }
         if (outcome.stopped() && found.isPresent()) {
             return;
         }
@@ -2037,6 +2108,11 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return "i-" + String.format("%017d", index);
     }
 
+    /** The public DNS name ListInstances gives a cluster's instance {@code index}, counted from 1, in a Region. */
+    static String publicDnsName(long index, String region) {
+        return AwsEndpoints.ec2PublicDns("203.0.113." + index, region);
+    }
+
     /**
      * The private IPv4 address of the instance {@code ordinal}, counted from 1, of a cluster's instance group numbered
      * {@code group}: an instance keeps it while its cluster's other groups resize, as an EC2 instance does.
@@ -2073,6 +2149,78 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             }
         }
         throw new IllegalArgumentException("The instance group or fleet is not one of the cluster's");
+    }
+
+    /**
+     * The EC2 instance that a cluster's instance {@code ordinal}, counted from 1, of its group or fleet numbered
+     * {@code group} is, as ListInstances gives it and its instance metadata answers: its id, the cluster's account as
+     * its owner, its instance type, private address and name, public name, the cluster's availability zone, and the
+     * cluster's EC2 instance profile ({@code JobFlowRole}).
+     */
+    Instance nodeInstance(EmrCluster cluster, String accountId, int group, long ordinal) {
+        List<EmrHandler.ListedInstances> listed = EmrHandler.listedInstances(cluster, false);
+        EmrHandler.ListedInstances primary = listed.stream().filter(set -> set.number() == 0).findFirst().orElse(null);
+        long next = primary == null ? 1 : 1 + primary.count();
+        long index = ordinal;
+        String instanceType = null;
+        for (EmrHandler.ListedInstances set : listed) {
+            long first = set == primary ? 1 : next;
+            if (set != primary) {
+                next += set.count();
+            }
+            if (set.number() == group) {
+                index = first + ordinal - 1;
+                instanceType = set.instanceType();
+                break;
+            }
+        }
+        Instance instance = new Instance();
+        instance.setInstanceId(ec2InstanceId(index));
+        instance.setOwnerId(accountId);
+        instance.setInstanceType(instanceType);
+        instance.setImageId(cluster.getCustomAmiId());
+        String address = privateIpAddress(group, ordinal);
+        instance.setPrivateIpAddress(address);
+        instance.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(address, cluster.getRegion()));
+        instance.setPublicDnsName(publicDnsName(index, cluster.getRegion()));
+        instance.setPlacement(new Placement(availabilityZone(cluster)));
+        instance.setRegion(cluster.getRegion());
+        instance.setState(InstanceState.running());
+        String profile = cluster.getJobFlowRole();
+        if (profile != null && !profile.isBlank()) {
+            instance.setIamInstanceProfileArn(AwsArnUtils.looksLikeArn(profile) ? profile
+                    : AwsArnUtils.Arn.global(regionResolver.partitionForRegion(cluster.getRegion()), "iam", accountId,
+                            "instance-profile/" + profile).toString());
+            // As IAM shapes a profile's id, which the metadata reports where IAM holds no such profile.
+            instance.setIamInstanceProfileId("AIPA" + instance.getInstanceId().substring(2));
+        }
+        return instance;
+    }
+
+    // The EC2 instance a cluster's node, named as ClusterStorage.identify has it, is as the cluster stands now; null for
+    // a cluster that is gone.
+    private Instance nodeIdentity(String clusterId, String accountId, String region, String node) {
+        int dash = node.indexOf('-');
+        int group = Integer.parseInt(node.substring(0, dash));
+        long ordinal = Long.parseLong(node.substring(dash + 1));
+        return RequestScopes.callAs(accountId, region, () -> call(() -> clusterStore.get(clusterId)
+                .map(cluster -> nodeInstance(cluster, accountId, group, ordinal)).orElse(null)));
+    }
+
+    /**
+     * The availability zone a cluster's instances are in: the one DescribeCluster's {@code Ec2InstanceAttributes} gives,
+     * else its Region's first.
+     */
+    static String availabilityZone(EmrCluster cluster) {
+        String recorded = null;
+        if (cluster.getEc2Attributes() != null) {
+            try {
+                recorded = SNAPSHOT_MAPPER.readTree(cluster.getEc2Attributes()).path("Ec2AvailabilityZone").asText(null);
+            } catch (JsonProcessingException ignored) {
+                // RunJobFlow stored them as an object; one an earlier Floci stored without a zone gets the Region's.
+            }
+        }
+        return recorded != null && !recorded.isBlank() ? recorded : cluster.getRegion() + "a";
     }
 
     // The primary instance's: the first of the MASTER group or fleet, which ListInstances numbers before the others.

@@ -369,7 +369,7 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, never()).resolveImageForLaunch(anyString(), any(), any());
         // An EMR Serverless run has no cluster, nor its storage or network.
         verify(spec, never()).withNamedVolume(anyString(), anyString());
-        verify(lifecycle, never()).connectToNetwork(anyString(), anyString());
+        verify(lifecycle, never()).connectToNetwork(anyString(), anyString(), any());
     }
 
     @Test
@@ -945,7 +945,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withExtraHost("ip-10-0-0-1.ec2.internal", "172.18.0.5");
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).create(any());
-        order.verify(lifecycle).connectToNetwork("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
+        order.verify(lifecycle).connectToNetwork("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs", null);
         order.verify(lifecycle).startCreated(eq("driver"), any());
         // After Floci's S3 settings, before the cluster's spark-defaults, which win.
         assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(19));
@@ -1031,9 +1031,9 @@ class EmrServerlessSparkRunnerTest {
 
         InOrder order = inOrder(lifecycle);
         order.verify(lifecycle).create(any());
-        order.verify(lifecycle).ensureConnected("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs", "s-1a2b3c4d5e6f7");
+        order.verify(lifecycle).ensureConnected("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs", "s-1a2b3c4d5e6f7", null);
         order.verify(lifecycle).startCreated(eq("driver"), any());
-        verify(lifecycle, never()).connectToNetwork(anyString(), anyString());
+        verify(lifecycle, never()).connectToNetwork(anyString(), anyString(), any());
         // Floci's address on the cluster's network, where its executors reach it too, not on Floci's own.
         verify(spec).withCmd(argThat((List<String> arguments) ->
                 arguments.contains("spark.hadoop.fs.s3a.endpoint=http://floci-on-cluster:4566")

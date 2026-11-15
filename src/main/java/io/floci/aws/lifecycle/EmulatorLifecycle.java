@@ -471,6 +471,11 @@ public class EmulatorLifecycle {
             return true;
         }
         EmulatorConfig.EksServiceConfig eks = config.services().eks();
-        return eks != null && eks.enabled() && !eks.mock() && eks.imds();
+        if (eks != null && eks.enabled() && !eks.mock() && eks.imds()) {
+            return true;
+        }
+        // An EMR cluster's containers in the docker runner mode read their nodes' metadata through it.
+        EmulatorConfig.EmrServiceConfig emr = config.services().emr();
+        return emr != null && emr.enabled() && "docker".equalsIgnoreCase(emr.runnerMode());
     }
 }

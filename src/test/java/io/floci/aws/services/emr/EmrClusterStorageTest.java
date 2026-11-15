@@ -32,6 +32,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.model.SessionCreds;
@@ -882,6 +883,173 @@ class EmrClusterStorageTest {
 
         verify(lifecycle).removeIfExistsStrict(coreName);
         verify(lifecycle, never()).removeIfExistsStrict(otherName);
+    }
+
+    @Test
+    void aClustersMetadataNetworkIsItsOwnWithItsRelayReachingFlociOnTheHost() {
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+
+        String network = withRelays(relays).metadataNetwork("j-1", "123456789012", "us-east-1", "sha256:image",
+                "floci-network");
+
+        assertEquals(hdfsName, network);
+        verify(lifecycle).ensureNetwork(eq(hdfsName), any());
+        verify(relays).start("j-1", "123456789012", "us-east-1", hdfsName, "sha256:image", "host.docker.internal");
+    }
+
+    @Test
+    void aClusterWhoseStepsShareANamespaceHasNoMetadataRelay() {
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(containerBuilder.resolveDockerNetwork(Optional.of("host"))).thenReturn(Optional.of("host"));
+
+        assertNull(withRelays(relays).metadataNetwork("j-1", "123456789012", "us-east-1", "sha256:image", "host"));
+
+        verify(relays, never()).start(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void eachNodeIsGivenAnAddressItsRelayAnswersAsThatNodeAndItGoesWithIt() {
+        nodesStart(coreName, taskName);
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        Map<String, Instance> instances = Map.of("0-1", nodeInstance("i-00000000000000001"),
+                "1-1", nodeInstance("i-00000000000000002"), "2-1", nodeInstance("i-00000000000000003"));
+        when(relays.give("j-1", instances.get("0-1"))).thenReturn("169.254.0.1");
+        when(relays.give("j-1", instances.get("1-1"))).thenReturn("169.254.0.2");
+        when(relays.give("j-1", instances.get("2-1"))).thenReturn("169.254.0.3");
+        when(relays.serves("j-1")).thenReturn(true);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", instances::get);
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(spec).withLinkLocalIp("169.254.0.1");
+        verify(spec).withLinkLocalIp("169.254.0.2");
+        verify(spec).withLinkLocalIp("169.254.0.3");
+
+        storage.remove("j-1");
+
+        // The primary's with its container; the rest with the relay, which releases every address on its network.
+        verify(relays).release("169.254.0.1");
+        verify(relays).stop("j-1");
+    }
+
+    @Test
+    void aNodeAnEarlierFlociGaveAnAddressStartsAgainSoNoAddressIsGivenTwice() {
+        nodesStart(coreName, taskName);
+        runningNodes(node(coreName, "running", IMAGE, CORE_HOST, true), node(taskName, "running", IMAGE, TASK_HOST, false));
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(relays.give(eq("j-1"), any())).thenReturn("169.254.0.9");
+        when(relays.serves("j-1")).thenReturn(true);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", node -> nodeInstance("i-" + node));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+
+        verify(lifecycle).removeIfExistsStrict(coreName);
+        verify(lifecycle).removeIfExistsStrict(taskName);
+        verify(spec).withName(coreName);
+        verify(spec).withName(taskName);
+    }
+
+    @Test
+    void theMetadataRelaysAnEarlierFlociLeftGoAtStart() {
+        Container relay = mock(Container.class);
+        when(relay.getId()).thenReturn("relay-old");
+        when(relay.getNames()).thenReturn(new String[] {"/floci-emr-j-1-metadata"});
+        when(relay.getLabels()).thenReturn(Map.of(ContainerStorageHelper.COMPONENT_LABEL, "emr-metadata",
+                ContainerStorageHelper.RESOURCE_ID_LABEL, "j-1"));
+        AtomicReference<Map<String, String>> filter = new AtomicReference<>();
+        ListContainersCmd list = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(docker.listContainersCmd()).thenReturn(list);
+        when(list.withLabelFilter(any(Map.class))).thenAnswer(asked -> {
+            filter.set(asked.getArgument(0));
+            return list;
+        });
+        when(list.exec()).thenAnswer(reading -> "emr-metadata".equals(filter.get()
+                .get(ContainerStorageHelper.COMPONENT_LABEL)) ? List.of(relay) : List.of());
+        ListNetworksCmd networks = mock(ListNetworksCmd.class, RETURNS_SELF);
+        when(docker.listNetworksCmd()).thenReturn(networks);
+        when(networks.exec()).thenReturn(List.of());
+        ListVolumesCmd volumes = mock(ListVolumesCmd.class, RETURNS_SELF);
+        when(docker.listVolumesCmd()).thenReturn(volumes);
+        when(volumes.exec()).thenReturn(mock(ListVolumesResponse.class));
+
+        storage.removeAllBut(Set.of("j-1"));
+
+        verify(lifecycle).stopAndRemove("relay-old", null, 0);
+    }
+
+    @Test
+    void aNodeDockerKeepsKeepsItsAddressSoNoOtherContainerIsGivenIt() {
+        nodesStart(coreName, taskName);
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        Map<String, Instance> instances = Map.of("0-1", nodeInstance("i-00000000000000001"),
+                "1-1", nodeInstance("i-00000000000000002"), "2-1", nodeInstance("i-00000000000000003"));
+        when(relays.give("j-1", instances.get("0-1"))).thenReturn("169.254.0.1");
+        when(relays.give("j-1", instances.get("1-1"))).thenReturn("169.254.0.2");
+        when(relays.give("j-1", instances.get("2-1"))).thenReturn("169.254.0.3");
+        when(relays.serves("j-1")).thenReturn(true);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", instances::get);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", null, () -> TWO_NODES,
+                NOT_STOPPED);
+        doThrow(new IllegalStateException("Docker kept it")).doNothing().when(lifecycle).removeIfExistsStrict(coreName);
+
+        storage.stopManagedContainers();
+
+        // Its container may still be there, at that address, which the relay would answer as another's.
+        verify(relays, never()).release("169.254.0.2");
+        verify(relays).release("169.254.0.3");
+
+        storage.stopManagedContainers();
+
+        verify(relays).release("169.254.0.2");
+    }
+
+    @Test
+    void anHdfsInTheHostsNamespaceFoundRunningServesEachStepAsNoRelayServesItsCluster() {
+        when(containerBuilder.resolveDockerNetwork(Optional.of("host"))).thenReturn(Optional.of("host"));
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        runningOn(hdfsName, "host");
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        EmrClusterStorage storage = withRelays(relays);
+        storage.identify("j-1", node -> nodeInstance("i-" + node));
+
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
+        storage.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "host", null, null, NOT_STOPPED);
+
+        // The other steps of its cluster use it.
+        verify(lifecycle, never()).removeIfExistsStrict(hdfsName);
+        verify(lifecycle, never()).createAndStart(any());
+        verify(relays, never()).give(anyString(), any());
+    }
+
+    @Test
+    void aRelayDockerKeepsLeavesItsClustersStorageToBeRemovedAgain() {
+        when(lifecycle.removeNetwork(any())).thenReturn(true);
+        when(lifecycle.removeVolume(any())).thenReturn(true);
+        runningNodes();
+        EmrMetadataRelays relays = mock(EmrMetadataRelays.class);
+        when(relays.stop("j-1")).thenReturn(false, true);
+        EmrClusterStorage storage = withRelays(relays);
+
+        assertFalse(storage.remove("j-1"));
+        assertTrue(storage.remove("j-1"));
+    }
+
+    private EmrClusterStorage withRelays(EmrMetadataRelays relays) {
+        return new EmrClusterStorage(lifecycle, containerBuilder, awsEnv, roleCredentials, currentContainer, config,
+                s3, Duration.ofSeconds(120), System::nanoTime, Runnable::run, Duration.ZERO, relays);
+    }
+
+    private static Instance nodeInstance(String id) {
+        Instance instance = new Instance();
+        instance.setInstanceId(id);
+        return instance;
     }
 
     @Test

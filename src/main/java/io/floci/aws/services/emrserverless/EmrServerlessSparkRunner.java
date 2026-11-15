@@ -551,10 +551,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             launch.started(containerId);
             // A cluster's HDFS is on a network of its own, which only its steps join; on YARN the executors there reach
             // the driver at the name its container has on it.
+            // With an address there, the cluster's instance metadata relay answers it as the cluster's primary node.
             if (onYarn) {
-                lifecycleManager.ensureConnected(containerId, job.storage().hdfsNetwork(), driverHost(job));
+                lifecycleManager.ensureConnected(containerId, job.storage().hdfsNetwork(), driverHost(job),
+                        job.storage().metadataAddress());
             } else if (job.storage() != null && job.storage().hdfsNetwork() != null) {
-                lifecycleManager.connectToNetwork(containerId, job.storage().hdfsNetwork());
+                lifecycleManager.connectToNetwork(containerId, job.storage().hdfsNetwork(),
+                        job.storage().metadataAddress());
             }
             // A stop, a reset or a shutdown while the image was pulled, the trust store copied or the archives put
             // in is read now, before the driver starts; one before an archive or while it streams in puts in no
