@@ -7,8 +7,8 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
-import java.util.regex.Matcher;
 import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import static io.floci.aws.services.cloudformation.CfnStackTestSupport.createUpdateChangeSet;

@@ -33,8 +33,8 @@ import java.util.Set;
  * are validated here before the service stores their XML. A property the template does not declare is left alone, except that
  * an update removing {@code NotificationConfiguration} or {@code OwnershipControls} clears it.
  *
- * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code BucketNamePrefix}, {@code BucketNamespace},
- * {@code CorsConfiguration},
+ * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code BucketNamePrefix} in the
+ * {@code account-regional} {@code BucketNamespace}, {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
  * {@code BucketEncryption}, {@code LifecycleConfiguration},
  * {@code OwnershipControls}, {@code NotificationConfiguration} and
@@ -116,6 +116,11 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         return derived;
     }
 
+    private static boolean hasBucketName(JsonNode props, ProvisionContext ctx) {
+        String name = ctx.resolveOptional(props, "BucketName");
+        return name != null && !name.isBlank();
+    }
+
     private void provisionBucket(StackResource r, JsonNode props, ProvisionContext ctx) {
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         String explicitName = templateBucketName(props, ctx);
@@ -126,6 +131,11 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
                 && ctx.changes(BUCKET, props).requiresReplacement();
         if (replaces && explicitName != null && explicitName.equals(ctx.priorPhysicalId())) {
             throw CfnExceptions.customNamedReplacement(explicitName);
+        }
+        if (ctx.isUpdate() && !replaces && ctx.priorPhysicalId() != null && !hasBucketName(props, ctx)) {
+            // A prefix the engine does not see change keeps the bucket: one created before the prefix
+            // was read has a generated name.
+            explicitName = null;
         }
         String bucketName = replaces && (explicitName == null || explicitName.isBlank())
                 ? ctx.generatePhysicalName(r.getLogicalId(), BUCKET_NAME_MAX_LENGTH, true)
