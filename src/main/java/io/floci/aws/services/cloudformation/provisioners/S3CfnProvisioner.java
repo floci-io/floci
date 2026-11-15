@@ -33,7 +33,8 @@ import java.util.Set;
  * are validated here before the service stores their XML. A property the template does not declare is left alone, except that
  * an update removing {@code NotificationConfiguration} or {@code OwnershipControls} clears it.
  *
- * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code CorsConfiguration},
+ * <p>Covered on {@code AWS::S3::Bucket}: {@code BucketName}, {@code BucketNamePrefix}, {@code BucketNamespace},
+ * {@code CorsConfiguration},
  * {@code VersioningConfiguration}, {@code PublicAccessBlockConfiguration},
  * {@code BucketEncryption}, {@code LifecycleConfiguration},
  * {@code OwnershipControls}, {@code NotificationConfiguration} and
@@ -60,6 +61,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     private static final String BUCKET = "AWS::S3::Bucket";
     private static final String BUCKET_POLICY = "AWS::S3::BucketPolicy";
     private static final int BUCKET_NAME_MAX_LENGTH = 63;
+    private static final String ACCOUNT_REGIONAL_NAMESPACE = "account-regional";
 
     private final S3Service s3Service;
 
@@ -88,9 +90,35 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * The name the template fixes: {@code BucketName}, or {@code BucketNamePrefix} expanded in the
+     * account regional namespace to {@code <prefix>-<accountId>-<region>-an}. Null when it fixes none.
+     */
+    private static String templateBucketName(JsonNode props, ProvisionContext ctx) {
+        String name = ctx.resolveOptional(props, "BucketName");
+        String prefix = ctx.resolveOptional(props, "BucketNamePrefix");
+        if (prefix == null || prefix.isBlank()) {
+            return name;
+        }
+        if (name != null && !name.isBlank()) {
+            throw new AwsException("ValidationError",
+                    BUCKET + " cannot set both BucketName and BucketNamePrefix", 400);
+        }
+        if (!ACCOUNT_REGIONAL_NAMESPACE.equals(ctx.resolveOptional(props, "BucketNamespace"))) {
+            throw new AwsException("ValidationError",
+                    BUCKET + " BucketNamePrefix requires BucketNamespace " + ACCOUNT_REGIONAL_NAMESPACE, 400);
+        }
+        String derived = prefix + "-" + ctx.accountId() + "-" + ctx.region() + "-an";
+        if (derived.length() > BUCKET_NAME_MAX_LENGTH) {
+            throw new AwsException("ValidationError", BUCKET + " BucketNamePrefix " + prefix + " makes the name "
+                    + derived + ", longer than " + BUCKET_NAME_MAX_LENGTH + " characters", 400);
+        }
+        return derived;
+    }
+
     private void provisionBucket(StackResource r, JsonNode props, ProvisionContext ctx) {
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
-        String explicitName = ctx.resolveOptional(props, "BucketName");
+        String explicitName = templateBucketName(props, ctx);
         // The engine's change decides, as it does for the change set's Replacement: BucketName,
         // BucketNamePrefix and BucketNamespace are create-only in the registry. A bucket named in the
         // template cannot be replaced under that name; an unnamed one gets a fresh generated name.
