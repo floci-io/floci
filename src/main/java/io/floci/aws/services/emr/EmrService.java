@@ -442,16 +442,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
             cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
             cluster.setMasterPublicDnsName(masterDnsName(region));
+            // Their states and what runs of them follow the cluster's, from its start (see EmrClusterLifecycle).
             for (EmrInstanceGroup g : cluster.getInstanceGroups()) {
                 g.setId("ig-" + randomId(13));
-                g.setRunningInstanceCount(g.getRequestedInstanceCount());
-                g.setState("RUNNING");
             }
             for (EmrInstanceFleet f : cluster.getInstanceFleets()) {
                 f.setId("if-" + randomId(13));
-                f.setProvisionedOnDemandCapacity(f.getTargetOnDemandCapacity());
-                f.setProvisionedSpotCapacity(f.getTargetSpotCapacity());
-                f.setState("RUNNING");
             }
             cluster.setProvisionedCoreNodes(coreNodes(cluster));
             cluster.getSteps().forEach(step -> step.setId("s-" + randomId(13)));
@@ -666,8 +662,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             List<String> ids = new ArrayList<>();
             for (EmrInstanceGroup group : groups) {
                 group.setId("ig-" + randomId(13));
-                group.setRunningInstanceCount(group.getRequestedInstanceCount());
-                group.setState("RUNNING");
+                // As the cluster's others are while it is as it is.
+                EmrClusterLifecycle.groupIn(group, EmrClusterLifecycle.instancesState(cluster.getState()));
                 cluster.getInstanceGroups().add(group);
                 ids.add(group.getId());
             }
@@ -773,9 +769,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 throw invalid(fleetsAndGroupsApart(clusterId, "instance groups"));
             }
             fleet.setId("if-" + randomId(13));
-            fleet.setProvisionedOnDemandCapacity(fleet.getTargetOnDemandCapacity());
-            fleet.setProvisionedSpotCapacity(fleet.getTargetSpotCapacity());
-            fleet.setState("RUNNING");
+            EmrClusterLifecycle.fleetIn(fleet, EmrClusterLifecycle.instancesState(cluster.getState()));
             cluster.getInstanceFleets().add(fleet);
             clusterStore.put(clusterId, cluster);
             resizeNodes(cluster);

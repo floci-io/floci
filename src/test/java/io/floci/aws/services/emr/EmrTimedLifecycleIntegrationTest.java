@@ -13,6 +13,7 @@ import java.util.Map;
 import static io.floci.aws.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
@@ -73,5 +74,64 @@ class EmrTimedLifecycleIntegrationTest {
                 .body("__type", equalTo("ValidationException"))
                 .body("message", equalTo(
                         "A job flow that is shutting down, terminated, or finished may not be modified."));
+    }
+
+    @Test
+    void aStartingClustersInstancesAreListedAsProvisionedWithNoneRunningYet() {
+        String clusterId = emr("RunJobFlow", "{\"Name\":\"provisioning\",\"Instances\":{"
+                + "\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":["
+                + "{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":2}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+
+        emr("ListInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\"}").then().statusCode(200)
+                .body("InstanceGroups.Status.State", equalTo(List.of("PROVISIONING", "PROVISIONING")))
+                .body("InstanceGroups.RunningInstanceCount", equalTo(List.of(0, 0)));
+        List<String> ids = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").then().statusCode(200)
+                .body("Instances.Status.State", equalTo(List.of("PROVISIONING", "PROVISIONING", "PROVISIONING")))
+                .extract().path("Instances.Id");
+        // The filter keeps the states it names.
+        emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceStates\":[\"RUNNING\"]}")
+                .then().statusCode(200)
+                .body("Instances", equalTo(List.of()));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
+        emr("ListInstanceGroups", "{\"ClusterId\":\"" + clusterId + "\"}").then().statusCode(200)
+                .body("InstanceGroups.Status.State", equalTo(List.of("TERMINATING", "TERMINATING")))
+                .body("InstanceGroups.RunningInstanceCount", equalTo(List.of(0, 0)));
+        // While it ends, the same instances, still being provisioned, none of them running.
+        emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceStates\":[\"PROVISIONING\"]}")
+                .then().statusCode(200)
+                .body("Instances.Id", equalTo(ids));
+        emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceStates\":[\"RUNNING\"]}")
+                .then().statusCode(200)
+                .body("Instances", equalTo(List.of()));
+    }
+
+    @Test
+    void aStartingClustersFleetsKeepTheirInstancesListedWhileItEnds() {
+        String clusterId = emr("RunJobFlow", "{\"Name\":\"provisioning-fleets\",\"Instances\":{"
+                + "\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceFleets\":["
+                + "{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]},"
+                + "{\"InstanceFleetType\":\"CORE\",\"TargetOnDemandCapacity\":2,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        List<String> ids = emr("ListInstances", "{\"ClusterId\":\"" + clusterId
+                        + "\",\"InstanceStates\":[\"PROVISIONING\"]}")
+                .then().statusCode(200)
+                .body("Instances.InstanceFleetId", hasSize(3))
+                .extract().path("Instances.Id");
+
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
+
+        emr("ListInstanceFleets", "{\"ClusterId\":\"" + clusterId + "\"}").then().statusCode(200)
+                .body("InstanceFleets.Status.State", equalTo(List.of("TERMINATING", "TERMINATING")))
+                .body("InstanceFleets.ProvisionedOnDemandCapacity", equalTo(List.of(0, 0)));
+        emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceStates\":[\"PROVISIONING\"]}")
+                .then().statusCode(200)
+                .body("Instances.Id", equalTo(ids));
+        emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\",\"InstanceStates\":[\"RUNNING\"]}")
+                .then().statusCode(200)
+                .body("Instances", equalTo(List.of()));
     }
 }
