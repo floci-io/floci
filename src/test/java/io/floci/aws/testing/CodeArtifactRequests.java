@@ -1,8 +1,18 @@
 package io.floci.aws.testing;
 
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
+import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -56,5 +66,51 @@ public final class CodeArtifactRequests {
                 .then().statusCode(200)
                 .body("originConfiguration.restrictions.publish", equalTo(publish))
                 .body("originConfiguration.restrictions.upstream", equalTo(upstream));
+    }
+
+    /**
+     * A real, minimal, valid {@code .crate}: a gzipped tarball with one real {@code Cargo.toml},
+     * shared by every Cargo Docker integration test that needs to publish something Kellnr
+     * genuinely accepts rather than a mocked unit test's own arbitrary bytes.
+     */
+    public static byte[] cargoCrateBytes(String name, String version) {
+        String cargoToml = "[package]\nname = \"" + name + "\"\nversion = \"" + version + "\"\nedition = \"2021\"\n";
+        byte[] cargoTomlBytes = cargoToml.getBytes(StandardCharsets.UTF_8);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(out);
+                TarArchiveOutputStream tar = new TarArchiveOutputStream(gzip)) {
+            TarArchiveEntry entry = new TarArchiveEntry(name + "-" + version + "/Cargo.toml");
+            entry.setSize(cargoTomlBytes.length);
+            tar.putArchiveEntry(entry);
+            tar.write(cargoTomlBytes);
+            tar.closeArchiveEntry();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return out.toByteArray();
+    }
+
+    /**
+     * The real Cargo publish wire body (confirmed from the Cargo Book's own spec text and live
+     * against a real Kellnr container): a 4-byte little-endian metadata length, the JSON metadata
+     * itself (one real, non-empty dependency, to prove a native publish's own dependency list
+     * survives the round trip untouched), then a 4-byte little-endian crate length and the crate
+     * itself.
+     */
+    public static byte[] cargoPublishBody(String name, String version, byte[] crateBytes) {
+        String metadataJson = "{\"name\":\"" + name + "\",\"vers\":\"" + version + "\",\"deps\":["
+                + "{\"name\":\"real-dependency\",\"version_req\":\"^1.0\",\"features\":[],\"optional\":false,"
+                + "\"default_features\":true,\"target\":null,\"kind\":\"normal\",\"registry\":null}],"
+                + "\"features\":{},\"authors\":[],\"description\":\"a test crate\",\"documentation\":null,"
+                + "\"homepage\":null,\"readme\":null,\"readme_file\":null,\"keywords\":[],\"categories\":[],"
+                + "\"license\":\"MIT\",\"license_file\":null,\"repository\":null,\"badges\":{},\"links\":null}";
+        byte[] metadata = metadataJson.getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buffer = ByteBuffer.allocate(4 + metadata.length + 4 + crateBytes.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putInt(metadata.length);
+        buffer.put(metadata);
+        buffer.putInt(crateBytes.length);
+        buffer.put(crateBytes);
+        return buffer.array();
     }
 }
