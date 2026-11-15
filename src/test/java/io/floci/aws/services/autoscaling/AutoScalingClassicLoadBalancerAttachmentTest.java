@@ -1,12 +1,7 @@
 package io.floci.aws.services.autoscaling;
 
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.services.autoscaling.model.AsgInstance;
 import io.floci.aws.services.autoscaling.model.AutoScalingGroup;
-import io.floci.aws.services.ec2.Ec2Service;
-import io.floci.aws.services.ec2.model.Instance;
-import io.floci.aws.services.ec2.model.Placement;
 import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import org.junit.jupiter.api.Test;
@@ -16,6 +11,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.FIRST;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.GROUP;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.IN_SERVICE;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.NODE;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.REGION;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.SECOND;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.STANDBY;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.groupsSharingTheNode;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.node;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.nodeGroupTags;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.ordinaryGroup;
 import static io.floci.aws.services.autoscaling.TargetMatchers.exactlyTargets;
 import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,28 +45,13 @@ import static org.mockito.Mockito.when;
  */
 class AutoScalingClassicLoadBalancerAttachmentTest {
 
-    private static final String REGION = "us-east-1";
-    private static final String GROUP = "web";
-    private static final String IN_SERVICE = "i-0a1b2c3d4e5f60001";
-    private static final String STANDBY = "i-0a1b2c3d4e5f60002";
-
-    private static final String FIRST = "eks-workers-1a2b3c4d";
-    private static final String SECOND = "eks-batch-5e6f7a8b";
-    private static final String NODE = "i-0123456789abcdef0";
-
     private final ElbV2Service targets = mock(ElbV2Service.class);
     private final ElbClassicService classic = mock(ElbClassicService.class);
-    private final AutoScalingService service = new AutoScalingService(targets, classic);
-    private final AutoScalingGroup group = new AutoScalingGroup();
+    private final AutoScalingService service = AutoScalingGroupFixtures.service(targets, classic);
+    private final AutoScalingGroup group = ordinaryGroup(service);
 
     AutoScalingClassicLoadBalancerAttachmentTest() {
-        service.regionResolver = new RegionResolver(REGION, "000000000000");
-        service.ec2Service = mock(Ec2Service.class);
-        group.setAutoScalingGroupName(GROUP);
-        group.setRegion(REGION);
         group.setLoadBalancerNames(new ArrayList<>(List.of("lb-attached")));
-        group.getInstances().addAll(List.of(member(IN_SERVICE, "InService"), member(STANDBY, "Standby")));
-        service.groups.put(REGION + "::" + GROUP, group);
     }
 
     @Test
@@ -170,7 +161,7 @@ class AutoScalingClassicLoadBalancerAttachmentTest {
     /** The groups of a cluster's node groups share its node, which stays in a load balancer either has attached. */
     @Test
     void detachingAClassicLoadBalancerLeavesTheSharedNodeInItWhileAnotherEksGroupHasItAttached() {
-        groupsSharingTheNode();
+        groupsSharingTheNode(service);
         service.attachLoadBalancers(REGION, FIRST, List.of("lb-shared"));
         service.attachTrafficSources(REGION, SECOND, List.of(
                 new AutoScalingService.TrafficSourceIdentifier("lb-shared", "elb")));
@@ -191,7 +182,7 @@ class AutoScalingClassicLoadBalancerAttachmentTest {
     /** A node that joins an EKS group after a Classic Load Balancer was attached to it is registered with it. */
     @Test
     void aNodeJoiningAnEksGroupIsRegisteredWithItsClassicLoadBalancers() {
-        service.createEksManagedGroup(REGION, FIRST, 1, 3, 2, List.of(), Map.of("eks:nodegroup-name", "workers"));
+        service.createEksManagedGroup(REGION, FIRST, 1, 3, 2, List.of(), nodeGroupTags("workers"));
         service.attachLoadBalancers(REGION, FIRST, List.of("lb-web"));
         verifyNoInteractions(classic);
 
@@ -203,7 +194,7 @@ class AutoScalingClassicLoadBalancerAttachmentTest {
     /** Deleting an EKS group, or detaching the node from it, leaves the node in what the other group has attached. */
     @Test
     void deletingOrDetachingFromAnEksGroupLeavesTheNodeInTheLoadBalancersTheOtherGroupHasAttached() {
-        groupsSharingTheNode();
+        groupsSharingTheNode(service);
         service.attachLoadBalancers(REGION, FIRST, List.of("lb-shared", "lb-first"));
         service.attachLoadBalancers(REGION, SECOND, List.of("lb-shared"));
         clearInvocations(classic);
@@ -217,28 +208,5 @@ class AutoScalingClassicLoadBalancerAttachmentTest {
 
         verify(classic).deregisterInstances(REGION, "lb-shared", List.of(NODE));
         verifyNoMoreInteractions(classic);
-    }
-
-    /** FIRST and SECOND, the groups of two node groups of one cluster, both holding its node. */
-    private void groupsSharingTheNode() {
-        service.createEksManagedGroup(REGION, FIRST, 1, 3, 2, List.of(), Map.of("eks:nodegroup-name", "workers"));
-        service.createEksManagedGroup(REGION, SECOND, 1, 1, 1, List.of(), Map.of("eks:nodegroup-name", "batch"));
-        service.addEksManagedInstance(REGION, FIRST, node());
-        service.addEksManagedInstance(REGION, SECOND, node());
-    }
-
-    private static AsgInstance member(String id, String state) {
-        AsgInstance member = new AsgInstance();
-        member.setInstanceId(id);
-        member.setLifecycleState(state);
-        return member;
-    }
-
-    private static Instance node() {
-        Instance node = new Instance();
-        node.setInstanceId(NODE);
-        node.setInstanceType("m5.large");
-        node.setPlacement(new Placement("us-east-1b"));
-        return node;
     }
 }

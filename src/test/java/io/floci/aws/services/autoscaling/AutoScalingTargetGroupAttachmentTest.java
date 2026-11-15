@@ -1,10 +1,7 @@
 package io.floci.aws.services.autoscaling;
 
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.services.autoscaling.model.AsgInstance;
 import io.floci.aws.services.autoscaling.model.AutoScalingGroup;
-import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.model.TargetDescription;
@@ -16,6 +13,11 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.GROUP;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.IN_SERVICE;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.REGION;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.STANDBY;
+import static io.floci.aws.services.autoscaling.AutoScalingGroupFixtures.ordinaryGroup;
 import static io.floci.aws.services.autoscaling.TargetMatchers.exactlyTargets;
 import static io.floci.aws.services.autoscaling.TargetMatchers.onlyTarget;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -39,23 +41,12 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
  */
 class AutoScalingTargetGroupAttachmentTest {
 
-    private static final String REGION = "us-east-1";
-    private static final String GROUP = "web";
-    private static final String IN_SERVICE = "i-0a1b2c3d4e5f60001";
-    private static final String STANDBY = "i-0a1b2c3d4e5f60002";
-
     private final ElbV2Service targets = mock(ElbV2Service.class);
-    private final AutoScalingService service = new AutoScalingService(targets, mock(ElbClassicService.class));
-    private final AutoScalingGroup group = new AutoScalingGroup();
+    private final AutoScalingService service = AutoScalingGroupFixtures.service(targets, mock(ElbClassicService.class));
+    private final AutoScalingGroup group = ordinaryGroup(service);
 
     AutoScalingTargetGroupAttachmentTest() {
-        service.regionResolver = new RegionResolver(REGION, "000000000000");
-        service.ec2Service = mock(Ec2Service.class);
-        group.setAutoScalingGroupName(GROUP);
-        group.setRegion(REGION);
         group.setTargetGroupARNs(new ArrayList<>(List.of("tg-attached")));
-        group.getInstances().addAll(List.of(member(IN_SERVICE, "InService"), member(STANDBY, "Standby")));
-        service.groups.put(REGION + "::" + GROUP, group);
     }
 
     @Test
@@ -148,12 +139,5 @@ class AutoScalingTargetGroupAttachmentTest {
         service.detachLoadBalancerTargetGroups(REGION, GROUP, List.of("tg-attached"));
 
         assertEquals(List.of(), group.getTargetGroupARNs());
-    }
-
-    private static AsgInstance member(String id, String state) {
-        AsgInstance member = new AsgInstance();
-        member.setInstanceId(id);
-        member.setLifecycleState(state);
-        return member;
     }
 }
