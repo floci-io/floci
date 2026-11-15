@@ -2477,23 +2477,43 @@ public class AslExecutor {
                 + "] which was managing this resource was aborted";
     }
 
-    /** Best effort, like AWS: a task that is already gone does not change how the state ends. */
+    /**
+     * Best effort, like AWS: a task that is already gone, which ECS answers with InvalidParameterException, does not
+     * change how the state ends, nor does one already stopped, which StopTask answers as it is. Any other refusal is a
+     * fault, raised as the integration's ECS error once every task has been asked to stop, as the emr-serverless undo
+     * raises its own; any other failure is raised at once.
+     */
     private void stopEcsTasks(String cluster, List<String> taskArns, String executionArn, String region) {
+        FailStateException fault = null;
         for (String taskArn : taskArns) {
             try {
                 ecsService.stopTask(cluster, taskArn, syncAbortCause(executionArn), region);
-            } catch (RuntimeException e) {
+            } catch (AwsException e) {
+                if (!"InvalidParameterException".equals(e.getErrorCode())) {
+                    fault = fault != null ? fault : new FailStateException("ECS." + e.getErrorCode(), e.getMessage());
+                    continue;
+                }
                 LOG.warnv("ecs:runTask.sync ended before its task {0} did, and the task could not be stopped: {1}",
                         taskArn, e.getMessage());
             }
         }
+        if (fault != null) {
+            throw fault;
+        }
     }
 
-    /** Best effort, like AWS: a child that already ended does not change how the state ends. */
+    /**
+     * Best effort, like AWS: a child that is gone, which Step Functions answers with ExecutionDoesNotExist, does not
+     * change how the state ends, nor does one that already ended, which StopExecution leaves as it is. Any other
+     * refusal is a fault, raised as the integration names a refused StartExecution, and any other failure is raised.
+     */
     private void abortChildExecution(String childExecutionArn, String executionArn) {
         try {
             sfnService.get().stopExecution(childExecutionArn, syncAbortCause(executionArn), null);
-        } catch (RuntimeException e) {
+        } catch (AwsException e) {
+            if (!"ExecutionDoesNotExist".equals(e.getErrorCode())) {
+                throw new FailStateException(optimizedSfnErrorName(e.getErrorCode()), e.getMessage());
+            }
             LOG.warnv("states:startExecution.sync ended before its child {0} did, and the child could not be stopped: {1}",
                     childExecutionArn, e.getMessage());
         }
