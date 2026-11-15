@@ -1,6 +1,7 @@
 package io.floci.aws.services.ses;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.route53.Route53Service;
@@ -172,7 +173,8 @@ final class SesServiceTestBuilder {
         contactService = new SesContactService(contactListStore, contactStore, clock);
         suppressionService = new SesSuppressionService(suppressionStore, accountSuppressionStore,
                 new InMemoryStorage<>());
-        configSetService = new SesConfigurationSetService(configSetStore);
+        configSetService = new SesConfigurationSetService(configSetStore, mock(SesEventPublisher.class),
+                new RegionResolver("us-east-1", "000000000000"));
         identityService = new SesIdentityService(identityStore, route53Service, clock);
         sentEmailService = new SesSentEmailService(emailStore);
         cvetService = new SesCvetService(cvetStore);
