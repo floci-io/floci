@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -108,6 +109,22 @@ class RedshiftAuditLogPublisherTest {
         assertEquals(List.of("userlog"), target.exports());
         assertEquals(7L, target.loggingGeneration());
         assertEquals(null, RedshiftAuditTarget.of(null));
+    }
+
+    @Test
+    void aClusterWithMalformedExportsNeverFailsThePublishOverloads() {
+        CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+        RedshiftAuditLogPublisher publisher = new RedshiftAuditLogPublisher(logs);
+        Cluster cluster = enabledCluster(Arrays.asList("userlog", null));
+
+        assertDoesNotThrow(() -> {
+            publisher.publishActivity(cluster, "111111111111", "us-east-1", "dev", "admin", "select 1");
+            publisher.publishConnection(cluster, "111111111111", "us-east-1", "dev", "admin", "initiating session",
+                    "127.0.0.1", null);
+            publisher.publishUserChange(cluster, "111111111111", "us-east-1", "dev", "admin", "create", null);
+            publisher.publish(cluster, "111111111111", "us-east-1", "userlog", Map.of());
+        });
+        verify(logs, never()).putLogEventsForAccount(anyString(), anyString(), anyString(), anyList(), anyString());
     }
 
     @Test

@@ -149,13 +149,27 @@ public class RedshiftAuditLogPublisher {
         }
     }
 
+    /**
+     * Builds the target of a cluster for the publish overloads, which must never fail the statement being audited:
+     * a cluster whose stored logging settings are malformed is reported and treated as having no target.
+     */
+    private static RedshiftAuditTarget targetOf(Cluster cluster) {
+        try {
+            return RedshiftAuditTarget.of(cluster);
+        } catch (RuntimeException ex) {
+            LOG.warnv(ex, "Failed to build the Redshift audit target for cluster {0}",
+                    cluster.getClusterIdentifier());
+            return null;
+        }
+    }
+
     private static String registryKey(String accountId, String clusterIdentifier) {
         return accountId + ":" + clusterIdentifier;
     }
 
     public void publishActivity(Cluster cluster, String accountId, String region, String database, String username,
                                 String sql) {
-        publishActivity(RedshiftAuditTarget.of(cluster), accountId, region, database, username, sql);
+        publishActivity(targetOf(cluster), accountId, region, database, username, sql);
     }
 
     public void publishActivity(RedshiftAuditTarget target, String accountId, String region, String database, String username,
@@ -175,7 +189,7 @@ public class RedshiftAuditLogPublisher {
 
     public void publishConnection(Cluster cluster, String accountId, String region, String database, String username,
                                   String event, String remoteAddress, String error) {
-        publishConnection(RedshiftAuditTarget.of(cluster), accountId, region, database, username, event, remoteAddress,
+        publishConnection(targetOf(cluster), accountId, region, database, username, event, remoteAddress,
                 error);
     }
 
@@ -233,7 +247,7 @@ public class RedshiftAuditLogPublisher {
 
     public void publishUserChange(Cluster cluster, String accountId, String region, String database,
                                   String username, String action, String oldUsername) {
-        publishUserChange(RedshiftAuditTarget.of(cluster), accountId, region, database, username, action, oldUsername);
+        publishUserChange(targetOf(cluster), accountId, region, database, username, action, oldUsername);
     }
 
     public void publishUserChange(RedshiftAuditTarget target, String accountId, String region, String database,
@@ -261,7 +275,7 @@ public class RedshiftAuditLogPublisher {
 
     public void publish(Cluster cluster, String accountId, String region, String logType,
                         Map<String, Object> record) {
-        publish(RedshiftAuditTarget.of(cluster), accountId, region, logType, record);
+        publish(targetOf(cluster), accountId, region, logType, record);
     }
 
     public void publish(RedshiftAuditTarget target, String accountId, String region, String logType,
