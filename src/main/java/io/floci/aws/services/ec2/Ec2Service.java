@@ -5903,19 +5903,35 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * is nothing to check.
      */
     public void checkInstanceAttributeChange(String region, String instanceId, boolean userData,
-                                             boolean attribute, List<String> groupIds) {
+                                             String attribute, List<String> groupIds) {
         ensureDefaultResources(region);
-        if (!userData && !attribute && groupIds.isEmpty()) {
+        if (!userData && attribute == null && groupIds.isEmpty()) {
             return;
         }
         Instance inst = getRequiredInstance(region, instanceId);
         if (userData) {
             requireStoppedForUserData(inst);
         }
+        if ("sourceDestCheck".equals(attribute)) {
+            requireSingleInterface(inst);
+        }
         if (!groupIds.isEmpty()) {
             synchronized (attachmentTopologyLock(region)) {
+                requireSingleInterface(inst);
                 instanceVpcGroups(region, inst, groupIds);
             }
+        }
+    }
+
+    /**
+     * AWS refuses an instance-level group or source/destination check change on an instance with more than one
+     * network interface, since those belong to each interface; ModifyNetworkInterfaceAttribute changes them there.
+     * The code and message are AWS's own, as the Terraform AWS provider quotes them.
+     */
+    private static void requireSingleInterface(Instance inst) {
+        if (inst.getNetworkInterfaces() != null && inst.getNetworkInterfaces().size() > 1) {
+            throw new AwsException("InvalidInstanceID", "There are multiple interfaces attached to instance '"
+                    + inst.getInstanceId() + "'. Please specify an interface ID for the operation instead.", 400);
         }
     }
 
@@ -5956,7 +5972,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     inst.setCreditSpecificationCpuCredits(acquiredCpuCredits(value, null));
                 }
             }
-            case "sourceDestCheck" -> inst.setSourceDestCheck(Boolean.parseBoolean(value));
+            case "sourceDestCheck" -> {
+                requireSingleInterface(inst);
+                inst.setSourceDestCheck(Boolean.parseBoolean(value));
+            }
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
         }
         instances.put(key(region, instanceId), inst);
@@ -5983,6 +6002,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         List<GroupIdentifier> identifiers = new ArrayList<>();
         List<String> protectedGroups = new ArrayList<>();
         synchronized (attachmentTopologyLock(region)) {
+            requireSingleInterface(inst);
             for (SecurityGroup sg : instanceVpcGroups(region, inst, groupIds)) {
                 identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
                 protectedGroups.add(callerAccountId() + "::" + key(region, sg.getGroupId()));
@@ -16192,28 +16212,215 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         Instance inst = instances.get(key(region, instanceId)).orElse(null);
         if (inst == null) return;
         for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
-            NetworkInterface ni = networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).orElse(null);
-            if (ni == null) {
-                // Implicit (auto-created) interface: honor the flag. When false, create a standalone
-                // record so the interface is returned to "available" on termination instead of deleted.
-                eni.setDeleteOnTermination(value);
-                if (!value) {
-                    NetworkInterface standalone = synthesizeImplicitNetworkInterface(inst, eni, region, callerAccountId());
-                    NetworkInterfaceAttachment att = standalone.getAttachment();
-                    att.setDeleteOnTermination(false);
-                    standalone.setStatus("in-use");
-                    networkInterfaces.put(key(region, eni.getNetworkInterfaceId()), standalone);
-                }
-            } else {
-                // Supplied (caller-created) interface: honor the flag on both copies.
-                eni.setDeleteOnTermination(value);
-                if (ni.getAttachment() != null) {
-                    ni.getAttachment().setDeleteOnTermination(value);
-                    networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
-                }
-            }
+            setDeleteOnTermination(region, inst, eni, value);
         }
         instances.put(key(region, instanceId), inst);
+    }
+
+    /** Sets one interface's DeleteOnTermination; the caller persists {@code inst}. */
+    private void setDeleteOnTermination(String region, Instance inst, InstanceNetworkInterface eni, boolean value) {
+        NetworkInterface ni = networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).orElse(null);
+        eni.setDeleteOnTermination(value);
+        if (ni == null) {
+            // Implicit (auto-created) interface: when false, create a standalone record so the
+            // interface is returned to "available" on termination instead of deleted.
+            if (!value) {
+                NetworkInterface standalone = synthesizeImplicitNetworkInterface(inst, eni, region, callerAccountId());
+                standalone.getAttachment().setDeleteOnTermination(false);
+                standalone.setStatus("in-use");
+                networkInterfaces.put(key(region, eni.getNetworkInterfaceId()), standalone);
+            }
+        } else if (ni.getAttachment() != null) {
+            // Supplied (caller-created) interface: honor the flag on both copies.
+            ni.getAttachment().setDeleteOnTermination(value);
+            networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+        }
+    }
+
+    /** The attributes one ModifyNetworkInterfaceAttribute call names: empty or null where it names none. */
+    public record NetworkInterfaceAttributeChange(List<String> groupIds, String description, Boolean sourceDestCheck,
+                                                  String attachmentId, Boolean deleteOnTermination) {
+    }
+
+    /**
+     * ModifyNetworkInterfaceAttribute, for a standalone interface or one an instance was launched with. A group
+     * change reaches the interface's security-group firewall before it is stored, so a policy that cannot be
+     * applied leaves the groups as they were, as {@link #modifyInstanceGroups} does. On an instance's primary
+     * interface the groups and the source/destination check are the instance's too.
+     */
+    public void modifyNetworkInterfaceAttribute(String region, String networkInterfaceId,
+                                                NetworkInterfaceAttributeChange change, boolean dryRun) {
+        ensureDefaultResources(region);
+        // The instance's lock when the interface has one, so a ModifyInstanceAttribute group change on the same
+        // instance cannot reach the firewall in between. An attach or detach can move the interface before that
+        // lock is held, which the locked step reports so the change starts again under the right lock.
+        while (true) {
+            String host;
+            synchronized (attachmentTopologyLock(region)) {
+                host = interfaceHostId(region, networkInterfaceId);
+            }
+            String lockKey = callerAccountId() + "::" + key(region, host != null ? host : networkInterfaceId);
+            boolean applied = withResourceLock(instanceGroupLocks, lockKey,
+                    () -> modifyNetworkInterfaceAttributeLocked(region, networkInterfaceId, change, dryRun, host));
+            if (applied) {
+                return;
+            }
+        }
+    }
+
+    /** False when the interface's host changed from {@code expectedHost}, so the caller starts again. */
+    private boolean modifyNetworkInterfaceAttributeLocked(String region, String networkInterfaceId,
+                                                          NetworkInterfaceAttributeChange change, boolean dryRun,
+                                                          String expectedHost) {
+        List<String> protectedGroups;
+        synchronized (attachmentTopologyLock(region)) {
+            if (!Objects.equals(expectedHost, interfaceHostId(region, networkInterfaceId))) {
+                return false;
+            }
+            protectedGroups = validateNetworkInterfaceAttributeChange(region, networkInterfaceId, change).stream()
+                    .map(group -> callerAccountId() + "::" + key(region, group.getGroupId())).toList();
+            if (dryRun) {
+                throw dryRunOperation();
+            }
+            protectedGroups.forEach(group -> pendingSecurityGroupAssignments.merge(group, 1, Integer::sum));
+        }
+
+        try {
+            if (!change.groupIds().isEmpty() && securityGroupEnforcementEnabled() && !config.services().ec2().mock()) {
+                List<SecurityGroup> current = securityGroups.scan(k -> k.startsWith(region + "::"));
+                Map<String, SecurityGroup> byId = current.stream().collect(Collectors.toMap(
+                        SecurityGroup::getGroupId, Function.identity()));
+                containerManager.updateSecurityGroups(networkInterfaceId, new HashSet<>(change.groupIds()), byId,
+                        policyPrefixLists(region, current));
+            }
+            Instance primaryHost;
+            synchronized (attachmentTopologyLock(region)) {
+                if (!Objects.equals(expectedHost, interfaceHostId(region, networkInterfaceId))) {
+                    return false;
+                }
+                List<GroupIdentifier> identifiers =
+                        validateNetworkInterfaceAttributeChange(region, networkInterfaceId, change);
+                primaryHost = applyNetworkInterfaceAttributeChange(region, networkInterfaceId, change, identifiers);
+            }
+            // The instance's groups changed, so the ports they publish change too, as after ModifyInstanceAttribute.
+            if (primaryHost != null && config.services().ec2().publishSecurityGroupPorts()
+                    && !config.services().ec2().mock() && primaryHost.getDockerContainerId() != null
+                    && primaryHost.getState() != null && "running".equals(primaryHost.getState().getName())) {
+                portForwardManager.reconcile(primaryHost, desiredPublishedPorts(region, primaryHost));
+            }
+            return true;
+        } finally {
+            synchronized (attachmentTopologyLock(region)) {
+                protectedGroups.forEach(group -> pendingSecurityGroupAssignments.computeIfPresent(
+                        group, (ignored, count) -> count == 1 ? null : count - 1));
+            }
+        }
+    }
+
+    /**
+     * Checks the interface exists and the change fits it, and returns the groups it names. Run in the critical
+     * section that validates the change and again in the one that stores it, so nothing it checked can have moved.
+     */
+    private List<GroupIdentifier> validateNetworkInterfaceAttributeChange(String region, String networkInterfaceId,
+                                                                          NetworkInterfaceAttributeChange change) {
+        NetworkInterface stored = networkInterfaces.get(key(region, networkInterfaceId))
+                .map(ni -> releaseIfHostIsGone(region, ni)).orElse(null);
+        Instance host = interfaceHost(region, networkInterfaceId).orElse(null);
+        InstanceNetworkInterface copy = host == null ? null : instanceCopy(host, networkInterfaceId);
+        if (stored == null && copy == null) {
+            throw new AwsException("InvalidNetworkInterfaceID.NotFound",
+                    "The network interface ID '" + networkInterfaceId + "' does not exist", 400);
+        }
+        String vpcId = stored != null ? stored.getVpcId() : copy.getVpcId();
+        List<GroupIdentifier> identifiers = new ArrayList<>();
+        for (String groupId : change.groupIds()) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            if (!Objects.equals(vpcId, sg.getVpcId())) {
+                throw new AwsException("InvalidGroup.NotFound",
+                        "Security group " + groupId + " does not belong to the network interface VPC", 400);
+            }
+            identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+        }
+        if (change.deleteOnTermination() != null) {
+            String attachmentId = copy != null ? copy.getAttachmentId()
+                    : stored.getAttachment() != null ? stored.getAttachment().getAttachmentId() : null;
+            if (attachmentId == null || !attachmentId.equals(change.attachmentId())) {
+                throw new AwsException("InvalidAttachmentID.NotFound",
+                        "The attachment ID '" + change.attachmentId() + "' does not exist", 400);
+            }
+        }
+        return identifiers;
+    }
+
+    /** Stores the change; returns the instance whose own groups it changed, or null. */
+    private Instance applyNetworkInterfaceAttributeChange(String region, String networkInterfaceId,
+                                                          NetworkInterfaceAttributeChange change,
+                                                          List<GroupIdentifier> identifiers) {
+        NetworkInterface stored = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+        if (stored != null) {
+            if (!identifiers.isEmpty()) {
+                stored.setGroups(new ArrayList<>(identifiers));
+            }
+            if (change.description() != null) {
+                stored.setDescription(change.description());
+            }
+            if (change.sourceDestCheck() != null) {
+                stored.setSourceDestCheck(change.sourceDestCheck());
+            }
+            networkInterfaces.put(key(region, networkInterfaceId), stored);
+        }
+        Instance host = interfaceHost(region, networkInterfaceId).orElse(null);
+        InstanceNetworkInterface copy = host == null ? null : instanceCopy(host, networkInterfaceId);
+        if (copy == null) {
+            return null;
+        }
+        boolean primary = copy.getDeviceIndex() == 0;
+        if (!identifiers.isEmpty()) {
+            copy.setGroups(new ArrayList<>(identifiers));
+            if (primary) {
+                host.setSecurityGroups(new ArrayList<>(identifiers));
+            }
+        }
+        if (change.description() != null) {
+            copy.setDescription(change.description());
+        }
+        if (change.sourceDestCheck() != null) {
+            copy.setSourceDestCheck(change.sourceDestCheck());
+            if (primary) {
+                host.setSourceDestCheck(change.sourceDestCheck());
+            }
+        }
+        if (change.deleteOnTermination() != null) {
+            setDeleteOnTermination(region, host, copy, change.deleteOnTermination());
+        }
+        instances.put(key(region, host.getInstanceId()), host);
+        return primary && !identifiers.isEmpty() ? host : null;
+    }
+
+    private String interfaceHostId(String region, String networkInterfaceId) {
+        return interfaceHost(region, networkInterfaceId).map(Instance::getInstanceId).orElse(null);
+    }
+
+    /** The instance an interface is attached to: the one its standalone record names, or the one launched with it. */
+    private Optional<Instance> interfaceHost(String region, String networkInterfaceId) {
+        String attached = instanceAttachedTo(region, networkInterfaceId);
+        if (attached != null) {
+            return instances.get(key(region, attached));
+        }
+        // A terminated instance's launch interfaces are gone with it, as describeNetworkInterfaces reports them.
+        return instances.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(inst -> inst.getState() == null || !"terminated".equals(inst.getState().getName()))
+                .filter(inst -> instanceCopy(inst, networkInterfaceId) != null)
+                .findFirst();
+    }
+
+    private static InstanceNetworkInterface instanceCopy(Instance inst, String networkInterfaceId) {
+        if (inst.getNetworkInterfaces() == null) {
+            return null;
+        }
+        return inst.getNetworkInterfaces().stream()
+                .filter(eni -> networkInterfaceId.equals(eni.getNetworkInterfaceId()))
+                .findFirst().orElse(null);
     }
 
     /**
@@ -16281,6 +16488,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public NetworkInterfaceAttachment attachNetworkInterface(String region, String networkInterfaceId,
                                                               String instanceId, int deviceIndex) {
+        // Under the topology lock, so the standalone record and the instance's copy change together for anything
+        // that reads both, ModifyNetworkInterfaceAttribute among them.
+        synchronized (attachmentTopologyLock(region)) {
+            return attachNetworkInterfaceLocked(region, networkInterfaceId, instanceId, deviceIndex);
+        }
+    }
+
+    private NetworkInterfaceAttachment attachNetworkInterfaceLocked(String region, String networkInterfaceId,
+                                                                    String instanceId, int deviceIndex) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
         if (ni.getAttachment() != null) {
             throw new AwsException("InvalidNetworkInterface.InUse",
@@ -16338,6 +16554,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (attachmentId == null || attachmentId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter AttachmentId", 400);
         }
+        // As attaching does: the standalone record and the instance's copy change together.
+        synchronized (attachmentTopologyLock(region)) {
+            return detachNetworkInterfaceLocked(region, attachmentId);
+        }
+    }
+
+    private NetworkInterfaceAttachment detachNetworkInterfaceLocked(String region, String attachmentId) {
         NetworkInterface ni = networkInterfaces.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(n -> n.getAttachment() != null && attachmentId.equals(n.getAttachment().getAttachmentId()))
                 .findFirst()

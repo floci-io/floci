@@ -43,6 +43,13 @@ public class Ec2QueryHandler {
             .withZone(ZoneOffset.UTC);
 
     /** ReplaceRoute targets AWS accepts that a stored {@code Route} cannot represent here. */
+    /**
+     * ModifyNetworkInterfaceAttribute members Floci does not apply, as their query names prefix them. Each is refused,
+     * as ReplaceRoute refuses a target it cannot store, rather than answering true with nothing changed.
+     */
+    private static final List<String> UNAPPLIED_INTERFACE_ATTRIBUTES = List.of("EnablePrimaryIpv6",
+            "EnaSrdSpecification", "ConnectionTrackingSpecification", "AssociatePublicIpAddress", "AssociatedSubnetId",
+            "Attachment.DefaultEnaQueueCount", "Attachment.EnaQueueCount");
     private static final List<String> UNSUPPORTED_ROUTE_TARGETS = List.of(
             "CarrierGatewayId", "CoreNetworkArn", "EgressOnlyInternetGatewayId",
             "LocalGatewayId", "OdbNetworkArn",
@@ -350,6 +357,7 @@ public class Ec2QueryHandler {
                 case "DeleteNetworkInterface" -> handleDeleteNetworkInterface(params, region);
                 case "AttachNetworkInterface" -> handleAttachNetworkInterface(params, region);
                 case "DetachNetworkInterface" -> handleDetachNetworkInterface(params, region);
+                case "ModifyNetworkInterfaceAttribute" -> handleModifyNetworkInterfaceAttribute(params, region);
                 // Volumes
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
@@ -1721,8 +1729,7 @@ public class Ec2QueryHandler {
             groupIds.add(groupId);
         }
         if (dryRun(p)) {
-            service.checkInstanceAttributeChange(region, instanceId, userDataEncoded != null, attrName != null,
-                    groupIds);
+            service.checkInstanceAttributeChange(region, instanceId, userDataEncoded != null, attrName, groupIds);
             throw Ec2Service.dryRunOperation();
         }
         if (userDataEncoded != null) {
@@ -5571,6 +5578,30 @@ public class Ec2QueryHandler {
         boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
         service.detachNetworkInterface(region, attachmentId, force);
         return booleanResponse("DetachNetworkInterface");
+    }
+
+    private Response handleModifyNetworkInterfaceAttribute(MultivaluedMap<String, String> p, String region) {
+        String networkInterfaceId = p.getFirst("NetworkInterfaceId");
+        if (networkInterfaceId == null || networkInterfaceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter NetworkInterfaceId",
+                    400);
+        }
+        for (String member : UNAPPLIED_INTERFACE_ATTRIBUTES) {
+            if (p.keySet().stream().anyMatch(name -> name.equals(member) || name.startsWith(member + "."))) {
+                throw new AwsException("UnsupportedOperation",
+                        "ModifyNetworkInterfaceAttribute with " + member + " is not supported.", 400);
+            }
+        }
+        // The SDKs and the CLI send the group list as SecurityGroupId.N: botocore's Groups member carries that
+        // locationName, and the EC2 protocol serializes a list by it.
+        Ec2Service.NetworkInterfaceAttributeChange change = new Ec2Service.NetworkInterfaceAttributeChange(
+                getList(p, "SecurityGroupId"),
+                p.getFirst("Description.Value"),
+                parseOptionalBoolean(p.getFirst("SourceDestCheck.Value"), "SourceDestCheck"),
+                p.getFirst("Attachment.AttachmentId"),
+                parseOptionalBoolean(p.getFirst("Attachment.DeleteOnTermination"), "Attachment.DeleteOnTermination"));
+        service.modifyNetworkInterfaceAttribute(region, networkInterfaceId, change, dryRun(p));
+        return booleanResponse("ModifyNetworkInterfaceAttribute");
     }
 
     // ─── XML fragment builders ────────────────────────────────────────────────
