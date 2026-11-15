@@ -37,11 +37,7 @@ class SesConfigurationSetSnsDestinationTest {
         publisher = mock(SesEventPublisher.class);
         when(publisher.eventDestinationTopicAccess(any(), any(), any(), any())).thenReturn(TopicAccess.NOT_FOUND);
         when(publisher.eventDestinationTopicAccess(TOPIC, CS, ACCOUNT_ID, REGION)).thenReturn(TopicAccess.PUBLISHABLE);
-        service = new SesConfigurationSetService(new InMemoryStorage<>(), publisher,
-                new RegionResolver(REGION, ACCOUNT_ID));
-        ConfigurationSet configurationSet = new ConfigurationSet();
-        configurationSet.setName(CS);
-        service.create(configurationSet, REGION);
+        serviceWithConfigurationSet(new RegionResolver(REGION, ACCOUNT_ID), REGION);
     }
 
     @Test
@@ -120,11 +116,7 @@ class SesConfigurationSetSnsDestinationTest {
         String region = "local-region-1";
         String topic = "arn:aws-cn:sns:local-region-1:000000000000:events";
         when(publisher.eventDestinationTopicAccess(topic, CS, ACCOUNT_ID, region)).thenReturn(TopicAccess.PUBLISHABLE);
-        service = new SesConfigurationSetService(new InMemoryStorage<>(), publisher,
-                new RegionResolver("cn-north-1", ACCOUNT_ID, "aws-cn"));
-        ConfigurationSet configurationSet = new ConfigurationSet();
-        configurationSet.setName(CS);
-        service.create(configurationSet, region);
+        serviceWithConfigurationSet(new RegionResolver("cn-north-1", ACCOUNT_ID, "aws-cn"), region);
 
         service.createEventDestination(CS, "to-sns", destination(topic), ACCOUNT_ID, region, false);
 
@@ -203,6 +195,13 @@ class SesConfigurationSetSnsDestinationTest {
 
         assertEquals("SNS topic <" + OTHER_TOPIC + "> not found.", e.getMessage());
         assertEquals(TOPIC, storedTopic());
+    }
+
+    private void serviceWithConfigurationSet(RegionResolver regionResolver, String region) {
+        service = new SesConfigurationSetService(new InMemoryStorage<>(), publisher, regionResolver);
+        ConfigurationSet configurationSet = new ConfigurationSet();
+        configurationSet.setName(CS);
+        service.create(configurationSet, region);
     }
 
     private void assertRefused(String message, String topicArn) {
