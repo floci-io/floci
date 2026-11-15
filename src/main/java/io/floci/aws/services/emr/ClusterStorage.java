@@ -1,11 +1,13 @@
 package io.floci.aws.services.emr;
 
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -15,6 +17,9 @@ import java.util.function.Supplier;
  * {@link EmrClusterStorage} is the Docker implementation, and a test supplies its own.
  */
 public interface ClusterStorage {
+
+    /** The name {@link #identify} knows a cluster's primary node by: the first instance of its group numbered 0. */
+    String PRIMARY_NODE = "0-1";
 
     /** The volumes holding {@code clusterId}'s storage, whether or not they are there yet. */
     SparkJobRunner.Storage volumes(String clusterId);
@@ -28,6 +33,44 @@ public interface ClusterStorage {
      * would serve every interface of the namespace.
      */
     boolean ownNetwork(String dockerNetwork);
+
+    /**
+     * Whether a cluster whose steps run on {@code dockerNetwork} has an instance metadata relay on a network of its
+     * own, which {@link #metadataNetwork} makes.
+     */
+    default boolean metadataServed(String dockerNetwork) {
+        return false;
+    }
+
+    /**
+     * Cluster {@code clusterId}'s network, its own, made when missing, with its instance metadata relay running there in
+     * {@code relayImage}, which the cluster's containers join to read their nodes' metadata at 169.254.169.254; null
+     * where its steps share a namespace or have no network, or no relay serves the metadata.
+     */
+    default String metadataNetwork(String clusterId, String accountId, String region, String relayImage,
+                                   String dockerNetwork) {
+        return null;
+    }
+
+    /**
+     * A link-local address on cluster {@code clusterId}'s network, which {@link #metadataNetwork} made, for a container
+     * that is {@code instance}, whose metadata its relay answers until the address is released; null where none is.
+     */
+    default String metadataAddress(String clusterId, Instance instance) {
+        return null;
+    }
+
+    /** The container given {@code address} has gone, and its metadata with it. */
+    default void releaseMetadataAddress(String address) {
+    }
+
+    /**
+     * How cluster {@code clusterId}'s nodes are known as EC2 instances, by node name: {@link #PRIMARY_NODE} its primary
+     * node, {@code <group>-<n>} each core or task node, as {@link Node#id} has it; each node's container started
+     * from then on is given its metadata.
+     */
+    default void identify(String clusterId, Function<String, Instance> nodes) {
+    }
 
     /**
      * Starts {@code clusterId}'s HDFS, a NameNode and a DataNode keeping their data in a volume of their own, and,

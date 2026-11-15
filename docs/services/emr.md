@@ -519,6 +519,20 @@ holding the driver and its executors, or a command or a script. The cluster itse
 * **Credentials**: the container gets a session for the step's `ExecutionRoleArn`, or else for the role
   of the cluster's `JobFlowRole` instance profile, when IAM knows it and the profile holds one role,
   and otherwise the account's placeholder credentials, with `AWS_ENDPOINT_URL` pointing at Floci.
+* **Instance metadata**: each node of an EMR cluster is an EC2 instance, so any process on it, a bootstrap action, a
+  step's command or a Spark executor YARN runs, reads its instance metadata at `http://169.254.169.254`, IMDSv1 and
+  IMDSv2. On a cluster with a Docker network of its own (see **Storage**), a relay container on that network holds
+  that address, as ECS's credentials endpoint is held, and each of the cluster's containers gets a link-local address
+  of its own there, so no container needs privileges; the relay forwards to Floci's EC2 metadata server, which answers
+  each as the instance it is: the bootstrap actions and each step's container as the primary node, each core or task
+  node's container as that node. Each answers with the instance id, type, private address and name and public name
+  `ListInstances` gives it, the cluster's account, the cluster's availability zone, which `DescribeCluster`'s
+  `Ec2InstanceAttributes` gives as `Ec2AvailabilityZone` (the one `RunJobFlow`'s `Instances.Placement` names, else the
+  Region's first), and the `JobFlowRole` instance profile, whose role's credentials `iam/security-credentials` gives
+  when IAM holds the profile with one role. Only the cluster's own containers reach its relay, and the metadata server
+  trusts the caller the relay names only from the relays Floci started. A relay that cannot start fails the step that
+  would read it, or ends the cluster as bootstrap actions that could not run do. Where the steps share a namespace or
+  have none, there is no relay.
 * **Output**: the driver's output goes to Floci's log, prefixed `emr:<stepId>`. With a `LogUri` on the
   cluster, its standard output and error also go to Floci's S3 once the step ends, gzipped, as
   `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/steps/<step-id>/`, the step log folder of the

@@ -18,6 +18,7 @@ import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.model.SessionCreds;
@@ -49,6 +50,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -388,6 +390,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     private final LongSupplier nanoTime;
     // The subnet of each cluster's own network, once read (see clusterSubnet).
     private final Map<String, String> subnets = new ConcurrentHashMap<>();
+    // The clusters' instance metadata relays; none in a test that has no use for them.
+    private final EmrMetadataRelays relays;
+    // How each cluster's nodes are known as EC2 instances, by node name (see ClusterStorage.identify).
+    private final Map<String, Function<String, Instance>> identities = new ConcurrentHashMap<>();
+    // The link-local address each node's container this process started was given, by container name.
+    private final Map<String, String> nodeAddresses = new ConcurrentHashMap<>();
     // How many teardowns, by a reset or a shutdown, have run: a step waiting for its cluster's HDFS through one stops.
     private final AtomicLong teardowns = new AtomicLong();
 
@@ -395,11 +403,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     public EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
                              LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
                              CurrentContainerNetworkResolver currentContainer, EmulatorConfig config,
-                             S3Service s3Service) {
+                             S3Service s3Service, EmrMetadataRelays relays) {
         this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, s3Service,
                 HDFS_START_TIMEOUT, System::nanoTime,
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-decommission-", 0).factory()),
-                DECOMMISSION_POLL);
+                DECOMMISSION_POLL, relays);
     }
 
     EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
@@ -415,6 +423,16 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                       CurrentContainerNetworkResolver currentContainer, EmulatorConfig config, S3Service s3Service,
                       Duration hdfsStartTimeout, LongSupplier nanoTime, Executor decommissions,
                       Duration decommissionPoll) {
+        this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, s3Service,
+                hdfsStartTimeout, nanoTime, decommissions, decommissionPoll, null);
+    }
+
+    EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
+                      LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
+                      CurrentContainerNetworkResolver currentContainer, EmulatorConfig config, S3Service s3Service,
+                      Duration hdfsStartTimeout, LongSupplier nanoTime, Executor decommissions,
+                      Duration decommissionPoll, EmrMetadataRelays relays) {
+        this.relays = relays;
         this.decommissions = decommissions;
         this.decommissionPoll = decommissionPoll;
         this.lifecycleManager = lifecycleManager;
@@ -554,6 +572,80 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     }
 
     @Override
+    public boolean metadataServed(String dockerNetwork) {
+        String network = network(dockerNetwork);
+        return relays != null && network != null && !NO_NETWORK.equals(network) && !sharesNamespace(network);
+    }
+
+    @Override
+    public String metadataNetwork(String clusterId, String accountId, String region, String relayImage,
+                                  String dockerNetwork) {
+        if (!metadataServed(dockerNetwork)) {
+            return null;
+        }
+        String name = hdfsName(clusterId);
+        lifecycleManager.ensureNetwork(name, labels(clusterId, accountId, region, HDFS_COMPONENT));
+        relays.start(clusterId, accountId, region, name, relayImage, metadataTarget(name));
+        return name;
+    }
+
+    @Override
+    public String metadataAddress(String clusterId, Instance instance) {
+        return relays != null ? relays.give(clusterId, instance) : null;
+    }
+
+    @Override
+    public void identify(String clusterId, Function<String, Instance> nodes) {
+        identities.put(clusterId, nodes);
+    }
+
+    // The address the container of a cluster's node is given on its cluster's network, where its relay answers it as
+    // that node, the one it had before released; null where no relay serves the cluster or the node is not known.
+    private String nodeAddress(String clusterId, String containerName, String node) {
+        releaseNodeAddress(containerName);
+        Function<String, Instance> known = identities.get(clusterId);
+        Instance instance = served(clusterId) && known != null ? known.apply(node) : null;
+        if (instance == null) {
+            return null;
+        }
+        String address = relays.give(clusterId, instance);
+        nodeAddresses.put(containerName, address);
+        return address;
+    }
+
+    private void releaseNodeAddress(String containerName) {
+        String address = nodeAddresses.remove(containerName);
+        if (address != null && relays != null) {
+            relays.release(address);
+        }
+    }
+
+    // Whether a node's container found running can serve its metadata: on a network a relay serves, one this process
+    // did not give an address, an earlier Floci's, has one this process does not know, which it could give another
+    // container, so it starts again. One in a namespace the steps share, which no relay serves, has none to know.
+    private boolean metadataKnown(String clusterId, String containerName) {
+        return !served(clusterId) || !identities.containsKey(clusterId) || nodeAddresses.containsKey(containerName);
+    }
+
+    // Whether a relay serves cluster clusterId's network.
+    private boolean served(String clusterId) {
+        return relays != null && relays.serves(clusterId);
+    }
+
+    @Override
+    public void releaseMetadataAddress(String address) {
+        if (relays != null) {
+            relays.release(address);
+        }
+    }
+
+    // Where the metadata relay on a cluster's network reaches Floci: as FLOCI_ALIAS, Floci's container joining the
+    // network, as for the metastore, else Floci on the host at the host's address.
+    private String metadataTarget(String network) {
+        return attachFloci(network) ? FLOCI_ALIAS : URI.create(awsEnv.flociEndpoint(false)).getHost();
+    }
+
+    @Override
     public boolean ownNetwork(String dockerNetwork) {
         String network = network(dockerNetwork);
         return !NO_NETWORK.equals(network) && !sharesNamespace(network);
@@ -598,6 +690,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                         && inStepsNamespace(name, shared ? network : name,
                                 shared || hiveMetastore != null || clusterSubnet(clusterId) == null ? null : network,
                                 imageId)
+                        && metadataKnown(clusterId, name)
                         && (shared || hiveMetastore == null || metastoreCurrent(name));
                 // Known before it starts, so a teardown while it starts removes it.
                 running.add(name);
@@ -675,7 +768,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (container == null || !"running".equals(container.getState())
                     || !request.imageId().equals(container.getImageId())
                     || !joins(container.getNetworkSettings() != null ? container.getNetworkSettings().getNetworks()
-                            : null, clusterSubnet(clusterId) != null ? request.joinedNetwork() : null)) {
+                            : null, clusterSubnet(clusterId) != null ? request.joinedNetwork() : null)
+                    || !metadataKnown(clusterId, name)) {
                 startNode(request, node.host(), node.core(), name, teardown);
             } else {
                 runningNodes.add(name);
@@ -757,6 +851,10 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         String subnet = request.joinedNetwork() != null ? clusterSubnet(clusterId) : null;
         if (subnet != null) {
             spec.withJoinedNetwork(request.joinedNetwork()).withEmbeddedDns().withEnv(SUBNET_VARIABLE, subnet);
+        }
+        String address = nodeAddress(clusterId, name, name.substring(name.lastIndexOf("-node-") + "-node-".length()));
+        if (address != null) {
+            spec.withLinkLocalIp(address);
         }
         if (core) {
             spec.withEnv(NODE_CORE_VARIABLE, "1");
@@ -998,6 +1096,8 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             LOG.warnv(e, "Could not remove the EMR node container {0}: {1}", name, e.getMessage());
             return false;
         }
+        // Its address goes only now, so no other container is given it while this one is there.
+        releaseNodeAddress(name);
         runningNodes.remove(name);
         archivedLogs.remove(name);
         return !withVolume || lifecycleManager.removeVolume(name);
@@ -1162,6 +1262,10 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             String subnet = network != null && hiveMetastore == null ? clusterSubnet(clusterId) : null;
             if (subnet != null) {
                 spec.withJoinedNetwork(network).withEmbeddedDns().withEnv(SUBNET_VARIABLE, subnet);
+            }
+            String address = nodeAddress(clusterId, name, PRIMARY_NODE);
+            if (address != null) {
+                spec.withLinkLocalIp(address);
             }
         }
         if (yarn != null) {
@@ -1395,13 +1499,18 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             nodesGone = false;
         }
         boolean containerGone = removeKnown(hdfsName(clusterId));
+        // Its relay goes, trusted no more, and every address given on its network with it.
+        boolean relayGone = relays == null || relays.stop(clusterId);
+        identities.remove(clusterId);
+        String nodes = ContainerStorageHelper.dockerName(config, SERVICE + "-" + clusterId + "-node-");
+        nodeAddresses.keySet().removeIf(name -> name.equals(hdfsName(clusterId)) || name.startsWith(nodes));
         SparkJobRunner.Storage storage = volumes(clusterId);
         // Each is tried, so one Docker refused does not keep the others.
         boolean networkGone = lifecycleManager.removeNetwork(hdfsName(clusterId));
         boolean homeGone = lifecycleManager.removeVolume(storage.home());
         boolean mntGone = lifecycleManager.removeVolume(storage.mnt());
         return lifecycleManager.removeVolume(hdfsName(clusterId)) && mntGone && homeGone && networkGone
-                && containerGone && nodesGone;
+                && containerGone && nodesGone && relayGone;
     }
 
     /**
@@ -1434,6 +1543,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             LOG.warnv(e, "Could not remove the HDFS container {0}: {1}", name, e.getMessage());
             return false;
         }
+        releaseNodeAddress(name);
         releaseSession(name);
         if (!detachFloci(name)) {
             return false;
@@ -1485,6 +1595,21 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             }
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not remove the HDFS of EMR clusters that have ended: {0}", e.getMessage());
+        }
+        // The instance metadata relays an earlier process left, whose networks they would keep: the next bootstrap or step
+        // of a cluster still up starts another.
+        try {
+            for (Container container : lifecycleManager.getDockerClient().listContainersCmd().withShowAll(true)
+                    .withLabelFilter(Map.of(ContainerStorageHelper.COMPONENT_LABEL, EmrMetadataRelays.COMPONENT,
+                            ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
+                    .exec()) {
+                Map<String, String> labels = container.getLabels() != null ? container.getLabels() : Map.of();
+                if (EmrMetadataRelays.COMPONENT.equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))) {
+                    lifecycleManager.stopAndRemove(container.getId(), null, 0);
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the instance metadata relays an earlier Floci left: {0}", e.getMessage());
         }
         try {
             for (Network network : lifecycleManager.getDockerClient().listNetworksCmd()

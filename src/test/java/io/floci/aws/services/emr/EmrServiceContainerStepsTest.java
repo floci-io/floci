@@ -6,6 +6,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrErrorDetail;
 import io.floci.aws.services.emr.model.EmrInstanceFleet;
@@ -687,6 +688,79 @@ class EmrServiceContainerStepsTest {
 
         // As EMR's spark-submit takes them: a cluster-mode driver runs on the cluster's YARN.
         assertEquals(List.of("--master", "yarn", "--deploy-mode", "cluster", REPORT), runner.jobs.get(0).application());
+    }
+
+    @Test
+    void aStepReadsItsPrimaryNodesInstanceMetadataAtAnAddressItsClusterGivesIt() {
+        fixture.clusterStorage.metadata = true;
+        EmrCluster requested = cluster("metadata", true, sparkStep("report", "CONTINUE"));
+        requested.setJobFlowRole("EMR_EC2_DefaultRole");
+        EmrInstanceGroup primaryGroup = new EmrInstanceGroup();
+        primaryGroup.setInstanceGroupType("MASTER");
+        primaryGroup.setInstanceType("m5.xlarge");
+        primaryGroup.setRequestedInstanceCount(1);
+        requested.setInstanceGroups(new ArrayList<>(List.of(primaryGroup)));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // The relay runs in the step's image, and the step's container is given an address on the cluster's network.
+        assertEquals(List.of(List.of(cluster.getId(), "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest")),
+                fixture.clusterStorage.relays);
+        assertEquals("169.254.0.1", runner.jobs.get(0).storage().metadataAddress());
+        // Answered as the primary node, as ListInstances and DescribeCluster give it.
+        Instance primary = fixture.clusterStorage.given.get(0);
+        assertEquals("i-00000000000000001", primary.getInstanceId());
+        assertEquals("m5.xlarge", primary.getInstanceType());
+        assertEquals("10.0.0.1", primary.getPrivateIpAddress());
+        assertEquals("ip-10-0-0-1.ec2.internal", primary.getPrivateDnsName());
+        assertEquals("us-east-1a", primary.getPlacement().getAvailabilityZone());
+        assertEquals("arn:aws:iam::000000000000:instance-profile/EMR_EC2_DefaultRole",
+                primary.getIamInstanceProfileArn());
+        // Released once the step ended, and its nodes known as the cluster numbers them.
+        assertEquals(List.of("169.254.0.1"), fixture.clusterStorage.released);
+        assertEquals("i-00000000000000001",
+                fixture.clusterStorage.identities.get(cluster.getId()).apply("0-1").getInstanceId());
+    }
+
+    @Test
+    void aStepOnAClusterWithoutARelayHasNoMetadataAddress() {
+        service.runJobFlow(cluster("no-metadata", true, sparkStep("report", "CONTINUE")), REGION);
+
+        fixture.runStepThread();
+
+        assertNull(runner.jobs.get(0).storage().metadataAddress());
+        assertEquals(List.of(), fixture.clusterStorage.given);
+    }
+
+    @Test
+    void aNodeIsAnInstanceOfItsClustersAccountWithThePublicNameListInstancesGivesIt() {
+        EmrCluster requested = cluster("other-account", true);
+        requested.setJobFlowRole("EMR_EC2_DefaultRole");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        Instance primary = service.nodeInstance(cluster, "111111111111", 0, 1);
+
+        // Its owner is its cluster's account, which its identity document and its credentials name.
+        assertEquals("111111111111", primary.getOwnerId());
+        assertEquals("arn:aws:iam::111111111111:instance-profile/EMR_EC2_DefaultRole",
+                primary.getIamInstanceProfileArn());
+        assertEquals("ec2-203-0-113-1.compute-1.amazonaws.com", primary.getPublicDnsName());
+    }
+
+    @Test
+    void aRelayThatCannotStartFailsTheStepThatWouldReadIt() {
+        fixture.clusterStorage.metadata = true;
+        fixture.clusterStorage.metadataFailure = new IllegalStateException("The relay did not listen");
+        EmrCluster cluster = service.runJobFlow(cluster("no-relay", true, sparkStep("report", "CONTINUE")), REGION);
+
+        fixture.runStepThread();
+
+        EmrStep failed = service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId());
+        assertEquals("FAILED", failed.getState());
+        assertEquals("The step could not start: The instance metadata of EMR cluster " + cluster.getId()
+                + " could not start: The relay did not listen", failed.getFailureMessage());
+        assertEquals(List.of(), runner.jobs);
     }
 
     @Test
@@ -1481,6 +1555,55 @@ class EmrServiceContainerStepsTest {
         // Made once, for the bootstrap: the image it left holds it. Released once the bootstrap ended.
         assertEquals(1, bootstrapping.releaseImages.asked.size());
         assertEquals(List.of(EmrServiceFixture.RecordingReleaseImages.IMAGE), bootstrapping.releaseImages.released);
+    }
+
+    @Test
+    void aBootstrapRunsOnItsClustersNetworkAtAnAddressItsRelayAnswersAsThePrimaryNode() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.clusterStorage.metadata = true;
+        EmrCluster cluster = bootstrapping.service.runJobFlow(bootstrapped(cluster("bootstrapped-metadata", true)),
+                REGION);
+
+        bootstrapping.runStepThread();
+
+        BootstrapRunner.Bootstrap ran = bootstrap.bootstraps.get(0);
+        assertEquals(EmrServiceFixture.RecordingStorage.HDFS_NETWORK, ran.metadataNetwork());
+        assertEquals("169.254.0.1", ran.metadataAddress());
+        assertEquals("i-00000000000000001", bootstrapping.clusterStorage.given.get(0).getInstanceId());
+        assertEquals(List.of("169.254.0.1"), bootstrapping.clusterStorage.released);
+        assertEquals(cluster.getId(), bootstrapping.clusterStorage.relays.get(0).get(0));
+    }
+
+    @Test
+    void aClusterWhoseBootstrapAloneHadAMetadataRelayRemovesItAsItEnds() {
+        bootstrap.outcome = BootstrapRunner.Outcome.actionFailed(1, 1);
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.clusterStorage.metadata = true;
+        EmrCluster cluster = bootstrapping.service.runJobFlow(bootstrapped(cluster("bootstrap-only", true)), REGION);
+
+        bootstrapping.runStepThread();
+        assertEquals("TERMINATED_WITH_ERRORS", bootstrapping.service.describeCluster(cluster.getId()).getState());
+        bootstrapping.runStepThread();
+
+        // Its network and relay go as its storage does, though no step of it ran.
+        assertEquals(List.of(cluster.getId()), bootstrapping.clusterStorage.removed);
+    }
+
+    @Test
+    void aBootstrapWhoseRelayCannotStartEndsItsClusterWhoseNetworkThenGoes() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.clusterStorage.metadata = true;
+        bootstrapping.clusterStorage.metadataFailure = new IllegalStateException("The relay did not listen");
+        EmrCluster cluster = bootstrapping.service.runJobFlow(bootstrapped(cluster("no-relay", true)), REGION);
+
+        bootstrapping.runStepThread();
+
+        EmrCluster ended = bootstrapping.service.describeCluster(cluster.getId());
+        assertEquals("TERMINATED_WITH_ERRORS", ended.getState());
+        assertEquals("INTERNAL_ERROR", ended.getStateChangeReasonCode());
+        assertEquals(List.of(), bootstrap.bootstraps);
+        bootstrapping.runStepThread();
+        assertEquals(List.of(cluster.getId()), bootstrapping.clusterStorage.removed);
     }
 
     @Test

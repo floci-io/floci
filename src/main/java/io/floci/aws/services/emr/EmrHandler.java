@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsJson11Controller;
@@ -161,7 +160,7 @@ public class EmrHandler {
         cluster.setKeepJobFlowAliveWhenNoSteps(instances.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
         cluster.setTerminationProtected(instances.path("TerminationProtected").asBoolean(false));
         cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
-        cluster.setEc2Attributes(buildEc2Attributes(instances));
+        cluster.setEc2Attributes(buildEc2Attributes(instances, region));
         cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
         cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
         cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
@@ -939,7 +938,7 @@ public class EmrHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
-        node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
+        node.put("PublicDnsName", EmrService.publicDnsName(index, cluster.getRegion()));
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
         node.put("PrivateIpAddress", privateIp);
         if (set.groupId() != null) {
@@ -1086,14 +1085,22 @@ public class EmrHandler {
         return fleet;
     }
 
-    private String buildEc2Attributes(JsonNode instances) {
+    // The cluster's EC2 attributes, its availability zone among them: the one Placement names, the first of its
+    // AvailabilityZones, else the Region's first, as its instances' metadata gives it too.
+    private String buildEc2Attributes(JsonNode instances, String region) {
         ObjectNode ec2 = objectMapper.createObjectNode();
+        JsonNode placement = instances.path("Placement");
+        String zone = placement.path("AvailabilityZone").asText("");
+        if (zone.isEmpty()) {
+            zone = placement.path("AvailabilityZones").path(0).asText("");
+        }
+        ec2.put("Ec2AvailabilityZone", zone.isEmpty() ? region + "a" : zone);
         copyText(instances, "Ec2KeyName", ec2, "Ec2KeyName");
         copyText(instances, "Ec2SubnetId", ec2, "Ec2SubnetId");
         copyText(instances, "EmrManagedMasterSecurityGroup", ec2, "EmrManagedMasterSecurityGroup");
         copyText(instances, "EmrManagedSlaveSecurityGroup", ec2, "EmrManagedSlaveSecurityGroup");
         copyText(instances, "ServiceAccessSecurityGroup", ec2, "ServiceAccessSecurityGroup");
-        return ec2.isEmpty() ? null : ec2.toString();
+        return ec2.toString();
     }
 
     private void copyText(JsonNode src, String srcField, ObjectNode dst, String dstField) {

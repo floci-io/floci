@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
@@ -16,11 +17,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -83,6 +87,50 @@ final class EmrServiceFixture {
         final List<ClusterStorage.Yarn> resizes = new ArrayList<>();
         boolean refuse;
         Runnable whileCreating = () -> { };
+        // Whether a cluster's network has an instance metadata relay, as where its steps have a network of Floci's.
+        boolean metadata;
+        // What a relay's start throws, if anything.
+        RuntimeException metadataFailure;
+        // Each relay started: its cluster and image; each instance given an address, by id; each address released.
+        final List<List<String>> relays = new ArrayList<>();
+        final List<Instance> given = new ArrayList<>();
+        final List<String> released = new ArrayList<>();
+        // How each cluster's nodes are known as EC2 instances.
+        final Map<String, Function<String, Instance>> identities = new HashMap<>();
+
+        @Override
+        public boolean metadataServed(String dockerNetwork) {
+            return metadata;
+        }
+
+        @Override
+        public String metadataNetwork(String clusterId, String accountId, String region, String relayImage,
+                                      String dockerNetwork) {
+            if (!metadata) {
+                return null;
+            }
+            relays.add(List.of(clusterId, relayImage));
+            if (metadataFailure != null) {
+                throw metadataFailure;
+            }
+            return HDFS_NETWORK;
+        }
+
+        @Override
+        public String metadataAddress(String clusterId, Instance instance) {
+            given.add(instance);
+            return "169.254.0." + given.size();
+        }
+
+        @Override
+        public void releaseMetadataAddress(String address) {
+            released.add(address);
+        }
+
+        @Override
+        public void identify(String clusterId, Function<String, Instance> nodes) {
+            identities.put(clusterId, nodes);
+        }
 
         @Override
         public SparkJobRunner.Storage volumes(String clusterId) {
