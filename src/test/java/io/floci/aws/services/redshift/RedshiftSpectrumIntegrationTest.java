@@ -17,7 +17,6 @@ import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -35,18 +34,17 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.services.redshift.RedshiftConnections.waitForConnection;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -380,9 +378,7 @@ class RedshiftSpectrumIntegrationTest {
 
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=20&loginTimeout=20";
-        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+        try (Connection connection = waitForConnection(url, "admin", "Secret123");
             Statement setup = connection.createStatement()) {
             setup.execute("CREATE EXTERNAL SCHEMA analytics_ext FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             setup.execute("CREATE EXTERNAL TABLE analytics_ext.events (id INTEGER, name VARCHAR) "
@@ -419,9 +415,7 @@ class RedshiftSpectrumIntegrationTest {
 
         String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
                 + "/dev?socketTimeout=20&loginTimeout=20";
-        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+        try (Connection connection = waitForConnection(url, "admin", "Secret123");
              Statement setup = connection.createStatement()) {
             setup.execute("CREATE EXTERNAL SCHEMA analytics_fetch FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '" + ROLE_ARN + "'");
             setup.execute("CREATE EXTERNAL TABLE analytics_fetch.events (id INTEGER, name VARCHAR) "
@@ -634,9 +628,7 @@ class RedshiftSpectrumIntegrationTest {
                 + "/dev?preferQueryMode=simple&socketTimeout=30";
         String schemaName = "pruning_lake";
 
-        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+        try (Connection connection = waitForConnection(url, "admin", "Secret123");
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
                     + "' IAM_ROLE '" + ROLE_ARN + "'");
@@ -702,10 +694,7 @@ class RedshiftSpectrumIntegrationTest {
         String schemaName = "pruning_ext_lake";
         String selectDayOne = "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = 1";
 
-        try (Connection setup = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(baseUrl + "&preferQueryMode=simple", "admin", "Secret123"),
-                        Objects::nonNull);
+        try (Connection setup = waitForConnection(baseUrl + "&preferQueryMode=simple", "admin", "Secret123");
              Statement statement = setup.createStatement()) {
             statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
                     + "' IAM_ROLE '" + ROLE_ARN + "'");
@@ -800,13 +789,6 @@ class RedshiftSpectrumIntegrationTest {
                 .then().statusCode(200).extract().path("Id");
         assertEquals("FINISHED", RestAssuredJsonUtils.awsAction("RedshiftData", "DescribeStatement",
                 "{\"Id\":\"" + queryId + "\"}").then().statusCode(200).extract().path("Status"));
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String username, String password) throws SQLException {
-        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
-        return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, username, password), Objects::nonNull);
     }
 
     private static long concurrentTotal(Cluster cluster, CountDownLatch ready, CountDownLatch start) throws Exception {
