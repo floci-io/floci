@@ -15724,56 +15724,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     continue;
                 }
                 foundIds.add(eni.getNetworkInterfaceId());
-                NetworkInterface ni = new NetworkInterface();
-                ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
-                ni.setSubnetId(eni.getSubnetId());
-                ni.setVpcId(eni.getVpcId());
-                ni.setDescription(eni.getDescription());
-                ni.setOwnerId(eni.getOwnerId());
-                ni.setStatus(eni.getStatus());
-                ni.setMacAddress(eni.getMacAddress());
-                ni.setPrivateIpAddress(eni.getPrivateIpAddress());
-                ni.setPrivateDnsName(eni.getPrivateDnsName());
-                ni.setSourceDestCheck(eni.isSourceDestCheck());
-                ni.setGroups(new ArrayList<>(eni.getGroups()));
-                // Phase 3: availability zone, tags, interface type
-                if (inst.getPlacement() != null) {
-                    ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
-                }
-                // A network interface's tags are its OWN, never the instance's. AWS tags
-                // exactly the resource types a RunInstances TagSpecification names, so an
-                // interface created for an instance whose specification said
-                // ResourceType=instance carries no tags until something tags the eni- id
-                // itself - and DescribeTags never listed these copied tags either, so
-                // DescribeNetworkInterfaces disagreed with DescribeTags about the same
-                // resource. Read the interface's own entry in the tag store instead:
-                // CreateTags on the eni- id writes it, and so does a RunInstances
-                // TagSpecification with ResourceType=network-interface.
-                Optional<List<Tag>> tagList = tagsOf(safeAccount, region, eni.getNetworkInterfaceId());
-                ni.getTagSet().addAll(tagList.orElse(List.of()));
-
-                NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
-                att.setAttachmentId(eni.getAttachmentId());
-                att.setDeviceIndex(eni.getDeviceIndex());
-                att.setStatus("attached");
-                att.setInstanceId(inst.getInstanceId());
-                att.setInstanceOwnerId(eni.getOwnerId());
-                // Phase 3: attachTime from instance launchTime, deleteOnTermination
-                if (inst.getLaunchTime() != null) {
-                    att.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
-                }
-                att.setDeleteOnTermination(eni.isDeleteOnTermination());
-                ni.setAttachment(att);
-
-                // Phase 3: privateIpAddressesSet - primary IP
-                NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-                primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
-                primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
-                primaryIp.setPrimary(true);
+                NetworkInterface ni = synthesizeImplicitNetworkInterface(inst, eni, region, safeAccount);
                 // Look up EIP association for this instance
                 addressForInstance(inst.getInstanceId()).ifPresent(addr ->
-                        primaryIp.setAssociation(networkInterfaceAssociation(addr, eni.getOwnerId())));
-                ni.getPrivateIpAddresses().add(primaryIp);
+                        ni.getPrivateIpAddresses().getFirst().setAssociation(
+                                networkInterfaceAssociation(addr, eni.getOwnerId())));
 
                 // Phase 4: apply filters
                 if (!matchesFilters(ni, filters, region)) {
@@ -16013,13 +15968,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /**
-     * Deletes a standalone ENI and gives the lease its primary address took back to the VPC
-     * network. A requested primary took no lease, so any it carries is a failed launch's, given
-     * back early as a deleted NAT gateway's is. AWS refuses while it is still attached,
-     * floci-kt9, and equally while a service holds it: {@link #holdNetworkInterfaceForService}
-     * leaves no attachment behind, so the status is what says the interface is spoken for.
-     */
     /** Builds the standalone record describeNetworkInterfaces would otherwise synthesize for an
      *  implicit (launch-created) interface, so a kept (DeleteOnTermination=false) interface is
      *  reported identically whether or not it has been promoted to the standalone store. */
@@ -16040,6 +15988,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (inst.getPlacement() != null) {
             ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
         }
+        // A network interface's tags are its OWN, never the instance's. AWS tags
+        // exactly the resource types a RunInstances TagSpecification names, so an
+        // interface created for an instance whose specification said
+        // ResourceType=instance carries no tags until something tags the eni- id
+        // itself - and DescribeTags never listed these copied tags either, so
+        // DescribeNetworkInterfaces disagreed with DescribeTags about the same
+        // resource. Read the interface's own entry in the tag store instead:
+        // CreateTags on the eni- id writes it, and so does a RunInstances
+        // TagSpecification with ResourceType=network-interface.
         Optional<List<Tag>> tagList = tagsOf(accountId, region, eni.getNetworkInterfaceId());
         ni.getTagSet().addAll(tagList.orElse(List.of()));
         NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
@@ -16090,6 +16047,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         instances.put(key(region, instanceId), inst);
     }
 
+    /**
+     * Deletes a standalone ENI and gives the lease its primary address took back to the VPC
+     * network. A requested primary took no lease, so any it carries is a failed launch's, given
+     * back early as a deleted NAT gateway's is. AWS refuses while it is still attached,
+     * floci-kt9, and equally while a service holds it: {@link #holdNetworkInterfaceForService}
+     * leaves no attachment behind, so the status is what says the interface is spoken for.
+     */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         synchronized (privateIpAllocationLock) {
             NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
