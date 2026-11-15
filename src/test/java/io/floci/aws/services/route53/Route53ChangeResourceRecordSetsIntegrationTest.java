@@ -18,6 +18,8 @@ import static org.hamcrest.Matchers.not;
 class Route53ChangeResourceRecordSetsIntegrationTest {
 
     private static final String XML = "application/xml";
+    private static final String A_RECORDS =
+            "<TTL>300</TTL><ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>";
 
     @Test
     void malformedChangeBatchIsRejectedAsInvalidInput() {
@@ -398,5 +400,61 @@ class Route53ChangeResourceRecordSetsIntegrationTest {
         return Stream.of(
                 Arguments.of("EmptyChanges", emptyChanges),
                 Arguments.of("NoChangeBatch", noChangeBatch));
+    }
+
+    /** IAM reads a record's name from the record set's own {@code Name}, so the change must act on that one too. */
+    @Test
+    void aNameOutsideItsRecordSetIsNotTheRecordsName() {
+        String zoneId = createZone("nested-name.example.com.", "ref-nested-name");
+
+        given().contentType(XML)
+                .body(changeBatch("<Action>CREATE</Action>", "<Name>kept.nested-name.example.com.</Name><Type>A</Type>"
+                        + "<GeoLocation><Name>other.nested-name.example.com.</Name></GeoLocation>" + A_RECORDS))
+                .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(200);
+
+        given().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then().statusCode(200)
+                .body(containsString("kept.nested-name.example.com."))
+                .body(not(containsString("other.nested-name.example.com.")));
+    }
+
+    /** A second copy of an element its change or record set holds once would be a value IAM reads but no change uses. */
+    @ParameterizedTest
+    @MethodSource("repeatedElementCases")
+    void anElementHeldOnceIsRefusedWhenRepeated(String element, String change, String recordSet) {
+        String zoneId = createZone("repeated-" + element.toLowerCase() + ".example.com.", "ref-repeated-" + element);
+
+        given().contentType(XML)
+                .body(changeBatch(change, recordSet))
+                .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+                .body("ErrorResponse.Error.Message", containsString(":" + element + "}"));
+
+        given().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then().statusCode(200)
+                .body(not(containsString("allowed.repeated.example.com.")))
+                .body(not(containsString("other.repeated.example.com.")));
+    }
+
+    private static Stream<Arguments> repeatedElementCases() {
+        String recordSet = "<Name>allowed.repeated.example.com.</Name><Type>A</Type>" + A_RECORDS;
+        return Stream.of(
+                Arguments.of("Name", "<Action>CREATE</Action>", recordSet
+                        + "<Name>other.repeated.example.com.</Name>"),
+                Arguments.of("Action", "<Action>CREATE</Action><Action>DELETE</Action>", recordSet),
+                Arguments.of("ResourceRecordSet", "<Action>CREATE</Action><ResourceRecordSet>"
+                        + "<Name>other.repeated.example.com.</Name><Type>A</Type>" + A_RECORDS
+                        + "</ResourceRecordSet>", recordSet));
+    }
+
+    /** One change, {@code change} holding its elements before the record set, which holds {@code recordSet}. */
+    private static String changeBatch(String change, String recordSet) {
+        return "<ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\">"
+                + "<ChangeBatch><Changes><Change>" + change + "<ResourceRecordSet>" + recordSet
+                + "</ResourceRecordSet></Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>";
     }
 }

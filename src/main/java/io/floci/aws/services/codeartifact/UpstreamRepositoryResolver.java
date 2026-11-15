@@ -4,33 +4,25 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
 
 /**
- * Flattens a repository's {@code upstreams} graph into the real order AWS searches it in when
- * resolving a package-manager request: confirmed against the live "Upstream repository priority
- * order" documentation, a repository's own direct upstreams are searched in the order they were
- * configured, and that search is transitive (a direct upstream's own upstreams are searched too,
- * region-wide quota page confirms as many as 25 repositories total in one resolution), not limited
- * to the one repository's own direct list.
+ * Flattens a repository's {@code upstreams} graph into the order AWS searches it in when resolving a
+ * package-manager request. The User Guide's "Upstream repository priority order": a repository's
+ * upstreams are searched in the order they were listed, and "if an upstream repository has its own
+ * upstream repositories, the same logic is used to find a package version before moving to the next
+ * upstream repository". That is a depth-first walk in list order: its own example, {@code my_repo}
+ * with upstreams {@code A} and {@code B}, {@code A} with {@code C} and {@code D}, and {@code D} with
+ * {@code E}, is searched {@code my_repo, A, C, D, E, B}.
  *
- * <p>Breadth-first, not depth-first: AWS's own ordering guarantee is that a repository's direct
- * upstreams are searched, in their configured order, before any of their own transitive upstreams.
- * A depth-first walk would violate this the moment a closer sibling exists alongside a deeper
- * match: given {@code A -> [B, C]} and {@code B -> [D]}, a depth-first walk would recurse into
- * {@code B}'s own subtree before ever reaching {@code C} (a direct upstream of {@code A}),
- * producing the search order {@code [B, D, C]} rather than the correct {@code [B, C, D]}: C, one
- * hop away, searched after D, two hops away. Breadth-first expands one full level (a "frontier")
- * at a time, so every direct upstream is always searched before any of their own upstreams,
- * matching AWS's documented guarantee exactly.
- *
- * <p>Cycle-safe by construction: a repository is enqueued at most once (the {@code visited} set),
- * so a cycle anywhere in the graph simply stops expanding rather than looping. {@code
- * validateUpstreams} independently rejects a cycle at the point it would be introduced (see its
- * own javadoc), but this walk does not rely on that validation having run, since an upstream list
- * can only be validated against the graph as it existed at that moment, not against every later
+ * <p>Cycle-safe by construction: a repository is searched at most once (the {@code visited} set),
+ * where it is first reached, so a cycle anywhere in the graph simply stops expanding rather than
+ * looping. {@code validateUpstreams} independently rejects a cycle at the point it would be introduced
+ * (see its own javadoc), but this walk does not rely on that validation having run, since an upstream
+ * list can only be validated against the graph as it existed at that moment, not against every later
  * edit to a different repository's own upstreams.
  */
 final class UpstreamRepositoryResolver {
@@ -57,20 +49,22 @@ final class UpstreamRepositoryResolver {
         List<String> order = new ArrayList<>();
         Set<String> visited = new HashSet<>();
         visited.add(startingRepository);
-        Deque<String> frontier = new ArrayDeque<>();
-        frontier.add(startingRepository);
-        while (!frontier.isEmpty() && order.size() < MAX_RESOLUTION_REPOSITORIES) {
-            String current = frontier.removeFirst();
-            for (String upstream : upstreamsOf.apply(current)) {
-                if (!visited.add(upstream)) {
-                    continue;
-                }
-                order.add(upstream);
-                if (order.size() >= MAX_RESOLUTION_REPOSITORIES) {
-                    break;
-                }
-                frontier.addLast(upstream);
+        // A stack of each repository's remaining upstreams: the top is the list being walked, so a
+        // repository's own upstreams are searched before the next of its siblings.
+        Deque<Iterator<String>> pending = new ArrayDeque<>();
+        pending.push(upstreamsOf.apply(startingRepository).iterator());
+        while (!pending.isEmpty() && order.size() < MAX_RESOLUTION_REPOSITORIES) {
+            Iterator<String> siblings = pending.peek();
+            if (!siblings.hasNext()) {
+                pending.pop();
+                continue;
             }
+            String upstream = siblings.next();
+            if (!visited.add(upstream)) {
+                continue;
+            }
+            order.add(upstream);
+            pending.push(upstreamsOf.apply(upstream).iterator());
         }
         return order;
     }

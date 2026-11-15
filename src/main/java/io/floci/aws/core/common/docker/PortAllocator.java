@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.IntFunction;
@@ -65,13 +66,31 @@ public class PortAllocator {
         // allocator blocks on.
         Set<Integer> published = publishedHostPorts();
         for (int port = basePort; port <= maxPort; port++) {
-            if (!reserved.contains(port) && !published.contains(port) && isPortFree(port)) {
+            if (available(port, published)) {
                 reserved.add(port);
                 LOG.debugv("Allocated port {0} from range {1}-{2}", String.valueOf(port), String.valueOf(basePort), String.valueOf(maxPort));
                 return port;
             }
         }
         throw new RuntimeException("No free port available in range " + basePort + "-" + maxPort);
+    }
+
+    /**
+     * Allocates {@code port} itself when {@link #allocate} would hand it out, or answers empty when it is reserved,
+     * published by a container or bound. A failure reading Docker's published ports propagates rather than reading
+     * as a taken port.
+     */
+    public synchronized OptionalInt allocateIfFree(int port) {
+        if (!available(port, publishedHostPorts())) {
+            return OptionalInt.empty();
+        }
+        reserved.add(port);
+        LOG.debugv("Allocated port {0}", String.valueOf(port));
+        return OptionalInt.of(port);
+    }
+
+    private boolean available(int port, Set<Integer> published) {
+        return !reserved.contains(port) && !published.contains(port) && isPortFree(port);
     }
 
     /**

@@ -38,6 +38,7 @@ final class EmrClusterLifecycle {
     static final String TERMINATED = "TERMINATED";
     static final String PENDING = "PENDING";
     static final String COMPLETED = "COMPLETED";
+    static final String CANCEL_PENDING = "CANCEL_PENDING";
     static final String CANCELLED = "CANCELLED";
     static final String FAILED = "FAILED";
     static final String TERMINATED_WITH_ERRORS = "TERMINATED_WITH_ERRORS";
@@ -148,21 +149,34 @@ final class EmrClusterLifecycle {
         cluster.setStateChangeMessage(message);
         cluster.setTerminatingDateTime(now);
         for (EmrStep step : cluster.getSteps()) {
-            if (PENDING.equals(step.getState()) || RUNNING.equals(step.getState())) {
+            if (PENDING.equals(step.getState()) || holdsAPlace(step)) {
                 cancelStep(cluster, step, now, region);
             }
         }
     }
 
     /**
-     * CancelSteps for one step: null once it is cancelled, or why it cannot be. CancelSteps: "When you
-     * use Amazon EMR releases 5.28.0 and later, you can cancel steps that are in a PENDING or RUNNING
-     * state." A cancelled RUNNING step makes room for the next PENDING one.
+     * CancelSteps for one step: null once its cancel is under way, or why it cannot be. CancelSteps: "When you
+     * use Amazon EMR releases 5.28.0 and later, you can cancel steps that are in a PENDING or RUNNING state",
+     * and it "is idempotent but asynchronous". A RUNNING step whose driver runs is CANCEL_PENDING, "cancelled
+     * at Time and is pending cancellation" as the guide's step events put it, until its driver is gone
+     * ({@link #stepEnded}), and keeps its place among the running steps meanwhile: "Canceling a running step does
+     * not allow a pending step to start running, assuming no change to stepConcurrencyLevel". One that completes
+     * by time, nothing running it, is CANCELLED at once and makes room for the next PENDING one.
      */
     String cancel(EmrCluster cluster, EmrStep step, Instant now, String region) {
+        if (CANCEL_PENDING.equals(step.getState())) {
+            return null;
+        }
         boolean running = RUNNING.equals(step.getState()) && cancelsRunningSteps(cluster.getReleaseLabel());
         if (!running && !PENDING.equals(step.getState())) {
             return "Step is not in a cancellable state: " + step.getState();
+        }
+        if (running && !timed(step)) {
+            step.setState(CANCEL_PENDING);
+            events.queue(events.stepCancelPending(cluster, step, now), region);
+            execution.stop(step);
+            return null;
         }
         cancelStep(cluster, step, now, region);
         if (running) {
@@ -271,7 +285,7 @@ final class EmrClusterLifecycle {
      * cluster is done.
      */
     private void runSteps(EmrCluster cluster, Instant at, String region) {
-        long running = cluster.getSteps().stream().filter(step -> RUNNING.equals(step.getState())).count();
+        long running = cluster.getSteps().stream().filter(EmrClusterLifecycle::holdsAPlace).count();
         // The model allows 1 to 256; Floci stores any level it is given, and a lower one would never start a step.
         int level = Math.max(1, cluster.getStepConcurrencyLevel());
         List<EmrStep> started = new ArrayList<>();
@@ -303,10 +317,16 @@ final class EmrClusterLifecycle {
 
     /**
      * A step run for real has ended: COMPLETED when {@code failure} is null, otherwise FAILED, with
-     * {@code failure} as its FailureDetails message, and its ActionOnFailure taken. Either way the
-     * cluster goes on as it would once a step is done.
+     * {@code failure} as its FailureDetails message, and its ActionOnFailure taken. A CANCEL_PENDING one is
+     * CANCELLED, however its driver ended, and takes no action: "Canceling a running step does not trigger the
+     * step ActionOnFailure". Either way the cluster goes on as it would once a step is done.
      */
     void stepEnded(EmrCluster cluster, EmrStep step, String failure, Instant at, String region) {
+        if (CANCEL_PENDING.equals(step.getState())) {
+            cancelStep(cluster, step, at, region);
+            runSteps(cluster, at, region);
+            return;
+        }
         step.setEndDateTime(at);
         if (failure == null) {
             step.setState(COMPLETED);
@@ -340,7 +360,8 @@ final class EmrClusterLifecycle {
             terminate(cluster, STEP_FAILURE, SHUT_DOWN_AS_STEP_FAILED, at, region);
             return;
         }
-        boolean othersRunning = cluster.getSteps().stream().anyMatch(other -> RUNNING.equals(other.getState()));
+        // The failed step is FAILED by now; one whose cancel is pending still runs until its driver is gone.
+        boolean othersRunning = cluster.getSteps().stream().anyMatch(EmrClusterLifecycle::holdsAPlace);
         if (activates && "CANCEL_AND_WAIT".equals(action) && !othersRunning) {
             if (cluster.isAutoTerminate()) {
                 terminate(cluster, STEP_FAILURE, SHUT_DOWN_AS_STEP_FAILED, at, region);
@@ -395,6 +416,11 @@ final class EmrClusterLifecycle {
      */
     private boolean bootstrapTimed(EmrCluster cluster) {
         return bootstrapping == null || !cluster.isBootstrapInContainer();
+    }
+
+    /** Whether {@code step} takes one of its cluster's StepConcurrencyLevel places: RUNNING, or CANCEL_PENDING. */
+    static boolean holdsAPlace(EmrStep step) {
+        return RUNNING.equals(step.getState()) || CANCEL_PENDING.equals(step.getState());
     }
 
     /** TERMINATED, or TERMINATED_WITH_ERRORS: the cluster has ended. */

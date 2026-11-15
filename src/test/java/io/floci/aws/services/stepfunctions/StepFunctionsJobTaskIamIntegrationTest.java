@@ -215,6 +215,51 @@ class StepFunctionsJobTaskIamIntegrationTest {
         target.notReached().check();
     }
 
+    /**
+     * A job run passes its execution role to EMR Serverless as a direct {@code StartJobRun} does, so the role the task
+     * runs as needs {@code iam:PassRole} on it beside the action on the application.
+     */
+    @Test
+    void aJobRunNeedsPassRoleOnItsExecutionRole() throws Exception {
+        Target target = startJobRunTarget();
+        String role = role(STATES_TRUST, allow(target.resourceArn(), target.actions()));
+
+        Response refused = terminal(start(machine(jsonPathTask(target, null), role), "{}"));
+
+        assertFailed(refused, target.error());
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("iam:PassRole") && cause.contains(target.arguments().get("ExecutionRoleArn").toString()),
+                cause);
+        target.notReached().check();
+    }
+
+    /**
+     * Tags an application is created with need {@code emr-serverless:TagResource} on the application it makes, as a
+     * direct {@code CreateApplication} does, and the create itself is checked with them.
+     */
+    @Test
+    void tagsAnApplicationIsCreatedWithNeedTagResource() throws Exception {
+        Target untagged = createApplicationTarget();
+        Map<String, Object> arguments = new LinkedHashMap<>(untagged.arguments());
+        arguments.put("Tags", Map.of("team", "data"));
+        Target target = new Target(untagged.integration(), untagged.error(), untagged.resourceArn(), arguments,
+                untagged.reached(), untagged.notReached(), untagged.actions());
+
+        Response refused = terminal(start(machine(jsonPathTask(target, null), role(STATES_TRUST, target.grant())), "{}"));
+        assertFailed(refused, target.error());
+        assertTrue(refused.jsonPath().getString("cause").contains("emr-serverless:TagResource"), refused.asString());
+        target.notReached().check();
+
+        Response created = terminal(start(machine(jsonPathTask(target, null), role(STATES_TRUST, policy(List.of(
+                Map.of("Effect", "Allow", "Action", List.of("emr-serverless:CreateApplication"), "Resource", List.of("*"),
+                        "Condition", Map.of("StringEquals", Map.of("aws:RequestTag/team", "data"))),
+                Map.of("Effect", "Allow", "Action", List.of("emr-serverless:TagResource"),
+                        "Resource", List.of("arn:aws:emr-serverless:" + REGION + ":" + ACCOUNT + ":/applications/*")))))),
+                "{}"));
+        assertEquals("SUCCEEDED", created.jsonPath().getString("status"), created.asString());
+        target.reached().check();
+    }
+
     @ParameterizedTest
     @MethodSource("eachIntegration")
     void aCredentialsRoleNotAllowedTheActionIsRefusedEvenIfTheExecutionRoleIs(String integration) throws Exception {
@@ -299,11 +344,17 @@ class StepFunctionsJobTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
     }
 
+    /**
+     * A definition ECS does not have is checked as the call made directly checks it, on any revision of its family:
+     * a role allowed nothing is refused, and one allowed {@code ecs:RunTask} gets ECS's own answer.
+     */
     @Test
-    void aTaskDefinitionEcsDoesNotHaveIsLeftToEcs() throws Exception {
+    void aTaskDefinitionEcsDoesNotHaveIsCheckedAsTheDirectCallIs() throws Exception {
         Map<String, Object> task = task("ecs:runTask", Map.of("TaskDefinition", "no-such-family-" + UUID.randomUUID()));
 
-        assertFailed(terminal(start(machine(task, role(STATES_TRUST, READ_ONLY)), "{}")), "ECS.ClientException");
+        assertFailed(terminal(start(machine(task, role(STATES_TRUST, READ_ONLY)), "{}")), "ECS.AccessDeniedException");
+        assertFailed(terminal(start(machine(task, role(STATES_TRUST, allow("*", "ecs:RunTask"))), "{}")),
+                "ECS.ClientException");
     }
 
     /** {@code .sync} needs the starting call alone: the wait reads what the task launched with no Describe grant. */
@@ -406,7 +457,10 @@ class StepFunctionsJobTaskIamIntegrationTest {
         target.notReached().check();
     }
 
-    /** The service ARN's own cluster is not what {@code UpdateService} reads: the task acts on the request's. */
+    /**
+     * The service ARN's own cluster is not what {@code UpdateService} reads: the task acts on the service of that name
+     * in the request's cluster. The request names both, so the task needs the action on both, as the direct call does.
+     */
     @Test
     void updateServiceIsEvaluatedOnTheServiceItActsOn() throws Exception {
         String family = family();
@@ -423,7 +477,15 @@ class StepFunctionsJobTaskIamIntegrationTest {
         assertTrue(refused.jsonPath().getString("cause").contains(inOther), refused.asString());
         assertEquals(0, desiredCount(other, name));
 
-        Response allowed = terminal(start(machine(task, role(STATES_TRUST, allow(inOther, "ecs:UpdateService"))), "{}"));
+        Response onlyActedOn = terminal(start(machine(task, role(STATES_TRUST, allow(inOther, "ecs:UpdateService"))),
+                "{}"));
+        assertFailed(onlyActedOn, "Ecs.AccessDeniedException");
+        assertTrue(onlyActedOn.jsonPath().getString("cause").contains(inNamed), onlyActedOn.asString());
+        assertEquals(0, desiredCount(other, name));
+
+        Response allowed = terminal(start(machine(task, role(STATES_TRUST,
+                policy(List.of(Map.of("Effect", "Allow", "Action", List.of("ecs:UpdateService"),
+                        "Resource", List.of(inNamed, inOther)))))), "{}"));
         assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
         assertEquals(1, desiredCount(other, name));
         assertEquals(0, desiredCount(named, name));
@@ -448,14 +510,23 @@ class StepFunctionsJobTaskIamIntegrationTest {
         assertEquals(2, MAPPER.readTree(allowed.jsonPath().getString("output")).path("Services").size());
     }
 
-    /** What a service does not have reaches nothing: a role allowed nothing gets the service's own answer. */
+    /**
+     * A service or a cluster ECS does not have is checked as the call made directly checks it, on the ARN the request
+     * names: a role allowed nothing is refused, and one allowed the action gets ECS's own answer.
+     */
     @Test
-    void aServiceEcsDoesNotHaveIsLeftToEcs() throws Exception {
+    void aServiceEcsDoesNotHaveIsCheckedAsTheDirectCallIs() throws Exception {
         String cluster = ecsCluster();
-        String role = role(STATES_TRUST, READ_ONLY);
+        String nothing = role(STATES_TRUST, READ_ONLY);
+        Map<String, Object> noService = task("aws-sdk:ecs:updateService",
+                Map.of("Cluster", cluster, "Service", "no-such-service"));
+        assertFailed(terminal(start(machine(noService, nothing), "{}")), "Ecs.AccessDeniedException");
+        assertFailed(terminal(start(machine(task("aws-sdk:ecs:describeServices",
+                Map.of("Cluster", cluster, "Services", List.of("no-such-service"))), nothing), "{}")),
+                "Ecs.AccessDeniedException");
 
-        assertFailed(terminal(start(machine(task("aws-sdk:ecs:updateService",
-                Map.of("Cluster", cluster, "Service", "no-such-service")), role), "{}")), "Ecs.ServiceNotFoundException");
+        String role = role(STATES_TRUST, allow("*", "ecs:UpdateService", "ecs:DescribeServices"));
+        assertFailed(terminal(start(machine(noService, role), "{}")), "Ecs.ServiceNotFoundException");
         assertFailed(terminal(start(machine(task("aws-sdk:ecs:updateService",
                 Map.of("Cluster", "no-such-cluster", "Service", "any")), role), "{}")), "Ecs.ClusterNotFoundException");
         Response described = terminal(start(machine(task("aws-sdk:ecs:describeServices",
@@ -530,8 +601,13 @@ class StepFunctionsJobTaskIamIntegrationTest {
             return actions[0];
         }
 
+        /** The actions on the resource, and {@code iam:PassRole} on the execution role a request passes, if any. */
         String grant() {
-            return allow(resourceArn, actions);
+            Object role = arguments.get("ExecutionRoleArn");
+            Map<String, Object> onResource = Map.of("Effect", "Allow", "Action", List.of(actions),
+                    "Resource", List.of(resourceArn));
+            return policy(role == null ? List.of(onResource) : List.of(onResource, Map.of("Effect", "Allow",
+                    "Action", List.of("iam:PassRole"), "Resource", List.of(role.toString()))));
         }
     }
 

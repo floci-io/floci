@@ -16,6 +16,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -112,7 +115,7 @@ public final class RequestResources {
         }
         Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
         JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
-        Map<String, String> form = located(table, operation, sent, ctx, labels);
+        Map<String, String> form = ec2Query(table, operation, located(table, operation, sent, ctx, labels));
         return resources.isEmpty() ? List.of()
                 : named(operation, resources, formats(table, operation), form, body, partition, region, accountId, stored);
     }
@@ -134,6 +137,64 @@ public final class RequestResources {
             return List.of();
         }
         return named(operation, resources, formats(table, operation), Map.of(), body, partition, region, accountId, stored);
+    }
+
+    /**
+     * A request an operation's service makes to another service as the caller, which the caller needs permission for
+     * too: {@code action} on {@code resource}, sent from {@code endpoint}, the operation's endpoint prefix, which the
+     * condition key {@code viaService} names where the action takes one (null otherwise). Not {@code held} when the
+     * action's service holds no resource of that name (a deleted key), {@code resource} then being the value the
+     * record holds: that service refuses the request, so the operation fails.
+     */
+    public record Forwarded(String action, String resource, String viaService, String endpoint, boolean held) {
+    }
+
+    /**
+     * The requests the operation's service makes to another as the caller (the table's {@code forwarded}), for the
+     * resources the request is checked on: for each of {@code resources} of the type whose record holds what the
+     * action acts on, the resource that record's member names, as the action's service finds it in the account and
+     * Region of the ARN, the caller's ({@code find}) or another's ({@code findInAccount}), or the value itself, not
+     * held, when it finds none. None for a resource whose service records nothing there (a snapshot under AWS's own
+     * key records no key of the account's), or one whose policy lets every principal of its account have the service
+     * act on it ({@link StoredResourceArns#grantsItsAccountThroughServices}: an AWS managed key). {@code held} is the
+     * operation's service, and {@code services} gives the action's.
+     */
+    public static List<Forwarded> forwarded(String operation, List<String> resources, String accountId,
+                                            StoredResourceArns held, Function<String, StoredResourceArns> services) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        List<RequestResourceMembers.Forwarded> uses = operation == null ? List.of()
+                : table.forwarded().getOrDefault(operation, List.of());
+        if (uses.isEmpty() || held == null) {
+            return List.of();
+        }
+        Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
+        List<Forwarded> found = new ArrayList<>();
+        for (RequestResourceMembers.Forwarded use : uses) {
+            StoredResourceArns service = services.apply(use.action().substring(0, use.action().indexOf(':')));
+            RequestResourceMembers.ArnFormat of = formats.get(use.of());
+            if (service == null || of == null) {
+                continue;
+            }
+            for (String resource : resources) {
+                if (!of.pattern().matcher(resource).matches()) {
+                    continue;
+                }
+                AwsArnUtils.Arn arn = AwsArnUtils.parse(resource);
+                Optional<String> named = held.recorded(resource, use.member());
+                if (named.isEmpty()) {
+                    continue;
+                }
+                Optional<String> target = arn.accountId().equals(accountId)
+                        ? service.find(use.type(), List.of(named.get()), arn.region())
+                        : service.findInAccount(use.type(), List.of(named.get()), arn.accountId(), arn.region());
+                if (target.isEmpty()) {
+                    found.add(new Forwarded(use.action(), named.get(), use.viaService(), use.endpoint(), false));
+                } else if (!service.grantsItsAccountThroughServices(target.get())) {
+                    found.add(new Forwarded(use.action(), target.get(), use.viaService(), use.endpoint(), true));
+                }
+            }
+        }
+        return List.copyOf(found);
     }
 
     /** Whether the table holds the operation as one with no resource of its own, which is checked on {@code *}. */
@@ -164,11 +225,7 @@ public final class RequestResources {
             String arn = "*";
             for (Map.Entry<String, String> prefix : targets.prefixes().entrySet()) {
                 if (id.startsWith(prefix.getValue())) {
-                    String format = formats.get(prefix.getKey()).format();
-                    Map<String, String> filling = new HashMap<>();
-                    VARIABLE.matcher(format).results().map(match -> match.group(1))
-                            .forEach(variable -> filling.put(variable, id));
-                    arn = render(format, filling, partition, region, accountId);
+                    arn = idArn(formats.get(prefix.getKey()).format(), id, partition, region, accountId);
                     break;
                 }
             }
@@ -247,9 +304,32 @@ public final class RequestResources {
     public static List<String> created(String operation, String tagging, ContainerRequestContext ctx, String partition,
                                        String region, String accountId, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
+        return created(table, operation, tagging, resources -> served(resources, ctx),
+                () -> ec2Query(table, operation,
+                        located(table, operation, IamConditionContextResolver.formParameters(ctx), ctx, labels)),
+                () -> IamConditionContextResolver.formParameters(ctx).isEmpty()
+                        ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null,
+                partition, region, accountId);
+    }
+
+    /**
+     * As {@link #created(String, String, ContainerRequestContext, String, String, String, Map)}, for a JSON request
+     * body that is not an HTTP request of its own (a state machine's task to its integrated service): its members
+     * the table locates in a path given in the body, and every resource applying, whatever endpoint it would reach.
+     */
+    public static List<String> created(String operation, String tagging, JsonNode body, String partition,
+                                       String region, String accountId) {
+        return created(RequestResourceMembers.table(), operation, tagging, resources -> resources, Map::of,
+                () -> body, partition, region, accountId);
+    }
+
+    private static List<String> created(RequestResourceMembers.Table table, String operation, String tagging,
+                                        UnaryOperator<List<RequestResourceMembers.Resource>> serving,
+                                        Supplier<Map<String, String>> sentForm, Supplier<JsonNode> sentBody,
+                                        String partition, String region, String accountId) {
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
         List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
-                : served(table.operations().getOrDefault(operation, List.of()), ctx).stream()
+                : serving.apply(table.operations().getOrDefault(operation, List.of())).stream()
                         .filter(RequestResourceMembers.Resource::made).toList();
         if (creates == null && made.isEmpty() && operation != null) {
             made = table.makes().getOrDefault(operation, List.of()).stream()
@@ -260,9 +340,8 @@ public final class RequestResources {
         if (creates == null && made.isEmpty()) {
             return List.of();
         }
-        Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
-        Map<String, String> form = located(table, operation, sent, ctx, labels);
+        JsonNode body = sentBody.get();
+        Map<String, String> form = sentForm.get();
         Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
         if (creates == null) {
             return named(operation, made, formats, form, body, partition, region, accountId, null);
@@ -512,7 +591,9 @@ public final class RequestResources {
      * The ARNs of a type the request names through the variables it fills: one for each value of a list member,
      * none when it gives none of them. A value that is itself an ARN of the type names that resource, and the others
      * in the same list their own, as a handler taking a name or an ARN for each reads them (CodeBuild's
-     * {@code BatchGetProjects}). They are in the account the resource's account member gives, which its handler
+     * {@code BatchGetProjects}); for a type of several variables it also gives the variable it fills its own value
+     * there, beside what the request's other members fill, as a handler may read the one or the other (an ECS
+     * service ARN of another cluster than the request's names that service and the one of its name in that cluster). They are in the account the resource's account member gives, which its handler
      * acts in, and none when that member holds no account id; in the request's without one, or with a JSON null for
      * it. An ARN given for a name puts the
      * resource in that ARN's account and Region, the caller's and the request's where it leaves them empty, as its
@@ -525,7 +606,9 @@ public final class RequestResources {
      * the type without a qualifier, is cut where the format ends, as an ARN given is. A variable no member fills
      * takes the value the resource gives it {@code fixed}. A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
-     * else has that id open.
+     * else has that id open. A member the request leaves out that names its service's default of another type
+     * ({@code defaults}) fills its variable from the ARN of that default, which {@code stored} gives in the caller's
+     * account: an ECS service a request names with no cluster is on the default cluster.
      */
     private static void fill(Set<String> arns, RequestResourceMembers.Resource resource,
                              Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
@@ -555,17 +638,26 @@ public final class RequestResources {
                     stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
                 }
             }
+            // A member the request leaves out naming its service's default of another type then fills the variable
+            // from that resource's ARN: an ECS service of a request with no cluster is on the default cluster.
+            String defaulted = resource.defaults().get(variable.getValue().path());
+            Optional<String> fallback = values.isEmpty() && defaulted != null && formats.containsKey(defaulted)
+                    && stored != null && account.equals(accountId) ? stored.findDefault(defaulted, region)
+                    : Optional.empty();
+            if (fallback.isPresent()) {
+                values = List.of(fallback.get());
+            }
+            RequestResourceMembers.ArnFormat named = fallback.isPresent() ? formats.get(defaulted)
+                    : arnOf(resource, variable.getValue().path(), formats);
             if (values.isEmpty()) {
                 continue;
             }
             given = true;
-            RequestResourceMembers.ArnFormat named = arnOf(resource, variable.getValue().path(), formats);
-            if (resource.fill().size() == 1 && fromRequest == null) {
-                List<String> asArns = values.stream()
-                        .filter(value -> !isArnOf(named, value)
-                                && format.pattern().matcher(value).matches()).toList();
-                asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
-                        accountId, stored));
+            List<String> asArns = fromRequest != null ? List.of() : values.stream()
+                    .filter(value -> !isArnOf(named, value) && format.pattern().matcher(value).matches()).toList();
+            asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
+                    accountId, stored));
+            if (resource.fill().size() == 1) {
                 values = values.stream().filter(value -> !asArns.contains(value)).toList();
                 if (values.isEmpty()) {
                     return;
@@ -574,8 +666,14 @@ public final class RequestResources {
             List<Filling> next = new ArrayList<>();
             for (Filling filling : fillings) {
                 for (String value : values) {
+                    // The type's own ARN, for a type of several variables, names that resource and gives this variable
+                    // its value too, beside what the request's other members fill: a handler may read the one or the
+                    // other (an ECS service ARN of another cluster than the request's).
                     next.add(isArnOf(named, value)
                             ? filling.with(variable.getKey(), named.variable(value), AwsArnUtils.parse(value))
+                            : asArns.contains(value)
+                            ? filling.with(variable.getKey(), format.variable(value, variable.getKey()),
+                                    AwsArnUtils.parse(value))
                             : filling.with(variable.getKey(), value, null));
                 }
             }
@@ -602,7 +700,7 @@ public final class RequestResources {
                         from.region().isEmpty() ? region : from.region(),
                         from.accountId().isEmpty() ? accountId : from.accountId())), format,
                         resource.types().getFirst(), filling.variables(), null, region), format.awsOwned(), partition,
-                        region, accountId, null);
+                        region, accountId, stored);
             }
         }
     }
@@ -648,12 +746,24 @@ public final class RequestResources {
      * ({@code find}), when the request gives each one value: the caller's resource {@code stored} finds under those
      * values in the Region, or else its ARN with that id open, as for a create; in the account its account member gives
      * when it has one, which {@code stored} finds the resource of as {@code findInAccount}; none when it leaves one out
-     * or gives it a JSON null, which its handler reads as none.
+     * or gives it a JSON null, which its handler reads as none. A find by one list member finds each of its values
+     * (ECS's {@code taskDefinitions[]}).
      */
     private static void found(Set<String> arns, RequestResourceMembers.Resource resource,
                               Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
                               JsonNode body, String partition, String region, String accountId,
                               StoredResourceArns stored) {
+        if (resource.find().size() == 1 && resource.find().getFirst().list()) {
+            String account = accountOf(resource, form, body, accountId);
+            if (account == null) {
+                return;
+            }
+            for (String value : values(form, body, resource.find().getFirst())) {
+                foundOne(arns, resource.types().getFirst(), List.of(value), formats, partition, region, account,
+                        accountId, stored);
+            }
+            return;
+        }
         List<String> names = new ArrayList<>();
         for (RequestResourceMembers.Member member : resource.find()) {
             List<String> values = values(form, body, member);
@@ -669,7 +779,13 @@ public final class RequestResources {
         if (account == null) {
             return;
         }
-        String type = resource.types().getFirst();
+        foundOne(arns, resource.types().getFirst(), names, formats, partition, region, account, accountId, stored);
+    }
+
+    /** The resource of the type {@code stored} finds by the values in the account, or else its ARN with its id open. */
+    private static void foundOne(Set<String> arns, String type, List<String> names,
+                                 Map<String, RequestResourceMembers.ArnFormat> formats, String partition,
+                                 String region, String account, String accountId, StoredResourceArns stored) {
         Optional<String> found = stored == null ? Optional.empty()
                 : account.equals(accountId) ? stored.findByMembers(type, names, region)
                 : stored.findInAccount(type, names, account, region);
@@ -708,7 +824,8 @@ public final class RequestResources {
      * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
      * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
      * alias points at. A type whose service follows its name with an id it mints has that id open when the service
-     * stores none, and any other type's is as rendered.
+     * stores none, one whose service follows it with characters it mints those characters open (a secret's
+     * {@code -??????}, as a create names the secret it makes), and any other type's is as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
@@ -718,7 +835,10 @@ public final class RequestResources {
                 return found.get();
             }
         }
-        return format.minted() ? arn + "/*" : arn;
+        if (format.minted()) {
+            return arn + "/*";
+        }
+        return format.mintedSuffix() != null ? arn + format.mintedSuffix() : arn;
     }
 
     /**
@@ -730,6 +850,21 @@ public final class RequestResources {
     }
 
     /** The format with each variable replaced once: the partition, Region and account, a value, or else {@code *}. */
+    /**
+     * The ARN of the namespace's resource of {@code type} named by {@code id}, the one variable of its format past
+     * partition, Region and account, as a request naming the resource by its id gives it.
+     */
+    static String idArn(String namespace, String type, String id, String partition, String region, String accountId) {
+        return idArn(RequestResourceMembers.table().formats().get(namespace).get(type).format(), id, partition, region,
+                accountId);
+    }
+
+    private static String idArn(String format, String id, String partition, String region, String accountId) {
+        Map<String, String> filling = new HashMap<>();
+        VARIABLE.matcher(format).results().map(match -> match.group(1)).forEach(variable -> filling.put(variable, id));
+        return render(format, filling, partition, region, accountId);
+    }
+
     private static String render(String format, Map<String, String> filling, String partition, String region,
                                  String accountId) {
         Matcher variable = VARIABLE.matcher(format);
@@ -752,10 +887,19 @@ public final class RequestResources {
      * the ARN's Region or the request's, whichever its handler acts on. An ARN with no account or Region keeps none,
      * and one of a type AWS owns ({@code awsOwned}) its account, {@code aws}, which is no caller's. One naming another
      * account whose resource {@code stored} says the service acts on there (an OAM sink a link is made to, a RAM
-     * invitation sent to the caller) is that resource alone.
+     * invitation sent to the caller) is that resource alone. When the service resolves the complete ARN to a stored
+     * resource, that stored ARN alone is checked: a layer version in its own coordinates, or the secret a full or
+     * partial ARN names in the ARN's Region, as its handler reads it.
      */
     private static void addNamed(Set<String> arns, String arn, boolean awsOwned, String partition, String region,
                                  String accountId, StoredResourceArns stored) {
+        if (stored != null) {
+            Optional<String> resolved = stored.resolveStoredArn(arn);
+            if (resolved.isPresent()) {
+                arns.add(resolved.get());
+                return;
+            }
+        }
         arns.add(arn);
         if (!AwsArnUtils.isArn(arn)) {
             return;
@@ -773,6 +917,28 @@ public final class RequestResources {
                 arns.add(new AwsArnUtils.Arn(partition, named.service(), inRegion, account, named.resource()).toString());
             }
         }
+    }
+
+    /** Normalize only generated EC2 wire members; JSON task inputs keep their SDK names. */
+    private static Map<String, String> ec2Query(RequestResourceMembers.Table table, String operation,
+                                               Map<String, String> sent) {
+        Map<RequestResourceMembers.Member, String> members = table.ec2Query().get(operation);
+        if (sent.isEmpty() || members == null) {
+            return sent;
+        }
+        Map<String, String> form = new HashMap<>(sent);
+        members.forEach((member, wire) -> {
+            // Ignore forged SDK/Query spellings the EC2 handler itself does not read.
+            form.keySet().removeIf(key -> key.equals(member.name()) || key.startsWith(member.name() + "."));
+            if (member.list()) {
+                for (int index = 1; sent.containsKey(wire + "." + index); index++) {
+                    form.put(member.name() + ".member." + index, sent.get(wire + "." + index));
+                }
+            } else if (sent.containsKey(wire)) {
+                form.put(member.name(), sent.get(wire));
+            }
+        });
+        return form;
     }
 
     /**

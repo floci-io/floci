@@ -23,7 +23,6 @@ import io.floci.aws.services.iam.model.InstanceProfile;
 import io.floci.aws.services.iam.model.ServerCertificate;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
-import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -153,14 +152,6 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<LambdaMicrovmsService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(microvms);
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, instance);
-    }
-
-    /** A builder reading {@code secrets}, for a secret named by its name. */
-    private static ResourceArnBuilder backedBy(SecretsManagerService secrets) {
-        @SuppressWarnings("unchecked")
-        Instance<SecretsManagerService> instance = mock(Instance.class);
-        when(instance.get()).thenReturn(secrets);
         return new ResourceArnBuilder(new ObjectMapper(), null, instance);
     }
 
@@ -169,7 +160,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<EksService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(eks);
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, instance);
     }
 
     private static IamService storeHolding(String userName, String path, String arn) {
@@ -1305,91 +1296,104 @@ class ResourceArnBuilderTest {
 
     // ── Secrets Manager ──────────────────────────────────────────────────────────
 
-    @Test
-    void secretsManagerBuildsArnFromSecretId() {
-        setJsonBody("{\"SecretId\":\"app/prod/database\"}");
-        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/prod/database"),
-                builder.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "us-east-1",
-                        "000000000000", "aws"));
+    private static final String SECRET = "arn:aws:secretsmanager:us-east-1:000000000000:secret:";
+
+    /**
+     * Secrets Manager as IAM asks it: the ARN of each secret it holds, by name, or by an ARN, a partial one included,
+     * in whatever Region or account it names.
+     */
+    private static StoredResourceArns secretsHolding(Map<String, String> stored) {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "secretsmanager";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "Secret".equals(type) && names.size() == 1
+                        ? Optional.ofNullable(stored.get(names.getFirst())) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> resolveStoredArn(String arn) {
+                return Optional.ofNullable(stored.get(arn));
+            }
+        };
     }
 
+    private List<String> secretsResources(ResourceArnBuilder builder, String operation, String region,
+                                          String partition) {
+        return builder.buildResources("secretsmanager", operation, ctx, region, ACCOUNT, partition);
+    }
+
+    /**
+     * A secret named by its name or an ARN, a partial one included, is the ARN Secrets Manager holds it under, random
+     * suffix included; one it does not hold has the six characters botocore documents open ({@code -??????}), and an
+     * ARN it does not hold is as given.
+     */
     @Test
-    void secretsManagerResolvesASecretNamedByItsNameToItsStoredArn() {
-        String storedArn = "arn:aws:secretsmanager:us-east-1:111122223333:secret:app/core-AbC123";
-        SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArn("111122223333", "app/core", "us-east-1")).thenReturn(Optional.of(storedArn));
+    void aSecretIsTheArnSecretsManagerHoldsItUnderOrItsNameWithTheSuffixOpen() {
+        String stored = SECRET + "app/core-AbC123";
+        ResourceArnBuilder backed = reading(secretsHolding(Map.of("app/core", stored, SECRET + "app/core", stored)));
+
         setJsonBody("{\"SecretId\":\"app/core\"}");
-
-        List<String> arns = backedBy(secrets).buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
-                "us-east-1", "111122223333", "aws");
-
-        assertEquals(List.of(storedArn), arns);
-    }
-
-    @Test
-    void secretsManagerKeepsTheNameOfASecretThatIsNotStored() {
-        SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArn(ACCOUNT, "app/missing", "us-east-1")).thenReturn(Optional.empty());
+        assertEquals(List.of(stored), secretsResources(backed, "secretsmanager:GetSecretValue", "us-east-1", "aws"));
+        setJsonBody("{\"SecretId\":\"" + SECRET + "app/core\"}");
+        assertEquals(List.of(stored), secretsResources(backed, "secretsmanager:GetSecretValue", "us-east-1", "aws"));
         setJsonBody("{\"SecretId\":\"app/missing\"}");
-
-        List<String> arns = backedBy(secrets).buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
-                "us-east-1", ACCOUNT, "aws");
-
-        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing"), arns);
+        assertEquals(List.of(SECRET + "app/missing-??????"),
+                secretsResources(backed, "secretsmanager:DescribeSecret", "us-east-1", "aws"));
+        setJsonBody("{\"SecretId\":\"" + SECRET + "app/missing\"}");
+        assertEquals(List.of(SECRET + "app/missing"),
+                secretsResources(backed, "secretsmanager:DescribeSecret", "us-east-1", "aws"));
     }
 
+    /**
+     * {@code CreateSecret} names the secret it makes by {@code Name}, its suffix not minted yet, and every other
+     * operation by {@code SecretId}, so a member the serving operation does not read names nothing; an operation
+     * acting on no resource type is checked on {@code *}.
+     */
     @Test
-    void secretsManagerResolvesAPartialArnToTheStoredArnAndKeepsAnArnThatIsNotStored() {
-        String partialArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core";
-        String storedArn = partialArn + "-AbC123";
-        String missingArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:app/missing";
-        SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArn(ACCOUNT, partialArn, "us-east-1")).thenReturn(Optional.of(storedArn));
-        when(secrets.findArn(ACCOUNT, missingArn, "us-east-1")).thenReturn(Optional.empty());
-        ResourceArnBuilder backed = backedBy(secrets);
-
-        setJsonBody("{\"SecretId\":\"" + partialArn + "\"}");
-        assertEquals(List.of(storedArn), backed.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
-                "us-east-1", ACCOUNT, "aws"));
-        setJsonBody("{\"SecretId\":\"" + missingArn + "\"}");
-        assertEquals(List.of(missingArn), backed.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx,
-                "us-east-1", ACCOUNT, "aws"));
-    }
-
-    @Test
-    void secretsManagerCreateSecretBuildsArnFromNameWithAnUnassignedSuffix() {
-        setJsonBody("{\"Name\":\"app/core\",\"SecretString\":\"x\"}");
-        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/core-??????"),
-                builder.buildSecretsManagerResources("secretsmanager:CreateSecret", ctx, "us-east-1", ACCOUNT,
-                        "aws"));
-    }
-
-    @Test
-    void secretsManagerTargetsTheFieldTheServingOperationReads() {
-        SecretsManagerService secrets = mock(SecretsManagerService.class);
-        when(secrets.findArn(ACCOUNT, "app/existing", "us-east-1"))
-                .thenReturn(Optional.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/existing-AbC123"));
-        ResourceArnBuilder backed = backedBy(secrets);
+    void aCreateNamesTheSecretItMakesAndEveryOtherOperationTheOneItsSecretIdNames() {
+        ResourceArnBuilder backed = reading(secretsHolding(Map.of("app/existing", SECRET + "app/existing-AbC123")));
 
         setJsonBody("{\"Name\":\"app/new\",\"SecretId\":\"app/existing\",\"SecretString\":\"x\"}");
-        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:app/new-??????"),
-                backed.buildSecretsManagerResources("secretsmanager:CreateSecret", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(SECRET + "app/new-??????"),
+                secretsResources(backed, "secretsmanager:CreateSecret", "us-east-1", "aws"));
         setJsonBody("{\"Name\":\"app/new\"}");
-        assertEquals(List.of("arn:aws:secretsmanager:us-east-1:000000000000:secret:*"),
-                backed.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "us-east-1", ACCOUNT,
-                        "aws"));
+        assertEquals(List.of("*"), secretsResources(backed, "secretsmanager:GetSecretValue", "us-east-1", "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"), secretsResources(backed, "secretsmanager:ListSecrets", "us-east-1", "aws"));
+    }
+
+    /**
+     * A secret Secrets Manager holds in another Region than the request's, named by its ARN, partial or full, is the
+     * one its operations act on there, and so is one another account holds under the full ARN named: that ARN alone,
+     * no secret of its name in the request's Region or the caller's account.
+     */
+    @Test
+    void aSecretHeldInAnotherRegionOrAccountIsCheckedOnItsArnAlone() {
+        String west = "arn:aws:secretsmanager:us-west-2:000000000000:secret:";
+        String stored = west + "app/core-AbC123";
+        String shared = "arn:aws:secretsmanager:us-east-1:111122223333:secret:app/shared-XyZ789";
+        ResourceArnBuilder backed = reading(secretsHolding(Map.of(west + "app/core", stored, stored, stored,
+                shared, shared)));
+
+        setJsonBody("{\"SecretId\":\"" + west + "app/core\"}");
+        assertEquals(List.of(stored), secretsResources(backed, "secretsmanager:GetSecretValue", "us-east-1", "aws"));
+        setJsonBody("{\"SecretId\":\"" + stored + "\"}");
+        assertEquals(List.of(stored), secretsResources(backed, "secretsmanager:GetSecretValue", "us-east-1", "aws"));
+        setJsonBody("{\"SecretId\":\"" + shared + "\"}");
+        assertEquals(List.of(shared), secretsResources(backed, "secretsmanager:GetSecretValue", "us-east-1", "aws"));
     }
 
     @Test
-    void secretsManagerMintsArnsInTheRequestPartition() {
+    void aSecretsArnIsInTheRequestsPartition() {
         setJsonBody("{\"Name\":\"app/core\"}");
         assertEquals(List.of("arn:aws-cn:secretsmanager:polygondwanaland-west-1:000000000000:secret:app/core-??????"),
-                builder.buildSecretsManagerResources("secretsmanager:CreateSecret", ctx, "polygondwanaland-west-1",
-                        ACCOUNT, "aws-cn"));
-        setJsonBody("{\"SecretId\":\"app/core\"}");
-        assertEquals(List.of("arn:aws-us-gov:secretsmanager:polygondwanaland-west-1:000000000000:secret:app/core"),
-                builder.buildSecretsManagerResources("secretsmanager:GetSecretValue", ctx, "polygondwanaland-west-1",
-                        ACCOUNT, "aws-us-gov"));
+                secretsResources(reading(secretsHolding(Map.of())), "secretsmanager:CreateSecret",
+                        "polygondwanaland-west-1", "aws-cn"));
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────
@@ -1404,7 +1408,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<KmsService> instance = mock(Instance.class);
         when(instance.get()).thenReturn(kms);
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, instance);
     }
 
     /** A builder reading the stored ARNs of a namespace, for every request of that namespace. */
@@ -1412,7 +1416,7 @@ class ResourceArnBuilderTest {
         @SuppressWarnings("unchecked")
         Instance<StoredResourceArns> instance = mock(Instance.class);
         when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
-        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, null, instance);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, instance);
     }
 
     /** The finder of the stored ARNs of a namespace, answering one name of one type with one ARN. */
@@ -2176,26 +2180,31 @@ class ResourceArnBuilderTest {
         for (String path : new String[] {"/2018-10-31/layers/my-layer/versions/3",
                 "/2018-10-31/layers/my-layer/versions/3/policy",
                 "/2018-10-31/layers/my-layer/versions/3/policy/statement-1"}) {
+            String operation = path.endsWith("/statement-1") ? "RemoveLayerVersionPermission"
+                    : path.endsWith("/policy") ? "GetLayerVersionPolicy" : "GetLayerVersion";
+            when(ctx.getMethod()).thenReturn(operation.startsWith("Remove") ? "DELETE" : "GET");
             request(path);
-            assertEquals(version, builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
+            assertEquals(version, layerResource(operation, "us-east-1"), path);
         }
-        // Lambda looks a layer named by an ARN up by that name as given, not as the layer the ARN names, so
-        // the layer of that name is the one checked.
+        // GetLayerVersion accepts an unversioned ARN and checks the version that it names.
         String named = "arn:aws:lambda:us-east-1:000000000000:layer:my-layer";
+        when(ctx.getMethod()).thenReturn("GET");
         request("/2018-10-31/layers/" + named + "/versions/3");
-        assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:" + named + ":3",
-                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        assertEquals(version, layerResource("GetLayerVersion", "us-east-1"));
         // GetLayerVersionByArn reads the version its Arn names.
         request("/2018-10-31/layers");
         queryParams.putSingle("find", "LayerVersion");
         queryParams.putSingle("Arn", version);
-        assertEquals(version, builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+        assertEquals(version, layerResource("GetLayerVersionByArn", "us-east-1"));
         queryParams.clear();
         // Listing layers, a layer's versions or configs, and creating a config, name no resource.
         for (String path : new String[] {"/2018-10-31/layers", "/2018-10-31/layers/my-layer/versions",
                 "/2020-04-22/code-signing-configs"}) {
             request(path);
-            assertEquals("*", builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
+            String operation = path.endsWith("/versions") ? "ListLayerVersions" : "ListLayers";
+            assertEquals("*", path.contains("/layers")
+                    ? layerResource(operation, "us-east-1")
+                    : builder.build("lambda", ctx, "us-east-1", ACCOUNT), path);
         }
         when(ctx.getMethod()).thenReturn("POST");
         request("/2020-04-22/code-signing-configs");
@@ -2203,7 +2212,7 @@ class ResourceArnBuilderTest {
         // PublishLayerVersion makes a version of the layer, so it is checked against the layer.
         request("/2018-10-31/layers/my-layer/versions");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my-layer",
-                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+                layerResource("PublishLayerVersion", "us-east-1"));
         // A function's own settings, such as its concurrency or versions, are checked against the function.
         request("/2015-03-31/functions/my-function/versions");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:my-function",
@@ -2214,6 +2223,31 @@ class ResourceArnBuilderTest {
                 builder.build("lambda", ctx, "us-east-1", ACCOUNT));
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws,us-west-2,us-east-1", "aws-cn,cn-northwest-1,cn-north-1",
+            "aws-us-gov,us-gov-east-1,us-gov-west-1"})
+    void lambdaLayerArnLookupKeepsItsCoordinatesAndNormalizesTheVersion(
+            String partition, String layerRegion, String requestRegion) {
+        String layer = "arn:" + partition + ":lambda:" + layerRegion + ":111122223333:layer:shared";
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2018-10-31/layers/" + layer.replace(":", "%3A") + "/versions/01");
+
+        assertEquals(layer + ":1", layerResource("GetLayerVersion", requestRegion));
+    }
+
+    @Test
+    void otherLayerRoutesKeepTheirLiteralNameResource() {
+        String layer = "arn:aws:lambda:us-west-2:111122223333:layer:shared";
+        String expected = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":layer:" + layer + ":1";
+        when(ctx.getMethod()).thenReturn("DELETE");
+        request("/2018-10-31/layers/" + layer + "/versions/01");
+        assertEquals(expected, layerResource("DeleteLayerVersion", "us-east-1"));
+
+        when(ctx.getMethod()).thenReturn("GET");
+        request("/2018-10-31/layers/" + layer + "/versions/01/policy");
+        assertEquals(expected, layerResource("GetLayerVersionPolicy", "us-east-1"));
+    }
+
     @Test
     void aLayerVersionIsReadAsLambdaReadsItsNameAndNumber() {
         // Lambda parses the version number, so 01 is version 1, and the router keeps an encoded / inside the
@@ -2221,21 +2255,26 @@ class ResourceArnBuilderTest {
         when(ctx.getMethod()).thenReturn("GET");
         request("/2018-10-31/layers/my-layer/versions/01");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my-layer:1",
-                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+                layerResource("GetLayerVersion", "us-east-1"));
         request("/2018-10-31/layers/my%2Flayer/versions/3/policy");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my/layer:3",
-                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+                layerResource("GetLayerVersionPolicy", "us-east-1"));
         when(ctx.getMethod()).thenReturn("POST");
         request("/2018-10-31/layers/my%2Flayer/versions");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my/layer",
-                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+                layerResource("PublishLayerVersion", "us-east-1"));
         // GetLayerVersionByArn parses the number the same way.
         when(ctx.getMethod()).thenReturn("GET");
         request("/2018-10-31/layers");
         queryParams.putSingle("find", "LayerVersion");
         queryParams.putSingle("Arn", "arn:aws:lambda:us-east-1:000000000000:layer:my-layer:01");
         assertEquals("arn:aws:lambda:us-east-1:000000000000:layer:my-layer:1",
-                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+                layerResource("GetLayerVersionByArn", "us-east-1"));
+    }
+
+    private String layerResource(String operation, String region) {
+        return builder.buildResources("lambda", "lambda:" + operation, ctx, region, ACCOUNT,
+                AwsRegions.partitionFor(region)).getFirst();
     }
 
     @Test

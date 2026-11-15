@@ -4,6 +4,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
 import java.nio.file.Files;
@@ -12,7 +14,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -21,8 +25,10 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,13 +56,15 @@ class CodeArtifactPypiUpstreamRepositoryImporterTest {
 
     private CodeArtifactService service;
     private PypiserverSidecarClient pypiserver;
+    private CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
     private CodeArtifactPypiUpstreamRepositoryImporter importer;
 
     @BeforeEach
     void setUp() {
         service = mock(CodeArtifactService.class);
         pypiserver = mock(PypiserverSidecarClient.class);
-        importer = new CodeArtifactPypiUpstreamRepositoryImporter(service, pypiserver);
+        externalConnectionImporter = mock(CodeArtifactPypiExternalConnectionImporter.class);
+        importer = new CodeArtifactPypiUpstreamRepositoryImporter(service, pypiserver, externalConnectionImporter);
 
         CodeArtifactRepository repository = new CodeArtifactRepository();
         repository.setUpstreams(List.of(UPSTREAM));
@@ -95,6 +103,100 @@ class CodeArtifactPypiUpstreamRepositoryImporterTest {
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
                 any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
+    }
+
+    /**
+     * A file no upstream holds is fetched through an upstream's own external connection, retained
+     * there first, then retained here from that upstream.
+     */
+    @Test
+    void aFileNoUpstreamHoldsIsFetchedThroughAnUpstreamsExternalConnection() {
+        // Nothing listed at the upstream until its external connection has fetched the version.
+        when(pypiserver.listPackageVersions(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_NAME))
+                .thenReturn(List.of())
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp(VERSION,
+                        Instant.ofEpochSecond(1000))));
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        when(externalConnectionImporter.tryImportAsset(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, FILENAME))
+                .thenReturn(true);
+
+        assertTrue(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, FILENAME));
+        // The package fence here is read before the fetch through the upstream's connection, so a
+        // DeletePackage here during that fetch moves it away from the snapshot.
+        InOrder order = inOrder(service, externalConnectionImporter);
+        order.verify(service).currentContainerBackedPackageFence(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null,
+                PACKAGE_NAME);
+        order.verify(externalConnectionImporter).tryImportAsset(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID,
+                FILENAME);
+        order.verify(service).claimRetainedVersionOrigin(REGION, DOMAIN, OWNER, REPOSITORY, "pypi", null,
+                PACKAGE_NAME, VERSION, UPSTREAM, RetentionOriginKind.UPSTREAM_REPOSITORY, 42L);
+        // Leased once by the walk and once for the fetch through its connection, each released.
+        verify(service, times(2)).resolveContainerIdAndBeginUse("pypi", REGION, DOMAIN, OWNER, UPSTREAM, pypiserver);
+        verify(pypiserver, times(2)).endUse(UPSTREAM_REPO_ID);
+    }
+
+    /**
+     * The upstream's connection answers for a version the upstream already holds, Archived: the walk
+     * over what the upstreams hold skipped it, and the fetch through the connection skips it too.
+     */
+    @Test
+    void aVersionArchivedAtTheUpstreamIsNotCopiedThroughItsExternalConnection() {
+        doThrow(new AwsException("ResourceNotFoundException", "archived", 404)).when(service)
+                .requireContainerBackedVersionDownloadable(OWNER, REGION, DOMAIN, UPSTREAM, "pypi", null, PACKAGE_NAME,
+                        VERSION, UPSTREAM_REPO_ID);
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        when(externalConnectionImporter.tryImportAsset(REGION, DOMAIN, OWNER, UPSTREAM, UPSTREAM_REPO_ID, FILENAME))
+                .thenReturn(true);
+
+        assertFalse(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, FILENAME));
+        verify(service, never()).claimRetainedVersionOrigin(anyString(), anyString(), anyString(), anyString(),
+                anyString(), any(), anyString(), anyString(), anyString(), any(), anyLong());
+        verify(pypiserver, times(2)).endUse(UPSTREAM_REPO_ID);
+    }
+
+    @Test
+    void anUpstreamWithoutAnExternalConnectionIsNotAskedToFetch() {
+        when(pypiserver.listPackageVersions(UPSTREAM_REPO_ID, DOMAIN, UPSTREAM, null, PACKAGE_NAME))
+                .thenReturn(List.of());
+
+        assertFalse(importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, FILENAME));
+        verify(externalConnectionImporter, never()).tryImportAsset(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void additionalInternalFilenamesOffersWhatAnUpstreamsExternalConnectionHas() {
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        String publicOnly = "widget-2.0.0.tar.gz";
+        when(externalConnectionImporter.additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER), eq(UPSTREAM),
+                eq(UPSTREAM_REPO_ID), eq(PACKAGE_NAME), eq(Set.of(FILENAME)), any())).thenReturn(List.of(
+                        new CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile(publicOnly, false, null)));
+
+        List<String> offered = importer.additionalInternalFilenames(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                PACKAGE_NAME, Set.of()).stream()
+                .map(CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile::filename).toList();
+
+        assertEquals(List.of(FILENAME, publicOnly), offered);
+    }
+
+    /**
+     * A version this repository marked Archived or Disposed is left out of what an upstream's external
+     * connection offers here, as it is left out of what the upstream itself holds.
+     */
+    @Test
+    void additionalInternalFilenamesLeavesOutAVersionArchivedHereFromAnUpstreamsExternalConnection() {
+        when(externalConnectionImporter.hasExternalConnection(REGION, DOMAIN, OWNER, UPSTREAM)).thenReturn(true);
+        doThrow(new AwsException("ResourceNotFoundException", "archived", 404)).when(service)
+                .requireContainerBackedVersionDownloadable(OWNER, REGION, DOMAIN, REPOSITORY, "pypi", null,
+                        PACKAGE_NAME, "2.0.0", REPO_ID);
+
+        importer.additionalInternalFilenames(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_NAME, Set.of());
+
+        ArgumentCaptor<Predicate<String>> listable = ArgumentCaptor.forClass(Predicate.class);
+        verify(externalConnectionImporter).additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(UPSTREAM), eq(UPSTREAM_REPO_ID), eq(PACKAGE_NAME), any(), listable.capture());
+        assertFalse(listable.getValue().test("2.0.0"));
+        assertTrue(listable.getValue().test(VERSION));
     }
 
     @Test

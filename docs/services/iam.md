@@ -505,10 +505,15 @@ validator's one sentence for both cases, `Syntax errors in policy.`, and to the 
 language defines: a `Version` outside `2012-10-17` and `2008-10-17` answers that same sentence, a
 statement whose `Effect` is not literally `Allow` or `Deny` answers `The policy failed legacy
 parsing`, and a resource named neither by ARN nor by `*` answers `Resource <value> must be in ARN
-format or "*".` A managed policy, on `CreatePolicy` and `CreatePolicyVersion`, is held to those and
+format or "*".` A value that is no string names the text of that value, as the `Version` and the
+`Effect` already do, so `"Resource": 123` answers that sentence exactly as `"Resource": "123"`
+does; an element carrying null names nothing, which is the element's own case rather than a value
+to read. A managed policy, on `CreatePolicy` and `CreatePolicyVersion`, is held to those and
 to its statements' own elements besides, `Policy statement must contain actions.` and `Policy
 statement must contain resources.`, where a statement that is no object at all is the syntax case
-rather than a missing element.
+rather than a missing element. One clause the two validators do not word alike: an `Effect` the
+language does not define answers `The policy failed legacy parsing` on an inline write and
+`Syntax errors in policy.` on a managed one, so the sentence follows the validator that read it.
 
 A document carrying `Statement` with nothing in it is still a policy, one that grants nothing, and a
 member the request leaves out is still answered as absent by the constraints ahead of the operation.
@@ -1052,7 +1057,10 @@ on the one action a level allows leaves none either. What a namespace-wide readi
 right: an SCP denying `s3:DeleteBucket` alone keeps S3 on the list, because every other S3 action is
 still reachable, and a `Deny` that carries a `Condition` or names particular resources closes nothing
 at all, since the region-restricting deny on `*` that most organizations carry, and a deny scoped to
-one bucket, both leave the service reachable by every request they do not cover. The survivors are
+one bucket, both leave the service reachable by every request they do not cover. A `Deny` that names no
+resource closes nothing either: a statement reaches through whichever resource element it names, so
+one naming neither, because the element is absent or carries nothing but a value that is no string,
+reaches no request and takes no service off the list. The survivors are
 found by probing the chain with the actions the policies themselves name plus one stand-in action per
 wildcard, which is exact for the patterns policies are written with; a wildcard that is not a
 trailing one, as in `s3:*Object`, cannot be probed that way and leaves the service on the list rather
@@ -1534,6 +1542,15 @@ These are what AWS calls Git credentials when they are used with CodeCommit. A s
 support them is `NoSuchEntity` with status 404 and the message "No such service `<name>` is
 supported for Service Specific Credentials".
 
+A request wrong in both halves answers for the user. Recordings validated against AWS answer a
+`UserName` that names no user with "The user with name `<name>` cannot be found." whether the
+`ServiceName` beside it is supported or not, so the user is looked up before the service name is
+read, on `CreateServiceSpecificCredential` and on `ListServiceSpecificCredentials` alike. Under
+`AllUsers` there is no user to look up and the filter is the only thing left to be wrong about. What
+the bounds of `CredentialAgeDays` say is settled ahead of both, by the constraints every request is
+held to; whether the service takes the member at all cannot be asked before the service is known,
+so that answer stays behind them.
+
 That is not what the wire model would suggest. The model declares `ServiceNotSupportedException`,
 code `NotSupportedService`, on both `CreateServiceSpecificCredential` and
 `ListServiceSpecificCredentials`, and AWS never raises it: recordings validated against AWS answer
@@ -1910,7 +1927,7 @@ action is denied. The routed protocol determines the status, not just the reques
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
-Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
+Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
@@ -2678,13 +2695,21 @@ iam:PassRole permission."
 `logs:DescribeIndexPolicies`. Its reference names none for `METRIC_EXTRACTION_POLICY`, which needs only
 `logs:DescribeAccountPolicies`.
 
-**Secrets Manager secrets.** A request that names a secret by its name, or by a partial ARN without
-the random suffix, is evaluated against the stored secret's full ARN, suffix included, so a
-`secret:<name>-??????` resource, the pattern the Secrets Manager User Guide documents, matches it as
-it does on AWS, and a `Deny` on the full ARN applies. `CreateSecret` is evaluated against
-`secret:<Name>-??????`, standing in for the suffix the secret is assigned when it is created, so a
-policy scoped to a name prefix such as `secret:app/*` allows it. A name that matches no secret in the
-request's account and region is evaluated as `secret:<name>`, and an ARN that matches none as given.
+**Secrets Manager secrets.** Secrets Manager is read from the generated request resources. A request
+that names a secret by its name, or by a partial ARN without the random suffix, is evaluated against
+the stored secret's full ARN, suffix included, so a `secret:<name>-??????` resource, the pattern the
+Secrets Manager User Guide documents, matches it as it does on AWS, and a `Deny` on the full ARN
+applies. A secret named by an ARN of another Region, and another account's secret named by its full
+ARN, are evaluated against that ARN alone, the secret Secrets Manager then reads. A secret Secrets
+Manager does not hold, as `CreateSecret` names the one it makes by `Name`, is evaluated against
+`secret:<name>-??????`, the hyphen and six random characters botocore documents the service adding
+after the name left open, so a policy scoped to a name prefix such as `secret:app/*` allows it; an
+ARN that matches none is evaluated as given and, where it names another Region or account, as the
+secret of that name in the request's. An operation acting on no
+resource type in the Service Authorization Reference (`ListSecrets`, `GetRandomPassword`,
+`BatchGetSecretValue`) is evaluated on `*`. A secret's stored tags fill `aws:ResourceTag/<key>` and
+`secretsmanager:ResourceTag/<key>`, the resource-tag keys the Service Reference gives the `Secret` type,
+as described under `aws:ResourceTag/<key>` below.
 
 **KMS keys.** A request that names a key by its id, an alias name, an alias ARN or a key ARN is
 evaluated against the stored key's ARN, as the KMS API reference resolves the request's key
@@ -2730,19 +2755,55 @@ also applies to other role operations such as `DeleteRole` and `ListRolePolicies
 `Path` cannot change this ARN. Once the role exists, its stored path and partition apply;
 creation still uses the path the request asks for.
 
+`ec2:CreateVpc` is evaluated against `vpc/*` in the caller's partition, Region and account,
+so a VPC-scoped grant can authorize creation with `aws:RequestTag` conditions. When supplied,
+IPv4 and IPv6 IPAM pools and an IPv6 address pool are checked as additional resources. Tags
+at creation additionally require `ec2:CreateTags` on the new VPC, with `ec2:CreateAction`
+set to `CreateVpc`. Explicit denies on these resources still apply. The resource mapping
+is generated from the Service Reference and botocore, as it is for every EC2 operation:
+a request is checked on the resources its members name, each EC2 Query list read under the
+wire name botocore serializes it with, and an operation whose request names none stays on `*`.
+
+`ec2:CreateSubnet`, `ec2:CreateRouteTable`, `ec2:CreateSecurityGroup`, and
+`ec2:CreateVpcEndpoint` authorize
+both the new resource ARN and the existing parent VPC. `ec2:CreateInternetGateway`
+authorizes the new gateway ARN. Tag-on-create checks apply to the new resource only;
+the parent VPC uses its own stored ownership tags.
+
+`ec2:CreateNetworkInterface` checks the new interface, its subnet and every supplied
+security group separately. The generated EC2 Query names preserve SDK list serialization
+(for example, `Groups` is sent as `SecurityGroupId.N`). `ec2:AllocateAddress` checks
+the new elastic IP and any supplied address pool; its created resource type is derived
+from botocore's operation description and returned allocation ID. `ec2:CreateNatGateway`
+checks the new gateway and each supplied subnet, elastic IP and VPC separately, including
+stored ownership tags on its existing parents.
+
+The network mutation operations include subnet attribute updates, route
+creation/replacement/deletion and association, gateway attachment/detachment,
+security-group ingress/egress changes, and VPC, subnet, route table, gateway, and
+security-group deletion. Each generated ARN is checked with that resource's own
+stored tags; allowing an owned VPC does not authorize an unowned gateway or subnet.
+
+`ec2:ModifyVpcAttribute` resolves the supplied `VpcId` to its ARN and checks the target's
+current stored tags under `aws:ResourceTag/` and `ec2:ResourceTag/`. Tags are read for each
+resolved ARN independently; request tags do not replace ownership tags on an existing VPC.
+The prefixes come from the generated `resourceTagKeys` table in `iam-request-resources.json`,
+derived from the Service Reference; new keys belong in the generator rather than Java branches.
+
 EC2 tagging targets come from `regen_iam_request_resources.py`, with EC2 among its namespaces.
 The Service Reference supplies the resource types and ARN formats, botocore supplies the
-`Resources` list and its EC2 Query spelling (`ResourceId.N`), and a documented generator
-mapping identifies instance IDs. The generated entries select `CreateTags` and `DeleteTags`
-from their input shapes and resource types, without an operation-name branch in Java.
-Each instance ARN is evaluated with that target's existing tags; every target must be authorized
-before the handler changes any tags. Other EC2 resource types retain wildcard authorization
-against every target context, including when mixed with instances. Only instance ARNs narrow
-the context to their own stored tags. Resource resolution reuses the decoded form parameters
-rather than reparsing the body for each target. The readers preserve the handler's parameter
-ordering, first duplicate value and stop at the first missing list index. This staged EC2 read
-covers only instances in heterogeneous target lists; other EC2 operations retain their existing
-wildcard resource resolution.
+`Resources` list and its EC2 Query spelling (`ResourceId.N`), and the id prefix botocore gives
+each type, in its documentation or its request and response examples (`"GroupId": "sg-903004f8"`),
+identifies instance, security-group, network-acl, route-table and network-interface IDs.
+The generated entries select `CreateTags` and `DeleteTags` from their input shapes and resource
+types, without an operation-name branch in Java. Each ARN is evaluated with that target's own
+stored tags; every target must be authorized before the handler changes any tags. Other EC2
+resource types retain wildcard authorization against every target context, including mixed
+batches. Resource resolution reuses the decoded form parameters rather than reparsing the body
+for each target. The readers preserve the handler's parameter ordering, first duplicate value
+and stop at the first missing list index. A list a type's ARN variable names, such as
+`InstanceIds`, is the request's targets only when the request names nothing else the action acts
+on: a launch's `SecurityGroupIds` are read beside its image and subnet, each on its own ARN.
 
 Which type each action takes is vendored, not written out in Java:
 `src/main/resources/aws/iam-action-resources.json` is generated by
@@ -2802,7 +2863,10 @@ account key carries no identity policies of its own.
 - **Session policies**: inline policies passed during `sts:AssumeRole`.
 - **Permission boundaries**: managed policies used to cap maximum permissions.
 - **Action/Resource patterns**: literal matches, wildcards (`*`, `?`), and `NotAction`/`NotResource` blocks.
-  Action names match without regard to case, resource ARNs match case-sensitively, as on AWS.
+  Action names match without regard to case, resource ARNs match case-sensitively, as on AWS. Each
+  value is written as a string, so one that is not, in a list as much as on its own, names nothing:
+  a statement whose only `NotResource` entry is a number excludes nothing and matches nothing,
+  rather than excluding nothing and so covering everything.
 - **Conditions**: support for `Condition` blocks with multiple operators.
 - **Policy variables**: `${...}` placeholders in a `Resource` pattern or a `Condition` value,
   resolved from the request context.
@@ -2957,7 +3021,20 @@ floci populates:
   once per resource and denied when any of them fails the condition, as on AWS.
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
-  `logs:DeleteRetentionPolicy` use the owning log group's tags.
+  `logs:DeleteRetentionPolicy` use the owning log group's tags. Any other ARN a request is checked on
+  takes the resource-tag keys the generated `resourceTagKeys` table in `iam-request-resources.json` gives
+  its type (`aws:ResourceTag/`, `secretsmanager:ResourceTag/`), which `regen_iam_request_resources.py`
+  reads from the Service Reference for every namespace it reads, valued from the tags the type's service
+  holds on that resource (`StoredResourceArns.storedTags`); a service that holds none leaves them absent.
+  Secrets Manager answers for its secrets. Tag keys differing only in case are one condition key holding
+  every value.
+- EC2 resource keys such as a network interface's `ec2:Vpc`, `ec2:Subnet`, `ec2:AvailabilityZone` and
+  `ec2:NetworkInterfaceID`: for every action on a resource EC2 holds, the members of the resource the
+  key names, an ARN for a key the Service Reference types as one. `resourceKeys` in
+  `iam-request-resources.json` gives each type's keys and members, generated from the Service Reference
+  and botocore by `tools/aws/regen_iam_request_resources.py`; network interfaces are read so far, and a
+  key of a type EC2 does not yet answer for stays absent. A batch is evaluated once per resource, each
+  with its own keys.
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
@@ -3088,6 +3165,23 @@ floci populates:
   generates from the Service Reference and pinned botocore. Regenerate with
   `make request-condition-keys-sync`. `redshift:DbName` and `redshift:DurationSeconds` are not
   populated yet.
+- `route53:ChangeResourceRecordSetsActions`, `route53:ChangeResourceRecordSetsRecordTypes` and
+  `route53:ChangeResourceRecordSetsNormalizedRecordNames`: the `Action`, `Type` and `Name` of every change
+  in a `ChangeResourceRecordSets` batch, each read from its own change or record set, so a `Name` elsewhere
+  in the record set is not read, and a second copy of one is refused with `InvalidInput`, as the change is.
+  A record name is spelled as the
+  [Route 53 condition format](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
+  gives it: lowercase, without the final dot, and with every character other than a to z, 0 to 9, hyphen,
+  underscore and the dots between labels as an octal escape code (`*` is `\052`). Use
+  `ForAllValues:StringEquals` with `Null` set to `false` to require every change to match. The actions, the
+  request members, their botocore shapes and the request protocol come from the same
+  `request-condition-keys.json`, and Route 53 spells the names as its `DNSName` shape.
+- `eks:authenticationMode`, `eks:bootstrapClusterCreatorAdminPermissions`, `eks:endpointPrivateAccess` and
+  `eks:endpointPublicAccess`: the `accessConfig` and `resourcesVpcConfig` members a `CreateCluster` request
+  names, and the three an `UpdateClusterConfig` takes, read from the JSON body as given; a member left out or
+  given a JSON null is absent, never the cluster's stored value. The actions, members and protocol come from
+  the same `request-condition-keys.json`. A boolean member given anything but a boolean or its text is refused
+  before it is read (see [EKS](eks.md)), so the key never misses a value the cluster takes.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

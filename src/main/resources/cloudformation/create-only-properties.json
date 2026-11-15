@@ -547,6 +547,9 @@
   "AWS::ElasticLoadBalancingV2::Listener": [
     "LoadBalancerArn"
   ],
+  "AWS::ElasticLoadBalancingV2::ListenerCertificate": [
+    "ListenerArn"
+  ],
   "AWS::ElasticLoadBalancingV2::ListenerRule": [
     "ListenerArn"
   ],

@@ -372,11 +372,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "MEASURED", {})
-    monkeypatch.setattr(r, "UNQUALIFIED", {})
-    monkeypatch.setattr(r, "MINTED_IDS", {})
-    monkeypatch.setattr(r, "FOUND_BY", {})
-    monkeypatch.setattr(r, "THROUGH", {})
-    monkeypatch.setattr(r, "CLIENTS_NOT_READ", {})
+    monkeypatch.setattr(r, "FORWARDED", {})
     return monkeypatch
 
 
@@ -385,6 +381,56 @@ def write_models(root, models: dict[str, dict]):
         directory = root / name / "2020-01-01"
         directory.mkdir(parents=True)
         (directory / "service-2.json").write_text(json.dumps(value), encoding="utf-8")
+
+
+def test_rest_arn_alternatives_and_integer_shapes_fill_versioned_resources(isolated, tmp_path):
+    formats = {
+        "product": "arn:${Partition}:svc:${Region}:${Account}:product:${ProductName}",
+        "productVersion": "arn:${Partition}:svc:${Region}:${Account}:product:${ProductName}:${ProductVersion}",
+    }
+    api = model({"GetProductVersion": {"ProductName": "ProductName", "VersionNumber": "ProductVersionNumber"},
+                 "GetProductVersionByArn": {"Arn": "String"}}, "rest-json")
+    api["shapes"]["ProductName"] = {
+        "type": "string", "pattern": "(arn:(aws[a-z-]*)?:svc:[a-z0-9-]+:[0-9]{12}:product:[a-z]+)|[a-z]+"}
+    api["shapes"]["ProductVersionNumber"] = {"type": "long"}
+    api["shapes"]["GetProductVersionIn"]["required"] = ["ProductName", "VersionNumber"]
+    api["operations"]["GetProductVersion"]["http"] = {
+        "method": "GET", "requestUri": "/products/{ProductName}/versions/{VersionNumber}"}
+    for name, member in api["shapes"]["GetProductVersionIn"]["members"].items():
+        member.update(location="uri", locationName=name)
+    api["operations"]["GetProductVersionByArn"]["http"] = {"method": "GET", "requestUri": "/products"}
+    api["shapes"]["GetProductVersionByArnIn"]["members"]["Arn"].update(location="querystring", locationName="Arn")
+    write_models(tmp_path, {"svc": api})
+    documents = [reference("svc", {"GetProductVersion": ["productVersion"],
+                                   "GetProductVersionByArn": ["productVersion"]}, formats)]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    entry = document["operations"]["svc:GetProductVersion"]
+    assert entry["resources"] == [{
+        "type": "productVersion", "fill": {"ProductName": "ProductName", "ProductVersion": "VersionNumber"},
+        "arnOf": {"ProductName": "product"}}]
+    assert entry["located"] == {"ProductName": "{ProductName}", "VersionNumber": "{VersionNumber}"}
+    assert document["operations"]["svc:GetProductVersionByArn"]["resources"] == [
+        {"types": ["productVersion"], "arn": "Arn"}]
+    assert document["integerVariables"] == {"svc": {"productVersion": ["ProductVersion"]}}
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    document["integerVariables"] = {}
+    assert any("integerVariables differ from botocore" in problem for problem in r.derive(document, tmp_path))
+    document["integerVariables"] = {"svc": {"productVersion": ["Account"]}}
+    assert r.validate(document) == ["integerVariables names no ARN variables for svc:productVersion"]
+
+
+def test_numeric_shapes_do_not_guess_between_members_or_accept_floats():
+    api = model({"UpdateThing": {"MinCapacity": "Capacity", "MaxCapacity": "Capacity",
+                                 "Weight": "WeightNumber"}})
+    api["shapes"]["Capacity"] = {"type": "integer"}
+    api["shapes"]["WeightNumber"] = {"type": "double"}
+    assert r.integer_members({"svc": api}, "UpdateThing") == {}
+
+
+def test_an_arn_alternative_requires_the_same_name_pattern():
+    shape = {"type": "string", "pattern": "(arn:aws:svc:us-east-1:123456789012:thing:[a-z]+)|[0-9]+"}
+    assert r._name_or_arn(shape) is None
 
 
 DOCUMENTS = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": FORMATS["thing"]}),
@@ -507,7 +553,8 @@ def test_redshift_serverless_account_inference_preserves_the_generated_resources
         if not operation.startswith("redshift-serverless:"):
             continue
         derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
-                              document["arnFormats"]["redshift-serverless"], models)
+                              document["arnFormats"]["redshift-serverless"], models, None,
+                              document["forwardedActions"])
         assert derived == entry, operation
         if r.account_members(models, operation.split(":", 1)[1]) == ["ownerAccount"]:
             account_operations.add(operation.split(":", 1)[1])
@@ -556,104 +603,150 @@ def test_a_hand_edited_entry_does_not_match_botocore(isolated, tmp_path):
     assert len(r.derive(document, tmp_path)) == 1
 
 
-def test_a_type_checked_without_a_qualifier_is_recorded_and_must_be_one_the_file_reads(isolated, tmp_path):
+THINGS = {"thing": "arn:${Partition}:svc:${Region}:${Account}:thing/${ThingName}",
+          "thingversion": "arn:${Partition}:svc:${Region}:${Account}:thing/${ThingName}:${ThingVersion}"}
+
+
+def test_a_type_another_qualifies_and_no_action_acts_on_is_checked_without_the_qualifier(isolated, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
-    isolated.setattr(r, "UNQUALIFIED", {"svc:thing": "its service checks a qualified ARN without the qualifier"})
-    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    documents = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, THINGS)]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    # `thingversion` is a thing's format and one more `:${...}`, and no action acts on it.
     assert document["unqualified"] == {"svc": ["thing"]}
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
-    # A hand edit no longer matches, and a type the file has no format for fails the build.
+    # A hand edit no longer matches.
     document["unqualified"] = {}
     assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    isolated.setattr(r, "UNQUALIFIED", {"svc:gone": "no longer there"})
-    with pytest.raises(ValueError, match="svc:gone"):
-        r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    # An action acting on the qualified type checks it on its own ARN.
+    documents = [reference("svc", {"GetThing": ["thing"], "ListThings": ["thingversion"]}, THINGS)]
+    assert r.build(documents, "test", tmp_path, "botocore test")["unqualified"] == {}
 
 
-def test_a_type_whose_service_mints_an_id_after_its_name_is_recorded_and_must_be_one_the_file_reads(isolated, tmp_path):
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
-    isolated.setattr(r, "MINTED_IDS", {"svc:thing": "its service follows the name with an id it mints"})
+def test_a_member_documented_to_take_a_selector_after_the_name_checks_its_type_without_it(isolated, tmp_path):
+    documented_ = model({"GetThing": {"ThingName": "String"}, "ListThings": {}})
+    documented_["shapes"]["GetThingIn"]["members"]["ThingName"]["documentation"] = (
+        '<p>The thing. To read a version, use "ThingName": "name:version".</p>')
+    write_models(tmp_path, {"svc": documented_})
+    document = r.build([reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": THINGS["thing"]})],
+                       "test", tmp_path, "botocore test")
+    assert document["unqualified"] == {"svc": ["thing"]}
+    assert r.derive(document, tmp_path) == []
+    # Without that form documented, the thing is checked as given.
+    write_models(tmp_path / "plain", {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
+    assert r.build([reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": THINGS["thing"]})],
+                   "test", tmp_path / "plain", "botocore test")["unqualified"] == {}
+
+
+def test_a_type_whose_arn_shape_takes_a_segment_past_its_name_has_an_id_its_service_mints(isolated, tmp_path):
+    minted = model({"GetThing": {"ThingName": "String"}, "ListThings": {}})
+    minted["shapes"]["ThingArn"] = {"type": "string",
+                                    "pattern": "^arn:aws:svc:[a-z0-9-]+:[0-9]{12}:thing\\/[\\.\\-_A-Za-z0-9]+\\/[\\-A-Za-z0-9]+$"}
+    write_models(tmp_path, {"svc": minted})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
     assert document["mintedIds"] == {"svc": ["thing"]}
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
-    # A hand edit no longer matches, and a type the file has no format for fails the build.
     document["mintedIds"] = {}
-    assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    isolated.setattr(r, "MINTED_IDS", {"svc:gone": "no longer there"})
-    with pytest.raises(ValueError, match="svc:gone"):
-        r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    assert len(r.derive(document, tmp_path)) == 1
+    # One segment that may hold slashes is the name alone.
+    minted["shapes"]["ThingArn"]["pattern"] = "^arn:aws:svc:[a-z0-9-]+:[0-9]{12}:thing\\/([a-zA-Z0-9-_\\.\\/]*)"
+    write_models(tmp_path / "plain", {"svc": minted})
+    assert r.build(DOCUMENTS, "test", tmp_path / "plain", "botocore test")["mintedIds"] == {}
 
 
-def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members_naming_it(isolated, tmp_path):
+def test_a_create_documenting_characters_its_service_mints_after_a_name_gives_them_open(isolated, tmp_path):
+    # Secrets Manager: "automatically adds a hyphen and six random characters after the secret name at the end of
+    # the ARN".
+    service = model({"CreateThing": {"Name": "String"}, "GetThing": {"ThingName": "String"}, "ListThings": {}})
+    service["shapes"]["CreateThingIn"]["members"]["Name"]["documentation"] = (
+        "<p>The name of the new thing.</p> <p>Svc automatically adds a hyphen and six random characters after the "
+        "thing name at the end of the ARN.</p>")
+    write_models(tmp_path, {"svc": service})
+    documents = [reference("svc", {"CreateThing": ["thing"], "GetThing": ["thing"], "ListThings": []},
+                           {"thing": FORMATS["thing"]})]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["mintedSuffixes"] == {"svc": {"thing": "-??????"}}
+    assert document["operations"]["svc:CreateThing"]["resources"] == [{"type": "thing", "fill": {"ThingName": "Name"}}]
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    document["mintedSuffixes"] = {}
+    assert any("minted suffix" in problem for problem in r.derive(document, tmp_path))
+    for bad in ({"svc": {"thing": "??????"}}, {"svc": {"group": "-??"}}, {"svc": {"thing": "-ab"}}, {"svc": {}}):
+        document["mintedSuffixes"] = bad
+        assert any("mintedSuffixes" in problem for problem in r.validate(document)), bad
+    # Undocumented, the thing has no suffix.
+    write_models(tmp_path / "plain", {"svc": model({"CreateThing": {"Name": "String"},
+                                                    "GetThing": {"ThingName": "String"}, "ListThings": {}})})
+    assert r.build(documents, "test", tmp_path / "plain", "botocore test")["mintedSuffixes"] == {}
+
+
+def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_its_documented_key_or_its_name(isolated, tmp_path):
     documents = [reference("svc", {"PutTarget": ["target"], "TagTarget": ["target"], "GetByResource": ["target"],
-                                   "RunOn": ["target", "group"]},
+                                   "RunOn": ["target", "group"], "RenameGroup": ["group"]},
                            {"target": "arn:${Partition}:svc:${Region}:${Account}:target/${ResourceId}",
                             "group": "arn:${Partition}:svc:${Region}:${Account}:group/${GroupId}"})]
-    write_models(tmp_path, {"svc": model({"PutTarget": {"Namespace": "String", "ResourceId": "String",
-                                                        "Dimension": "String"},
-                                          "TagTarget": {"ResourceArn": "String"},
-                                          "GetByResource": {"ResourceId": "String"},
-                                          "RunOn": {"GroupName": "String"}})})
-    isolated.setattr(r, "FOUND_BY", {"svc:target": (["Namespace", "ResourceId", "Dimension"], "its service mints the id"),
-                                        "svc:group": (["GroupName"], "its service mints the id")})
+    found = model({"PutTarget": {"Namespace": "String", "ResourceId": "String", "Dimension": "String"},
+                   "TagTarget": {"ResourceArn": "String"},
+                   "GetByResource": {"ResourceId": "String"},
+                   "RunOn": {"GroupName": "String"}, "RenameGroup": {"GroupName": "String"}})
+    found["operations"]["PutTarget"]["documentation"] = (
+        "<p>Targets are uniquely identified by the combination of namespace, resource ID, and dimension.</p>")
+    write_models(tmp_path, {"svc": found})
     document = r.build(documents, "test", tmp_path, "botocore test")
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
     operations = document["operations"]
-    # Found by the three, in order, rather than filled by ResourceId, which is not the id the ARN ends in.
+    # Found by its documented key, in the request's order, rather than filled by ResourceId, not the id its ARN ends in.
     assert operations["svc:PutTarget"]["resources"] == [
         {"type": "target", "fill": {}, "find": ["Namespace", "ResourceId", "Dimension"]}]
-    # Its ARN names it as given, and a request lacking a member names none.
+    # Its ARN names it as given, and a request lacking a member of its key names none.
     assert operations["svc:TagTarget"]["resources"] == [{"types": ["target"], "arn": "ResourceArn"}]
     assert operations["svc:GetByResource"]["resources"] == []
-    # Found by its name though no member fills its id, so the rule derives nothing for it.
+    # Found by its name, its id being one no request gives.
     assert operations["svc:RunOn"]["resources"] == [{"type": "group", "fill": {}, "find": ["GroupName"]}]
-    # A hand edit no longer matches, and a type the file has no format for fails the build.
+    # Where a request gives the id, a name beside it is a new name, not the group's.
+    found["shapes"]["RenameGroupIn"]["members"]["GroupId"] = {"shape": "String"}
+    write_models(tmp_path / "given", {"svc": found})
+    renamed = r.build(documents, "test", tmp_path / "given", "botocore test")["operations"]
+    assert renamed["svc:RenameGroup"]["resources"] == [{"type": "group", "fill": {"GroupId": "GroupId"}}]
+    assert not any("find" in resource for resource in renamed["svc:RunOn"]["resources"])
+    # A hand edit no longer matches.
     operations["svc:PutTarget"]["resources"] = [{"type": "target", "fill": {"ResourceId": "ResourceId"}}]
-    assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    isolated.setattr(r, "FOUND_BY", {"svc:gone": (["Namespace"], "no longer there")})
-    with pytest.raises(ValueError, match="svc:gone"):
-        r.build(documents, "test", tmp_path, "botocore test")
+    assert len(r.derive(document, tmp_path)) == 1
 
 
-def test_a_member_naming_a_resource_of_no_type_names_the_one_it_runs_on_through_it(isolated, tmp_path):
+def test_a_member_naming_a_resource_of_no_type_names_what_its_record_says_it_runs_on_through_it(isolated, tmp_path):
     documents = [reference("svc", {"Run": ["cluster", "group"], "RunOnGroup": ["group"], "RunOnCluster": ["cluster"],
                                    "ListSessions": []},
                            {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster:${ClusterName}",
                             "group": "arn:${Partition}:svc:${Region}:${Account}:group/${GroupId}"})]
-    write_models(tmp_path, {"svc": model({"Run": {"SessionId": "String"}, "RunOnGroup": {"SessionId": "String"},
-                                          "RunOnCluster": {"Sql": "String"}, "ListSessions": {"SessionId": "String"}})})
-    isolated.setattr(r, "THROUGH", {"svc:SessionId": (["cluster", "group"], "a session runs on one")})
+    sessions = model({"Run": {"SessionId": "String"}, "RunOnGroup": {"SessionId": "String"},
+                      "RunOnCluster": {"Sql": "String"}, "ListSessions": {"SessionId": "String"}})
+    # A session's record holds its id beside the cluster or group it runs on.
+    sessions["shapes"]["SessionData"] = {"type": "structure", "members": {
+        "SessionId": {"shape": "String"}, "ClusterIdentifier": {"shape": "String"}, "GroupId": {"shape": "String"},
+        "Status": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": sessions})
     document = r.build(documents, "test", tmp_path, "botocore test")
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
     operations = document["operations"]
-    # Named through the session, as one of the types the action acts on.
     assert operations["svc:Run"]["resources"] == [{"types": ["cluster", "group"], "through": "SessionId"}]
     assert operations["svc:RunOnGroup"]["resources"][-1] == {"types": ["group"], "through": "SessionId"}
     # Not by a request without the member, nor for an action acting on none of the types.
     assert not any("through" in resource for resource in operations["svc:RunOnCluster"]["resources"])
     assert operations["svc:ListSessions"]["resources"] == []
-    # A hand edit no longer matches, and a type the file has no format for fails the build.
-    operations["svc:Run"]["resources"] = []
-    assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
-    isolated.setattr(r, "THROUGH", {"svc:SessionId": (["gone"], "no longer there")})
-    with pytest.raises(ValueError, match="svc:gone"):
-        r.build(documents, "test", tmp_path, "botocore test")
+    # Without the record, the session reaches nothing.
+    del sessions["shapes"]["SessionData"]
+    write_models(tmp_path / "plain", {"svc": sessions})
+    assert r.build(documents, "test", tmp_path / "plain", "botocore test")["operations"]["svc:Run"]["resources"] == []
 
 
-def test_a_client_not_read_gives_no_members_and_aws_listing_it_is_no_untrue_claim(isolated, tmp_path):
-    isolated.setattr(r, "CLIENTS_NOT_READ", {"svcv2": "a second API Floci does not serve"})
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
-                            "svcv2": model({"GetThing": {"ThingArn": "String"}})})
-    documents = [dict(DOCUMENTS[0], Operations=[dict(op, SDK=op["SDK"] + [{"Name": "svcv2", "Package": "Boto3"}])
-                                                for op in DOCUMENTS[0]["Operations"]])] + DOCUMENTS[1:]
-    document = r.build(documents, "test", tmp_path, "botocore test")
-    assert document["namespaces"] == {"svc": ["svc"]} and document["clientsNotRead"] == {"svcv2": "a second API Floci does not serve"}
-    assert document["operations"]["svc:GetThing"]["resources"] == [{"type": "thing", "fill": {"ThingName": "ThingName"}}]
-    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
-    upstream = r.checked_actions(documents)
-    assert r.verify_against(document, upstream, {"svc": {"thing": FORMATS["thing"]}}) == ([], [])
-    document["clientsNotRead"] = {}
-    assert len(r.derive(document, tmp_path)) == 1
+def test_a_member_whose_shape_takes_an_alias_names_its_type_with_a_word_before_it():
+    formats = {"key": "arn:${Partition}:svc:${Region}:${Account}:key/${KeyArn}"}
+    keys = model({"ReEncrypt": {"IncomingKeyIdentifier": "KeyArnOrKeyAliasType",
+                                "OutgoingKeyIdentifier": "KeyArnOrKeyAliasType"}})
+    keys["shapes"]["KeyArnOrKeyAliasType"] = {
+        "type": "string", "pattern": "arn:aws:svc:[a-z0-9-]+:[0-9]{12}:(key/[0-9a-zA-Z]{16,64}|alias/[a-zA-Z0-9/_-]+)$|^alias/[a-zA-Z0-9/_-]+"}
+    assert r.alias_members({"svc": keys}, "ReEncrypt") == {"IncomingKeyIdentifier", "OutgoingKeyIdentifier"}
+    keys["shapes"]["KeyArnOrKeyAliasType"]["pattern"] = "arn:aws:svc:[a-z0-9-]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
+    assert r.alias_members({"svc": keys}, "ReEncrypt") == set()
 
 
 def test_a_member_taking_an_arn_before_a_name_is_read_as_the_variable_of_that_types_arn():
@@ -689,10 +782,11 @@ def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_re
 
 
 def good_document() -> dict:
-    return {"namespaces": {"svc": ["svc"]}, "clientsNotRead": {"svcv2": "not served"}, "handBuilt": ["hand"],
+    return {"namespaces": {"svc": ["svc"]}, "handBuilt": ["hand"],
             "notCovered": {"later": "a later batch"},
             "otherNamespaces": ["other"], "arnFormats": {"svc": {"thing": FORMATS["thing"], "group": FORMATS["group"]}},
-            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]},
+            "unqualified": {"svc": ["thing"]}, "mintedIds": {"svc": ["thing"]}, "mintedSuffixes": {},
+            "forwardedActions": {},
             "operations": {
                 "svc:A": {"action": "svc:A", "types": ["thing"], "resources": [{"types": ["thing"], "arn": "ThingArn"}]},
                 "svc:B": {"action": "svc:B", "types": ["group"], "resources": [{"type": "group", "fill": {"GroupName": "Names[]"}}]},
@@ -719,9 +813,18 @@ def test_a_well_formed_document_validates():
         fill={"GroupName": "Group.Name"}, fixed={"GroupId": "g-1"}, made=True)
     document["operations"]["svc:A"]["resources"][0]["made"] = True
     assert r.validate(document) == []
-    # A type whose ARN is all an id its service mints, found by the members naming it.
+    # A type whose ARN is all an id its service mints, found by the members naming it, or each value of one list.
     document = good_document()
     document["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace", "Id"])
+    assert r.validate(document) == []
+    document["operations"]["svc:B"]["resources"][0].update(find=["Ids[]"])
+    assert r.validate(document) == []
+    # A member filling the one variable of another type's format names that type's default when left out.
+    document = good_document()
+    document["arnFormats"]["svc"]["service"] = "arn:${Partition}:svc:${Region}:${Account}:service/${ThingName}/${Name}"
+    document["operations"]["svc:A"]["types"] = ["service"]
+    document["operations"]["svc:A"]["resources"] = [{"type": "service", "fill": {"ThingName": "thing", "Name": "Names[]"},
+                                                     "defaults": {"thing": "thing"}}]
     assert r.validate(document) == []
     # A resource named through a member naming another of its service's own, which it runs on, or through each
     # value of a list's field when another member is absent.
@@ -792,7 +895,6 @@ def with_a_create() -> dict:
     (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:${Region}:${Account}:group/${GroupName}/${Id}")
      or d["operations"]["svc:B"]["resources"][0].update(arnOf={"Bus": "group"}), "types of one variable"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(unless={"Type": ["a"]}), "neither an ARN member"),
-    (lambda d: d["clientsNotRead"].update(svcv2=""), "clientsNotRead"),
     (lambda d: d.update(unqualified={"svc": ["pool"]}), "unqualified"),
     (lambda d: d.update(unqualified={"other": ["thing"]}), "unqualified"),
     (lambda d: d.update(unqualified={"svc": []}), "unqualified"),
@@ -803,7 +905,11 @@ def with_a_create() -> dict:
     (lambda d: d.pop("mintedIds"), "mintedIds"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(find=["Namespace"]), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=[]), "beside a fill"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]"]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]", "Namespace"]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults={"Names[]": "thing"}), "defaults of types"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults={"Other": "thing"}), "defaults of types"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults={}), "defaults of types"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(defaults=["thing"]), "defaults of types"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find="Namespace"), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], fixed={"GroupId": "g"}),
      "beside a fill"),
@@ -882,7 +988,6 @@ def test_the_vendored_file_is_well_formed():
     # EventBridge V2 is read beside EventBridge, and where both name an operation's resources, which one applies is
     # the endpoint serving the request, never a member a caller could add.
     assert document["namespaces"]["events"] == ["eventbridgev2", "events"]
-    assert "eventbridgev2" not in document["clientsNotRead"]
     assert operations["events:DeleteSubscriber"]["resources"] == [{"types": ["subscriber"], "arn": "SubscriberArn"}]
     assert operations["events:DeleteEventBus"]["resources"] == [
         {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
@@ -898,7 +1003,10 @@ def test_the_vendored_file_is_well_formed():
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
     # A state machine's version or alias is checked on the state machine.
-    assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
+    assert document["unqualified"] == {"lambda": ["function"], "ssm": ["parameter"], "states": ["statemachine"]}
+    assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
+    assert {operation for operation in operations if operation.startswith("lambda:")} == {
+        "lambda:GetLayerVersion", "lambda:GetLayerVersionByArn"}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}
@@ -992,6 +1100,125 @@ def test_a_measured_entry_must_name_an_operation_the_file_reads(isolated, tmp_pa
     isolated.setattr(r, "MEASURED", {"hand:Gone": ([{"type": "thing", "fill": {}}], PROBED)})
     with pytest.raises(ValueError, match="MEASURED gives hand:Gone, which the file does not read"):
         r.build(measured_documents(tmp_path, []), "test", tmp_path, "botocore test")
+
+
+GUIDE_SAYS = "the guide (https://example.com/guide) says 'restoring a thing needs keys:Decrypt on its key'"
+KEY_FORMAT = "arn:${Partition}:keys:${Region}:${Account}:key/${KeyId}"
+
+
+def keys_reference(resources: list[str] | None = None, condition_keys: list[str] | None = None) -> dict:
+    """A Service Reference document of a key service whose `Decrypt` acts on keys and takes its `ViaService` key."""
+    document = reference("keys", {"Decrypt": ["key"] if resources is None else resources}, {"key": KEY_FORMAT})
+    document["Actions"][0]["ActionConditionKeys"] = ["keys:ViaService"] if condition_keys is None else condition_keys
+    return document
+
+
+def forwarding_documents(tmp_path, record_member: str = "KeysKeyId", listed: bool = False,
+                         keys: dict | None = None) -> list[dict]:
+    """`svc`, whose `GetThing` restores a thing its record says a key of `keys` encrypts, and that key service."""
+    svc = model({"GetThing": {"ThingName": "String"}, "ListThings": {}})
+    svc["metadata"]["endpointPrefix"] = "svc"
+    svc["shapes"]["Thing"] = {"type": "structure", "members": {"ThingName": {"shape": "String"},
+                                                               record_member: {"shape": "String"}}}
+    write_models(tmp_path, {"svc": svc})
+    documents = [dict(DOCUMENTS[0]), *DOCUMENTS[1:], keys or keys_reference()]
+    if listed:
+        documents[0] = json.loads(json.dumps(DOCUMENTS[0]))
+        documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
+    return documents
+
+
+def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_holds(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+    # The member is the record's, named after the action's namespace and its type's variable, whatever its case.
+    assert document["operations"]["svc:GetThing"]["forwarded"] == [
+        {"action": "keys:Decrypt", "of": "thing", "member": "KeysKeyId", "endpoint": "svc"}]
+    assert document["forwardedActions"] == {
+        "keys:Decrypt": {"type": "key", "format": KEY_FORMAT, "viaService": "keys:ViaService"}}
+    assert "forwarded" not in document["operations"]["svc:ListThings"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    assert json.loads(r.render(document)) == document
+    # An action the reference gives no ViaService key carries none.
+    documents = forwarding_documents(tmp_path / "plain", keys=keys_reference(condition_keys=[]))
+    assert r.build(documents, "test", tmp_path / "plain", "botocore test")["forwardedActions"] == {
+        "keys:Decrypt": {"type": "key", "format": KEY_FORMAT}}
+
+
+@pytest.mark.parametrize("forwarded, change, problem", [
+    # No link to where AWS says it.
+    ((["keys:Decrypt", "thing"], "the guide says so"), {}, "no link to the evidence"),
+    # The reference lists the action for the operation: a rule reads it.
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"listed": True}, "which the Service Reference lists for it"),
+    # An action the reference does not list, or one acting on no one type.
+    ((["keys:Encrypt", "thing"], GUIDE_SAYS), {}, "which the Service Reference does not list"),
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"keys": keys_reference(resources=[])}, "not one resource type"),
+    # What a type the operation's action does not act on holds.
+    ((["keys:Decrypt", "group"], GUIDE_SAYS), {}, "no type its action acts on"),
+    # A record holding no member named after the action's namespace and its type's variable.
+    ((["keys:Decrypt", "thing"], GUIDE_SAYS), {"record_member": "EncryptionKey"}, "has no keysKeyId member"),
+])
+def test_a_forwarded_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say_and_is_read(
+        isolated, tmp_path, forwarded, change, problem):
+    (action, of), evidence = forwarded
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
+    with pytest.raises(ValueError, match=problem):
+        r.build(forwarding_documents(tmp_path, **change), "test", tmp_path, "botocore test")
+
+
+def test_a_forwarded_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    with pytest.raises(ValueError, match="FORWARDED gives svc:Gone, which the file does not read"):
+        r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+
+
+def forwarding_document() -> dict:
+    document = good_document()
+    document["forwardedActions"] = {"keys:Decrypt": {"type": "key", "format": KEY_FORMAT, "viaService": "keys:ViaService"}}
+    document["operations"]["svc:A"]["forwarded"] = [
+        {"action": "keys:Decrypt", "of": "thing", "member": "KeysKeyId", "endpoint": "svc"}]
+    return document
+
+
+@pytest.mark.parametrize("change, problem", [
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(action="keys:Encrypt"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(of="group"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].update(member="Keys[]"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"]["forwarded"][0].pop("endpoint"), "forwards no recorded action"),
+    (lambda d: d["operations"]["svc:A"].update(forwarded=[]), "forwards no recorded action"),
+    (lambda d: d["forwardedActions"]["keys:Decrypt"].update(viaService="other:ViaService"), "forwardedActions is not"),
+    (lambda d: d["forwardedActions"]["keys:Decrypt"].update(format="arn:${Partition}:other:::key/${KeyId}"),
+     "forwardedActions is not"),
+    (lambda d: d.pop("forwardedActions"), "forwardedActions is not"),
+])
+def test_a_malformed_forwarded_entry_is_rejected(change, problem):
+    assert r.validate(forwarding_document()) == []
+    document = forwarding_document()
+    change(document)
+    assert any(problem in found for found in r.validate(document))
+
+
+def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists_it_for_the_operation(isolated):
+    isolated.setattr(r, "FORWARDED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = forwarding_document()
+    documents = [reference("svc", {"A": ["thing"]}, {"thing": FORMATS["thing"]}), keys_reference()]
+    assert r.verify_forwarded(document, documents) == []
+    assert r.verify_forwarded(document, [documents[0], keys_reference(condition_keys=[])]) == [
+        'AWS gives keys:Decrypt {"type": "key", "format": "' + KEY_FORMAT + '"}, not '
+        '{"type": "key", "format": "' + KEY_FORMAT + '", "viaService": "keys:ViaService"}']
+    documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
+    assert r.verify_forwarded(document, documents) == [
+        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so FORWARDED should not give them"]
+
+
+def test_check_fails_when_the_file_records_other_forwarded_actions_than_forwarded_names(isolated, tmp_path):
+    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
+    isolated.setattr(r, "FORWARDED", {})
+    document["operations"]["svc:GetThing"].pop("forwarded")
+    assert r.derive(document, tmp_path) == [
+        "the file records ['keys:Decrypt'] as forwarded actions, FORWARDED names []"]
 
 
 def test_a_variable_no_member_fills_takes_the_one_value_of_its_enum_the_operations_name_gives():
@@ -1119,8 +1346,34 @@ def test_verify_reports_a_rest_models_operation_whose_action_aws_no_longer_has(i
     assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 1
 
 
+def with_instance_example(model_: dict) -> dict:
+    """An EC2 model whose documentation gives an instance id's example, as botocore's does."""
+    model_["shapes"]["Filter"] = {"type": "structure", "members": {"Value": {
+        "shape": "String", "documentation": "<p>For associations, this is the instance ID (for example, "
+                                            "i-0123456789abcdef0).</p>"}}}
+    return model_
+
+
+def test_create_vpc_reads_the_new_vpc_and_each_optional_pool():
+    ec2 = model({"CreateVpc": {"CidrBlock": "String", "Ipv4IpamPoolId": "IpamPoolId",
+                               "Ipv6IpamPoolId": "IpamPoolId", "Ipv6Pool": "Ipv6PoolEc2Id"}}, "ec2")
+    ec2["shapes"]["IpamPoolId"] = {"type": "string"}
+    ec2["shapes"]["Ipv6PoolEc2Id"] = {"type": "string"}
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}",
+               "ipam-pool": "arn:${Partition}:ec2::${Account}:ipam-pool/${IpamPoolId}",
+               "ipv6pool-ec2": "arn:${Partition}:ec2:${Region}:${Account}:ipv6pool-ec2/${Ipv6PoolEc2Id}"}
+    upstream = {"action": "ec2:CreateVpc", "types": ["ipam-pool", "ipv6pool-ec2", "vpc"]}
+    entry = r.entry_for("ec2:CreateVpc", upstream, formats, {"ec2": ec2})
+    assert entry["resources"] == [
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv4IpamPoolId"}},
+        {"type": "ipv6pool-ec2", "fill": {"Ipv6PoolEc2Id": "Ipv6Pool"}},
+        {"type": "vpc", "fill": {}, "made": True},
+        {"type": "ipam-pool", "fill": {"IpamPoolId": "Ipv6IpamPoolId"}}]
+    assert "targets" not in entry
+
+
 def test_id_targets_follow_the_model_and_resource_types_not_operation_names():
-    ec2 = model({"AnnotateResources": {"Resources": "Strings"}}, "ec2")
+    ec2 = with_instance_example(model({"AnnotateResources": {"Resources": "Strings"}}, "ec2"))
     member = ec2["shapes"]["AnnotateResourcesIn"]["members"]["Resources"]
     member["locationName"] = "resourceId"
     formats = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}"}
@@ -1132,6 +1385,10 @@ def test_id_targets_follow_the_model_and_resource_types_not_operation_names():
     # Neither a resource type the action does not authorize nor a scalar masquerading as a list is read.
     assert "targets" not in r.entry_for("ec2:AnnotateResources", {**upstream, "types": ["volume"]}, formats, {"ec2": ec2})
     member["shape"] = "String"
+    assert "targets" not in r.entry_for("ec2:AnnotateResources", upstream, formats, {"ec2": ec2})
+    # With no example of an instance id in botocore's documentation, nothing tells an instance id apart.
+    member["shape"] = "Strings"
+    del ec2["shapes"]["Filter"]
     assert "targets" not in r.entry_for("ec2:AnnotateResources", upstream, formats, {"ec2": ec2})
 
 
@@ -1154,7 +1411,9 @@ def test_generated_targets_match_botocores_actual_serialization(operation, targe
         operation_model = model.operation_model(name)
         parameters = ArgumentGenerator().generate_skeleton(operation_model.input_shape)
         parameters[target["member"].removesuffix("[]")] = ids
-        request = create_serializer(model.metadata["protocol"]).serialize_to_request(parameters, operation_model)
+        # The skeleton's other members are placeholders (an empty tag key), so only the serialization is checked.
+        request = create_serializer(model.metadata["protocol"], include_validation=False).serialize_to_request(
+            parameters, operation_model)
         assert [request["body"][target["query"] + "." + str(i)] for i in range(1, 4)] == ids
         checked += 1
     assert checked > 0
@@ -1162,7 +1421,7 @@ def test_generated_targets_match_botocores_actual_serialization(operation, targe
 
 def test_instance_target_member_is_derived_from_the_arn_variable_not_the_action_name():
     names = ("StartInstances", "StopInstances", "RebootInstances", "TerminateInstances", "InventedAction")
-    ec2 = model({name: {"InstanceIds": "Strings", "Resources": "Strings"} for name in names}, "ec2")
+    ec2 = with_instance_example(model({name: {"InstanceIds": "Strings", "Resources": "Strings"} for name in names}, "ec2"))
     formats = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}"}
     for name in names:
         member = ec2["shapes"][name + "In"]["members"]["InstanceIds"]
@@ -1178,19 +1437,76 @@ def test_instance_target_member_is_derived_from_the_arn_variable_not_the_action_
     ec2["shapes"]["StartInstancesIn"]["members"]["DecoyInstanceIds"] = {"shape": "Strings"}
     assert "targets" not in r.entry_for("ec2:StartInstances",
             {"action": "ec2:StartInstances", "types": ["instance"]}, formats, {"ec2": ec2})
-    renamed = model({"InventedAction": {"MachineIds": "Strings"}}, "ec2")
+    renamed = with_instance_example(model({"InventedAction": {"MachineIds": "Strings"}}, "ec2"))
     renamed_formats = {"instance": "arn:${Partition}:ec2:${Region}:${Account}:instance/${MachineId}"}
     assert r.entry_for("ec2:InventedAction", {"action": "ec2:InventedAction", "types": ["instance"]},
                        renamed_formats, {"ec2": renamed})["targets"]["member"] == "MachineIds[]"
 
 
-def test_resource_tag_prefixes_come_only_from_supported_reference_resources():
+def test_resource_tag_prefixes_cover_every_type_with_a_format_of_the_namespaces_read_from_the_reference():
     documents = [{"Name": "ec2", "Resources": [
         {"Name": "instance", "ConditionKeys": ["vendor:ResourceTag/${TagKey}", "aws:RequestTag/${TagKey}",
                                                "aws:ResourceTag/${TagKey}", "ec2:Region"]},
-        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]}]}]
-    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"]}}
-    assert r.resource_tag_keys([]) == {}
+        {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]},
+        {"Name": "unformatted", "ConditionKeys": ["aws:ResourceTag/${TagKey}"]},
+        {"Name": "untaggable", "ConditionKeys": ["ec2:Region"]}]},
+        {"Name": "secretsmanager", "Resources": [{"Name": "Secret", "ConditionKeys": [
+            "aws:ResourceTag/${TagKey}", "secretsmanager:ResourceTag/tag-key", "secretsmanager:SecretPrimaryRegion"]}]},
+        {"Name": "ssm", "Resources": [{"Name": "parameter", "ConditionKeys": [
+            "aws:ResourceTag/${TagKey}", "ssm:resourceTag/${TagKey}", "ssm:resourceTag/tag-key",
+            "ssm:resourceTag/aws:ssmmessages:session-id"]}]},
+        {"Name": "other", "Resources": [{"Name": "thing", "ConditionKeys": ["aws:ResourceTag/${TagKey}"]}]}]
+    formats = {"ec2": {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{Id}}"
+                       for kind in ("instance", "volume", "untaggable")},
+               "secretsmanager": {"Secret": "arn:${Partition}:secretsmanager:${Region}:${Account}:secret:${SecretId}"},
+               "ssm": {"parameter": "arn:${Partition}:ssm:${Region}:${Account}:parameter/${ParameterNameWithoutLeadingSlash}"}}
+    # A key naming one tag key of its own (`aws:ssmmessages:session-id`) is not a prefix; a namespace not read, or a
+    # type without an ARN format, has none.
+    assert r.resource_tag_keys(documents, formats) == {
+        "ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"], "volume": ["volume:ResourceTag/"]},
+        "secretsmanager": {"Secret": ["aws:ResourceTag/", "secretsmanager:ResourceTag/"]},
+        "ssm": {"parameter": ["aws:ResourceTag/", "ssm:resourceTag/"]}}
+    assert r.resource_tag_keys([], formats) == {}
+
+
+def test_resource_keys_are_the_reference_keys_a_member_of_the_types_shape_names(monkeypatch):
+    model = {"shapes": {
+        "NetworkInterface": {"type": "structure", "members": {
+            "VpcId": {"shape": "String"}, "SubnetId": {"shape": "String"},
+            "NetworkInterfaceId": {"shape": "String"}, "Groups": {"shape": "GroupList"}}},
+        "String": {"type": "string"}, "GroupList": {"type": "list", "member": {"shape": "String"}}}}
+    monkeypatch.setattr(r, "load_models", lambda data, clients: {"ec2": model})
+    document = {"Name": "ec2", "ConditionKeys": [
+        {"Name": "ec2:Vpc", "Types": ["ARN"]}, {"Name": "ec2:Subnet", "Types": ["ARN"]},
+        {"Name": "ec2:NetworkInterfaceID", "Types": ["String"]}, {"Name": "ec2:Region", "Types": ["String"]},
+        {"Name": "ec2:Groups", "Types": ["String"]}],
+        "Resources": [
+            {"Name": "network-interface", "ARNFormats": ["arn:${Partition}:ec2:${Region}:${Account}:network-interface/x"],
+             "ConditionKeys": ["aws:ResourceTag/${TagKey}", "ec2:Vpc", "ec2:Subnet", "ec2:NetworkInterfaceID",
+                               "ec2:Region", "ec2:Groups", "ec2:Attribute/${AttributeName}"]},
+            {"Name": "vpc", "ARNFormats": ["arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"],
+             "ConditionKeys": []}]}
+    # A key named as the member or as it without its Id; a list member, a key no member names, an ARN key with no
+    # type named as it and a key with a variable are left out.
+    assert r.resource_keys([document], Path("."), {"ec2": ["ec2"]}) == {"ec2": {"network-interface": {
+        "ec2:NetworkInterfaceID": {"member": "NetworkInterfaceId"}, "ec2:Vpc": {"member": "VpcId", "arn": "vpc"}}}}
+    assert r.resource_keys([document], Path("."), {}) == {}
+
+
+def test_id_prefixes_read_botocores_examples_by_the_shape_of_each_member():
+    ec2 = model({"DescribeGroups": {"GroupIds": "GroupIdList", "Label": "String"}}, "ec2")
+    ec2["shapes"]["SecurityGroupId"] = {"type": "string"}
+    ec2["shapes"]["GroupIdList"] = {"type": "list", "member": {"shape": "SecurityGroupId"}}
+    ec2["operations"]["DescribeGroups"]["output"] = {"shape": "DescribeGroupsOut"}
+    ec2["shapes"]["DescribeGroupsOut"] = {"type": "structure", "members": {"GroupId": {"shape": "SecurityGroupId"}}}
+    examples = {"ec2": {"examples": {"DescribeGroups": [
+        {"input": {"GroupIds": ["sg-903004f8", "sg-1a2b3c4d"], "Label": "lb-0123456789abcdef"},
+         "output": {"GroupId": "sg-0a1b2c3d4e5f60718"}},
+        {"input": {"GroupIds": ["xx-12345678"]}}]}}}
+    assert r.id_prefixes({"ec2": ec2}, ("security-group",), examples) == {"security-group": "sg-"}
+    # A String member's id-like value names no type, and without examples nothing is known.
+    assert r.id_prefixes({"ec2": ec2}, ("lb",), examples) == {}
+    assert r.id_prefixes({"ec2": ec2}, ("security-group",)) == {}
 
 
 def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_members():
@@ -1498,6 +1814,117 @@ def test_a_resource_one_optional_member_qualifies_is_named_only_when_the_request
     assert r.with_optional_qualifier(resources, {"ClusterIdentifier"}) == resources
 
 
+CLUSTERS = {"cluster": "arn:${Partition}:svc:${Region}:${Account}:cluster/${ClusterName}",
+            "service": "arn:${Partition}:svc:${Region}:${Account}:service/${ClusterName}/${ServiceName}",
+            "task-definition": "arn:${Partition}:svc:${Region}:${Account}:task-definition/"
+                               "${TaskDefinitionFamilyName}:${TaskDefinitionRevisionNumber}"}
+
+
+def cluster_model(operation: str, docs: dict[str, str], required: tuple[str, ...] = ()) -> dict[str, dict]:
+    """A JSON model whose operation takes `docs`' members, `Names` lists for those ending in `s`, others strings."""
+    shapes = {"String": {"type": "string"}, "Names": {"type": "list", "member": {"shape": "String"}},
+              "In": {"type": "structure", "required": list(required), "members": {
+                  name: {"shape": "Names" if name.endswith("s") else "String", "documentation": doc}
+                  for name, doc in docs.items()}}}
+    return {"svc": {"metadata": {"protocol": "json"}, "operations": {operation: {"input": {"shape": "In"}}},
+                    "shapes": shapes}}
+
+
+CLUSTER_DOC = ("<p>The short name or full Amazon Resource Name (ARN) of the cluster that hosts the service to describe. "
+               "If you do not specify a cluster, the default cluster is assumed.</p>")
+
+
+def test_a_member_whose_service_uses_its_default_when_left_out_names_that_default():
+    # ECS: "If you do not specify a cluster, the default cluster is assumed", or "default is used".
+    assert r.defaulted_members(cluster_model("DescribeServices", {"cluster": CLUSTER_DOC}), "DescribeServices") == {
+        "cluster": "cluster"}
+    assert r.defaulted_members(cluster_model("ListThings", {"cluster": "<p>If you don't specify a cluster, default is "
+                                                                       "used.</p>"}), "ListThings") == {"cluster": "cluster"}
+    assert r.defaulted_members(cluster_model("DescribeClusters", {"clusters": "<p>A list of up to 100 cluster names. If "
+                                                                              "you do not specify a cluster, the default "
+                                                                              "cluster is assumed.</p>"}),
+                               "DescribeClusters") == {"clusters[]": "cluster"}
+    # A required member is never left out, and one documenting no default names none.
+    assert r.defaulted_members(cluster_model("DeleteCluster", {"cluster": CLUSTER_DOC}, ("cluster",)),
+                               "DeleteCluster") == {}
+    assert r.defaulted_members(cluster_model("DescribeThing", {"cluster": "<p>The name of the cluster.</p>"}),
+                               "DescribeThing") == {}
+    service = {"type": "service", "fill": {"ClusterName": "cluster", "ServiceName": "services[]"}}
+    defaulted = dict(service, defaults={"cluster": "cluster"})
+    assert r.with_documented_defaults([service], CLUSTERS, {"cluster": "cluster"}) == [defaulted]
+    # Only the default of the type whose format is that variable alone, named by the documentation's word.
+    assert r.with_documented_defaults([service], CLUSTERS, {"cluster": "pool"}) == [service]
+    assert r.with_documented_defaults([service], CLUSTERS, {"serviceName": "service"}) == [service]
+    # Named then, not only when the request gives it.
+    assert r.with_optional_qualifier([defaulted], {"cluster"}) == [defaulted]
+    assert r.with_optional_qualifier([service], {"cluster"}) == [dict(service, unless={"cluster": [None]})]
+
+
+def test_a_member_documented_as_a_name_or_an_arn_of_another_type_may_give_that_types_arn():
+    for doc in (CLUSTER_DOC, "<p>The short name or full ARN of the cluster that hosts the task.</p>",
+                # AWS's own typo, the "of" left out.
+                "<p>The short name or full Amazon Resource Name (ARN)the cluster that hosts the service to describe.</p>",
+                # The two the other way round, and the type before them past the first sentence.
+                "<p>The Amazon Resource Name (ARN) or short name of the cluster the task is running in.</p>",
+                "<p>The cluster that hosts the service. This can either be the cluster name or ARN.</p>"):
+        assert r.documented_name_or_arn_members(cluster_model("DescribeServices", {"cluster": doc}),
+                                                "DescribeServices") == {"cluster": "cluster"}
+    assert r.documented_name_or_arn_members(cluster_model("DescribeServices", {"cluster": "<p>The name of the cluster."
+                                                                                          "</p>"}), "DescribeServices") == {}
+    service = {"type": "service", "fill": {"ClusterName": "cluster", "ServiceName": "service"}}
+    cluster = {"type": "cluster", "fill": {"ClusterName": "cluster"}}
+    assert r.with_arn_of([service, cluster], CLUSTERS, {}, {"cluster": "cluster"}) == [
+        dict(service, arnOf={"cluster": "cluster"}), cluster]
+    # A pattern taking the ARN says so of the resource's own type too.
+    assert r.with_arn_of([cluster], CLUSTERS, {"cluster": "cluster"}) == [dict(cluster, arnOf={"cluster": "cluster"})]
+
+
+def test_each_elements_id_whose_target_type_is_one_type_fills_that_types_last_variable():
+    shapes = {"String": {"type": "string"}, "TargetType": {"type": "string", "enum": ["container-instance"]},
+              "Attribute": {"type": "structure", "members": {"name": {"shape": "String"},
+                                                             "targetType": {"shape": "TargetType"},
+                                                             "targetId": {"shape": "String"}}},
+              "Attributes": {"type": "list", "member": {"shape": "Attribute"}},
+              "In": {"type": "structure", "members": {"cluster": {"shape": "String"},
+                                                      "attributes": {"shape": "Attributes"}}}}
+    models = {"svc": {"metadata": {"protocol": "json"}, "operations": {"PutAttributes": {"input": {"shape": "In"}}},
+                      "shapes": shapes}}
+    typed = r.typed_target_fields(models, "PutAttributes")
+    assert typed == {"attributes[].targetId": ["container-instance"]}
+    formats = {"container-instance": "arn:${Partition}:svc:${Region}:${Account}:container-instance/${ClusterName}/"
+                                     "${ContainerInstanceId}"}
+    instance = {"type": "container-instance", "fill": {"ClusterName": "cluster"}}
+    assert r.with_typed_targets([instance], formats, typed) == [
+        {"type": "container-instance", "fill": {"ClusterName": "cluster",
+                                                "ContainerInstanceId": "attributes[].targetId"}}]
+    # Not a type the enum does not name alone, nor a variable a member fills already.
+    assert r.with_typed_targets([instance], formats, {"attributes[].targetId": ["container-instance", "task"]}) == [
+        instance]
+    filled = {"type": "container-instance", "fill": {"ClusterName": "cluster", "ContainerInstanceId": "instance"}}
+    assert r.with_typed_targets([filled], formats, typed) == [filled]
+
+
+def test_a_type_of_two_variables_its_documentation_spells_is_found_by_its_service():
+    assert r.spelled("task-definition", CLUSTERS["task-definition"]) == "(family:revision)"
+    assert r.spelled("service", CLUSTERS["service"]) is None
+    assert r.spelled("cluster", CLUSTERS["cluster"]) is None
+    run = cluster_model("RunTask", {"taskDefinition": "<p>The <code>family</code> and <code>revision</code> (<code>"
+                                                      "family:revision</code>) or full ARN of the task definition to "
+                                                      "run.</p>"})
+    # Read neither as an ARN alone nor left unnamed: its service resolves a family to its latest revision.
+    assert r.with_documented("svc:RunTask", ["task-definition"], CLUSTERS, run, []) == [
+        {"type": "task-definition", "fill": {}, "find": ["taskDefinition"]}]
+    delete = cluster_model("DeleteTaskDefinitions", {"taskDefinitions": "<p>The family and revision (family:revision)"
+                                                                        " or full Amazon Resource Name (ARN) of the "
+                                                                        "task definition to delete.</p>"})
+    assert r.with_documented("svc:DeleteTaskDefinitions", ["task-definition"], CLUSTERS, delete, []) == [
+        {"type": "task-definition", "fill": {}, "find": ["taskDefinitions[]"]}]
+    # A member holding the ARN alone still names it as one.
+    by_arn = cluster_model("RunTask", {"definition": "<p>The full ARN of the task definition to run.</p>"})
+    assert r.with_documented("svc:RunTask", ["task-definition"], CLUSTERS, by_arn, []) == [
+        {"types": ["task-definition"], "arn": "definition"}]
+
+
 def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():
     assert r.pattern_words("arn:aws:svc:[a-z0-9-]+:([0-9]{12}):(bus-v2|subscriber|source-v2\\/(a|b))\\/[A-Za-z]+") == {
         "bus-v2", "subscriber", "source-v2"}
@@ -1567,3 +1994,119 @@ def test_a_resource_id_variable_takes_a_member_named_so_and_a_bare_id_the_member
     # A bare `Id` is whatever the operation is about: the tenant's is its `DistributionTenantId`.
     assert r._filling("Id", "distributiontenant", 1, {"Id": "Id", "DistributionTenantId": "DistributionTenantId"},
                       {"Id"}) == "DistributionTenantId"
+
+
+def test_vpc_operations_read_vpc_ids_and_stored_tag_keys():
+    ec2 = model({"ModifyVpcAttribute": {"VpcId": "String"}}, "ec2")
+    formats = {"vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"}
+    assert r.entry_for("ec2:ModifyVpcAttribute", {"action": "ec2:ModifyVpcAttribute", "types": ["vpc"]},
+                       formats, {"ec2": ec2})["resources"] == [{"type": "vpc", "fill": {"VpcId": "VpcId"}}]
+    assert r.resource_tag_keys([{"Name": "ec2", "Resources": [{"Name": "vpc", "ConditionKeys": [
+        "aws:ResourceTag/${TagKey}", "ec2:ResourceTag/${TagKey}", "ec2:Region"]}]}], {"ec2": formats}) == {
+            "ec2": {"vpc": ["aws:ResourceTag/", "ec2:ResourceTag/"]}}
+
+
+@pytest.mark.parametrize("operation,kind,variable", [
+    ("CreateSubnet", "subnet", "SubnetId"),
+    ("CreateRouteTable", "route-table", "RouteTableId"),
+    ("CreateSecurityGroup", "security-group", "SecurityGroupId"),
+    ("CreateInternetGateway", "internet-gateway", "InternetGatewayId"),
+])
+def test_network_creates_authorize_new_resource_and_existing_vpc(operation, kind, variable):
+    has_parent = operation != "CreateInternetGateway"
+    members = {"VpcId": "String"} if has_parent else {}
+    ec2 = model({operation: members}, "ec2")
+    formats = {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{{variable}}}",
+               "vpc": "arn:${Partition}:ec2:${Region}:${Account}:vpc/${VpcId}"}
+    types = [kind, "vpc"] if has_parent else [kind]
+    entry = r.entry_for(f"ec2:{operation}", {"action": f"ec2:{operation}", "types": types},
+                        formats, {"ec2": ec2})
+    expected = [{"type": kind, "fill": {}}]
+    if has_parent:
+        expected[0]["made"] = True
+        expected.append({"type": "vpc", "fill": {"VpcId": "VpcId"}})
+    assert entry["resources"] == expected
+
+
+@pytest.mark.parametrize("documentation,output_id,input_id,expected", [
+    ("<p>Allocates an Elastic IP address to your account.</p>", True, False, True),
+    ("Allocates a pool for an Elastic IP address.", True, False, False),
+    ("Describes an Elastic IP address.", True, False, False),
+    ("Allocates an Elastic IP address.", False, False, False),
+    ("Allocates an Elastic IP address.", True, True, False),
+])
+def test_documented_creation_requires_direct_object_and_new_response_id(documentation, output_id, input_id, expected):
+    ec2 = model({"AllocateAddress": {"AllocationId": "String"} if input_id else {}}, "ec2")
+    ec2["operations"]["AllocateAddress"].update(documentation=documentation, output={"shape": "Out"})
+    ec2["shapes"]["Out"] = {"type": "structure", "members": {
+        "AllocationId" if output_id else "PublicIp": {"shape": "String"}}}
+    formats = {"elastic-ip": "arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}"}
+    assert r.with_documented_creation([], "ec2:AllocateAddress", ["elastic-ip"], formats, {"ec2": ec2}) == (
+        [{"type": "elastic-ip", "fill": {}, "made": True}] if expected else [])
+
+
+def test_ec2_query_names_follow_model_serialization_and_only_read_resource_members():
+    ec2 = model({"CreateNetworkInterface": {"Groups": "Strings", "SubnetId": "String", "Ignored": "Strings"}}, "ec2")
+    group = ec2["shapes"]["CreateNetworkInterfaceIn"]["members"]["Groups"]
+    group["locationName"] = "securityGroupId"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups", "SubnetId"}) == {
+        "Groups[]": "SecurityGroupId"}
+    group["queryName"] = "ExactGroupWireName"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups"}) == {
+        "Groups[]": "ExactGroupWireName"}
+    ec2["metadata"]["protocol"] = "query"
+    assert r.ec2_query_members("ec2:CreateNetworkInterface", {"ec2": ec2}, {"Groups"}) == {}
+
+
+def test_a_typed_list_is_the_targets_only_when_the_request_names_nothing_else_the_action_acts_on():
+    ec2 = model({"Launch": {"SecurityGroupIds": "Strings", "ImageId": "String"},
+                 "ApplyGroups": {"SecurityGroupIds": "Strings"},
+                 "AnnotateResources": {"Resources": "Strings"}}, "ec2")
+    formats = {"security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}",
+               "image": "arn:${Partition}:ec2:${Region}::image/${ImageId}"}
+    known = {"security-group": "sg-"}
+    # A launch's groups sit beside its image: the ordinary rules read both, and the groups are not its targets.
+    launch = r.entry_for("ec2:Launch", {"action": "ec2:Launch", "types": ["image", "security-group"]},
+                         formats, {"ec2": ec2}, known)
+    assert "targets" not in launch
+    assert {"type": "image", "fill": {"ImageId": "ImageId"}} in launch["resources"]
+    applied = r.entry_for("ec2:ApplyGroups", {"action": "ec2:ApplyGroups", "types": ["security-group"]},
+                          formats, {"ec2": ec2}, known)
+    assert applied["targets"] == {"member": "SecurityGroupIds[]", "query": "SecurityGroupIds",
+                                  "prefixes": {"security-group": "sg-"}}
+    tags = r.entry_for("ec2:AnnotateResources", {"action": "ec2:AnnotateResources", "types": ["security-group"]},
+                       formats, {"ec2": ec2}, known)
+    assert tags["targets"]["prefixes"] == {"security-group": "sg-"}
+
+
+def test_a_list_inside_a_structure_is_no_member_the_rules_read():
+    ec2 = model({"CreateSnapshots": {"InstanceSpecification": "Specification"}}, "ec2")
+    ec2["shapes"]["Specification"] = {"type": "structure", "members": {
+        "InstanceId": {"shape": "String"}, "ExcludeDataVolumeIds": {"shape": "Strings"}}}
+    found = r.documented_members({"ec2": ec2}, "CreateSnapshots")
+    assert "InstanceSpecification.InstanceId" in found
+    assert "InstanceSpecification.ExcludeDataVolumeIds" not in found
+
+
+def test_lists_of_several_types_are_read_by_the_ordinary_rules():
+    ec2 = model({"CreateEndpoint": {"RouteTableIds": "Strings", "SecurityGroupIds": "Strings"}}, "ec2")
+    formats = {"route-table": "arn:${Partition}:ec2:${Region}:${Account}:route-table/${RouteTableId}",
+               "security-group": "arn:${Partition}:ec2:${Region}:${Account}:security-group/${SecurityGroupId}"}
+    entry = r.entry_for("ec2:CreateEndpoint", {"action": "ec2:CreateEndpoint", "types": ["route-table", "security-group"]},
+                        formats, {"ec2": ec2}, {"route-table": "rtb-", "security-group": "sg-"})
+    assert "targets" not in entry
+    assert {kind for resource in entry["resources"] for kind in r._kinds(resource)} == {"route-table", "security-group"}
+
+
+@pytest.mark.parametrize("operation,members,kinds", [
+    ("AssociateAddress", {"AllocationId": "String", "InstanceId": "String", "NetworkInterfaceId": "String"},
+     ["elastic-ip", "instance", "network-interface"]),
+    ("ReleaseAddress", {"AllocationId": "String"}, ["elastic-ip"]),
+])
+def test_eip_operations_read_scalar_targets_from_models(operation, members, kinds):
+    variables = {"elastic-ip": "AllocationId", "instance": "InstanceId", "network-interface": "NetworkInterfaceId"}
+    formats = {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{{variables[kind]}}}" for kind in kinds}
+    ec2 = model({operation: members}, "ec2")
+    action = "ec2:" + operation
+    entry = r.entry_for(action, {"action": action, "types": kinds}, formats, {"ec2": ec2})
+    assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]

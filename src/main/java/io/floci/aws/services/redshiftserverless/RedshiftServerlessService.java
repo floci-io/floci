@@ -1006,6 +1006,23 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
         return findSnapshotOfAccount(account, names.getFirst(), region).map(RedshiftServerlessSnapshot::getSnapshotArn);
     }
 
+    /**
+     * What the snapshot stored under {@code arn}, in any account, records as its {@code kmsKeyId}: its key, none for
+     * one under AWS's own key ({@value #AWS_OWNED_KMS_KEY}), which is no key of the account's.
+     */
+    @Override
+    public Optional<String> recorded(String arn, String member) {
+        if (!"kmsKeyId".equals(member) || !AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return snapshots.scanForAccount(parsed.accountId(), key -> key.startsWith(parsed.region() + "::")).stream()
+                .filter(snapshot -> arn.equals(snapshot.getSnapshotArn()))
+                .map(RedshiftServerlessSnapshot::getKmsKeyId)
+                .filter(key -> key != null && !key.isBlank() && !AWS_OWNED_KMS_KEY.equals(key))
+                .findFirst();
+    }
+
     /** The snapshot {@code snapshotName} of {@code accountId} in {@code region}, whoever is calling. */
     public Optional<RedshiftServerlessSnapshot> findSnapshotOfAccount(String accountId, String snapshotName,
                                                                       String region) {
@@ -1054,6 +1071,34 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
     }
 
     public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}
+
+    /** What a table restore reads from and writes into: the workgroup's backend, the snapshot's database and dump. */
+    public record TableRestoreSource(Workgroup workgroup, Namespace namespace, Path dump) {}
+
+    /**
+     * Resolves what restoring one table of {@code snapshotName} into {@code workgroupName} needs. The snapshot must be
+     * available and of {@code namespaceName}, the workgroup must be running, and the snapshot must hold data.
+     */
+    public synchronized TableRestoreSource tableRestoreSource(String namespaceName, String workgroupName,
+                                                              String snapshotName, String region) {
+        RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(snapshot);
+        if (!namespaceName.equals(snapshot.getNamespaceName())) {
+            throw snapshotNotFound(snapshotName);
+        }
+        Namespace namespace = getNamespace(namespaceName, region);
+        Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!namespaceName.equals(workgroup.getNamespaceName())) {
+            throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
+                    + namespaceName + ".");
+        }
+        if (!hasLiveRuntime(workgroup)) {
+            throw ServerlessSupport.conflict("The workgroup " + workgroupName + " is not available.");
+        }
+        Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> ServerlessSupport.validation(
+                "The snapshot " + snapshotName + " holds no table data to restore."));
+        return new TableRestoreSource(workgroup, namespace, dump);
+    }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
         requireResourceArn(resourceArn);

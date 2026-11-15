@@ -204,10 +204,10 @@ class ElbV2CfnProvisionerTest {
     }
 
     @Test
-    void declaresTheFourTypes() {
+    void declaresTheFiveTypes() {
         assertEquals(Set.of("AWS::ElasticLoadBalancingV2::LoadBalancer", "AWS::ElasticLoadBalancingV2::TargetGroup",
-                "AWS::ElasticLoadBalancingV2::Listener", "AWS::ElasticLoadBalancingV2::ListenerRule"),
-                provisioner.resourceTypes());
+                "AWS::ElasticLoadBalancingV2::Listener", "AWS::ElasticLoadBalancingV2::ListenerRule",
+                "AWS::ElasticLoadBalancingV2::ListenerCertificate"), provisioner.resourceTypes());
     }
 
     @Test

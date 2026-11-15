@@ -212,7 +212,7 @@ cross-resource references.
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model), `EventSubscription` |
 | Redshift Serverless | `Namespace` (Managed admin credentials use Secrets Manager; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
 | EC2 | `VPC` (`Tags` update in place, keeping tags added outside the stack; deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported; `Tags` update in place, keeping tags added outside the stack; a failed stack update puts the rules and tags of a group it changed in place back), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway` (zonal; `AvailabilityMode` regional fails; a change to the `Secondary*` address properties updates the gateway in place), `EIP`, `Instance` (`Tags` update in place, keeping tags added outside the stack), `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog` (`Tags` are applied and updated in place, keeping tags added outside the stack; any other change fails, since it needs a replacement), `KeyPair` (a created key's private key is stored in the `SecureString` parameter `/ec2/keypair/<KeyPairId>`, as on AWS, and deleted with the key), `PrefixList` (updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails) |
-| Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
+| Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule`, `ListenerCertificate` (`Certificates` update in place, a `ListenerArn` change replaces it) |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
 | Route 53 | `HostedZone`, `RecordSet`, `RecordSetGroup` (written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group's hosted zone), `HealthCheck` |
@@ -544,8 +544,14 @@ A function whose code is hot-reloaded publishes a version for every new id.
 Like SAM, floci gives the version the function's `DeletionPolicy`, else its `VersionDeletionPolicy`
 (`Delete` or `Retain`), else `Delete` for a function with a `CapacityProviderConfig` and `Retain`
 for any other. So by default the version a new id replaces stays published, and the update reports
-it `DELETE_SKIPPED`. With `Delete` floci reports the old version `DELETE_COMPLETE` but never deletes
-it, where AWS does. A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
+it `DELETE_SKIPPED`. With `Delete`, physical version deletion uses Lambda's qualified
+`DeleteFunction`: that version is removed while `$LATEST` and other versions remain. An alias
+whose primary target is the version makes deletion fail; removing that alias permits a retry.
+This uses the native service's existing primary-target check; weighted alias references are not covered.
+The same deletion applies to a raw `AWS::Lambda::Version`, template removal and create rollback,
+including `RetainExceptOnCreate`. A version whose parent is already absent can be deleted again.
+This does not add replacement updates for a version that retains the same logical id.
+A `VersionDeletionPolicy` written as an intrinsic function, such as a `Ref` to
 a parameter, is copied onto the version unresolved, as SAM copies it. CloudFormation takes
 intrinsic functions only in resource properties, outputs, metadata attributes and update policy
 attributes, unless a transform such as `AWS::LanguageExtensions` resolves them first, and floci
@@ -640,6 +646,25 @@ target has no port and is its function ARN alone.
 - A target group created before Floci registered `Targets` has no targets from its template. The
   first update that changes the group registers the declared targets and deregisters nothing.
 - `QuicServerId` is accepted and ignored, as Floci's `RegisterTargets` has no QUIC support.
+
+## ELBv2 listener certificates
+
+`AWS::ElasticLoadBalancingV2::ListenerCertificate` adds its `Certificates` to the listener's
+certificate list, as `AddListenerCertificates` does, so `DescribeListenerCertificates` names them and
+an HTTPS or TLS listener serves them by SNI. It is how a CDK listener's `addCertificates` gives a
+listener certificates beyond its default one. `Ref` returns `<ListenerArn>|<suffix>`: CloudFormation
+publishes no format for this resource's identifier, so the format is Floci's.
+
+- On `UpdateStack`, a change to `Certificates` (no interruption, as in AWS) adds the certificates
+  the template gains, then removes the ones it drops. A failed update removes the certificates it
+  added and adds back the ones it removed.
+- A change to `ListenerArn` replaces the resource: the certificates are added to the new listener,
+  and removed from the old one once the update commits.
+- Deleting the resource removes the certificates it added. One that is also the listener's default
+  certificate is refused with `OperationNotPermitted`, as `RemoveListenerCertificates` refuses it.
+- A certificate the listener's list already held when the resource declared it, one added outside
+  the stack for instance, was not added by the resource: neither dropping it from `Certificates` nor
+  deleting the resource takes it off the listener.
 
 ## S3 ownership controls
 
@@ -825,7 +850,8 @@ a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s 
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
 their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
 `NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
-`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`ServiceRegistries` are kept, and so is its `DesiredCount`: an update that leaves it out does not send it,
+so the stored count stays, while a new service without one starts at 1. A service's dropped
 `DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
 template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
 the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. A `Route`'s

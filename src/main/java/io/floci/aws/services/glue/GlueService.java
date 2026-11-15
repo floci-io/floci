@@ -14,6 +14,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.RegionScopedStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.StorageOperations;
@@ -225,29 +226,42 @@ public class GlueService {
                        RegionResolver regionResolver,
                        ResourceGroupsTaggingService resourceGroupsTaggingService,
                        KmsService kmsService) {
-        this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<>() {});
-        this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<>() {});
-        this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
-        this.columnStatisticsStore = storageFactory.create("glue", "column_statistics.json", new TypeReference<>() {});
-        this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
-        this.partitionIndexStore = storageFactory.create(
+        this.databaseStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "databases.json", new TypeReference<>() {});
+        this.tableStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "tables.json", new TypeReference<>() {});
+        this.tableVersionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "table_versions.json", new TypeReference<>() {});
+        this.columnStatisticsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "column_statistics.json", new TypeReference<>() {});
+        this.partitionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "partitions.json", new TypeReference<>() {});
+        this.partitionIndexStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "partition_indexes.json", new TypeReference<>() {});
-        this.partitionColumnStatisticsStore = storageFactory.create(
+        this.partitionColumnStatisticsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "partition_column_statistics.json", new TypeReference<>() {});
-        this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
-        this.jobStore = storageFactory.create("glue", "jobs.json", new TypeReference<>() {});
-        this.crawlerStore = storageFactory.create("glue", "crawlers.json", new TypeReference<>() {});
-        this.classifierStore = storageFactory.create("glue", "classifiers.json", new TypeReference<>() {});
-        this.connectionStore = storageFactory.create("glue", "connections.json", new TypeReference<>() {});
-        this.resourcePolicyStore = storageFactory.create("glue", "resource_policy.json", new TypeReference<>() {});
-        this.encryptionSettingsStore = storageFactory.create(
+        this.functionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "functions.json", new TypeReference<>() {});
+        this.jobStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "jobs.json", new TypeReference<>() {});
+        this.crawlerStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "crawlers.json", new TypeReference<>() {});
+        this.classifierStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "classifiers.json", new TypeReference<>() {});
+        this.connectionStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "connections.json", new TypeReference<>() {});
+        this.resourcePolicyStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "resource_policy.json", new TypeReference<>() {});
+        this.encryptionSettingsStore = new RegionScopedStorage<>(storageFactory, regionResolver,
                 "glue", "catalog_encryption_settings.json", new TypeReference<>() {});
         this.securityConfigurationStore = storageFactory.create(
             "glue", "security_configurations.json", new TypeReference<>() {});
         this.dataQualityRulesetStore = storageFactory.create(
                 "glue", "data_quality_rulesets.json", new TypeReference<>() {});
-        this.triggerStore = storageFactory.create("glue", "triggers.json", new TypeReference<>() {});
-        this.workflowStore = storageFactory.create("glue", "workflows.json", new TypeReference<>() {});
+        this.triggerStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "triggers.json", new TypeReference<>() {});
+        this.workflowStore = new RegionScopedStorage<>(storageFactory, regionResolver,
+                "glue", "workflows.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
@@ -364,7 +378,7 @@ public class GlueService {
     }
 
     public void createDatabase(Database database) {
-        createDatabase(database, null, regionResolver.getDefaultRegion());
+        createDatabase(database, null, regionResolver.getRegion());
     }
 
     public synchronized void createDatabase(Database database, Map<String, String> tags, String region) {
@@ -429,7 +443,7 @@ public class GlueService {
     }
 
     public void deleteDatabase(String name) {
-        deleteDatabase(name, regionResolver.getDefaultRegion());
+        deleteDatabase(name, regionResolver.getRegion());
     }
 
     public synchronized void deleteDatabase(String name, String region) {
@@ -1394,7 +1408,7 @@ public class GlueService {
         boolean latest = ref.getSchemaVersionId() == null && ref.getSchemaVersionNumber() == null;
         return schemaRegistryService.getSchemaVersion(
                 ref.getSchemaId(), ref.getSchemaVersionId(),
-                ref.getSchemaVersionNumber(), latest, regionResolver.getDefaultRegion());
+                ref.getSchemaVersionNumber(), latest, regionResolver.getRegion());
     }
 
     private static SchemaReference schemaReferenceOf(Table table) {
@@ -2025,7 +2039,7 @@ public class GlueService {
     }
 
     public void createJob(Job job) {
-        createJob(job, null, regionResolver.getDefaultRegion());
+        createJob(job, null, regionResolver.getRegion());
     }
 
     public void createJob(Job job, Map<String, String> tags, String region) {
@@ -2331,7 +2345,7 @@ public class GlueService {
     }
 
     public void createCrawler(Crawler crawler) {
-        createCrawler(crawler, null, regionResolver.getDefaultRegion());
+        createCrawler(crawler, null, regionResolver.getRegion());
     }
 
     public void createCrawler(Crawler crawler, Map<String, String> tags, String region) {

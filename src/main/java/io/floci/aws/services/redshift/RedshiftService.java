@@ -71,9 +71,12 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
 import java.util.function.BiPredicate;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -127,6 +130,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ResourceKey> managedRotationReservations = new ConcurrentHashMap<>();
+    private final List<BiConsumer<String, String>> clusterRemovalListeners = new CopyOnWriteArrayList<>();
 
     private record ResourceKey(String accountId, String kind, String identifier) { }
 
@@ -506,6 +510,7 @@ public class RedshiftService implements ManagedSecretRotator {
             if (proxyStopped) {
                 clusters.delete(identifier);
                 credentialBroker.revokeCluster(clusters.accountId(), identifier);
+                notifyClusterRemoved(identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -518,6 +523,7 @@ public class RedshiftService implements ManagedSecretRotator {
             if (proxyStopped) {
                 clusters.delete(identifier);
                 credentialBroker.revokeCluster(clusters.accountId(), identifier);
+                notifyClusterRemoved(identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -618,6 +624,7 @@ public class RedshiftService implements ManagedSecretRotator {
         if (proxyStopped) {
             clusters.delete(cluster.getClusterIdentifier());
             credentialBroker.revokeCluster(clusters.accountId(), cluster.getClusterIdentifier());
+            notifyClusterRemoved(cluster.getClusterIdentifier());
         } else {
             cluster.setClusterStatus("failed");
             clusters.put(cluster.getClusterIdentifier(), cluster);
@@ -1126,6 +1133,34 @@ public class RedshiftService implements ManagedSecretRotator {
         }
     }
 
+    /**
+     * Registers a callback run with the account id and identifier of every cluster that is deleted. It runs
+     * while the cluster's resource lock is held, so it must not wait for locks of its own.
+     */
+    public void onClusterRemoved(BiConsumer<String, String> listener) {
+        clusterRemovalListeners.add(listener);
+    }
+
+    public boolean clusterExists(String accountId, String identifier) {
+        return clusters.getForAccount(accountId, identifier).isPresent();
+    }
+
+    /** The region the cluster was created in, or empty when the account has no such cluster. */
+    public Optional<String> clusterRegion(String accountId, String identifier) {
+        return clusters.getForAccount(accountId, identifier).map(this::clusterRegion);
+    }
+
+    /** A failing listener must not abort the removal: the cluster is already gone by now. */
+    private void notifyClusterRemoved(String identifier) {
+        for (BiConsumer<String, String> listener : clusterRemovalListeners) {
+            try {
+                listener.accept(clusters.accountId(), identifier);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Cluster removal listener failed for cluster {0}", identifier);
+            }
+        }
+    }
+
     public List<Cluster> describeClusters(String identifier) {
         if (identifier != null) {
             Optional<Cluster> cluster = clusters.get(identifier);
@@ -1175,7 +1210,7 @@ public class RedshiftService implements ManagedSecretRotator {
     public List<RedshiftMetricTarget> availableMetricTargets() {
         return clusters.scanAllAccountEntries(k -> true).stream()
                 .filter(entry -> "available".equals(entry.value().getClusterStatus()))
-                .map(entry -> new RedshiftMetricTarget(entry.accountId(), snapshotRegion(entry.value()),
+                .map(entry -> new RedshiftMetricTarget(entry.accountId(), clusterRegion(entry.value()),
                         entry.value(), relayKey(entry.accountId(), entry.value().getClusterIdentifier())))
                 .toList();
     }
@@ -1273,6 +1308,7 @@ public class RedshiftService implements ManagedSecretRotator {
         // Invalidate any GetClusterCredentials passwords so a cluster later recreated with this
         // identifier does not accept them as master-equivalent.
         credentialBroker.revokeCluster(clusters.accountId(), identifier);
+        notifyClusterRemoved(identifier);
 
         if (cluster.getMasterPasswordSecretArn() != null && secretsManagerService != null) {
             try {
@@ -2019,7 +2055,7 @@ public class RedshiftService implements ManagedSecretRotator {
         snapshot.setMasterUsername(cluster.getMasterUsername());
         snapshot.setMasterPassword(cluster.getMasterPassword());
         snapshot.setSnapshotArn(scheduledTime == null ? snapshotArn(clusterIdentifier, snapshotIdentifier)
-                : AwsArnUtils.Arn.of("redshift", snapshotRegion(cluster), accountId,
+                : AwsArnUtils.Arn.of("redshift", clusterRegion(cluster), accountId,
                         "snapshot:" + clusterIdentifier + "/" + snapshotIdentifier).toString());
         snapshot.setSnapshotCreateTime(now);
         snapshot.setManualSnapshotRetentionPeriod(retentionPeriod);
@@ -2046,7 +2082,7 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("InvalidParameterValue", "Invalid snapshot identifier", 400);
         }
         boolean finalSnapshot = retentionPeriod != null;
-        String eventRegion = scheduledTime == null ? regionResolver.getRegion() : snapshotRegion(cluster);
+        String eventRegion = scheduledTime == null ? regionResolver.getRegion() : clusterRegion(cluster);
         emitSnapshotEvent(accountId, eventRegion,
                 finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_STARTED : RedshiftEventCatalog.SNAPSHOT_STARTED,
                 snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "A user snapshot '") + snapshotIdentifier
@@ -2159,6 +2195,33 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }
         return named;
+    }
+
+    /**
+     * The snapshot an ARN names in its account, as a restore finds it, a cluster the ARN leaves open ({@code *})
+     * matching any: in the caller's account the copy kept in the ARN's Region before the snapshot itself, and in
+     * another account the snapshot itself alone, taken in the ARN's Region, as a shared one is restored.
+     */
+    public Optional<Snapshot> findSnapshotAt(String snapshotArn) {
+        if (!AwsArnUtils.isArnFor(snapshotArn, "redshift")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshotArn);
+        String resource = arn.resource();
+        int slash = resource.indexOf('/');
+        if (!resource.startsWith("snapshot:") || slash < 0) {
+            return Optional.empty();
+        }
+        String cluster = resource.substring("snapshot:".length(), slash);
+        String identifier = resource.substring(slash + 1);
+        Predicate<Snapshot> ofCluster = snapshot -> "*".equals(cluster) || cluster.equals(snapshot.getClusterIdentifier());
+        if (!arn.accountId().equals(clusters.accountId())) {
+            return snapshots.getForAccount(arn.accountId(), identifier).filter(ofCluster)
+                    .filter(snapshot -> snapshot.getSnapshotArn() == null
+                            || AwsArnUtils.parse(snapshot.getSnapshotArn()).region().equals(arn.region()));
+        }
+        return snapshotCopies.getForAccount(arn.accountId(), copyKey(arn.region(), identifier)).filter(ofCluster)
+                .or(() -> snapshots.getForAccount(arn.accountId(), identifier).filter(ofCluster));
     }
 
     private boolean isInRequestRegion(Snapshot snapshot) {
@@ -2430,6 +2493,40 @@ public class RedshiftService implements ManagedSecretRotator {
         return snapshot;
     }
 
+    /** Whether the caller's account has a cluster named {@code identifier}. */
+    public boolean hasCluster(String identifier) {
+        return clusters.get(identifier).isPresent();
+    }
+
+    /** What a table restore reads from and writes into: the cluster, the snapshot dump and the database it covers. */
+    public record TableRestoreSource(Cluster cluster, Path dump, String database) {
+    }
+
+    /**
+     * Resolves the cluster and the snapshot of it a table is restored from. Like AWS, the snapshot must have been
+     * taken from the cluster, and both must be available.
+     */
+    public TableRestoreSource tableRestoreSource(String clusterIdentifier, String snapshotIdentifier) {
+        Cluster cluster = clusters.get(clusterIdentifier).orElseThrow(
+                () -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        Snapshot snapshot = findSnapshot(snapshotIdentifier)
+                .filter(found -> clusterIdentifier.equals(found.getClusterIdentifier()))
+                .filter(this::isInRequestRegion)
+                .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + snapshotIdentifier + " not found", 404));
+        if (!"available".equals(cluster.getClusterStatus())) {
+            throw new AwsException("InvalidClusterState",
+                    "Cluster " + clusterIdentifier + " is not in the available state.", 400);
+        }
+        String sqlDump = snapshot.getSqlDump();
+        if (!"available".equals(snapshot.getStatus()) || !isTrustedDumpPath(sqlDump)
+                || !Files.exists(Paths.get(sqlDump))) {
+            throw new AwsException("InvalidClusterSnapshotState",
+                    "Snapshot " + snapshotIdentifier + " is not in the available state.", 400);
+        }
+        return new TableRestoreSource(cluster, Paths.get(sqlDump), CLUSTER_DB_NAME);
+    }
+
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier) {
         return restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, null);
     }
@@ -2507,6 +2604,7 @@ public class RedshiftService implements ManagedSecretRotator {
         mutate(() -> {
             if (proxyStopped) {
                 clusters.delete(identifier);
+                notifyClusterRemoved(identifier);
             } else {
                 cluster.setClusterStatus("failed");
                 clusters.put(identifier, cluster);
@@ -3130,7 +3228,7 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("UnknownSnapshotCopyRegionFault",
                     "Unknown destination region: " + destinationRegion, 404);
         }
-        if (destinationRegion.equals(snapshotRegion(cluster))) {
+        if (destinationRegion.equals(clusterRegion(cluster))) {
             // A copy in the cluster's own Region would shadow the snapshots it was copied from.
             throw new AwsException("UnknownSnapshotCopyRegionFault",
                     "The destination region must differ from the cluster's region: " + destinationRegion, 404);
@@ -3370,7 +3468,8 @@ public class RedshiftService implements ManagedSecretRotator {
                 new AutomatedSnapshotState(scheduleKey, state.anchor(), scheduled)));
     }
 
-    private String snapshotRegion(Cluster cluster) {
+    /** The Region the cluster was created in; the default Region for a cluster stored before clusters kept one. */
+    private String clusterRegion(Cluster cluster) {
         return cluster.getSnapshotRegion() == null ? regionResolver.getDefaultRegion() : cluster.getSnapshotRegion();
     }
 
@@ -3536,7 +3635,7 @@ public class RedshiftService implements ManagedSecretRotator {
         Snapshot copy = new Snapshot(source);
         copy.setSnapshotArn(AwsArnUtils.Arn.of("redshift", destination, accountId,
                 "snapshot:" + source.getClusterIdentifier() + "/" + source.getSnapshotIdentifier()).toString());
-        copy.setSourceRegion(snapshotRegion(cluster));
+        copy.setSourceRegion(clusterRegion(cluster));
         copy.setSourceSnapshotArn(source.getSnapshotArn());
         copy.setSourceSnapshotCreateTime(source.getSnapshotCreateTime());
         copy.setSqlDump(dump == null ? null : dump.toString());

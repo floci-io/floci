@@ -28,5 +28,4 @@ servicecatalog	covered by PartitionArnMintingIntegrationTest (all partitions)
 signin	the only ARN is the sub claim of an id token issued by the OAuth flow, and the session that flow registers cannot be removed
 ssm	covered by PartitionArnMintingIntegrationTest (all partitions)
 ssoadmin	one instance per account, minted in its primary region's partition, so a request signed in another partition sees that ARN (BL-243)
-ssoportal	no portal response carries the reserved role ARN, and a portal session cannot be built over HTTP under the test config
 swf	a registered domain can only be deprecated, never removed, so a case would leak state into the shared emulator

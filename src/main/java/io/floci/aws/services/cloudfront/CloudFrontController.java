@@ -663,7 +663,7 @@ public class CloudFrontController {
     }
 
     @PUT
-    @Path("/origin-access-control/{Id}")
+    @Path("/origin-access-control/{Id}/config")
     public Response updateOriginAccessControl(@PathParam("Id") String id,
                                               @HeaderParam("If-Match") String ifMatch,
                                               String body) {

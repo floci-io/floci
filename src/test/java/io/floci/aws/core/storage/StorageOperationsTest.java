@@ -1,5 +1,6 @@
 package io.floci.aws.core.storage;
 
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
@@ -60,6 +61,37 @@ class StorageOperationsTest {
                 ? Set.of("222222222222/db:current", "111111111111/db:neighbor:kept")
                 : Set.of("db:legacy", "111111111111/db:current", "111111111111/db:neighbor:kept");
         assertEquals(retained, raw.keys());
+        verify(raw).deleteAllAtomically(removed);
+        verify(raw, never()).delete(any());
+        verify(raw, never()).put(any(), any());
+    }
+
+    /**
+     * A Region view deletes its own Region's matches; in the default Region the regionless ones go too,
+     * the account store's unprefixed legacy keys included, as the account store deletes them itself.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "eu-west-1"})
+    void regionViewDeletionKeepsOtherRegionsAndLegacyOwnership(String region) {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<>());
+        raw.putAll(Map.of(
+                "db:legacy", "db",
+                "111111111111/db:regionless", "db",
+                "111111111111/us-east-1/db:east", "db",
+                "111111111111/eu-west-1/db:west", "db",
+                "111111111111/eu-west-1/db:neighbor:kept", "neighbor"));
+        RegionResolver regions = mock(RegionResolver.class);
+        when(regions.getDefaultRegion()).thenReturn("us-east-1");
+        when(regions.getRegion()).thenReturn(region);
+        RegionScopedStorage<String> storage = new RegionScopedStorage<>(
+                new AccountAwareStorageBackend<>(raw, null, "111111111111"), regions);
+        clearInvocations(raw);
+
+        StorageOperations.deleteMatchingAtomically(storage, "db"::equals);
+
+        Set<String> removed = region.equals("us-east-1")
+                ? Set.of("db:legacy", "111111111111/db:regionless", "111111111111/us-east-1/db:east")
+                : Set.of("111111111111/eu-west-1/db:west");
         verify(raw).deleteAllAtomically(removed);
         verify(raw, never()).delete(any());
         verify(raw, never()).put(any(), any());

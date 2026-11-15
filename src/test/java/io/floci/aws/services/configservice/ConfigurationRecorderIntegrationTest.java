@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -432,8 +434,7 @@ class ConfigurationRecorderIntegrationTest {
             .body("ConfigurationRecorders[0]", not(hasKey("recordingMode")));
     }
 
-    /** PutConfigurationRecorder's Tags is a TagsList, and the operation models ValidationException,
-     *  not the InvalidParameterValueException PutConfigRule answers. */
+    /** PutConfigurationRecorder's Tags is a TagsList, and the operation models ValidationException. */
     @Test
     @Order(19)
     void putConfigurationRecorderRejectsAnInvalidTagWithoutStoringIt() {
@@ -591,5 +592,23 @@ class ConfigurationRecorderIntegrationTest {
             """.formatted(arn))
             .then().statusCode(400)
             .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+    }
+
+    /** Arn is an AmazonResourceName, 1-1000 characters, on both Describe calls. */
+    @Test
+    @Order(23)
+    void anArnOutsideItsModeledLengthIsAValidationException() {
+        for (String action : List.of("DescribeConfigurationRecorders", "DescribeConfigurationRecorderStatus")) {
+            RestAssuredJsonUtils.awsAction("StarlingDoveService", action, "{\"Arn\": \"\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Invalid parameter at 'Arn' failed to satisfy constraint: "
+                        + "'Member must have length greater than or equal to 1'"));
+            RestAssuredJsonUtils.awsAction("StarlingDoveService", action, "{\"Arn\": \"" + "a".repeat(1001) + "\"}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Invalid parameter at 'Arn' failed to satisfy constraint: "
+                        + "'Member must have length less than or equal to 1000'"));
+        }
     }
 }

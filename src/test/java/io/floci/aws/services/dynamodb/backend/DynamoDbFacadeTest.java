@@ -153,8 +153,9 @@ class DynamoDbFacadeTest {
         requestContext.setRegion(OTHER_REGION);
         IamConditionContextResolver resolver = new IamConditionContextResolver(dynamoDb,
                 mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class),
-                requestContext,
+                mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), requestContext,
+                new RegionResolver(OTHER_REGION, "000000000000"),
                 mock(EmulatorConfig.class),
                 null, mock(io.floci.aws.core.common.ResolvedServiceCatalog.class));
         ContainerRequestContext request = mock(ContainerRequestContext.class);

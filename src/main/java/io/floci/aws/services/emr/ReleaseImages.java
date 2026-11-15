@@ -15,4 +15,11 @@ public interface ReleaseImages {
      * the two; a failure is thrown.
      */
     String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive);
+
+    /**
+     * The step or the bootstrap that {@link #image} gave {@code imageId} to has ended, so a newer image of its kind may
+     * remove it; until then it stays, as no container of it may be there yet to keep it. Once for each id given.
+     */
+    default void released(String imageId) {
+    }
 }

@@ -134,6 +134,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
 | `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-region `SnapshotArn`. `OwnerAccount`, or a `SnapshotArn` of another account, restores a snapshot that account has authorized the caller to restore, and is refused with `AccessToSnapshotDenied` otherwise; the dump is read from the owner's directory and the cluster is created in the caller's account |
+| `RestoreTableFromClusterSnapshot` | Create one table of a cluster snapshot in the cluster it was taken from, under `NewTableName` and in `TargetSchemaName` (default: the source schema, which defaults to `public`). See [Table restore](#table-restore) |
+| `DescribeTableRestoreStatus` | List the table restore requests of a cluster in the order they were made, or one by `TableRestoreRequestId`; `MaxRecords` (20 to 100) and `Marker` page the list |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
@@ -165,6 +167,10 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. A background sweep then copies the cluster's snapshots to that Region, see [Cross-region snapshot copy](#cross-region-snapshot-copy) |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
+| `CreateScheduledAction` | Create a scheduled action that runs `PauseCluster` or `ResumeCluster` on a cluster at an `at(...)` time or on a six-field `cron(...)` schedule, in UTC, with an optional `StartTime`/`EndTime` window, `Enable` and description. A `ResizeCluster` target is refused with `ScheduledActionTypeUnsupported` |
+| `ModifyScheduledAction` | Change the role, schedule, target, window, description or `Enable` of an action; a new schedule, or enabling a disabled action, restarts the count from now |
+| `DeleteScheduledAction` | Remove an action |
+| `DescribeScheduledActions` | List actions filtered by `ScheduledActionName`, `TargetActionType`, `Active`, `StartTime`, `EndTime` and the `cluster-identifier` and `iam-role` filters, paged with `MaxRecords` (20 to 100) and `Marker`, with `State` and `NextInvocations` |
 | `CreateSnapshotSchedule` | Create a UTC rate or cron schedule that takes automated snapshots on associated clusters, with optional tags |
 | `ModifySnapshotSchedule` | Replace a schedule's definitions |
 | `DescribeSnapshotSchedules` | List schedules filtered by `ScheduleIdentifier`, `ClusterIdentifier`, `TagKeys` and `TagValues`, paged with `MaxRecords` and `Marker`, with their associated clusters |
@@ -380,6 +386,10 @@ See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.h
 - **Hybrid storage can lose a copy after a crash.** The copy is written before the source is marked, but hybrid storage flushes in the background and does not report a failed write. If the copy's write fails and the source's succeeds, a crash before the next flush leaves the source marked as copied without a copy, and later sweeps skip it. Persistent and WAL storage report the failed write before the source is marked, so a crash there leaves the snapshot to be copied again.
 - **Retention.** Copied automated snapshots follow the cluster's current `RetentionPeriod`, so `ModifySnapshotCopyRetentionPeriod` changes existing ones. Copied manual snapshots keep the `ManualSnapshotRetentionPeriod` they were copied with; `-1` keeps them until deleted. Retention counts from the source snapshot's creation time.
 - **The cluster store has no Region.** A cluster restored from a copy is created in the same store as every other cluster, as before.
+
+## Scheduled actions
+
+A scheduled action pauses or resumes a provisioned cluster on a schedule. A background sweep runs the latest invocation that came due since it last looked, once, so a long downtime does not replay missed invocations and nothing before an action was created, rescheduled or enabled again runs. With IAM enforcement on, the action's role has to trust `scheduler.redshift.amazonaws.com` and allow `redshift:PauseCluster` or `redshift:ResumeCluster` on the cluster. A failing invocation, such as pausing a cluster that is already paused, is logged and the sweep goes on. Actions are removed with their cluster. Only `PauseCluster` and `ResumeCluster` targets are supported. A cron schedule whose invocations are less than one hour apart is refused with `InvalidSchedule`, as in AWS. Memory storage forgets actions on restart.
 
 ## Automated snapshots
 
@@ -652,6 +662,16 @@ Warehouse:
 
 For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyClusterParameterGroup` on both create and update. `Description` and `ParameterGroupFamily` are replacement properties, matching AWS: changing either creates a new parameter group instead of reusing the prior one.
 
+### Table restore
+
+`RestoreTableFromClusterSnapshot` lifts the table's `CREATE TABLE` statement and its rows out of the snapshot's dump and replays them, renamed, in one transaction. The cluster must be `available` and the snapshot must be an available snapshot of it. Floci differs from AWS in these ways:
+
+- The restore runs inside the request. The response shows `PENDING`, and `DescribeTableRestoreStatus` already reports `SUCCEEDED` or `FAILED`, with the reason in `Message`. `InProgressTableRestoreQuotaExceededFault` is never returned.
+- A snapshot covers one database, `dev`. A `SourceDatabaseName` or table the snapshot does not hold is refused with `InvalidTableRestoreArgument`. A target table that already exists, or a target schema or database that does not, ends the request in `FAILED` and leaves nothing behind.
+- Only the definition and the rows are restored. Constraints, defaults that read a sequence and ownership are not. A partitioned table is refused with `InvalidTableRestoreArgument`, because its rows live in its partitions.
+- Names are matched ignoring case unless `EnableCaseSensitiveIdentifier` is `true`, and folded to lower case in the target otherwise.
+- The status of a deleted cluster's requests is dropped when they are next listed, so a cluster recreated under its name can inherit a request made against its predecessor if nothing listed them in between.
+
 ### Gaps and Limitations
 
 - `Port` is ignored: Floci assigns the dynamic host proxy port returned in `Endpoint.Port`.
@@ -669,8 +689,12 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
   `AccountsWithRestoreAccess` and `RevokeSnapshotAccess` removes it, so a snapshot deleted and taken again under
   the same name starts with no grant. Only a manual, available snapshot can be shared. A shared snapshot can be
   described and restored by the account it is shared with, and by no other action. The caller's own identity
-  policies are the IAM filter's to check when IAM enforcement is on. KMS key grants are not checked, and a
-  snapshot copied to another Region is shared only through the Region it was taken in.
+  policies are the IAM filter's to check when IAM enforcement is on. A snapshot carrying a `KmsKeyId`, which in
+  Floci is a copy made into another Region under a snapshot copy grant, also needs `kms:Decrypt` on that key under
+  IAM enforcement, from the key policy and the caller's own policies, with `kms:ViaService` as
+  `redshift.<region>.amazonaws.com`, unless the grant was made without a key, whose copies use the AWS managed
+  `alias/aws/redshift` and need nothing from KMS. KMS grants are not evaluated, and a snapshot copied to another
+  Region is shared only through the Region it was taken in.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
 ## Configuration
@@ -683,6 +707,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED` | `true` | Run the background sweep that copies snapshots of copy-enabled clusters to their destination Region |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS` | `60` | Delay between snapshot copy sweeps |
+| `FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTIONS_ENABLED` | `true` | Run the background sweep that pauses and resumes clusters through scheduled actions |
+| `FLOCI_SERVICES_REDSHIFT_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS` | `60` | Delay between scheduled action sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |

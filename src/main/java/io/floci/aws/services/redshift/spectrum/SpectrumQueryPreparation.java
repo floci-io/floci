@@ -7,7 +7,9 @@ import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Partition;
 import io.floci.aws.services.glue.model.Table;
+import io.floci.aws.services.redshift.RedshiftService;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -20,6 +22,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.BiFunction;
 
 @ApplicationScoped
 public class SpectrumQueryPreparation {
@@ -30,6 +33,8 @@ public class SpectrumQueryPreparation {
     private final GlueService glue;
     private final ExternalMetadataWriter metadata;
     private final ExternalCatalogLocks catalogLocks;
+    /** The Region of an account's cluster, by its identifier; null when it isn't known. */
+    private final BiFunction<String, String, String> clusterRegion;
     private final Map<BackendSql, List<ExternalSchemaBinding>> pendingBindings = new ConcurrentHashMap<>();
 
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
@@ -37,16 +42,40 @@ public class SpectrumQueryPreparation {
         this(registry, materializer, parser, glue, metadata, new ExternalCatalogLocks());
     }
 
-    @Inject
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
                                     ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks) {
+        this(registry, materializer, parser, glue, metadata, catalogLocks, (accountId, clusterIdentifier) -> null);
+    }
+
+    @Inject
+    public SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
+                                    ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
+                                    ExternalCatalogLocks catalogLocks, Instance<RedshiftService> redshift) {
+        this(registry, materializer, parser, glue, metadata, catalogLocks,
+                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
+                             ExternalStatementParser parser, GlueService glue, ExternalMetadataWriter metadata,
+                             ExternalCatalogLocks catalogLocks, BiFunction<String, String, String> clusterRegion) {
+        this.clusterRegion = clusterRegion;
         this.registry = registry;
         this.materializer = materializer;
         this.parser = parser;
         this.glue = glue;
         this.metadata = metadata;
         this.catalogLocks = catalogLocks;
+    }
+
+    /**
+     * The Region whose Glue catalog the session's cluster reads: the cluster's own, as on AWS. Null when the
+     * cluster isn't a provisioned one Floci knows, which leaves the Region the call already runs in, such as a
+     * Data API request's.
+     */
+    private String catalogRegion(SpectrumSession session) {
+        String clusterIdentifier = session.clusterIdentifier();
+        return clusterIdentifier == null ? null : clusterRegion.apply(session.accountId(), clusterIdentifier);
     }
 
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend) {
@@ -59,7 +88,8 @@ public class SpectrumQueryPreparation {
      */
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
         try {
-            return RequestScopes.callAs(session.accountId(), () -> prepareInScope(sql, session, backend, parameters));
+            return RequestScopes.callAs(session.accountId(), catalogRegion(session),
+                    () -> prepareInScope(sql, session, backend, parameters));
         } catch (AwsException exception) {
             String state = switch (exception.getErrorCode()) {
                 case "AlreadyExistsException" -> "42P07";

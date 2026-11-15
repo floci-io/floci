@@ -95,11 +95,8 @@ public class EmrServerlessController {
     @Path("/{applicationId}")
     public UpdateApplicationResponse updateApplication(@PathParam("applicationId") String applicationId,
                                                      UpdateApplicationRequest request) {
-        Application app = service.updateApplication(applicationId, request);
         UpdateApplicationResponse response = new UpdateApplicationResponse();
-        response.setApplicationId(app.getApplicationId());
-        response.setArn(app.getArn());
-        response.setName(app.getName());
+        response.setApplication(service.updateApplication(applicationId, request));
         return response;
     }
 

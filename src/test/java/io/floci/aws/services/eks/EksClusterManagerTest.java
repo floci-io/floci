@@ -14,6 +14,7 @@ import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.InspectVolumeCmd;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
@@ -53,7 +54,6 @@ import io.floci.aws.services.eks.model.CertificateAuthority;
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.services.eks.model.ClusterIdentity;
 import io.floci.aws.services.eks.model.ClusterOidcKey;
-import io.floci.aws.services.eks.model.CreateClusterRequest;
 import io.floci.aws.services.eks.model.LogSetup;
 import io.floci.aws.services.eks.model.Logging;
 import io.floci.aws.services.eks.model.Nodegroup;
@@ -83,6 +83,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -92,6 +93,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -115,6 +117,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -597,6 +600,7 @@ class EksClusterManagerTest {
         private PortAllocator portAllocator;
         private DockerClient dockerClient;
         private ContainerBuilder containerBuilder;
+        private ContainerBuilder.Builder builder;
         private ContainerDetector containerDetector;
         private EksClusterManager manager;
 
@@ -620,7 +624,7 @@ class EksClusterManagerTest {
 
             lifecycleManager = Mockito.mock(ContainerLifecycleManager.class);
             containerBuilder = Mockito.mock(ContainerBuilder.class);
-            ContainerBuilder.Builder builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+            builder = Mockito.mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
             when(containerBuilder.newContainer(anyString())).thenReturn(builder);
             when(builder.build()).thenReturn(new ContainerSpec("test-image"));
             portAllocator = Mockito.mock(PortAllocator.class);
@@ -1267,6 +1271,126 @@ class EksClusterManagerTest {
             assertEquals("cid-new", cluster.getContainerId());
             // startCluster removes the broken survivor before reusing its name.
             verify(lifecycleManager).removeIfExists("floci-eks-demo");
+        }
+
+        @Test
+        void recreatingAMissingContainerKeepsTheApiServerPortTheEndpointNames() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocateIfFree(6453)).thenReturn(OptionalInt.of(6453));
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6453");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals(6453, cluster.getHostPort());
+            assertEquals("https://localhost:6453", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6453);
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
+        @Test
+        void recreatingASurvivorThatPublishesNoPortKeepsTheApiServerPortTheEndpointNames() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of()));
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocateIfFree(6457)).thenReturn(OptionalInt.of(6457));
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6457");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://localhost:6457", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6457);
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
+        /**
+         * A survivor that can't be adopted may still publish the port the endpoint names. It is removed before the
+         * port is asked for, so the new container takes that port and the endpoint stays.
+         */
+        @Test
+        void recreatingASurvivorThatCannotBeAdoptedRemovesItBeforeTakingTheEndpointsPort() {
+            when(lifecycleManager.findByName("floci-eks-demo"))
+                    .thenReturn(Optional.of(survivingContainer("cid-1")));
+            when(lifecycleManager.adopt("cid-1", List.of(6443), Optional.empty()))
+                    .thenThrow(new RuntimeException("the survivor did not start"));
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocateIfFree(6457)).thenReturn(OptionalInt.of(6457));
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6457");
+
+            manager.restoreCluster(cluster);
+
+            InOrder order = inOrder(lifecycleManager, portAllocator);
+            order.verify(lifecycleManager).removeIfExistsStrict("floci-eks-demo");
+            order.verify(portAllocator).allocateIfFree(6457);
+            assertEquals("cid-new", cluster.getContainerId());
+            assertEquals("https://localhost:6457", cluster.getEndpoint());
+            verify(portAllocator, never()).allocate(6440, 6499);
+        }
+
+        @Test
+        void recreatingAMissingContainerMovesToAFreePortWhenTheEndpointPortIsTaken() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            when(portAllocator.allocateIfFree(6457)).thenReturn(OptionalInt.empty());
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6457");
+
+            List<LogRecord> logs = LogCapture.capture(EksClusterManager.class, () -> manager.restoreCluster(cluster));
+
+            assertEquals(6440, cluster.getHostPort());
+            assertEquals("https://localhost:6440", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6440);
+            verify(portAllocator).allocate(6440, 6499);
+            String warning = "API server port 6457 of EKS cluster demo is taken; moving the cluster to another port "
+                    + "changes its endpoint";
+            // Compared by severity, not identity: JBoss LogManager has its own Level constants.
+            List<String> warnings = logs.stream()
+                    .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
+                    .map(record -> MessageFormat.format(record.getMessage(), record.getParameters()))
+                    .toList();
+            assertTrue(warnings.contains(warning), String.valueOf(warnings));
+        }
+
+        /**
+         * A network-mode endpoint names the container's own API server port, 6443, which says nothing
+         * about the host port the container had, so it is not asked for even inside the range.
+         */
+        @Test
+        void recreatingAMissingContainerInNetworkModeDoesNotAskForTheEndpointsContainerPort() {
+            when(containerDetector.isRunningInContainer()).thenReturn(true);
+            when(config.services().eks().endpointMode()).thenReturn("network");
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://floci-eks-demo:6443");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(6440, cluster.getHostPort());
+            assertEquals("https://" + cluster.getDockerName() + ":6443", cluster.getEndpoint());
+            verify(builder).withPortBinding(6443, 6440);
+            verify(portAllocator, never()).allocateIfFree(6443);
+        }
+
+        @Test
+        void recreatingAMissingContainerIgnoresAnEndpointPortOutsideTheConfiguredRange() {
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.empty());
+            stubFreshStart("cid-new", 6440);
+            Cluster cluster = cluster();
+            cluster.setEndpoint("https://localhost:6512");
+
+            manager.restoreCluster(cluster);
+
+            assertEquals(6440, cluster.getHostPort());
+            assertEquals("https://localhost:6440", cluster.getEndpoint());
+            verify(portAllocator, never()).allocateIfFree(6512);
         }
 
         @Test
@@ -2086,6 +2210,83 @@ class EksClusterManagerTest {
                                     && String.valueOf(record.getMessage()).contains("Resolver rules will not apply")),
                     "the cluster must say why its rules stopped applying, got: "
                             + logs.stream().map(LogRecord::getMessage).toList());
+        }
+
+        @Test
+        void aRegisteredNodeIsReachedAtItsPrivateAddress() {
+            Cluster cluster = new Cluster();
+            cluster.setName("reach-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-reach");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("container-reach", node.getDockerContainerId());
+            assertEquals("172.17.0.2", node.getPrivateIpAddress());
+            assertEquals("172.17.0.2", node.getContainerBridgeIp());
+        }
+
+        @Test
+        void aNodeOnSeveralNetworksIsReachedAtThePrivateAddressItsContainerHolds() {
+            // The first network that isn't the default bridge, the one EC2 would pick, is Floci's own here, but the
+            // node reports its VPC address, and that is where an instance target's traffic goes.
+            InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
+            InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+            NetworkSettings settings = Mockito.mock(NetworkSettings.class);
+            Map<String, ContainerNetwork> networks = new LinkedHashMap<>();
+            networks.put("floci_default", new ContainerNetwork().withIpv4Address("172.18.0.4"));
+            networks.put("floci-vpc", new ContainerNetwork().withIpv4Address("10.10.0.3"));
+            when(dockerClient.inspectContainerCmd(anyString())).thenReturn(inspect);
+            when(inspect.exec()).thenReturn(response);
+            when(response.getNetworkSettings()).thenReturn(settings);
+            when(settings.getNetworks()).thenReturn(networks);
+            Cluster cluster = new Cluster();
+            cluster.setName("vpc-cluster");
+            cluster.setNodePrivateIp("10.10.0.3");
+
+            manager.registerClusterNodeInstance(cluster, "container-vpc");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("10.10.0.3", node.getPrivateIpAddress());
+            assertEquals("10.10.0.3", node.getContainerBridgeIp());
+        }
+
+        @Test
+        void aNodeWhosePrivateAddressItsContainerDoesNotHoldIsReachedAtTheContainersAddress() {
+            Cluster cluster = new Cluster();
+            cluster.setName("moved-cluster");
+            cluster.setNodePrivateIp("10.10.0.9");
+
+            manager.registerClusterNodeInstance(cluster, "container-moved");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("10.10.0.9", node.getPrivateIpAddress());
+            assertEquals("172.17.0.2", node.getContainerBridgeIp());
+        }
+
+        @Test
+        void aNodeWhoseAddressesCannotBeDeterminedRecordsNoneToReachItAt() {
+            when(dockerClient.inspectContainerCmd(anyString()))
+                    .thenThrow(new RuntimeException("docker is unreachable"));
+            Cluster cluster = new Cluster();
+            cluster.setName("unknown-cluster");
+
+            manager.registerClusterNodeInstance(cluster, "container-unknown");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("10.0.0.1", node.getPrivateIpAddress());
+            assertNull(node.getContainerBridgeIp());
+        }
+
+        @Test
+        void theMetadataEndpointRecordsANodeItRegistersAsRegistrationDoes() {
+            Cluster cluster = new Cluster();
+            cluster.setName("imds-first-cluster");
+
+            manager.configureLinkLocalMetadataEndpoint(cluster, "container-42");
+
+            Instance node = manager.getRegisteredClusterNodeInstance(cluster);
+            assertEquals("container-42", node.getDockerContainerId());
+            assertEquals("172.17.0.2", node.getContainerBridgeIp());
         }
 
         @Test
@@ -4941,10 +5142,11 @@ class EksClusterManagerTest {
                     eksService,
                     Mockito.mock(EksAccessEntryService.class),
                     Mockito.mock(EksPodIdentityAssociationService.class),
-                    Mockito.mock(EksAddonService.class));
+                    Mockito.mock(EksAddonService.class),
+                    mapper);
 
             for (Response response : List.of(
-                    controller.createCluster(new CreateClusterRequest()),
+                    controller.createCluster(mapper.createObjectNode()),
                     controller.describeCluster("wire-cluster"),
                     controller.deleteCluster("wire-cluster"))) {
                 @SuppressWarnings("unchecked")

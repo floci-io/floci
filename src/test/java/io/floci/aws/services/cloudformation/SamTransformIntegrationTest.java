@@ -483,9 +483,9 @@ class SamTransformIntegrationTest {
             .toList();
         assertThat(oldVersionStatuses, hasItem("DELETE_COMPLETE"));
         assertThat(oldVersionStatuses, not(hasItem("DELETE_SKIPPED")));
-        // floci reports the version deleted but keeps every version it publishes; AWS deletes it.
+        // VersionDeletionPolicy: Delete removes the replaced version from the native inventory.
         given().when().get("/2015-03-31/functions/" + function + "/versions")
-            .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "1", "2")));
+            .then().statusCode(200).body("Versions.Version", equalTo(List.of("$LATEST", "2")));
     }
 
     /**

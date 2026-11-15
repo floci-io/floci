@@ -651,4 +651,14 @@ class CodeArtifactNpmExternalConnectionImporterTest {
                     return Optional.of(new NpmExternalConnectionClient.FetchedFile(content.length));
                 });
     }
+
+    /** An upstream deleted since a search order named it has no connection to fetch through. */
+    @Test
+    void aDeletedRepositoryHasNoExternalConnection() {
+        when(service.describeRepository(REGION, DOMAIN, OWNER, "deleted"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Repository 'deleted' not found.", 404));
+
+        assertFalse(importer.hasExternalConnection(REGION, DOMAIN, OWNER, "deleted"));
+        assertTrue(importer.hasExternalConnection(REGION, DOMAIN, OWNER, REPOSITORY));
+    }
 }

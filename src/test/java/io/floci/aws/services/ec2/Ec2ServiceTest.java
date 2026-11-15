@@ -3560,6 +3560,25 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesRefusesAnImageWhoseArchitectureTheInstanceTypeCannotRun() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException graviton = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-amd64", "m6g.large", 1, 1, null, List.of(), null, null, List.of(), null, null));
+        AwsException intel = assertThrows(AwsException.class, () -> service.runInstances("us-east-1",
+                "ami-ubuntu2404-arm64", "t3.micro", 1, 1, null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", graviton.getErrorCode());
+        assertEquals("The architecture 'arm64' of the specified instance type does not match the architecture "
+                + "'x86_64' of the specified AMI.", graviton.getMessage());
+        assertEquals("The architecture 'x86_64' of the specified instance type does not match the architecture "
+                + "'arm64' of the specified AMI.", intel.getMessage());
+    }
+
+    @Test
     void runInstancesKeepsX8664FallbackForUnknownImageAndType() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
@@ -9928,6 +9947,41 @@ class Ec2ServiceTest {
             copy.setTags(source.getTags() == null ? List.of() : new ArrayList<>(source.getTags()));
             return copy;
         }
+    }
+
+    /**
+     * A cluster node found by its id keeps the address its provider recorded for the container behind it, which an
+     * ELB instance target naming the node connects to.
+     */
+    @Test
+    void aClusterNodeFoundByIdKeepsTheContainerAddressItsProviderRecorded() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Instance nodeInstance = new Instance();
+        nodeInstance.setInstanceId("i-0de1234567890abd");
+        nodeInstance.setRegion("us-east-1");
+        nodeInstance.setPlacement(new Placement("us-east-1a"));
+        nodeInstance.setState(InstanceState.running());
+        nodeInstance.setPrivateIpAddress("10.10.80.10");
+        nodeInstance.setDockerContainerId("node-container");
+        nodeInstance.setContainerBridgeIp("10.10.80.10");
+        service.setClusterNodeInstanceProvider(new ClusterNodeInstanceProvider() {
+            @Override
+            public Optional<Instance> findInstance(String accountId, String region, String instanceId) {
+                return "i-0de1234567890abd".equals(instanceId) ? Optional.of(nodeInstance) : Optional.empty();
+            }
+
+            @Override
+            public List<Instance> listInstances(String accountId, String region) {
+                return List.of(nodeInstance);
+            }
+        });
+
+        Instance found = service.findInstanceById("123456789012", "i-0de1234567890abd");
+
+        assertEquals("node-container", found.getDockerContainerId());
+        assertEquals("10.10.80.10", found.getContainerBridgeIp());
     }
 
     @Test

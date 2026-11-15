@@ -91,6 +91,25 @@ class IamPolicyDocumentWriteIntegrationTest {
     }
 
     /**
+     * A {@code PutUserPolicy} of {@code document} on a holder these cases share, which is all the
+     * inline cases differ in: the write is the same one every time.
+     */
+    private RequestSpecification inlinePolicyWrite(String userName, String policyName,
+                                                   String document) {
+        return iam("PutUserPolicy")
+                .formParam("UserName", userName)
+                .formParam("PolicyName", policyName)
+                .formParam("PolicyDocument", document);
+    }
+
+    /** A {@code CreatePolicy} of {@code document} under a name no other case holds. */
+    private RequestSpecification managedPolicyWrite(String policyNamePrefix, String document) {
+        return iam("CreatePolicy")
+                .formParam("PolicyName", unique(policyNamePrefix))
+                .formParam("PolicyDocument", document);
+    }
+
+    /**
      * A role's trust policy is read by a validator of IAM's own, which words a document that does
      * not parse as a JSON object apart from one that parses and describes no statement.
      */
@@ -180,21 +199,16 @@ class IamPolicyDocumentWriteIntegrationTest {
      */
     @Test
     void aManagedPolicysStatementsAreHeldToTheElementsTheGrammarRequires() {
-        expectMalformed(iam("CreatePolicy")
-                .formParam("PolicyName", unique("write-managed-actions"))
-                .formParam("PolicyDocument",
-                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Resource\":\"*\"}]}"),
+        expectMalformed(managedPolicyWrite("write-managed-actions",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Resource\":\"*\"}]}"),
                 "Policy statement must contain actions.");
-        expectMalformed(iam("CreatePolicy")
-                .formParam("PolicyName", unique("write-managed-resources"))
-                .formParam("PolicyDocument",
-                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"s3:GetObject\"}]}"),
+        expectMalformed(managedPolicyWrite("write-managed-resources",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\"}]}"),
                 "Policy statement must contain resources.");
-        expectMalformed(iam("CreatePolicy")
-                .formParam("PolicyName", unique("write-managed-statement"))
-                .formParam("PolicyDocument", "{\"Statement\":\"allow everything\"}"),
+        expectMalformed(managedPolicyWrite("write-managed-statement",
+                "{\"Statement\":\"allow everything\"}"),
                 "Syntax errors in policy.");
     }
 
@@ -223,35 +237,23 @@ class IamPolicyDocumentWriteIntegrationTest {
     void theValuesAnIdentityPolicyDeclaresAreReadAgainstTheLanguage() {
         String userName = createUser("write-values");
 
-        expectMalformed(iam("PutUserPolicy")
-                .formParam("UserName", userName)
-                .formParam("PolicyName", "write-values")
-                .formParam("PolicyDocument",
-                        "{\"Version\":\"2019-01-01\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}"),
+        expectMalformed(inlinePolicyWrite(userName, "write-values",
+                "{\"Version\":\"2019-01-01\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}"),
                 "Syntax errors in policy.");
-        expectMalformed(iam("PutUserPolicy")
-                .formParam("UserName", userName)
-                .formParam("PolicyName", "write-values")
-                .formParam("PolicyDocument",
-                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"allow\","
-                        + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}"),
+        expectMalformed(inlinePolicyWrite(userName, "write-values",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}"),
                 "The policy failed legacy parsing");
-        expectMalformed(iam("PutUserPolicy")
-                .formParam("UserName", userName)
-                .formParam("PolicyName", "write-values")
-                .formParam("PolicyDocument",
-                        "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                        + "\"Action\":\"s3:GetObject\",\"Resource\":\"my-bucket\"}]}"),
+        expectMalformed(inlinePolicyWrite(userName, "write-values",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"my-bucket\"}]}"),
                 "Resource my-bucket must be in ARN format or \"*\".");
 
         // The version the language also defines, and a resource named by ARN, are both taken.
-        iam("PutUserPolicy")
-                .formParam("UserName", userName)
-                .formParam("PolicyName", "write-values")
-                .formParam("PolicyDocument",
-                        "{\"Version\":\"2008-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
-                        + "\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket/*\"}]}")
+        inlinePolicyWrite(userName, "write-values",
+                "{\"Version\":\"2008-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::bucket/*\"}]}")
             .when().post("/").then().statusCode(200);
         cleanup.register(() -> iam("DeleteUserPolicy").formParam("UserName", userName)
             .formParam("PolicyName", "write-values").when().post("/").then().statusCode(200));
@@ -317,5 +319,68 @@ class IamPolicyDocumentWriteIntegrationTest {
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo(MALFORMED))
             .body(MESSAGE, equalTo("Syntax errors in policy."));
+    }
+
+    /**
+     * A resource value that is no string names the text of that value, so it is held to the same
+     * rule as the string spelling it: {@code "Resource": 123} and {@code "Resource": "123"} are
+     * one case, where the first used to be passed over and stored. The {@code Version} and the
+     * {@code Effect} are already read that way, and both validators word this clause alike.
+     */
+    @Test
+    void aResourceValueThatIsNoStringIsHeldToTheArnRuleTheStringSpellingIs() {
+        String userName = createUser("write-nonstring");
+
+        expectMalformed(inlinePolicyWrite(userName, "write-nonstring",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":123}]}"),
+                "Resource 123 must be in ARN format or \"*\".");
+        expectMalformed(inlinePolicyWrite(userName, "write-nonstring",
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":[\"arn:aws:s3:::reports/*\",7]}]}"),
+                "Resource 7 must be in ARN format or \"*\".");
+        expectMalformed(inlinePolicyWrite(userName, "write-nonstring",
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"NotResource\":true}]}"),
+                "Resource true must be in ARN format or \"*\".");
+        expectMalformed(managedPolicyWrite("write-nonstring-managed",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":123}]}"),
+                "Resource 123 must be in ARN format or \"*\".");
+
+        // A null element still names nothing rather than a value to check, which is the element's
+        // own sentence and not this one.
+        expectMalformed(managedPolicyWrite("write-null-resource",
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":null}]}"),
+                "Policy statement must contain resources.");
+    }
+
+    /**
+     * The one clause the two identity validators do not word alike: an {@code Effect} the language
+     * does not define answers the inline validator's sentence on an inline write and the managed
+     * one's on a managed write, whichever way the value misses, spelling or type.
+     */
+    @Test
+    void anEffectTheLanguageDoesNotDefineIsWordedByTheValidatorThatReadsIt() {
+        String userName = createUser("write-effect-wording");
+        String arn = createManagedPolicy("write-effect-wording");
+        String lowercase = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        String undefined = "{\"Statement\":[{\"Effect\":\"Permit\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"*\"}]}";
+        String noString = "{\"Statement\":[{\"Effect\":true,\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"*\"}]}";
+
+        for (String document : new String[] {lowercase, undefined, noString}) {
+            expectMalformed(managedPolicyWrite("write-effect-managed", document),
+                    "Syntax errors in policy.");
+            expectMalformed(iam("CreatePolicyVersion")
+                    .formParam("PolicyArn", arn)
+                    .formParam("PolicyDocument", document),
+                    "Syntax errors in policy.");
+            expectMalformed(inlinePolicyWrite(userName, "write-effect-wording", document),
+                    "The policy failed legacy parsing");
+        }
     }
 }
