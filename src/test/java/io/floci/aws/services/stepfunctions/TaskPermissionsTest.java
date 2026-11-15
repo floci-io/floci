@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.StoredResourceArns;
-import io.floci.aws.services.cloudformation.CloudFormationQueryHandler;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
 import org.junit.jupiter.api.Test;
@@ -616,8 +615,9 @@ class TaskPermissionsTest {
     }
 
     private static final String STACK = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/s/id";
+    private static final String STACK_SET = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/ss:id";
 
-    private static TaskPermissions control(String tail, String request, CloudFormationQueryHandler cloudFormation,
+    private static TaskPermissions control(String tail, String request, StoredResourceArns cloudFormation,
                                            StoredResourceArns secrets, StoredResourceArns states,
                                            boolean callback) throws Exception {
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, callback,
@@ -628,16 +628,23 @@ class TaskPermissionsTest {
         return control(tail, request, null, null, null, false);
     }
 
-    private static CloudFormationQueryHandler stacks() {
-        CloudFormationQueryHandler handler = mock(CloudFormationQueryHandler.class);
-        when(handler.stackId(any(), any())).thenReturn(Optional.empty());
-        when(handler.stackId("s", "eu-west-1")).thenReturn(Optional.of(STACK));
-        when(handler.stackId(STACK, "eu-west-1")).thenReturn(Optional.of(STACK));
-        when(handler.stackIdOfChangeSet(any(), any())).thenReturn(Optional.empty());
-        when(handler.stackIdOfResource(any(), any())).thenReturn(Optional.empty());
-        when(handler.stackSetId(any())).thenReturn(Optional.empty());
-        when(handler.stackSetId("ss")).thenReturn(Optional.of("ss:id"));
-        return handler;
+    /** CloudFormation as IAM asks it: the stack {@code s} and the stack set {@code ss}, under the ids it minted. */
+    private static StoredResourceArns stacks() {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "cloudformation";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return switch (type) {
+                    case "stack" -> names.equals(List.of("s")) ? Optional.of(STACK) : Optional.empty();
+                    case "stackset" -> names.equals(List.of("ss")) ? Optional.of(STACK_SET) : Optional.empty();
+                    default -> Optional.empty();
+                };
+            }
+        };
     }
 
     @ParameterizedTest
@@ -660,7 +667,7 @@ class TaskPermissionsTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"aws-sdk:scheduler:getSchedule", "aws-sdk:scheduler:listSchedules",
-            "aws-sdk:cloudformation:describeTypeRegistration", "aws-sdk:sfn:describeExecution", "aws-sdk:sfn:stopExecution",
+            "aws-sdk:sfn:describeExecution", "aws-sdk:sfn:stopExecution",
             "aws-sdk:ec2:describeInstances", "aws-sdk:lambda:invoke", "aws-sdk:secretsmanager:getSecretValue",
             "aws-sdk:s3:getObject", "s3:getObject", "aws-sdk:s3:listObjectsV2", "dynamodb:query",
             "aws-sdk:rdsdata:batchExecuteStatement", "http:get", "elasticmapreduce:describeCluster"})
@@ -685,12 +692,28 @@ class TaskPermissionsTest {
         assertEquals(36, actions);
     }
 
+    /** An API the handler does not serve is checked as the direct request is, and the handler answers it. */
+    @Test
+    void aCloudFormationApiTheHandlerDoesNotServeIsCheckedAsTheTableGivesIt() throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:DescribeTypeRegistration", "*")),
+                control("aws-sdk:cloudformation:describeTypeRegistration", "{}").permissions());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"validateTemplate", "listStacks", "listExports", "describeOrganizationsAccess",
             "activateOrganizationsAccess", "createStackSet", "listStackSets"})
     void aCloudFormationActionWithNoResourceTypeIsOnAnyResource(String api) throws Exception {
         assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
                 control("aws-sdk:cloudformation:" + api, "{}").permissions());
+    }
+
+    /** A task whose input is no object still needs its action, on any resource, as a direct request naming none. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"listStacks|null", "listStacks|[]", "describeStacks|\"s\"",
+            "executeChangeSet|7"})
+    void aCloudFormationTaskWhoseInputIsNoObjectIsOnAnyResource(String api, String input) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
+                control("aws-sdk:cloudformation:" + api, input).permissions());
     }
 
     @ParameterizedTest
@@ -708,60 +731,42 @@ class TaskPermissionsTest {
         }
     }
 
+    /** A stack CloudFormation does not hold, one a create makes among them, is its ARN with the id open. */
     @ParameterizedTest
-    @ValueSource(strings = {"createStack", "createChangeSet"})
-    void aStackNotThereYetHasItsIdOpenForWhatCreatesIt(String api) throws Exception {
+    @ValueSource(strings = {"createStack", "createChangeSet", "updateStack", "deleteStack", "describeStacks",
+            "describeChangeSet", "getTemplateSummary"})
+    void aStackCloudFormationDoesNotHoldHasItsIdOpen(String api) throws Exception {
         assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api),
                         "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/new/*")),
-                control("aws-sdk:cloudformation:" + api, "{\"StackName\":\"new\"}", stacks(), null, null, false).permissions());
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"updateStack", "deleteStack", "describeStacks", "describeChangeSet", "getTemplateSummary"})
-    void aStackCloudFormationDoesNotHaveNamesNothing(String api) throws Exception {
-        assertEquals(List.of(), control("aws-sdk:cloudformation:" + api, "{\"StackName\":\"none\"}", stacks(), null, null, false)
-                .permissions());
+                control("aws-sdk:cloudformation:" + api, "{\"StackName\":\"new\"}", stacks(), null, null, false)
+                        .permissions());
     }
 
     @Test
-    void anUnknownStackIdNeverOpensAnIdEvenToCreate() throws Exception {
-        assertEquals(List.of(), control("aws-sdk:cloudformation:createStack",
-                "{\"StackName\":\"arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/none/id\"}", stacks(), null, null, false)
-                .permissions());
+    void aStackIdIsCheckedAsGiven() throws Exception {
+        String unknown = "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stack/none/id";
+        assertEquals(List.of(new Permission("cloudformation:CreateStack", unknown)),
+                control("aws-sdk:cloudformation:createStack", "{\"StackName\":\"" + unknown + "\"}", stacks(), null,
+                        null, false).permissions());
     }
 
+    /**
+     * A request naming its stack by no {@code StackName}, a change set by its ARN alone or a physical resource id
+     * alone among them, is checked on any resource, as the direct request is: the vendored request resources fill
+     * the stack from {@code StackName} only.
+     */
     @ParameterizedTest
-    @ValueSource(strings = {"describeStacks", "getTemplateSummary"})
-    void aCloudFormationActionWithAnOptionalStackIsOnAnyResourceWithoutOne(String api) throws Exception {
+    @CsvSource(delimiter = '|', value = {
+            "describeStacks|{}",
+            "getTemplateSummary|{}",
+            "describeChangeSet|{\"ChangeSetName\":\"arn:aws:cloudformation:eu-west-1:000000000000:changeSet/c/1\"}",
+            "executeChangeSet|{\"ChangeSetName\":\"arn:aws:cloudformation:eu-west-1:000000000000:changeSet/c/1\"}",
+            "deleteChangeSet|{\"ChangeSetName\":\"c\"}",
+            "describeStackResources|{\"PhysicalResourceId\":\"r-1\"}",
+            "listStackResources|{\"PhysicalResourceId\":\"r-1\"}"})
+    void aRequestNamingNoStackIsOnAnyResource(String api, String request) throws Exception {
         assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), "*")),
-                control("aws-sdk:cloudformation:" + api, "{}", stacks(), null, null, false).permissions());
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"describeChangeSet", "executeChangeSet", "deleteChangeSet"})
-    void aChangeSetArnFindsItsStack(String api) throws Exception {
-        CloudFormationQueryHandler handler = stacks();
-        when(handler.stackIdOfChangeSet("arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":changeSet/c/1", "eu-west-1"))
-                .thenReturn(Optional.of(STACK));
-
-        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), STACK)),
-                control("aws-sdk:cloudformation:" + api,
-                        "{\"ChangeSetName\":\"arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":changeSet/c/1\"}",
-                        handler, null, null, false).permissions());
-        assertEquals(List.of(), control("aws-sdk:cloudformation:" + api, "{\"ChangeSetName\":\"c\"}",
-                handler, null, null, false).permissions());
-    }
-
-    @Test
-    void describeStackResourcesFindsTheStackOfThePhysicalId() throws Exception {
-        CloudFormationQueryHandler handler = stacks();
-        when(handler.stackIdOfResource("r-1", "eu-west-1")).thenReturn(Optional.of(STACK));
-
-        assertEquals(List.of(new Permission("cloudformation:DescribeStackResources", STACK)),
-                control("aws-sdk:cloudformation:describeStackResources", "{\"PhysicalResourceId\":\"r-1\"}",
-                        handler, null, null, false).permissions());
-        assertEquals(List.of(), control("aws-sdk:cloudformation:listStackResources", "{\"PhysicalResourceId\":\"r-1\"}",
-                handler, null, null, false).permissions());
+                control("aws-sdk:cloudformation:" + api, request, stacks(), null, null, false).permissions());
     }
 
     @ParameterizedTest
@@ -769,11 +774,13 @@ class TaskPermissionsTest {
             "listStackInstances", "describeStackInstance", "deleteStackInstances", "listStackSetOperations",
             "describeStackSetOperation", "listStackSetAutoDeploymentTargets"})
     void aStackSetActionIsOnTheStackSetAsCloudFormationHoldsIt(String api) throws Exception {
+        assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api), STACK_SET)),
+                control("aws-sdk:cloudformation:" + api, "{\"StackSetName\":\"ss\"}", stacks(), null, null, false)
+                        .permissions());
         assertEquals(List.of(new Permission("cloudformation:" + AslExecutor.capitalizeFirst(api),
-                        "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/ss:id")),
-                control("aws-sdk:cloudformation:" + api, "{\"StackSetName\":\"ss\"}", stacks(), null, null, false).permissions());
-        assertEquals(List.of(), control("aws-sdk:cloudformation:" + api, "{\"StackSetName\":\"none\"}",
-                stacks(), null, null, false).permissions());
+                        "arn:aws:cloudformation:eu-west-1:" + ACCOUNT + ":stackset/none:*")),
+                control("aws-sdk:cloudformation:" + api, "{\"StackSetName\":\"none\"}", stacks(), null, null, false)
+                        .permissions());
     }
 
     @Test

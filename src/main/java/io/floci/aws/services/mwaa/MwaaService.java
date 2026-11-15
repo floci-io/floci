@@ -11,9 +11,11 @@ import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.mwaa.model.CreateEnvironmentRequest;
 import io.floci.aws.services.mwaa.model.Environment;
 import io.floci.aws.services.mwaa.model.EnvironmentStatus;
+import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import io.floci.aws.services.mwaa.model.UpdateEnvironmentRequest;
 import io.floci.aws.services.mwaa.proxy.MwaaProxyManager;
 import io.floci.aws.services.mwaa.proxy.MwaaWebProxy;
@@ -45,7 +47,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class MwaaService implements TagHandler {
+public class MwaaService implements TagHandler, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(MwaaService.class);
 
@@ -133,7 +135,44 @@ public class MwaaService implements TagHandler {
         if (!config.services().mwaa().mock()) {
             startReadinessPoller();
             startDagSyncPoller();
+            for (Environment environment : allEnvironments()) {
+                environmentManager.reclaimVpcAddress(environment);
+            }
         }
+    }
+
+    /**
+     * Amazon MWAA keeps network interfaces in each subnet an environment names, so DeleteSubnet refuses one an
+     * environment still uses, as it does here. A plain read of the caller's environments and of the addresses live
+     * Airflow containers hold, which takes no lock of this service.
+     */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        String accountId = regionResolver.getAccountId();
+        return holdsLiveAddresses() && environmentManager.holdsSubnet(accountId, region, subnetId)
+                || environmentsOf(accountId, region).stream()
+                        .filter(environment -> environment.getStatus() != EnvironmentStatus.DELETED)
+                        .map(Environment::getNetworkConfiguration)
+                        .anyMatch(network -> network != null && network.getSubnetIds() != null
+                                && network.getSubnetIds().contains(subnetId));
+    }
+
+    /** A VPC is only deleted once its subnets are, which {@link #hasSubnetDependency} guards; this adds live leases. */
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return holdsLiveAddresses() && environmentManager.holdsVpc(regionResolver.getAccountId(), region, vpcId);
+    }
+
+    /** Mock mode runs no containers, so no Airflow container holds a VPC address there. */
+    private boolean holdsLiveAddresses() {
+        return !config.services().mwaa().mock();
+    }
+
+    private List<Environment> environmentsOf(String accountId, String region) {
+        List<Environment> environments = storage instanceof AccountAwareStorageBackend<Environment> aware
+                ? aware.scanForAccount(accountId, k -> true)
+                : storage.scan(k -> true);
+        return environments.stream().filter(environment -> region.equals(environmentRegion(environment))).toList();
     }
 
     @PreDestroy
@@ -338,7 +377,13 @@ public class MwaaService implements TagHandler {
             environment.setPluginsS3Path(request.getPluginsS3Path());
         }
         if (request.getNetworkConfiguration() != null) {
-            environment.setNetworkConfiguration(request.getNetworkConfiguration());
+            // UpdateEnvironment's NetworkConfiguration holds only SecurityGroupIds: an environment's subnets, and so
+            // its VPC, are fixed at creation, as Amazon MWAA has them.
+            NetworkConfiguration network = new NetworkConfiguration();
+            network.setSubnetIds(environment.getNetworkConfiguration() != null
+                    ? environment.getNetworkConfiguration().getSubnetIds() : null);
+            network.setSecurityGroupIds(request.getNetworkConfiguration().getSecurityGroupIds());
+            environment.setNetworkConfiguration(network);
         }
         if (request.getLoggingConfiguration() != null) {
             environment.setLoggingConfiguration(request.getLoggingConfiguration());

@@ -168,10 +168,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " HADOOP_HDFS_HOME=$h/hadoop-hdfs HADOOP_MAPRED_HOME=$h/hadoop-mapreduce"
                     + " HADOOP_YARN_HOME=$h/hadoop-yarn PATH=$h/hadoop-hdfs/bin:$h/hadoop-yarn/bin:$h/hadoop/bin:$PATH",
             "fi");
-    // What every node of a cluster writes before its daemons start: the Hadoop configuration, its name among the
-    // nodes in HDFS's when it is given one, and the empty files listing the nodes being decommissioned.
+    // What every node of a cluster writes before its daemons start: the files that say which node it is, the Hadoop
+    // configuration, its name among the nodes in HDFS's when it is given one, and the empty files listing the nodes
+    // being decommissioned.
     private static final String NODE_SETUP = String.join("\n",
             "chown hadoop:hadoop /mnt || exit",
+            EmrServerlessSparkRunner.NODE_INFO,
             EmrServerlessSparkRunner.HIVE_ONE_SDK,
             "mkdir -p " + HDFS_CONF + " || exit",
             "printf '%s\\n' '<configuration>'"
@@ -832,6 +834,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", NODE_SCRIPT))
+                .withEnv(EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE, core ? "CORE" : "TASK")
                 .withEnv("FLOCI_HDFS_HOST", request.host())
                 .withEnv("FLOCI_HDFS_BIND", "0.0.0.0")
                 .withEnv(NODE_HOST_VARIABLE, host)
@@ -1247,6 +1250,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", HDFS_SCRIPT))
+                .withEnv(EmrServerlessSparkRunner.INSTANCE_ROLE_VARIABLE, "MASTER")
                 .withEnv("FLOCI_HDFS_HOST", host)
                 .withEnv("FLOCI_HDFS_BIND", shared ? LOOPBACK : "0.0.0.0")
                 .withEnv("HADOOP_CONF_DIR", HDFS_CONF)

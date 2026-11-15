@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
@@ -15,7 +16,11 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Subnet;
+import io.floci.aws.services.ec2.net.Cidr4;
 import io.floci.aws.services.mwaa.model.Environment;
+import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -29,11 +34,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -91,18 +98,23 @@ public class MwaaEnvironmentManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final LaunchedContainerAwsEnv awsEnv;
+    private final Ec2Service ec2Service;
+    /** The VPC address each Airflow container holds, by container id, returned once the container is gone. */
+    private final Map<String, VpcLease> vpcLeases = new ConcurrentHashMap<>();
 
     @Inject
     public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
                                   ContainerLifecycleManager lifecycleManager,
                                   ContainerDetector containerDetector,
                                   EmulatorConfig config,
-                                  LaunchedContainerAwsEnv awsEnv) {
+                                  LaunchedContainerAwsEnv awsEnv,
+                                  Ec2Service ec2Service) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.config = config;
         this.awsEnv = awsEnv;
+        this.ec2Service = ec2Service;
     }
 
     /**
@@ -220,6 +232,7 @@ public class MwaaEnvironmentManager {
         String containerId = lifecycleManager.create(spec);
         ContainerInfo info;
         try {
+            joinVpcNetwork(environment, containerId);
             // Real MWAA documents startup scripts using "sudo yum install ..." as the baseline way
             // to install OS packages — sudo is assumed to just work for the airflow user. The stock
             // apache/airflow image ships sudo but requires a password, so without this grant every
@@ -252,6 +265,7 @@ public class MwaaEnvironmentManager {
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
             lifecycleManager.removeIfExists(containerId);
+            releaseVpcLeaseIfGone(containerId);
             throw e;
         }
         environment.setAirflowContainerId(info.containerId());
@@ -365,6 +379,7 @@ public class MwaaEnvironmentManager {
         String name = environment.getName();
         if (environment.getAirflowContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getAirflowContainerId(), null);
+            releaseVpcLeaseIfGone(environment.getAirflowContainerId());
         }
         if (environment.getDbContainerId() != null) {
             lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
@@ -374,6 +389,133 @@ public class MwaaEnvironmentManager {
         lifecycleManager.removeVolume(airflowContainerName + "-dags");
         lifecycleManager.removeVolume(airflowContainerName + "-logs");
         LOG.infov("Stopped MWAA containers for environment {0}", name);
+    }
+
+    /**
+     * Puts the Airflow container on the VPC network of the environment's {@code NetworkConfiguration}, at an
+     * address leased from its first subnet, before the container starts: Amazon MWAA runs the environment's
+     * workers in those subnets, so its DAGs reach what the VPC holds (an EC2 instance, a database) by private
+     * address. The container keeps the network it was created on, which holds its metadata database. Without
+     * Docker-backed VPC networks, or for subnets EC2 does not know, it stays there alone. The subnet is checked and
+     * the lease recorded while EC2 holds its subnet references, so a DeleteSubnet cannot pass its dependency check
+     * between the two ({@link #holdsSubnet}).
+     */
+    void joinVpcNetwork(Environment environment, String containerId) {
+        String subnetId = firstSubnet(environment);
+        if (ec2Service == null || subnetId == null) {
+            return;
+        }
+        String accountId = environmentAccount(environment);
+        String region = regionOf(environment);
+        // Provisioning can run outside the CreateEnvironment request, so the environment's account is named.
+        RequestScopes.runAs(accountId, region, () -> ec2Service.runWithSubnetReferencesHeld(region, () -> {
+            String vpcId = vpcOf(region, subnetId);
+            if (vpcId == null) {
+                return;
+            }
+            Optional<String> address = ec2Service.allocateVpcPrivateIp(region, subnetId);
+            if (address.isEmpty()) {
+                return;
+            }
+            if (ec2Service.attachContainerToVpc(region, vpcId, subnetId, containerId, address.get()).isPresent()) {
+                vpcLeases.put(containerId, new VpcLease(accountId, region, vpcId, subnetId, address.get()));
+                LOG.infov("MWAA environment {0} joined VPC {1} at {2}", environment.getName(), vpcId,
+                        address.get());
+            } else {
+                ec2Service.releaseVpcPrivateIp(region, subnetId, address.get());
+            }
+        }));
+    }
+
+    /**
+     * Re-claims the VPC address an environment's Airflow container still holds after Floci restarts, when it was
+     * kept running ({@code keep-running-on-shutdown}): the address leases are in memory, so without this EC2 could
+     * hand the same address to an instance and Docker would refuse it. The container is found by its name.
+     */
+    void reclaimVpcAddress(Environment environment) {
+        String subnetId = firstSubnet(environment);
+        if (ec2Service == null || subnetId == null) {
+            return;
+        }
+        String containerId;
+        Collection<ContainerNetwork> networks;
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient()
+                    .inspectContainerCmd(airflowContainerName(config, environment)).exec();
+            containerId = inspect.getId();
+            networks = inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null
+                    ? List.of() : inspect.getNetworkSettings().getNetworks().values();
+        } catch (NotFoundException expected) {
+            // The container did not outlive the restart, so there is no address to re-claim.
+            return;
+        }
+        String accountId = environmentAccount(environment);
+        String region = regionOf(environment);
+        RequestScopes.runAs(accountId, region, () -> {
+            List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(subnetId), Map.of());
+            Optional<Cidr4> cidr = subnets.size() == 1 ? Cidr4.parse(subnets.getFirst().getCidrBlock())
+                    : Optional.empty();
+            if (cidr.isEmpty()) {
+                return;
+            }
+            for (ContainerNetwork network : networks) {
+                Optional<Cidr4> address = Cidr4.parse(network.getIpAddress() + "/32");
+                if (address.isPresent() && cidr.get().containsAddress(address.get().network())
+                        && ec2Service.reserveVpcPrivateIp(region, subnetId, network.getIpAddress())) {
+                    vpcLeases.put(containerId, new VpcLease(accountId, region, subnets.getFirst().getVpcId(),
+                            subnetId, network.getIpAddress()));
+                    LOG.infov("MWAA environment {0} re-claimed its VPC address {1}", environment.getName(),
+                            network.getIpAddress());
+                    return;
+                }
+            }
+        });
+    }
+
+    /** Whether a live Airflow container of the account holds an address in the subnet. */
+    boolean holdsSubnet(String accountId, String region, String subnetId) {
+        return vpcLeases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
+                && lease.region().equals(region) && lease.subnetId().equals(subnetId));
+    }
+
+    /** Whether a live Airflow container of the account is on the VPC's network. */
+    boolean holdsVpc(String accountId, String region, String vpcId) {
+        return vpcLeases.values().stream().anyMatch(lease -> lease.accountId().equals(accountId)
+                && lease.region().equals(region) && lease.vpcId().equals(vpcId));
+    }
+
+    private static String firstSubnet(Environment environment) {
+        NetworkConfiguration network = environment.getNetworkConfiguration();
+        List<String> subnetIds = network == null ? null : network.getSubnetIds();
+        return subnetIds == null || subnetIds.isEmpty() ? null : subnetIds.getFirst();
+    }
+
+    private String vpcOf(String region, String subnetId) {
+        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(subnetId), Map.of());
+        return subnets.size() == 1 ? subnets.getFirst().getVpcId() : null;
+    }
+
+    /**
+     * Gives the container's VPC address back once Docker no longer has the container. A removal that failed (it
+     * logs and carries on) leaves the address held, so the lease is kept rather than offered to someone else.
+     */
+    private void releaseVpcLeaseIfGone(String containerId) {
+        VpcLease lease = vpcLeases.get(containerId);
+        if (lease == null) {
+            return;
+        }
+        try {
+            lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
+            LOG.warnv("MWAA container {0} is still present after removal; it keeps VPC address {1}", containerId,
+                    lease.address());
+        } catch (NotFoundException expected) {
+            // Gone, so its address is free.
+            vpcLeases.remove(containerId);
+            ec2Service.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
+        }
+    }
+
+    private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {
     }
 
     /** Writes {@code content} to {@code DAGS_MOUNT/relativePath} inside the Airflow container. */

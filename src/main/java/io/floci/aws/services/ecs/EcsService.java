@@ -113,6 +113,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
@@ -154,6 +155,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final int TASK_STOP_CONCURRENCY = 8;
     /** How long a container teardown waits for the launches it interrupted to land their tasks. */
     private static final long LAUNCHER_SHUTDOWN_SECONDS = 30;
+    private static final long RECONCILER_SHUTDOWN_SECONDS = 2;
     // Runs the service scheduler's Docker stops (see stopInBackground). A container teardown drains
     // and shuts it down, and afterReset() replaces it, as with the reconciler.
     private volatile ExecutorService taskStopper;
@@ -161,7 +163,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // interrupts and shuts it down, and afterReset() replaces it, as with the task stopper.
     private volatile ExecutorService taskLauncher;
     private final Object reconcilerLock = new Object();
-    private final Object reconciliationPassLock = new Object();
+    private final ReentrantLock reconciliationPassLock = new ReentrantLock();
     // False until a previous run's task containers are confirmed gone; no task starts before.
     private volatile boolean leftoverContainersRemoved = true;
     private volatile boolean leftoverTaskVolumesRemoved;
@@ -463,22 +465,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         stopManagedContainers();
     }
 
-    /**
-     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
-     * state reset. Task state is transient (memory-only), so without this the containers
-     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
-     * tick awaited, so it cannot restart drained tasks between this teardown and the final
-     * storage flush. A reset brings it back in {@link #afterReset()}. The task launcher is then
-     * interrupted and its launches awaited, so each lands its task before the sweep below. The
-     * stops the task stopper already has are let finish, since each owns its task's handle until
-     * it lands. The remaining handles are claimed atomically to avoid racing an explicit StopTask.
-     */
+    /** Stops task producers before any owner retires shared credentials or networking. */
     @Override
-    public void stopManagedContainers() {
-        ScheduledExecutorService current = reconciler;
-        current.shutdownNow();
+    public void beginTeardown() {
+        reconciler.shutdownNow();
         try {
-            current.awaitTermination(2, TimeUnit.SECONDS);
+            if (reconciliationPassLock.tryLock(RECONCILER_SHUTDOWN_SECONDS, TimeUnit.SECONDS)) {
+                reconciliationPassLock.unlock();
+            } else {
+                LOG.warnv("ECS reconciliation still running after {0} seconds of teardown; "
+                        + "shared resources will retire before the pass finishes", RECONCILER_SHUTDOWN_SECONDS);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -493,6 +490,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    /**
+     * Stops the Docker containers of all still-running tasks on emulator shutdown and on a
+     * state reset. Task state is transient (memory-only), so without this the containers
+     * outlive the process as orphans. The reconciler is shut down first, and any in-flight
+     * tick given a bounded wait, so cooperative passes land before this teardown and the final
+     * storage flush. A reset brings it back in {@link #afterReset()}. The task launcher is then
+     * interrupted and its launches awaited, so each lands its task before the sweep below. The
+     * stops the task stopper already has are let finish, since each owns its task's handle until
+     * it lands. The remaining handles are claimed atomically to avoid racing an explicit StopTask.
+     */
+    @Override
+    public void stopManagedContainers() {
+        beginTeardown();
         drainTaskStopper();
         for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
             if (taskStops.containsKey(taskArn)) {
@@ -5379,7 +5391,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // ── Service Reconciliation ────────────────────────────────────────────────
 
     void reconcile() {
-        synchronized (reconciliationPassLock) {
+        reconciliationPassLock.lock();
+        try {
+            if (reconciler.isShutdown()) {
+                return;
+            }
             try {
                 retryPreviousRunTaskVolumes();
             } catch (Exception e) {
@@ -5400,6 +5416,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 });
             }
+        } finally {
+            reconciliationPassLock.unlock();
         }
     }
 
@@ -5884,7 +5902,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     void reconcileServices() {
-        synchronized (reconciliationPassLock) {
+        reconciliationPassLock.lock();
+        try {
+            if (reconciler.isShutdown()) {
+                return;
+            }
             for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {
                 try {
                     reconcileService(entry.getKey(), entry.getValue());
@@ -5897,6 +5919,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     LOG.warnv(e, "Could not publish Container Insights task counts for ECS service {0}", entry.getKey());
                 }
             }
+        } finally {
+            reconciliationPassLock.unlock();
         }
     }
 

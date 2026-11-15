@@ -1,5 +1,6 @@
 package io.floci.aws.services.emrserverless;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
@@ -42,10 +43,12 @@ import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -257,6 +260,10 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withCmd(EmrServerlessSparkRunner.hiveArguments(step, ENDPOINT, List.of()));
         verify(spec).withNamedVolume("j-1-home", "/home/hadoop");
         verify(spec).withNamedVolume("j-1-mnt", "/mnt");
+        // It runs on its cluster's primary node, which its node's files name.
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "MASTER");
+        verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.get(2).contains(
+                EmrServerlessSparkRunner.NODE_INFO)));
         // In its cluster's image, which holds Spark too, Hive reads its own Hadoop configuration.
         verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.get(2).contains(
                 "if [ -d /etc/hadoop/conf.hive ]; then export HADOOP_CONF_DIR=/etc/hadoop/conf.hive; fi")));
@@ -367,8 +374,9 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, never()).copyJavaTrustStore(anyString());
         // The release's image is not in an ECR repository, so it is pulled once, as the container is created.
         verify(lifecycle, never()).resolveImageForLaunch(anyString(), any(), any());
-        // An EMR Serverless run has no cluster, nor its storage or network.
+        // An EMR Serverless run has no cluster, nor its storage or network, nor a node's files.
         verify(spec, never()).withNamedVolume(anyString(), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_INSTANCE_ROLE"), anyString());
         verify(lifecycle, never()).connectToNetwork(anyString(), anyString(), any());
     }
 
@@ -1400,6 +1408,41 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aClustersContainerWritesWhatAwsDocumentsOfItsNodesFilesAndNothingElse(@TempDir Path folder) throws Exception {
+        // As the test's user, root or not, in place of the image's hadoop user, whom the host need not have.
+        String script = EmrServerlessSparkRunner.NODE_INFO.replace("/mnt/", folder + "/")
+                .replace("setpriv --reuid=hadoop --regid=hadoop --clear-groups", "");
+        Path instance = folder.resolve("var/lib/info/instance.json");
+        Path extra = folder.resolve("var/lib/instance-controller/extraInstanceData.json");
+        // The Management Guide's bootstrap action, which tells the primary node from the others.
+        String guide = "if grep isMaster " + instance + " | grep false > /dev/null; then echo other;"
+                + " else echo primary; fi";
+        ObjectMapper json = new ObjectMapper();
+        for (String role : List.of("MASTER", "CORE", "TASK")) {
+            ProcessBuilder shell = new ProcessBuilder("bash", "-c", script + "\n" + guide);
+            shell.environment().put("FLOCI_INSTANCE_ROLE", role);
+
+            BootstrapProcess.Result ended = BootstrapProcess.run(shell);
+
+            assertEquals(new BootstrapProcess.Result(0, "MASTER".equals(role) ? "primary\n" : "other\n"), ended);
+            assertEquals("{\"isMaster\": " + "MASTER".equals(role) + "}\n", Files.readString(instance));
+            assertEquals("{\"instanceRole\": \"" + role + "\"}\n", Files.readString(extra));
+            // AWS's Knowledge Center reads it with jq and compares it, lowercased, with master, core and task.
+            assertEquals(role.toLowerCase(Locale.ROOT), json.readTree(extra.toFile()).path("instanceRole").asText()
+                    .toLowerCase(Locale.ROOT));
+            assertEquals(PosixFilePermissions.fromString("rw-r--r--"), Files.getPosixFilePermissions(instance));
+        }
+        // Nothing where no role is named, as in an EMR Serverless run.
+        Path unnamed = Files.createDirectory(folder.resolve("unnamed"));
+        BootstrapProcess.Result skipped = BootstrapProcess.run(new ProcessBuilder("bash", "-c",
+                script.replace(folder + "/", unnamed + "/")));
+        assertEquals(new BootstrapProcess.Result(0, ""), skipped);
+        try (Stream<Path> made = Files.list(unnamed)) {
+            assertEquals(0, made.count());
+        }
+    }
+
+    @Test
     void aStepsCommandFindsASudoThatRunsItsCommandAsItIs(@TempDir Path folder) throws Exception {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
@@ -1540,6 +1583,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 5
                 && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
                 && entrypoint.get(2).startsWith(String.join("\n",
+                        EmrServerlessSparkRunner.NODE_INFO,
                         "conf=/tmp/floci-spark-conf",
                         "mkdir -p \"$conf\"",
                         "cp -rL \"${SPARK_CONF_DIR:-/usr/lib/spark/conf}/.\" \"$conf\" 2>/dev/null",

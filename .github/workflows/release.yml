@@ -175,115 +175,12 @@ jobs:
   # ── Build standalone binaries — macOS and Windows ───────────────────────
   # The Linux release binaries are the native-amd64, native-arm64 and native-arm64-baseline
   # artifacts above, which also go into the images. macOS and Windows are built only for the
-  # release assets. Mandrel has no macOS distribution, so both use GraalVM Community, which has
-  # no -H:-AOTSingleCallsiteInline option to pass.
-  build-binary-darwin-arm64:
-    name: Build standalone binary (darwin-arm64)
-    runs-on: macos-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
-        with:
-          java-version: '25'
-          distribution: 'graalvm-community'
-          cache: maven
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build native executable
-        run: mvn clean package -Dnative -DskipTests -B
-
-      - name: Smoke-test the standalone binary
-        run: .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$GITHUB_REF_NAME"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: binary-darwin-arm64
-          path: target/*-runner
-          if-no-files-found: error
-          retention-days: 7
-
-  build-binary-darwin-amd64:
-    name: Build standalone binary (darwin-amd64, Rosetta)
-    # native-image cannot cross-compile, and Intel macOS runners queue for hours, so an x86_64
-    # GraalVM runs under Rosetta 2 on the Apple Silicon runner (floci-cli's recipe).
-    # setup-graalvm has no architecture override, so the x86_64 JDK is installed by hand: GraalVM
-    # Community, like the other binaries, pinned to 25.0.1 (the last release with a macOS x64 build)
-    # and checked against its published SHA-256 before anything built with it is signed.
-    runs-on: macos-latest
-    timeout-minutes: 90
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rosetta 2
-        run: sudo softwareupdate --install-rosetta --agree-to-license
-
-      - name: Install x86_64 GraalVM
-        env:
-          GRAALVM_X64_URL: https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-25.0.1/graalvm-community-jdk-25.0.1_macos-x64_bin.tar.gz
-          GRAALVM_X64_SHA256: a3d895b4cd1c783badbd277ec70409806bd4102fca0d2a60dbaeb0bab41aec30
-        run: |
-          curl -fsSL -o "$RUNNER_TEMP/graalvm-x64.tar.gz" "$GRAALVM_X64_URL"
-          echo "$GRAALVM_X64_SHA256  $RUNNER_TEMP/graalvm-x64.tar.gz" | shasum -a 256 -c -
-          mkdir -p "$RUNNER_TEMP/graalvm-x64"
-          tar -xzf "$RUNNER_TEMP/graalvm-x64.tar.gz" -C "$RUNNER_TEMP/graalvm-x64" --strip-components 1
-          echo "JAVA_HOME=$RUNNER_TEMP/graalvm-x64/Contents/Home" >> "$GITHUB_ENV"
-          echo "GRAALVM_HOME=$RUNNER_TEMP/graalvm-x64/Contents/Home" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/graalvm-x64/Contents/Home/bin" >> "$GITHUB_PATH"
-
-      - name: Build native executable (x86_64 under Rosetta)
-        run: arch -x86_64 mvn clean package -Dnative -DskipTests -B
-
-      - name: Verify the binary is x86_64
-        run: file target/*-runner | grep -q x86_64
-
-      - name: Smoke-test the standalone binary
-        run: arch -x86_64 .github/scripts/smoke-binary.sh "$(ls target/*-runner)" "$GITHUB_REF_NAME"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: binary-darwin-amd64
-          path: target/*-runner
-          if-no-files-found: error
-          retention-days: 7
-
-  build-binary-windows-amd64:
-    name: Build standalone binary (windows-amd64)
-    runs-on: windows-latest
-    timeout-minutes: 90
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
-        with:
-          java-version: '25'
-          distribution: 'graalvm-community'
-          cache: maven
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build native executable
-        # Keeps the Windows snappy-java and JNA dispatch libraries every other build excludes
-        # (see quarkus.native.resources in application.yml).
-        shell: bash
-        run: >-
-          mvn clean package -Dnative -DskipTests -B
-          "-Dfloci.native.windows-jni-include=*"
-          -Dfloci.native.windows-jni-exclude=none
-
-      - name: Smoke-test the standalone binary
-        shell: bash
-        run: .github/scripts/smoke-binary.sh "$(ls target/*-runner.exe)" "$GITHUB_REF_NAME"
-
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: binary-windows-amd64
-          path: target/*-runner.exe
-          if-no-files-found: error
-          retention-days: 7
+  # release assets, by standalone-binaries.yml, which can also be run by hand to try a change.
+  standalone-binaries:
+    name: Standalone binaries
+    uses: ./.github/workflows/standalone-binaries.yml
+    with:
+      version: ${{ github.ref_name }}
 
   # ── Publish standalone binaries to the GitHub Release ────────────────────
   # semantic-release pushes this tag and then creates the release (notes only); the upload step
@@ -302,9 +199,15 @@ jobs:
       - build-native-amd64
       - build-native-arm64
       - build-native-arm64-baseline
-      - build-binary-darwin-arm64
-      - build-binary-darwin-amd64
-      - build-binary-windows-amd64
+      - standalone-binaries
+    # The Linux binaries are required. A macOS or Windows build that failed or timed out leaves
+    # its binary out instead of holding back the others (2.4.0 and 2.5.0 published none at all
+    # because the macOS builds timed out); Stage the release assets warns about each one missing.
+    if: >-
+      ${{ always() &&
+      needs.build-native-amd64.result == 'success' &&
+      needs.build-native-arm64.result == 'success' &&
+      needs.build-native-arm64-baseline.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -323,12 +226,20 @@ jobs:
           set -euo pipefail
           mkdir dist
           stage() { local src=("artifacts/$1"/*-runner*); install -m 755 "${src[0]}" "dist/$2"; }
+          optional() {
+            if compgen -G "artifacts/$1/*-runner*" > /dev/null; then
+              stage "$1" "$2"
+            else
+              echo "::warning::$2 was not built, so the release goes out without it"
+              echo "- \`$2\` was not built and is not attached to the release." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
           stage native-amd64 floci-aws-linux-amd64
           stage native-arm64 floci-aws-linux-arm64
           stage native-arm64-baseline floci-aws-linux-arm64-baseline
-          stage binary-darwin-arm64 floci-aws-darwin-arm64
-          stage binary-darwin-amd64 floci-aws-darwin-amd64
-          stage binary-windows-amd64 floci-aws-windows-amd64.exe
+          optional binary-darwin-arm64 floci-aws-darwin-arm64
+          optional binary-darwin-amd64 floci-aws-darwin-amd64
+          optional binary-windows-amd64 floci-aws-windows-amd64.exe
           (cd dist && sha256sum floci-aws-* > sha256sums.txt)
           ls -l dist
 

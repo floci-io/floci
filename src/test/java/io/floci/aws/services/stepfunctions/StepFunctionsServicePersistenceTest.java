@@ -14,13 +14,13 @@ import io.floci.aws.services.stepfunctions.model.Execution;
 import io.floci.aws.services.stepfunctions.model.HistoryEvent;
 import io.floci.aws.services.stepfunctions.model.MockedTestCase;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
+import io.floci.aws.testutil.LogCapture;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mockito;
 
 import java.nio.file.Path;
-import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -31,10 +31,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
-import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
-import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -222,22 +220,15 @@ class StepFunctionsServicePersistenceTest {
         executions.putForAccount(OTHER_ACCOUNT, OTHER_ACCOUNT_EXECUTION_ARN,
                 running(OTHER_ACCOUNT_EXECUTION_ARN));
 
-        List<LogRecord> logRecords = new ArrayList<>();
-        Handler collector = collectorInto(logRecords);
-        Logger serviceLogger = Logger.getLogger(StepFunctionsService.class.getName());
-        serviceLogger.addHandler(collector);
-        try {
-            serviceWithStorage(storage).abortAbandonedExecutions();
-        } finally {
-            serviceLogger.removeHandler(collector);
-        }
+        List<LogRecord> logRecords = LogCapture.capture(StepFunctionsService.class,
+                () -> serviceWithStorage(storage).abortAbandonedExecutions());
 
         List<LogRecord> warnings = warningsIn(logRecords);
         assertEquals(1, warnings.size(),
                 "expected one WARN record for the sweep, got: " + formattedAll(logRecords));
-        assertTrue(formatted(warnings.getFirst()).contains("1"),
+        assertTrue(LogCapture.formatted(warnings.getFirst()).contains("1"),
                 "expected the WARN record to name how many executions were aborted, got: "
-                        + formatted(warnings.getFirst()));
+                        + LogCapture.formatted(warnings.getFirst()));
 
         Optional<Execution> owned =
                 executions.getForAccount(OTHER_ACCOUNT, OTHER_ACCOUNT_EXECUTION_ARN);
@@ -271,15 +262,8 @@ class StepFunctionsServicePersistenceTest {
 
         // Nothing is RUNNING any more, so the second sweep retires nothing and says nothing: a WARN
         // on every clean boot is the noise the repo's logging rule forbids.
-        List<LogRecord> logRecords = new ArrayList<>();
-        Handler collector = collectorInto(logRecords);
-        Logger serviceLogger = Logger.getLogger(StepFunctionsService.class.getName());
-        serviceLogger.addHandler(collector);
-        try {
-            afterRestart.abortAbandonedExecutions();
-        } finally {
-            serviceLogger.removeHandler(collector);
-        }
+        List<LogRecord> logRecords = LogCapture.capture(StepFunctionsService.class,
+                afterRestart::abortAbandonedExecutions);
         assertEquals(List.of(), warningsIn(logRecords),
                 "expected no WARN record from a sweep that found nothing RUNNING, got: "
                         + formattedAll(logRecords));
@@ -298,25 +282,6 @@ class StepFunctionsServicePersistenceTest {
         verifyNoInteractions(aslExecutor, mockLoader, regionResolver);
     }
 
-    private static Handler collectorInto(List<LogRecord> records) {
-        Handler collector = new Handler() {
-            @Override
-            public void publish(LogRecord record) {
-                records.add(record);
-            }
-
-            @Override
-            public void flush() {
-            }
-
-            @Override
-            public void close() {
-            }
-        };
-        collector.setLevel(Level.ALL);
-        return collector;
-    }
-
     private static List<LogRecord> warningsIn(List<LogRecord> records) {
         // The level is compared by value: under JBoss LogManager the record carries its own WARN
         // instance, not the java.util.logging constant.
@@ -326,7 +291,7 @@ class StepFunctionsServicePersistenceTest {
     }
 
     private static List<String> formattedAll(List<LogRecord> records) {
-        return records.stream().map(StepFunctionsServicePersistenceTest::formatted).toList();
+        return records.stream().map(LogCapture::formatted).toList();
     }
 
     /**
@@ -337,15 +302,6 @@ class StepFunctionsServicePersistenceTest {
         assertNotNull(stopDate);
         assertTrue(stopDate > EPOCH_SECONDS_2023_11_14 && stopDate < EPOCH_SECONDS_2100_01_01,
                 "stopDate is not a plausible epoch-seconds instant: " + stopDate);
-    }
-
-    /** The record as a reader sees it, whether the handler receives it formatted or as a pattern. */
-    private static String formatted(LogRecord record) {
-        Object[] parameters = record.getParameters();
-        if (parameters == null || parameters.length == 0) {
-            return String.valueOf(record.getMessage());
-        }
-        return MessageFormat.format(record.getMessage(), parameters);
     }
 
     private static Execution running(String executionArn) {

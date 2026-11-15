@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -37,8 +38,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -52,6 +53,8 @@ import java.util.function.Predicate;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.spy;
 
 class KinesisServiceTest {
 
@@ -465,72 +468,43 @@ class KinesisServiceTest {
         assertFalse(parent.isClosed());
     }
 
-    /**
-     * A lock-free reader must never observe a half-published split: a closed parent with only one
-     * of its two children. splitShard publishes both children in one atomic CopyOnWriteArrayList.addAll,
-     * so every snapshot holds either zero or both split-children of any given parent.
-     *
-     * <p>Fail-without-fix: reverting the addAll to two sequential {@code add()} calls opens a window
-     * (between the two adds, widened by the child2 shard construction) in which the list holds child1
-     * but not child2; the hammering reader below catches it and records a violation.
-     */
-    @RepeatedTest(3)
+    @Test
     void splitShard_concurrentReaderNeverSeesHalfPublishedTopology() throws Exception {
-        kinesisService.createStream("my-stream", 1, REGION);
-        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        StorageBackend<String, KinesisStream> store = new InMemoryStorage<>();
+        KinesisService service = new KinesisService(store, new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        KinesisStream stream = spy(service.createStream("my-stream", 1, REGION));
+        CountDownLatch published = new CountDownLatch(1);
+        CountDownLatch inspected = new CountDownLatch(1);
+        PublicationObservedShards shards = new PublicationObservedShards(stream.getShards(), published, inspected);
+        doReturn(shards).when(stream).getShards();
+        store.put(REGION + "::my-stream", stream);
+        KinesisShard parent = shards.getFirst();
 
-        AtomicReference<String> violation = new AtomicReference<>();
-        AtomicBoolean done = new AtomicBoolean(false);
-
-        Thread reader = new Thread(() -> {
-            while (!done.get()) {
-                // A fresh snapshot of the live list, exactly as a lock-free DescribeStream/ListShards sees it.
-                List<KinesisShard> snapshot = new ArrayList<>(stream.getShards());
-                Map<String, Integer> splitChildCount = new HashMap<>();
-                for (KinesisShard s : snapshot) {
-                    // Split children carry a parent but no adjacent-parent (that marks a merge child).
-                    if (s.getParentShardId() != null && s.getAdjacentParentShardId() == null) {
-                        splitChildCount.merge(s.getParentShardId(), 1, Integer::sum);
-                    }
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<List<KinesisShard>> snapshot = executor.submit(() -> {
+                try {
+                    assertTrue(published.await(5, TimeUnit.SECONDS), "split did not publish its children");
+                    return new ArrayList<>(shards);
+                } finally {
+                    inspected.countDown();
                 }
-                for (Map.Entry<String, Integer> e : splitChildCount.entrySet()) {
-                    if (e.getValue() != 2) {
-                        violation.compareAndSet(null,
-                                "parent " + e.getKey() + " observed with " + e.getValue()
-                                        + " split-children (expected 0 or 2)");
-                        return;
-                    }
-                }
+            });
+            try {
+                service.splitShard("my-stream", parent.getShardId(),
+                        "170141183460469231731687303715884105728", REGION);
+                List<KinesisShard> children = snapshot.get(5, TimeUnit.SECONDS).stream()
+                        .filter(shard -> parent.getShardId().equals(shard.getParentShardId()))
+                        .toList();
+                assertEquals(2, children.size(), "reader observed a half-published split");
+                assertEquals(2, children.stream().map(KinesisShard::getShardId).distinct().count());
+                assertTrue(parent.isClosed());
+                assertEquals(3, shards.size());
+            } finally {
+                published.countDown();
+                inspected.countDown();
             }
-        });
-        reader.start();
-
-        // Split an open shard repeatedly; each split is one control-plane resharding with its own
-        // publish window. Always split the widest open shard so ranges never narrow to the point
-        // splitting is impossible; this keeps every one of the 3000 iterations a real split with
-        // its own publish window. The open shards are kept in a queue ordered by width, so picking
-        // the widest is not a scan of the whole (growing) shard list on every iteration.
-        PriorityQueue<OpenShard> openShards = new PriorityQueue<>(
-                Comparator.comparing(OpenShard::width).reversed());
-        for (KinesisShard shard : stream.getShards()) {
-            openShards.add(OpenShard.of(shard));
         }
-        for (int i = 0; i < 3000 && violation.get() == null; i++) {
-            OpenShard open = openShards.poll();
-            BigInteger mid = open.start().add(open.end()).divide(BigInteger.TWO);
-            if (mid.compareTo(open.start()) <= 0 || mid.compareTo(open.end()) >= 0) {
-                break; // range too narrow to split further
-            }
-            kinesisService.splitShard("my-stream", open.shardId(), mid.toString(), REGION);
-            List<KinesisShard> shards = stream.getShards();
-            openShards.add(OpenShard.of(shards.get(shards.size() - 2)));
-            openShards.add(OpenShard.of(shards.get(shards.size() - 1)));
-        }
-        done.set(true);
-        reader.join(TimeUnit.SECONDS.toMillis(10));
-        assertFalse(reader.isAlive(), "reader thread did not terminate");
-
-        assertNull(violation.get(), () -> "half-published split observed: " + violation.get());
     }
 
     @Test
@@ -1572,15 +1546,39 @@ class KinesisServiceTest {
 
     private static final String META_STREAM = "meta";
 
-    private record OpenShard(String shardId, BigInteger start, BigInteger end) {
-        static OpenShard of(KinesisShard shard) {
-            return new OpenShard(shard.getShardId(),
-                    new BigInteger(shard.getHashKeyRange().startingHashKey()),
-                    new BigInteger(shard.getHashKeyRange().endingHashKey()));
+    private static final class PublicationObservedShards extends CopyOnWriteArrayList<KinesisShard> {
+        private final CountDownLatch published;
+        private final CountDownLatch inspected;
+
+        private PublicationObservedShards(List<KinesisShard> shards, CountDownLatch published,
+                                          CountDownLatch inspected) {
+            super(shards);
+            this.published = published;
+            this.inspected = inspected;
         }
 
-        BigInteger width() {
-            return end.subtract(start);
+        @Override
+        public boolean add(KinesisShard shard) {
+            boolean changed = super.add(shard);
+            observePublication();
+            return changed;
+        }
+
+        @Override
+        public boolean addAll(Collection<? extends KinesisShard> shards) {
+            boolean changed = super.addAll(shards);
+            observePublication();
+            return changed;
+        }
+
+        private void observePublication() {
+            published.countDown();
+            try {
+                assertTrue(inspected.await(5, TimeUnit.SECONDS), "reader did not inspect the published shards");
+            } catch (InterruptedException failure) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("publication observation interrupted", failure);
+            }
         }
     }
 

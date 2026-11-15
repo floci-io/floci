@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -22,8 +21,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.GZIPOutputStream;
 
+import static io.floci.aws.testing.GzipFixtures.gzip;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
@@ -42,7 +41,7 @@ class CloudWatchMetricsGzipJsonIntegrationTest {
 
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
     private static final String TARGET = "GraniteServiceVersion20100801.";
-    private static final int DECOMPRESSED_LIMIT = 10 * 1024 * 1024;
+    private static final int DECOMPRESSED_LIMIT = 5 * 1024 * 1024;
     private static final AwsRequestSigner ROOT = AwsRequestSigner.signedAs("test", "test", "monitoring");
 
     @TestHTTPResource("/")
@@ -90,8 +89,8 @@ class CloudWatchMetricsGzipJsonIntegrationTest {
         String namespace = namespace();
         request(ROOT, "PutMetricData", gzip(paddedPublication(namespace, DECOMPRESSED_LIMIT + 1)), "gzip")
                 .then().statusCode(413)
-                .header("x-amzn-query-error", "PayloadTooLargeException;Sender")
-                .body("__type", equalTo("PayloadTooLargeException"));
+                .header("x-amzn-query-error", "RequestEntityTooLargeException;Sender")
+                .body("__type", equalTo("RequestEntityTooLargeException"));
         assertAbsent(namespace);
     }
 
@@ -239,13 +238,5 @@ class CloudWatchMetricsGzipJsonIntegrationTest {
         byte[] padded = Arrays.copyOf(plain, size);
         Arrays.fill(padded, plain.length, padded.length, (byte) ' ');
         return padded;
-    }
-
-    private static byte[] gzip(byte[] plain) throws IOException {
-        ByteArrayOutputStream result = new ByteArrayOutputStream();
-        try (GZIPOutputStream compressed = new GZIPOutputStream(result)) {
-            compressed.write(plain);
-        }
-        return result.toByteArray();
     }
 }

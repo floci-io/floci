@@ -26,7 +26,8 @@ class AthenaHiveDdlExecutorTest {
         table.setName("events");
         when(glue.getTable("lake", "events")).thenReturn(table);
         doThrow(new AwsException("EntityNotFoundException", "Table not found", 400)).when(glue).deleteTable("lake", "events");
-        AthenaHiveDdlExecutor executor = new AthenaHiveDdlExecutor(glue, Mockito.mock(S3Service.class));
+        AthenaHiveDdlExecutor executor = new AthenaHiveDdlExecutor(glue, Mockito.mock(S3Service.class),
+                Mockito.mock(AthenaIcebergStatements.class));
 
         assertDoesNotThrow(() -> executor.execute(AthenaHiveDdl.parse("DROP TABLE IF EXISTS events"), "lake"));
         AwsException e = assertThrows(AwsException.class,

@@ -42,6 +42,8 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
+
 /**
  * Owns initialized environments separately from the on-demand idle pool.
  * Persisted requests never imply readiness: every new process must finish real initialization.
@@ -224,7 +226,7 @@ public class ProvisionedConcurrencyPool implements Resettable {
                     && previous.configuration.requested() == count && !"FAILED".equals(previous.status)) {
                 return status(previous);
             }
-            write(target);
+            putInAccount(storage, target.account(), target.key(), target);
             Allocation next = new Allocation(target);
             allocations.put(target.key(), next);
             if (previous != null) {
@@ -503,7 +505,7 @@ public class ProvisionedConcurrencyPool implements Resettable {
         Configuration target = new Configuration(value.account(), value.region(), value.name(),
                 value.functionArn(), value.qualifier(), fn.getVersion(), fn.getRevisionId(), value.requested(),
                 LAST_MODIFIED.format(Instant.ofEpochMilli(clock.millis())));
-        write(target);
+        putInAccount(storage, target.account(), target.key(), target);
         Allocation next = new Allocation(target);
         allocations.put(target.key(), next);
         retired.addAll(retire(previous));
@@ -816,14 +818,6 @@ public class ProvisionedConcurrencyPool implements Resettable {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(fn.getFunctionArn());
         return new AwsArnUtils.Arn(arn.partition(), "lambda", arn.region(), arn.accountId(),
                 "function:" + fn.getFunctionName()).toString();
-    }
-
-    private void write(Configuration value) {
-        if (storage instanceof AccountAwareStorageBackend<Configuration> aware) {
-            aware.putForAccount(value.account(), value.key(), value);
-        } else {
-            storage.put(value.key(), value);
-        }
     }
 
     private void erase(Configuration value) {

@@ -465,6 +465,49 @@ public class CodeArtifactController {
     }
 
     @POST
+    @Path("/v1/package/version/dependencies")
+    @Consumes(MediaType.WILDCARD)
+    public Response listPackageVersionDependencies(@Context HttpHeaders headers,
+                                                     @QueryParam("domain") String domain,
+                                                     @QueryParam("domain-owner") String domainOwner,
+                                                     @QueryParam("repository") String repository,
+                                                     @QueryParam("format") String format,
+                                                     @QueryParam("namespace") String namespace,
+                                                     @QueryParam("package") String packageName,
+                                                     @QueryParam("version") String version,
+                                                     @QueryParam("next-token") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.PackageVersionDependenciesListResult result = service.listPackageVersionDependencies(
+                region, domain, domainOwner, repository, format, namespace, packageName, version, nextToken);
+        ObjectNode dependenciesResponse = objectMapper.createObjectNode();
+        dependenciesResponse.put("format", result.format());
+        if (result.namespace() != null) {
+            dependenciesResponse.put("namespace", result.namespace());
+        }
+        dependenciesResponse.put("package", result.packageName());
+        dependenciesResponse.put("version", result.version());
+        dependenciesResponse.put("versionRevision", result.versionRevision());
+        ArrayNode dependencies = dependenciesResponse.putArray("dependencies");
+        result.dependencies().forEach(dependency -> {
+            ObjectNode node = dependencies.addObject();
+            if (dependency.namespace() != null) {
+                node.put("namespace", dependency.namespace());
+            }
+            node.put("package", dependency.packageName());
+            if (dependency.dependencyType() != null) {
+                node.put("dependencyType", dependency.dependencyType());
+            }
+            if (dependency.versionRequirement() != null) {
+                node.put("versionRequirement", dependency.versionRequirement());
+            }
+        });
+        if (result.nextToken() != null) {
+            dependenciesResponse.put("nextToken", result.nextToken());
+        }
+        return ok(dependenciesResponse);
+    }
+
+    @POST
     @Path("/v1/package/versions")
     @Consumes(MediaType.WILDCARD)
     public Response listPackageVersions(@Context HttpHeaders headers, @QueryParam("domain") String domain,
