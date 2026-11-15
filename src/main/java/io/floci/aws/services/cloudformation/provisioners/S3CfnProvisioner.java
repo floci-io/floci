@@ -63,7 +63,6 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     private static final String BUCKET_POLICY = "AWS::S3::BucketPolicy";
     private static final int BUCKET_NAME_MAX_LENGTH = 63;
     private static final String ACCOUNT_REGIONAL_NAMESPACE = "account-regional";
-    private static final Set<String> UNSUPPORTED_ACCOUNT_REGIONAL_REGIONS = Set.of("me-south-1", "me-central-1");
     private static final Pattern BUCKET_NAME_PREFIX_CHARS = Pattern.compile("[a-z0-9][a-z0-9.-]*");
 
     private final S3Service s3Service;
@@ -110,12 +109,6 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         if (!ACCOUNT_REGIONAL_NAMESPACE.equals(ctx.resolveOptional(props, "BucketNamespace"))) {
             throw new AwsException("ValidationError",
                     BUCKET + " BucketNamePrefix requires BucketNamespace " + ACCOUNT_REGIONAL_NAMESPACE, 400);
-        }
-        // AWS S3 user guide: "You can create buckets in your account regional namespace in all AWS
-        // Regions except Middle East (Bahrain) and Middle East (UAE)."
-        if (UNSUPPORTED_ACCOUNT_REGIONAL_REGIONS.contains(ctx.region())) {
-            throw new AwsException("ValidationError", BUCKET + " BucketNamePrefix is not supported in "
-                    + ctx.region() + ", which has no account regional namespace", 400);
         }
         // AWS: "The name can only consist of lowercase letters, numbers, periods (.), and hyphens (-).
         // Bucket names must begin and end with a letter or number and cannot contain two adjacent periods."
