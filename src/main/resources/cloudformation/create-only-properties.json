@@ -526,6 +526,19 @@
     "Engine",
     "NetworkType"
   ],
+  "AWS::ElastiCache::ReplicationGroup": [
+    "AtRestEncryptionEnabled",
+    "CacheSubnetGroupName",
+    "DataTieringEnabled",
+    "GlobalReplicationGroupId",
+    "KmsKeyId",
+    "NetworkType",
+    "Port",
+    "PreferredCacheClusterAZs",
+    "ReplicationGroupId",
+    "SnapshotArns",
+    "SnapshotName"
+  ],
   "AWS::ElastiCache::ServerlessCache": [
     "ServerlessCacheName",
     "KmsKeyId",

@@ -14,6 +14,8 @@ import io.floci.aws.services.elasticache.model.CacheSubnetGroup;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.ReplicationGroup;
+import io.floci.aws.services.elasticache.model.ReplicationGroupSettings;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -25,7 +27,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Provisions AWS::ElastiCache::CacheCluster, SubnetGroup, User and UserGroup. A cache cluster needs
+ * Provisions AWS::ElastiCache::CacheCluster, ReplicationGroup, SubnetGroup, User and UserGroup. A cache cluster needs
  * the Memcached service as well as the Redis one, because the two engines keep their clusters in
  * separate stores.
  */
@@ -36,6 +38,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final String CACHE_CLUSTER = "AWS::ElastiCache::CacheCluster";
+    private static final String REPLICATION_GROUP = "AWS::ElastiCache::ReplicationGroup";
     private static final String SUBNET_GROUP = "AWS::ElastiCache::SubnetGroup";
     private static final String USER = "AWS::ElastiCache::User";
     private static final String USER_GROUP = "AWS::ElastiCache::UserGroup";
@@ -45,7 +48,16 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     private static final List<String> UNSUPPORTED_CLUSTER_PROPERTIES = List.of("CacheSecurityGroupNames",
             "NotificationTopicArn", "AZMode", "PreferredAvailabilityZones", "LogDeliveryConfigurations",
             "SnapshotArns", "SnapshotName");
+    private static final List<String> UNSUPPORTED_REPLICATION_GROUP_PROPERTIES = List.of("CacheSecurityGroupNames",
+            "NotificationTopicArn", "PreferredCacheClusterAZs", "LogDeliveryConfigurations", "SnapshotArns",
+            "SnapshotName", "GlobalReplicationGroupId", "NodeGroupConfiguration", "PrimaryClusterId",
+            "SnapshottingClusterId", "DataTieringEnabled");
+    private static final List<String> REPLICATION_GROUP_ENDPOINT_ATTRIBUTES = List.of(
+            "PrimaryEndPoint.Address", "PrimaryEndPoint.Port", "ReaderEndPoint.Address", "ReaderEndPoint.Port",
+            "ReadEndPoint.Addresses", "ReadEndPoint.Addresses.List", "ReadEndPoint.Ports", "ReadEndPoint.Ports.List",
+            "ConfigurationEndPoint.Address", "ConfigurationEndPoint.Port");
     private static final int CLUSTER_ID_MAX_LENGTH = 50;
+    private static final int REPLICATION_GROUP_ID_MAX_LENGTH = 40;
     private static final int SUBNET_GROUP_NAME_MAX_LENGTH = 255;
 
     private final ElastiCacheService elastiCacheService;
@@ -60,7 +72,12 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of(CACHE_CLUSTER, SUBNET_GROUP, USER, USER_GROUP);
+        return Set.of(CACHE_CLUSTER, REPLICATION_GROUP, SUBNET_GROUP, USER, USER_GROUP);
+    }
+
+    @Override
+    public Map<String, Set<String>> jsonAttributes() {
+        return Map.of(REPLICATION_GROUP, Set.of("ReadEndPoint.Addresses.List", "ReadEndPoint.Ports.List"));
     }
 
     @Override
@@ -71,6 +88,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
             case CACHE_CLUSTER -> provisionCacheCluster(r, props, ctx);
+            case REPLICATION_GROUP -> provisionReplicationGroup(r, props, ctx);
             case SUBNET_GROUP -> provisionSubnetGroup(r, props, ctx);
             case USER -> provisionUser(r, props, ctx);
             case USER_GROUP -> provisionUserGroup(r, props, ctx);
@@ -294,6 +312,138 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    private void provisionReplicationGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String description = ctx.resolveOptional(props, "ReplicationGroupDescription");
+        if (description == null || description.isBlank()) {
+            throw new AwsException("ValidationException", "ReplicationGroupDescription is required", 400);
+        }
+        String explicitId = ctx.resolveOptional(props, "ReplicationGroupId");
+        if (explicitId != null && explicitId.length() > REPLICATION_GROUP_ID_MAX_LENGTH) {
+            throw new AwsException("ValidationException",
+                    "ReplicationGroupId exceeds maximum length of " + REPLICATION_GROUP_ID_MAX_LENGTH, 400);
+        }
+
+        ReplicationGroup prior = ctx.isUpdate() ? findReplicationGroup(ctx.priorPhysicalId()) : null;
+        // As for a cache cluster: a create-only change replaces the group, which needs a new id.
+        boolean createOnlyChanged = prior != null && ctx.changes(REPLICATION_GROUP, props).requiresReplacement();
+        if (createOnlyChanged && explicitId != null && explicitId.equals(ctx.priorPhysicalId())) {
+            throw new AwsException("InvalidParameterValue", "Updating a create-only property of replication group "
+                    + explicitId + " requires a new ReplicationGroupId", 400);
+        }
+        String id = createOnlyChanged && explicitId == null
+                ? ctx.generatePhysicalName(r.getLogicalId(), REPLICATION_GROUP_ID_MAX_LENGTH, true)
+                : ctx.stablePhysicalName(explicitId, r.getLogicalId(), REPLICATION_GROUP_ID_MAX_LENGTH, true);
+
+        ReplicationGroup group;
+        if (ctx.reusesPriorEntity(id)) {
+            group = prior != null ? prior : findReplicationGroup(id);
+            if (group == null) {
+                LOG.warnv("ElastiCache replication group {0} was deleted outside the stack, recreating it", id);
+                group = createReplicationGroup(id, description, props, ctx);
+            } else {
+                LOG.warnv("ElastiCache replication group {0}: in-place modification is not supported, "
+                        + "property changes are ignored", id);
+            }
+        } else {
+            group = createReplicationGroup(id, description, props, ctx);
+        }
+
+        r.setPhysicalId(id);
+        putReplicationGroupEndpointAttributes(r, group);
+    }
+
+    private ReplicationGroup createReplicationGroup(String id, String description, JsonNode props,
+                                                    ProvisionContext ctx) {
+        for (String name : UNSUPPORTED_REPLICATION_GROUP_PROPERTIES) {
+            if (props.hasNonNull(name)) {
+                LOG.warnv("ElastiCache replication group {0}: {1} is accepted and ignored", id, name);
+            }
+        }
+        String authToken = ctx.resolveOptional(props, "AuthToken");
+        boolean hasAuthToken = authToken != null && !authToken.isBlank();
+        List<String> userGroupIds = ctx.resolveStringList(props, "UserGroupIds");
+        List<String> securityGroupIds = ctx.resolveStringList(props, "SecurityGroupIds");
+        ReplicationGroupSettings settings = new ReplicationGroupSettings(
+                optionalBoolean(ctx, props, "AtRestEncryptionEnabled"),
+                ctx.resolveOptional(props, "KmsKeyId"),
+                ctx.resolveOptionalInt(props, "SnapshotRetentionLimit"),
+                ctx.resolveOptional(props, "SnapshotWindow"),
+                ctx.resolveOptional(props, "TransitEncryptionMode"),
+                optionalBoolean(ctx, props, "TransitEncryptionEnabled"));
+        return elastiCacheService.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                id,
+                description,
+                hasAuthToken ? AuthMode.PASSWORD : AuthMode.NO_AUTH,
+                hasAuthToken ? authToken : null,
+                ctx.region(),
+                ctx.resolveOptional(props, "Engine"),
+                ctx.resolveOptional(props, "EngineVersion"),
+                ctx.resolveOptional(props, "CacheNodeType"),
+                ctx.resolveOptional(props, "CacheParameterGroupName"),
+                ctx.resolveOptional(props, "CacheSubnetGroupName"),
+                ctx.resolveOptional(props, "ClusterMode"),
+                ctx.resolveOptionalInt(props, "NumNodeGroups"),
+                ctx.resolveOptionalInt(props, "ReplicasPerNodeGroup"),
+                ctx.resolveOptionalInt(props, "NumCacheClusters"),
+                optionalBoolean(ctx, props, "AutomaticFailoverEnabled"),
+                optionalBoolean(ctx, props, "MultiAZEnabled"),
+                ctx.resolveOptionalInt(props, "Port"),
+                settings,
+                ctx.resolveTags(props, "Tags"),
+                userGroupIds.isEmpty() ? null : userGroupIds,
+                securityGroupIds.isEmpty() ? null : securityGroupIds));
+    }
+
+    /**
+     * Sets the endpoint attributes AWS exposes for the group's mode: a cluster-mode group answers on its
+     * ConfigurationEndPoint, any other on its primary and reader endpoints and one read endpoint per node.
+     */
+    private void putReplicationGroupEndpointAttributes(StackResource r, ReplicationGroup group) {
+        REPLICATION_GROUP_ENDPOINT_ATTRIBUTES.forEach(r.getAttributes()::remove);
+        Endpoint endpoint = group.getConfigurationEndpoint();
+        if (endpoint == null) {
+            return;
+        }
+        String port = String.valueOf(endpoint.port());
+        if (group.isClusterEnabled()) {
+            r.getAttributes().put("ConfigurationEndPoint.Address", endpoint.address());
+            r.getAttributes().put("ConfigurationEndPoint.Port", port);
+            return;
+        }
+        r.getAttributes().put("PrimaryEndPoint.Address", endpoint.address());
+        r.getAttributes().put("PrimaryEndPoint.Port", port);
+        r.getAttributes().put("ReaderEndPoint.Address", endpoint.address());
+        r.getAttributes().put("ReaderEndPoint.Port", port);
+        List<String> addresses = new ArrayList<>();
+        List<String> ports = new ArrayList<>();
+        for (ElastiCacheService.MemberCacheCluster member : elastiCacheService.memberCacheClusters(group)) {
+            addresses.add(endpoint.address());
+            ports.add(String.valueOf(member.port()));
+        }
+        r.getAttributes().put("ReadEndPoint.Addresses", String.join(",", addresses));
+        r.getAttributes().put("ReadEndPoint.Ports", String.join(",", ports));
+        try {
+            r.getAttributes().put("ReadEndPoint.Addresses.List", MAPPER.writeValueAsString(addresses));
+            r.getAttributes().put("ReadEndPoint.Ports.List", MAPPER.writeValueAsString(ports));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private ReplicationGroup findReplicationGroup(String groupId) {
+        if (groupId == null || groupId.isBlank()) {
+            return null;
+        }
+        try {
+            return elastiCacheService.getReplicationGroup(groupId);
+        } catch (AwsException e) {
+            if ("ReplicationGroupNotFoundFault".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
     private void provisionSubnetGroup(StackResource r, JsonNode props, ProvisionContext ctx) {
         String description = ctx.resolveOptional(props, "Description");
         if (description == null || description.isBlank()) {
@@ -448,6 +598,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
                     elastiCacheService.deleteCacheCluster(physicalId);
                 }
             }, "CacheClusterNotFound");
+            case REPLICATION_GROUP -> CfnDeletes.safeDelete("ElastiCache replication group", physicalId,
+                    () -> elastiCacheService.deleteReplicationGroup(physicalId), "ReplicationGroupNotFoundFault");
             case SUBNET_GROUP -> CfnDeletes.safeDelete("ElastiCache subnet group", physicalId,
                     () -> elastiCacheService.deleteCacheSubnetGroup(physicalId), "CacheSubnetGroupNotFoundFault");
             case USER_GROUP -> CfnDeletes.safeDelete("ElastiCache user group", physicalId,
@@ -457,6 +609,19 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
             default -> {
             }
         }
+    }
+
+    /** CloudFormation passes a template boolean as true, false or their string forms. */
+    private static Boolean optionalBoolean(ProvisionContext ctx, JsonNode props, String name) {
+        String raw = ctx.resolveOptional(props, name);
+        if (raw == null || raw.isBlank()) {
+            return null;
+        }
+        // parseBoolean reads every unrecognised value as false, which would hide a malformed template.
+        if (!"true".equalsIgnoreCase(raw.trim()) && !"false".equalsIgnoreCase(raw.trim())) {
+            throw new AwsException("ValidationError", "Value of property " + name + " must be a boolean.", 400);
+        }
+        return Boolean.parseBoolean(raw.trim());
     }
 
     private static Integer optionalInt(String raw) {

@@ -15,6 +15,8 @@ import io.floci.aws.services.elasticache.model.CacheSubnetGroup;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
+import io.floci.aws.services.elasticache.model.ReplicationGroup;
+import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -103,6 +105,111 @@ class ElastiCacheCfnProvisionerTest {
         assertEquals("cache.t3.micro", request.getValue().cacheNodeType());
         assertEquals(1, request.getValue().numCacheNodes());
         verify(memcached, never()).createCacheCluster(any());
+    }
+
+    private ReplicationGroup replicationGroup(String id, int numCacheClusters) {
+        ReplicationGroup group = new ReplicationGroup(id, "d", ReplicationGroupStatus.AVAILABLE, AuthMode.NO_AUTH,
+                new Endpoint("localhost", 6420), Instant.now(), 6420);
+        group.setNumCacheClusters(numCacheClusters);
+        return group;
+    }
+
+    @Test
+    void replicationGroupTakesLooseScalarsAndExposesItsEndpoints() throws Exception {
+        ReplicationGroup created = replicationGroup("app-redis", 2);
+        when(cache.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
+                .thenReturn(created);
+        when(cache.memberCacheClusters(created)).thenReturn(List.of(
+                new ElastiCacheService.MemberCacheCluster(created, "app-redis-001", 6420, true),
+                new ElastiCacheService.MemberCacheCluster(created, "app-redis-002", 6420, false)));
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+
+        // EngineVersion as a number, NumCacheClusters and AutomaticFailoverEnabled as strings
+        provisioner.provision(r, props("""
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","Engine":"redis",
+                 "EngineVersion":7.1,"Port":6379,"CacheNodeType":"cache.t3.micro","NumCacheClusters":"2",
+                 "AutomaticFailoverEnabled":"false","SecurityGroupIds":["sg-1"],"CacheSubnetGroupName":"sng",
+                 "UserGroupIds":["users"],"TransitEncryptionEnabled":true}
+                """), ctx(null));
+
+        ArgumentCaptor<ElastiCacheService.CreateReplicationGroupRequest> request =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateReplicationGroupRequest.class);
+        verify(cache).createReplicationGroup(request.capture());
+        ElastiCacheService.CreateReplicationGroupRequest sent = request.getValue();
+        assertEquals("app-redis", sent.replicationGroupId());
+        assertEquals("7.1", sent.engineVersion());
+        assertEquals(2, sent.numCacheClusters());
+        assertEquals(false, sent.automaticFailoverEnabled());
+        assertEquals(6379, sent.port());
+        assertEquals(true, sent.settings().transitEncryptionEnabled());
+        assertEquals(List.of("users"), sent.userGroupIds());
+        assertEquals(List.of("sg-1"), sent.securityGroupIds());
+        assertEquals("sng", sent.cacheSubnetGroupName());
+        assertEquals(AuthMode.NO_AUTH, sent.authMode());
+
+        assertEquals("app-redis", r.getPhysicalId());
+        assertEquals("localhost", r.getAttributes().get("PrimaryEndPoint.Address"));
+        assertEquals("6420", r.getAttributes().get("PrimaryEndPoint.Port"));
+        assertEquals("localhost", r.getAttributes().get("ReaderEndPoint.Address"));
+        assertEquals("6420", r.getAttributes().get("ReaderEndPoint.Port"));
+        assertEquals("localhost,localhost", r.getAttributes().get("ReadEndPoint.Addresses"));
+        assertEquals("6420,6420", r.getAttributes().get("ReadEndPoint.Ports"));
+        assertEquals(mapper.readTree("[\"6420\",\"6420\"]"), provisioner.attributeValue(
+                "AWS::ElastiCache::ReplicationGroup", "ReadEndPoint.Ports.List",
+                r.getAttributes().get("ReadEndPoint.Ports.List")));
+        assertNull(r.getAttributes().get("ConfigurationEndPoint.Address"));
+    }
+
+    @Test
+    void clusterModeReplicationGroupExposesOnlyTheConfigurationEndpoint() throws Exception {
+        ReplicationGroup created = replicationGroup("sharded", 1);
+        created.setClusterEnabled(true);
+        when(cache.createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class)))
+                .thenReturn(created);
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+
+        provisioner.provision(r, props("""
+                {"ReplicationGroupId":"sharded","ReplicationGroupDescription":"d","ClusterMode":"enabled",
+                 "NumNodeGroups":2}
+                """), ctx(null));
+
+        assertEquals("6420", r.getAttributes().get("ConfigurationEndPoint.Port"));
+        assertNull(r.getAttributes().get("PrimaryEndPoint.Address"));
+    }
+
+    @Test
+    void malformedReplicationGroupBooleanIsRejected() throws Exception {
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"ReplicationGroupDescription":"d","AutomaticFailoverEnabled":"yes"}
+                """), ctx(null)));
+        verify(cache, never()).createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class));
+    }
+
+    @Test
+    void replicationGroupUpdateWithSameIdDoesNotCreateAgain() throws Exception {
+        when(cache.getReplicationGroup("app-redis")).thenReturn(replicationGroup("app-redis", 1));
+        StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
+
+        provisioner.provision(r, props("""
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"changed","CacheNodeType":"cache.t3.small"}
+                """), ctx("app-redis", """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","CacheNodeType":"cache.t3.micro"}
+                """));
+
+        verify(cache, never()).createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class));
+        assertEquals("app-redis", r.getPhysicalId());
+        assertEquals("6420", r.getAttributes().get("PrimaryEndPoint.Port"));
+    }
+
+    @Test
+    void replicationGroupDeleteToleratesAGroupAlreadyGone() {
+        doThrow(new AwsException("ReplicationGroupNotFoundFault", "gone", 404))
+                .when(cache).deleteReplicationGroup("app-redis");
+
+        provisioner.delete("AWS::ElastiCache::ReplicationGroup", "app-redis", "us-east-1");
+
+        verify(cache).deleteReplicationGroup("app-redis");
     }
 
     @Test

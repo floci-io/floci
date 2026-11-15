@@ -98,7 +98,7 @@ type_order:
   AWS::RDS:
     [DBInstance, DBCluster, DBSubnetGroup, DBParameterGroup, DBClusterParameterGroup]
   AWS::ElastiCache:
-    [CacheCluster, SubnetGroup, User, UserGroup, ServerlessCache]
+    [CacheCluster, ReplicationGroup, SubnetGroup, User, UserGroup, ServerlessCache]
   AWS::Redshift:
     [Cluster, ClusterParameterGroup, ClusterSubnetGroup, ClusterSecurityGroup, EventSubscription]
   AWS::RedshiftServerless:
@@ -211,6 +211,7 @@ notes:
   AWS::RDS::DBInstance: starts a real container
   AWS::RDS::DBCluster: starts a real container
   AWS::ElastiCache::CacheCluster: 'starts a real container; modifying an existing cluster in place is not supported'
+  AWS::ElastiCache::ReplicationGroup: 'starts a real container; modifying an existing group in place is not supported'
   AWS::ElastiCache::User: Tags are ignored
   AWS::ElastiCache::UserGroup: Tags are ignored
   AWS::ElastiCache::ServerlessCache: 'GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form'
