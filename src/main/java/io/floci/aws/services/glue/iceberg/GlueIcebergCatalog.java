@@ -8,9 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.GlueTableResolver;
-import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.Database;
-import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,7 +16,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -47,11 +44,10 @@ public class GlueIcebergCatalog {
     private static final Logger LOG = Logger.getLogger(GlueIcebergCatalog.class);
 
     static final String DEFAULT_CATALOG = ":";
-    private static final String PARAM_TABLE_TYPE = "table_type";
-    private static final String PARAM_METADATA_LOCATION = "metadata_location";
+    private static final String PARAM_TABLE_TYPE = IcebergGlueTables.PARAM_TABLE_TYPE;
+    private static final String PARAM_METADATA_LOCATION = IcebergGlueTables.PARAM_METADATA_LOCATION;
     private static final String PARAM_PREVIOUS_METADATA_LOCATION = "previous_metadata_location";
-    private static final String ICEBERG = "ICEBERG";
-    private static final Pattern S3_LOCATION = Pattern.compile("^s3[an]?://([^/]+)/?(.*)$");
+    private static final String ICEBERG = IcebergGlueTables.ICEBERG;
     private static final Pattern METADATA_VERSION = Pattern.compile("^(\\d+)-.*\\.metadata\\.json$");
     /** The REST routes the endpoint answers, as {@code GetConfig}'s {@code endpoints} names them. */
     private static final List<String> ENDPOINTS = List.of(
@@ -453,43 +449,24 @@ public class GlueIcebergCatalog {
      * {@code existing} holds beyond those (a description, other parameters) carries over.
      */
     private Table icebergTable(String name, ObjectNode metadata, String metadataLocation, Table existing) {
-        Table table = new Table();
-        table.setName(name);
-        table.setTableType("EXTERNAL_TABLE");
-        Map<String, String> parameters = new HashMap<>();
+        Table table = IcebergGlueTables.glueTable(name, metadata, metadataLocation);
         if (existing != null) {
             table.setDescription(existing.getDescription());
             table.setOwner(existing.getOwner());
             if (existing.getParameters() != null) {
-                parameters.putAll(existing.getParameters());
+                Map<String, String> parameters = new HashMap<>(existing.getParameters());
+                parameters.putAll(table.getParameters());
+                table.setParameters(parameters);
             }
         }
-        parameters.put(PARAM_TABLE_TYPE, ICEBERG);
-        parameters.put(PARAM_METADATA_LOCATION, metadataLocation);
-        table.setParameters(parameters);
-        StorageDescriptor descriptor = new StorageDescriptor();
-        descriptor.setLocation(metadata.path("location").asText());
-        List<Column> columns = new ArrayList<>();
-        for (JsonNode field : IcebergTableMetadata.currentSchema(metadata).path("fields")) {
-            Column column = new Column(field.path("name").asText(), IcebergTypes.hiveType(field.path("type")));
-            if (field.hasNonNull("doc")) {
-                column.setComment(field.get("doc").asText());
-            }
-            column.setParameters(Map.of(
-                    "iceberg.field.id", field.path("id").asText(),
-                    "iceberg.field.optional", String.valueOf(!field.path("required").asBoolean(false)),
-                    "iceberg.field.current", "true"));
-            columns.add(column);
-        }
-        descriptor.setColumns(columns);
-        table.setStorageDescriptor(descriptor);
         return table;
     }
 
     private ObjectNode readMetadata(String metadataLocation) {
-        S3Location location = s3Location(metadataLocation);
-        try (InputStream stream = s3.openObjectStream(location.bucket(), location.key(), null)) {
-            return (ObjectNode) mapper.readTree(stream);
+        try {
+            return (ObjectNode) IcebergGlueTables.readMetadata(s3, mapper, metadataLocation);
+        } catch (IllegalArgumentException e) {
+            throw IcebergRestException.badRequest(e.getMessage());
         } catch (AwsException e) {
             throw IcebergRestException.badRequest("Cannot read table metadata " + metadataLocation + ": "
                     + e.getMessage());
@@ -503,7 +480,7 @@ public class GlueIcebergCatalog {
     private String writeMetadata(ObjectNode metadata, int version) {
         String fileName = String.format("%05d-%s.metadata.json", version, UUID.randomUUID());
         String metadataLocation = metadata.path("location").asText() + "/metadata/" + fileName;
-        S3Location location = s3Location(metadataLocation);
+        IcebergGlueTables.S3Location location = s3Location(metadataLocation);
         try {
             s3.putObject(location.bucket(), location.key(),
                     mapper.writeValueAsString(metadata).getBytes(StandardCharsets.UTF_8), "application/json", null);
@@ -519,7 +496,7 @@ public class GlueIcebergCatalog {
 
     /** Removes a metadata file a failed commit wrote; a failure to is logged, since the commit's error matters more. */
     private void deleteMetadata(String metadataLocation) {
-        S3Location location = s3Location(metadataLocation);
+        IcebergGlueTables.S3Location location = s3Location(metadataLocation);
         try {
             s3.deleteObject(location.bucket(), location.key());
         } catch (RuntimeException e) {
@@ -546,12 +523,12 @@ public class GlueIcebergCatalog {
         return kept;
     }
 
-    private static S3Location s3Location(String location) {
-        Matcher matcher = S3_LOCATION.matcher(location == null ? "" : location);
-        if (!matcher.matches() || matcher.group(2).isEmpty()) {
-            throw IcebergRestException.badRequest("Not an S3 object location: " + location);
+    private static IcebergGlueTables.S3Location s3Location(String location) {
+        try {
+            return IcebergGlueTables.s3Location(location);
+        } catch (IllegalArgumentException e) {
+            throw IcebergRestException.badRequest(e.getMessage());
         }
-        return new S3Location(matcher.group(1), matcher.group(2));
     }
 
     private static IcebergRestException translated(AwsException e, String database, String table) {
@@ -561,8 +538,5 @@ public class GlueIcebergCatalog {
                     : IcebergRestException.noSuchTable(database, table);
             default -> IcebergRestException.badRequest(e.getMessage());
         };
-    }
-
-    private record S3Location(String bucket, String key) {
     }
 }

@@ -1805,6 +1805,7 @@ public class GlueService {
         Table copy = new Table();
         copy.setName(source.getName());
         copy.setDatabaseName(source.getDatabaseName());
+        copy.setCatalogId(source.getCatalogId());
         copy.setDescription(source.getDescription());
         copy.setOwner(source.getOwner());
         copy.setCreateTime(source.getCreateTime());
