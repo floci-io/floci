@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CredentialClassifierTest {
 
@@ -37,6 +39,15 @@ class CredentialClassifierTest {
         String jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.sig";
         ClassifiedMode mode = CredentialClassifier.classify(Map.of("Authorization", "Bearer " + jwt));
         assertEquals(ClassifiedMode.BEARER_JWT, mode);
+    }
+
+    @Test
+    void bareJwtIsRecognisedButWrappedTokensAreNot() {
+        String jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.sig";
+        assertTrue(CredentialClassifier.isBareJwt(jwt));
+        assertFalse(CredentialClassifier.isBareJwt("prefix:" + jwt));
+        assertFalse(CredentialClassifier.isBareJwt(jwt + ":suffix"));
+        assertFalse(CredentialClassifier.isBareJwt("ABC123"));
     }
 
     @Test

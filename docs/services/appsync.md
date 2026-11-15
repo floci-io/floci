@@ -258,7 +258,7 @@ Missing required auth headers return HTTP **401** `UnauthorizedException` with m
 | `Authorization` starts with `AWS4-HMAC-SHA256` | `AWS_IAM` (wins over `x-api-key` if both are present) |
 | `x-api-key` present | `API_KEY` |
 | `Authorization: Bearer <jwt>` | Cognito and/or OIDC (matched by `iss` / `aud` or `azp`) |
-| Other `Authorization` | `AWS_LAMBDA` |
+| Other `Authorization` | `AWS_LAMBDA`, except that a bare JWT (three dot-separated segments, no `Bearer ` prefix) is handled like `Bearer <jwt>` when Cognito or OIDC is configured: a token they reject returns 401 and is not sent to `AWS_LAMBDA` |
 
 Configured modes are the API default `authenticationType` plus `additionalAuthenticationProviders`. A classified mode that is not configured returns 401.
 
