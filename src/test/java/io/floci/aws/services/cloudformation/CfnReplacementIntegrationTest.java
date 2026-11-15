@@ -159,13 +159,13 @@ class CfnReplacementIntegrationTest {
                 SUBNET_GROUP_REPLACED,
                 createOnlyRow("SQS queue explicit QueueName removed", "", "", SQS_TYPE,
                         "\"QueueName\": \"repl-q-removed\"", "\"VisibilityTimeout\": 30", "True", false, null),
-                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue",
+                new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue, beside an updatable change",
                         namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"x\"]"),
                         namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"y\"]"),
                         "Subject", "True", true, null),
                 createOnlyRow("S3 bucket explicit BucketName removed", "", "", S3_TYPE,
                         "\"BucketName\": \"repl-s3-removed\"", "", "True", false, null),
-                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue",
+                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue, beside an updatable change",
                         namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"x\"]"),
                         namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"y\"]"),
                         "Subject", "True", true, null),
@@ -195,6 +195,16 @@ class CfnReplacementIntegrationTest {
                                 + " \"Properties\": {\"RetentionInDays\": 7,"
                                 + " \"LogGroupName\": \"repl-added-name\"}}}}",
                         "Subject", "True", true, null),
+                new Row("log group whose added LogGroupName is an Fn::If choosing AWS::NoValue, beside an updatable change",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 7}}}}",
+                        "{\"Conditions\": {\"Named\": {\"Fn::Equals\": [\"x\", \"y\"]}},"
+                                + " \"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"RetentionInDays\": 14,"
+                                + " \"LogGroupName\": {\"Fn::If\": [\"Named\", \"repl-if-novalue\","
+                                + " {\"Ref\": \"AWS::NoValue\"}]}}}}}",
+                        "Subject", "False", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
