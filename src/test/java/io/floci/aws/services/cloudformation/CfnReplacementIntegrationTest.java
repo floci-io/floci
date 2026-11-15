@@ -159,6 +159,11 @@ class CfnReplacementIntegrationTest {
                         namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"x\"]"),
                         namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"y\"]"),
                         "Subject", "True", true, null),
+                new Row("log group whose whole Properties block is dropped",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\","
+                                + " \"Properties\": {\"LogGroupName\": \"repl-dropped-properties\"}}}}",
+                        "{\"Resources\": {\"Subject\": {\"Type\": \"AWS::Logs::LogGroup\"}}}",
+                        "Subject", "True", true, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
