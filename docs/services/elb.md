@@ -218,8 +218,11 @@ on `HealthCheckPort`, or the target's traffic port when configured as `traffic-p
 The response-code matcher and healthy/unhealthy thresholds affect target health.
 `HealthCheckProtocol=TCP` does not perform a TCP-only probe.
 Lambda targets are not actively probed. In ELBv2 mock mode, sockets
-and active monitoring are disabled. The proxy can route to initial targets and fails
-open to registered targets when none are healthy, so a successful request alone does
+and active monitoring are disabled. While a target group has a `healthy` target, the
+proxy routes only to its `healthy` targets, so a newly registered target in `initial`
+state gets no requests until its first health check passes. When no target is
+`healthy`, the proxy fails open to every registered target, including `initial` ones
+and those in a group with health checks disabled, so a successful request alone does
 not prove that a health check passed.
 
 ### Security groups and PrivateLink
