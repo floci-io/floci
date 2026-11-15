@@ -5523,12 +5523,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return false;
         }
         return findSessionForCallerContext(accessKeyId)
-                .filter(session -> session.getDelegatedApproverArn() == null
-                        && !isFederatedUserSession(session)
-                        && session.getRoleArn() == null
-                        && session.getPresignedAction() == null)
+                .filter(IamService::isSessionTokenSession)
                 .filter(IamService::issuedByRoot)
                 .isPresent();
+    }
+
+    /**
+     * A GetSessionToken session: no delegated approval's, federated user's, role's or presigned URL's, so it acts
+     * with the policies of the identity that minted it.
+     */
+    private static boolean isSessionTokenSession(SessionCredential session) {
+        return session.getDelegatedApproverArn() == null && !isFederatedUserSession(session)
+                && session.getRoleArn() == null && session.getPresignedAction() == null;
     }
 
     /**
@@ -6257,7 +6263,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .filter(found -> found.getDelegatedApproverArn() == null && !isFederatedUserSession(found));
         if (session.isPresent() && session.get().getRoleArn() == null) {
             // GetSessionToken credentials act with the policies of the user that minted them.
-            return session.filter(found -> found.getPresignedAction() == null)
+            return session.filter(IamService::isSessionTokenSession)
                     .flatMap(this::issuingUser)
                     .map(this::heldPolicies);
         }
