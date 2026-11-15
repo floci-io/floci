@@ -4272,6 +4272,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             if (inst.getLaunchTime() != null) {
                                 eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
                             }
+                            // Caller-supplied ENI defaults to false; an implicit interface defaults to true.
+                            eni.setDeleteOnTermination(suppliedEni == null);
                             inst.getNetworkInterfaces().add(eni);
                             if (suppliedEni != null) {
                                 // The standalone record stays authoritative rather than being folded into the
@@ -5108,6 +5110,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(inst -> Objects.equals(primaryInterfaceId(inst), address.getNetworkInterfaceId()))
                 .map(Instance::getInstanceId)
                 .orElse(null);
+    }
+
+    /** The standalone record for an interface id, or null when it is implicit/launch-created. */
+    public NetworkInterface getNetworkInterface(String region, String networkInterfaceId) {
+        if (networkInterfaceId == null || networkInterfaceId.isBlank()) {
+            return null;
+        }
+        return networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
     }
 
     /** The instance a standalone interface is attached to, or null. */
@@ -15848,56 +15858,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     continue;
                 }
                 foundIds.add(eni.getNetworkInterfaceId());
-                NetworkInterface ni = new NetworkInterface();
-                ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
-                ni.setSubnetId(eni.getSubnetId());
-                ni.setVpcId(eni.getVpcId());
-                ni.setDescription(eni.getDescription());
-                ni.setOwnerId(eni.getOwnerId());
-                ni.setStatus(eni.getStatus());
-                ni.setMacAddress(eni.getMacAddress());
-                ni.setPrivateIpAddress(eni.getPrivateIpAddress());
-                ni.setPrivateDnsName(eni.getPrivateDnsName());
-                ni.setSourceDestCheck(eni.isSourceDestCheck());
-                ni.setGroups(new ArrayList<>(eni.getGroups()));
-                // Phase 3: availability zone, tags, interface type
-                if (inst.getPlacement() != null) {
-                    ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
-                }
-                // A network interface's tags are its OWN, never the instance's. AWS tags
-                // exactly the resource types a RunInstances TagSpecification names, so an
-                // interface created for an instance whose specification said
-                // ResourceType=instance carries no tags until something tags the eni- id
-                // itself - and DescribeTags never listed these copied tags either, so
-                // DescribeNetworkInterfaces disagreed with DescribeTags about the same
-                // resource. Read the interface's own entry in the tag store instead:
-                // CreateTags on the eni- id writes it, and so does a RunInstances
-                // TagSpecification with ResourceType=network-interface.
-                Optional<List<Tag>> tagList = tagsOf(safeAccount, region, eni.getNetworkInterfaceId());
-                ni.getTagSet().addAll(tagList.orElse(List.of()));
-
-                NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
-                att.setAttachmentId(eni.getAttachmentId());
-                att.setDeviceIndex(eni.getDeviceIndex());
-                att.setStatus("attached");
-                att.setInstanceId(inst.getInstanceId());
-                att.setInstanceOwnerId(eni.getOwnerId());
-                // Phase 3: attachTime from instance launchTime, deleteOnTermination
-                if (inst.getLaunchTime() != null) {
-                    att.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
-                }
-                att.setDeleteOnTermination(true);
-                ni.setAttachment(att);
-
-                // Phase 3: privateIpAddressesSet - primary IP
-                NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-                primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
-                primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
-                primaryIp.setPrimary(true);
+                NetworkInterface ni = synthesizeImplicitNetworkInterface(inst, eni, region, safeAccount);
                 // Look up EIP association for this instance
                 addressForInstance(inst.getInstanceId()).ifPresent(addr ->
-                        primaryIp.setAssociation(networkInterfaceAssociation(addr, eni.getOwnerId())));
-                ni.getPrivateIpAddresses().add(primaryIp);
+                        ni.getPrivateIpAddresses().getFirst().setAssociation(
+                                networkInterfaceAssociation(addr, eni.getOwnerId())));
 
                 // Phase 4: apply filters
                 if (!matchesFilters(ni, filters, region)) {
@@ -16135,6 +16100,85 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 return ni;
             }
         }
+    }
+
+    /** Builds the standalone record describeNetworkInterfaces would otherwise synthesize for an
+     *  implicit (launch-created) interface, so a kept (DeleteOnTermination=false) interface is
+     *  reported identically whether or not it has been promoted to the standalone store. */
+    private NetworkInterface synthesizeImplicitNetworkInterface(Instance inst, InstanceNetworkInterface eni,
+                                                               String region, String accountId) {
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
+        ni.setSubnetId(eni.getSubnetId());
+        ni.setVpcId(eni.getVpcId());
+        ni.setDescription(eni.getDescription());
+        ni.setOwnerId(eni.getOwnerId());
+        ni.setStatus(eni.getStatus());
+        ni.setMacAddress(eni.getMacAddress());
+        ni.setPrivateIpAddress(eni.getPrivateIpAddress());
+        ni.setPrivateDnsName(eni.getPrivateDnsName());
+        ni.setSourceDestCheck(eni.isSourceDestCheck());
+        ni.setGroups(new ArrayList<>(eni.getGroups()));
+        if (inst.getPlacement() != null) {
+            ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
+        }
+        // A network interface's tags are its OWN, never the instance's. AWS tags
+        // exactly the resource types a RunInstances TagSpecification names, so an
+        // interface created for an instance whose specification said
+        // ResourceType=instance carries no tags until something tags the eni- id
+        // itself - and DescribeTags never listed these copied tags either, so
+        // DescribeNetworkInterfaces disagreed with DescribeTags about the same
+        // resource. Read the interface's own entry in the tag store instead:
+        // CreateTags on the eni- id writes it, and so does a RunInstances
+        // TagSpecification with ResourceType=network-interface.
+        Optional<List<Tag>> tagList = tagsOf(accountId, region, eni.getNetworkInterfaceId());
+        ni.getTagSet().addAll(tagList.orElse(List.of()));
+        NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
+        att.setAttachmentId(eni.getAttachmentId());
+        att.setDeviceIndex(eni.getDeviceIndex());
+        att.setStatus("attached");
+        att.setInstanceId(inst.getInstanceId());
+        att.setInstanceOwnerId(eni.getOwnerId());
+        if (inst.getLaunchTime() != null) {
+            att.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+        }
+        att.setDeleteOnTermination(eni.isDeleteOnTermination());
+        ni.setAttachment(att);
+        NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+        primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
+        primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
+        primaryIp.setPrimary(true);
+        ni.getPrivateIpAddresses().add(primaryIp);
+        return ni;
+    }
+
+    /** Sets DeleteOnTermination on the launched instance's network interfaces for an explicit request param. */
+    public void setNetworkInterfaceDeleteOnTermination(String region, String instanceId, boolean value) {
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) return;
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            NetworkInterface ni = networkInterfaces.get(key(region, eni.getNetworkInterfaceId())).orElse(null);
+            if (ni == null) {
+                // Implicit (auto-created) interface: honor the flag. When false, create a standalone
+                // record so the interface is returned to "available" on termination instead of deleted.
+                eni.setDeleteOnTermination(value);
+                if (!value) {
+                    NetworkInterface standalone = synthesizeImplicitNetworkInterface(inst, eni, region, callerAccountId());
+                    NetworkInterfaceAttachment att = standalone.getAttachment();
+                    att.setDeleteOnTermination(false);
+                    standalone.setStatus("in-use");
+                    networkInterfaces.put(key(region, eni.getNetworkInterfaceId()), standalone);
+                }
+            } else {
+                // Supplied (caller-created) interface: honor the flag on both copies.
+                eni.setDeleteOnTermination(value);
+                if (ni.getAttachment() != null) {
+                    ni.getAttachment().setDeleteOnTermination(value);
+                    networkInterfaces.put(key(region, ni.getNetworkInterfaceId()), ni);
+                }
+            }
+        }
+        instances.put(key(region, instanceId), inst);
     }
 
     /**
