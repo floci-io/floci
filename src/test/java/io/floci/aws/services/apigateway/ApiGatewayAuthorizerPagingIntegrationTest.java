@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -57,16 +58,21 @@ class ApiGatewayAuthorizerPagingIntegrationTest {
                 assertNotNull(first.position());
 
                 List<String> seen = new ArrayList<>();
+                List<String> cursors = new ArrayList<>();
                 seen.add(first.items().get(0).id());
                 String position = first.position();
-                while (position != null) {
+                for (int page = 0; position != null && page < created.size(); page++) {
+                    assertFalse(cursors.contains(position), "position repeated: " + position);
+                    cursors.add(position);
                     String next = position;
-                    GetAuthorizersResponse page = client.getAuthorizers(request -> request.restApiId(apiId)
+                    GetAuthorizersResponse response = client.getAuthorizers(request -> request.restApiId(apiId)
                             .limit(1).position(next));
-                    assertEquals(1, page.items().size());
-                    seen.add(page.items().get(0).id());
-                    position = page.position();
+                    assertEquals(1, response.items().size());
+                    assertFalse(seen.contains(response.items().get(0).id()), "authorizer repeated");
+                    seen.add(response.items().get(0).id());
+                    position = response.position();
                 }
+                assertNull(position);
                 assertEquals(3, seen.size());
                 assertEquals(created, new HashSet<>(seen));
             } finally {
