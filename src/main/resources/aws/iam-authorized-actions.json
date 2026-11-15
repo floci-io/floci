@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-15",
+    "retrieved": "2026-11-16",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -502,6 +502,15 @@
       "ListEksAnywhereSubscriptions",
       "RegisterCluster"
     ],
+    "emr-containers": [
+      "CreateCertificate",
+      "CreateJobTemplate",
+      "CreateSecurityConfiguration",
+      "CreateVirtualCluster",
+      "ListJobTemplates",
+      "ListSecurityConfigurations",
+      "ListVirtualClusters"
+    ],
     "emr-serverless": [
       "CreateApplication",
       "ListApplications"
@@ -611,6 +620,7 @@
       "ListFilters",
       "ListFindings",
       "ListIPSets",
+      "ListInvestigationRecords",
       "ListInvestigations",
       "ListInvitations",
       "ListMalwareProtectionPlans",
@@ -1015,13 +1025,16 @@
       "CreateCidrCollection",
       "CreateHealthCheck",
       "CreateHostedZone",
+      "CreateIpGuardrailPolicy",
       "CreateReusableDelegationSet",
       "CreateTrafficPolicy",
+      "DeleteIpGuardrailPolicy",
       "GetAccountLimit",
       "GetCheckerIpRanges",
       "GetGeoLocation",
       "GetHealthCheckCount",
       "GetHostedZoneCount",
+      "GetIpGuardrailPolicy",
       "GetTrafficPolicyInstanceCount",
       "ListCidrCollections",
       "ListGeoLocations",
@@ -1029,10 +1042,12 @@
       "ListHostedZones",
       "ListHostedZonesByName",
       "ListHostedZonesByVPC",
+      "ListIpGuardrailPolicies",
       "ListReusableDelegationSets",
       "ListTrafficPolicies",
       "ListTrafficPolicyInstances",
-      "TestDNSAnswer"
+      "TestDNSAnswer",
+      "UpdateIpGuardrailPolicy"
     ],
     "s3tables": [
       "ListTableBuckets"
