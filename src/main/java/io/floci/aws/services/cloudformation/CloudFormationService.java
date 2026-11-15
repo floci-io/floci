@@ -1520,8 +1520,10 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
-            JsonNode oldProps = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
-            JsonNode newProps = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
+            JsonNode oldProps = withoutNoValue(withoutMissing(oldDef.path("Properties"), newDef.path("Properties")),
+                    oldParams, oldConditions, oldTemplate);
+            JsonNode newProps = withoutNoValue(withoutMissing(newDef.path("Properties"), oldDef.path("Properties")),
+                    newParams, newConditions, newTemplate);
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
@@ -1538,6 +1540,18 @@ public class CloudFormationService implements ResourceProvider {
                         ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             return resolved;
+        }
+
+        /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
+        private JsonNode withoutNoValue(JsonNode block, Map<String, String> params,
+                                        Map<String, Boolean> conditions, JsonNode template) {
+            try {
+                JsonNode omitted = engineOver(ownerAccount(stack), params, Map.of(), Map.of(), conditions, template)
+                        .omitNoValue(block);
+                return omitted.isMissingNode() ? block : omitted;
+            } catch (RuntimeException e) {
+                return block;
+            }
         }
 
         /**
