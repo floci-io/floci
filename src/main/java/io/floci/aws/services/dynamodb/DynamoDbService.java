@@ -1707,7 +1707,8 @@ public class DynamoDbService {
         int scannedCount = evaluatedItems.size();
         List<JsonNode> scannedItems = evaluatedItems;
 
-        if (filterExpression != null) {
+        // Parse only when there is an item to evaluate: an expression is still only read when an item reaches it.
+        if (filterExpression != null && !evaluatedItems.isEmpty()) {
             ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(filterExpression);
             evaluatedItems = evaluatedItems.stream()
                     .filter(item -> ExpressionEvaluator.evaluate(filter, item, exprAttrNames, expressionAttrValues))
@@ -1777,7 +1778,8 @@ public class DynamoDbService {
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
                 : items.values();
 
-        ExpressionEvaluator.Expr filter = filterExpression != null ? ExpressionEvaluator.parse(filterExpression) : null;
+        // Parsed when the first item is evaluated, so a scan that evaluates no item doesn't read it.
+        ExpressionEvaluator.Expr filter = null;
         final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int totalScanned = 0;
         int accSize = 0;
@@ -1820,6 +1822,9 @@ public class DynamoDbService {
             totalScanned++;
             scannedItems.add(item);
             lastScanned = item;
+            if (filterExpression != null && filter == null) {
+                filter = ExpressionEvaluator.parse(filterExpression);
+            }
             boolean matched = (filter == null
                     || ExpressionEvaluator.evaluate(filter, filtered, expressionAttrNames, expressionAttrValues))
                     && (scanFilter == null || matchesScanFilterPublic(filtered, scanFilter, conditionalOperator));
@@ -5051,11 +5056,15 @@ public class DynamoDbService {
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
                 ? extractScalarValue(expressionAttrValues.get(partitionKeyValuePlaceholder))
                 : null;
-        ExpressionEvaluator.Expr keyCondition = ExpressionEvaluator.parse(expression);
+        // Parsed when the first candidate is evaluated, so no candidate means no parse.
+        ExpressionEvaluator.Expr keyCondition = null;
         for (JsonNode item : queryCandidates(items, accessPath, partitionKeyValue)) {
             if (partitionKeyValue != null
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
+            }
+            if (keyCondition == null) {
+                keyCondition = ExpressionEvaluator.parse(expression);
             }
             if (ExpressionEvaluator.evaluate(keyCondition, item, exprAttrNames, expressionAttrValues)) {
                 results.add(item);
