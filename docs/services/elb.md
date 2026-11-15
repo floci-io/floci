@@ -140,8 +140,8 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
 - HTTP or HTTPS listeners sharing a local port must use the same protocol. Requests select a load balancer by its DNS name, a hostname declared by its rules, or a certificate hostname; ambiguous hostnames return 502. TCP never serves a port alongside either protocol; see the TCP note above.
 - Load balancer, target group, listener, rule, and tag state is persisted through Floci storage and rebuilt on service startup.
 - Load balancers are created in `active` state.
-- `CreateLoadBalancer` takes `Subnets` or `SubnetMappings` for every load balancer type, and both together are refused with `ValidationError`. An Application Load Balancer takes at least two: with one or none it returns `ValidationError` `At least two subnets in two different Availability Zones must be specified` and creates nothing. The count comes before any subnet is looked up, as on AWS, so one subnet that does not exist gets that error too. A Network or Gateway Load Balancer with neither returns `ValidationError` `At least one subnet must be specified`. CloudFormation refuses such an `AWS::ElasticLoadBalancingV2::LoadBalancer` the same way when it creates or replaces the balancer; an update that keeps the balancer and names no subnets leaves it on its subnets.
-- `SetSubnets`, like `CreateLoadBalancer`, takes `Subnets` or `SubnetMappings`, and both together are refused with `ValidationError`. With neither it returns the same `ValidationError` as `CreateLoadBalancer` for the balancer's type, `At least two subnets in two different Availability Zones must be specified` for an Application Load Balancer and `At least one subnet must be specified` for a Network or Gateway Load Balancer, and leaves the balancer on its subnets. A `SetSubnets` that names subnets is counted as `CreateLoadBalancer` counts them, following the two-zone rule its API reference states: one subnet for an Application Load Balancer, in `Subnets` or `SubnetMappings`, returns `ValidationError` `At least two subnets in two different Availability Zones must be specified` before any subnet is looked up, and leaves the balancer on its subnets. AWS does not document the error for this case, so Floci gives `CreateLoadBalancer`'s error, in the same order. A CloudFormation update that keeps an Application Load Balancer and names one subnet fails with that error and rolls back. A Network Load Balancer can be set onto one subnet. The `SetSubnets` API reference requires a Gateway Load Balancer's `Subnets` to include every subnet it is already on; Floci does not enforce that.
+- `CreateLoadBalancer` takes `Subnets` or `SubnetMappings`; specifying both is rejected with `ValidationError`. Application Load Balancers use the regional zone policy described below: by default, one ordinary AZ is accepted in Osaka and two distinct AZs are required elsewhere. Empty subnet requests remain invalid. Subnet-count checks precede lookup, and rejected requests create no load balancer. CloudFormation uses the same service validation; an update that keeps the balancer and omits subnets preserves its current subnets.
+- `SetSubnets` uses the same regional policy for `Subnets` and `SubnetMappings`. Specifying both, an empty request, or a request below the effective AZ minimum is rejected before mutation. Each selected subnet must belong to a different AZ and the load balancer's VPC. Network Load Balancers may use one subnet. The AWS requirement that a Gateway Load Balancer retain every existing subnet is not currently enforced.
 - EC2 refuses deletion of subnets and VPCs still referenced by load balancers with `DependencyViolation`. These account- and region-scoped dependencies follow persisted load balancer state; changing subnets or deleting the load balancer releases its old references. A CloudFormation update that names other subnets in `Subnets` or `SubnetMappings` moves the load balancer the way `SetSubnets` does, and a rolled-back update moves it back. An independent target group does not prevent subnet or VPC deletion.
 - HTTP listener sockets are preserved when listener actions change and are restarted only when socket-level settings such as port change.
 - Gateway listeners require `Protocol` and `Port` to be omitted on create and modify. Their control-plane response reports `GENEVE` without a port. CloudFormation preserves omitted gateway listener settings on create and update; other load balancer types retain their existing `HTTP` and port 80 defaults.
@@ -380,3 +380,32 @@ healthy and nothing else reports the collision.
 Giving each load balancer a `host-header` rule for the hostname it serves is usually enough, and it
 is the same configuration AWS needs. Moving one load balancer to a different listener port also
 works, at the cost of a Floci-only difference from the deployed template.
+
+## Application Load Balancer zone policy
+
+One Floci instance serves multiple regions. The ALB policy uses each request's
+region, including CloudFormation provisioning, rather than the server's default region.
+By default, ordinary ALB subnets require two distinct Availability Zones, except
+in Osaka (`ap-northeast-3`), where one is accepted. Empty subnet lists remain invalid.
+Each selected subnet must belong to a different AZ, even when a single AZ is allowed.
+This applies to CreateLoadBalancer and SetSubnets; NLB and GWLB rules are unchanged.
+Local Zone and Outpost-specific placement is not implemented by this setting.
+
+To override this rule globally, set
+`FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE=allow-single-zone` or `require-two-zones`.
+The default is `aws`. Individual regions can override the global setting in YAML:
+
+```yaml
+floci:
+  services:
+    elbv2:
+      alb-zone-rule: allow-single-zone
+      alb-zone-rule-by-region:
+        us-east-1: require-two-zones
+        ap-northeast-3: aws
+```
+
+Precedence is per-region setting, global setting, then AWS behavior.
+A per-region `aws` entry restores AWS behavior even when the global rule is overridden.
+These explicit overrides intentionally change local compatibility; they do not
+change the AWS API shape or require a separate Floci process for each region.

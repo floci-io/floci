@@ -111,6 +111,77 @@ class ElbV2ServiceTest {
         stubAlbSubnets(ec2Service);
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "ap-northeast-3,AWS,none,true",
+        "us-east-1,AWS,none,false",
+        "us-east-1,ALLOW_SINGLE_ZONE,none,true",
+        "ap-northeast-3,REQUIRE_TWO_ZONES,none,false",
+        "us-east-1,ALLOW_SINGLE_ZONE,REQUIRE_TWO_ZONES,false",
+        "us-east-1,REQUIRE_TWO_ZONES,ALLOW_SINGLE_ZONE,true",
+        "ap-northeast-3,REQUIRE_TWO_ZONES,AWS,true",
+        "us-east-1,ALLOW_SINGLE_ZONE,AWS,false"
+    })
+    void albZonePolicyAppliesToCreateAndSetSubnets(String region, EmulatorConfig.AlbZoneRule global,
+                                                  String regional, boolean allowed) {
+        EmulatorConfig settings = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElbV2ServiceConfig elbv2 = mock(EmulatorConfig.ElbV2ServiceConfig.class);
+        when(settings.services()).thenReturn(services);
+        when(services.elbv2()).thenReturn(elbv2);
+        when(elbv2.albZoneRule()).thenReturn(global);
+        Map<String, EmulatorConfig.AlbZoneRule> overrides = "none".equals(regional) ? Map.of()
+                : Map.of(region, EmulatorConfig.AlbZoneRule.valueOf(regional));
+        when(elbv2.albZoneRuleByRegion()).thenReturn(overrides);
+        lenient().when(settings.hostname()).thenReturn(Optional.empty());
+        service.config = settings;
+        service.regionResolver = new RegionResolver(region, "000000000000");
+        lenient().when(ec2Service.describeSubnets(eq(region), anyList(), eq(Map.of())))
+                .thenAnswer(invocation -> invocation.<List<String>>getArgument(1).stream()
+                        .map(id -> subnet(id, region + ("subnet-a".equals(id) ? "a" : "b"))).toList());
+        lenient().when(ec2Service.requireSubnet(eq(region), anyString()))
+                .thenAnswer(invocation -> subnet(invocation.getArgument(1), region + "a"));
+        LoadBalancer twoZones = service.createLoadBalancer(region, "two-zones", "internal", "application",
+                "ipv4", ALB_SUBNETS, List.of(), Map.of());
+        if (allowed) {
+            LoadBalancer single = service.createLoadBalancer(region, "one-zone", "internal", "application",
+                    "ipv4", List.of("subnet-a"), List.of(), Map.of());
+            assertEquals(1, single.getAvailabilityZones().size());
+            service.setSubnetsFromRequest(region, twoZones.getLoadBalancerArn(), List.of("subnet-a"));
+            assertEquals(1, twoZones.getAvailabilityZones().size());
+        } else {
+            assertThrows(AwsException.class, () -> service.createLoadBalancer(region, "one-zone", "internal",
+                    "application", "ipv4", List.of("subnet-a"), List.of(), Map.of()));
+            assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(region,
+                    twoZones.getLoadBalancerArn(), List.of("subnet-a")));
+            assertEquals(2, twoZones.getAvailabilityZones().size());
+        }
+        assertThrows(AwsException.class, () -> service.createLoadBalancer(region, "no-zone", "internal",
+                "application", "ipv4", List.of(), List.of(), Map.of()));
+        assertThrows(AwsException.class, () -> service.setSubnetsFromRequest(region,
+                twoZones.getLoadBalancerArn(), List.of()));
+    }
+
+    @Test
+    void singleZonePolicyStillRejectsMultipleSubnetsInTheSameZone() {
+        String region = "ap-northeast-3";
+        Subnet first = subnet("subnet-a", region + "a");
+        Subnet second = subnet("subnet-b", region + "a");
+        when(ec2Service.describeSubnets(region, ALB_SUBNETS, Map.of())).thenReturn(List.of(first, second));
+        when(ec2Service.describeSubnets(region, List.of("subnet-a"), Map.of())).thenReturn(List.of(first));
+        AwsException rejected = assertThrows(AwsException.class, () -> service.createLoadBalancer(region,
+                "same-zone", "internal", "application", "ipv4", ALB_SUBNETS, List.of(), Map.of()));
+        assertEquals("InvalidConfigurationRequest", rejected.getErrorCode());
+        assertEquals("A load balancer cannot be attached to multiple subnets in the same Availability Zone",
+                rejected.getMessage());
+        LoadBalancer single = service.createLoadBalancer(region, "single-zone", "internal", "application",
+                "ipv4", List.of("subnet-a"), List.of(), Map.of());
+        assertThrows(AwsException.class,
+                () -> service.setSubnetsFromRequest(region, single.getLoadBalancerArn(), ALB_SUBNETS));
+        assertEquals(List.of("subnet-a"), single.getAvailabilityZones().stream()
+                .map(AvailabilityZone::getSubnetId).toList());
+    }
+
     @Test
     void describeListenersRequiresEveryExplicitArn() {
         String lb = service.createLoadBalancer(REGION, "listener-lookup", "internal", "application", "ipv4",
@@ -995,6 +1066,9 @@ class ElbV2ServiceTest {
     void createLoadBalancerUsesConfiguredHostnameForDnsSuffix() {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.hostname()).thenReturn(Optional.of("floci"));
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.elbv2()).thenReturn(mock(EmulatorConfig.ElbV2ServiceConfig.class));
         service.config = config;
 
         String dnsName = service.createLoadBalancer(
