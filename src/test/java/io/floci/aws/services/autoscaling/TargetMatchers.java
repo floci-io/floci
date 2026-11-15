@@ -13,6 +13,11 @@ final class TargetMatchers {
 
     /** Matches a target list holding {@code instanceId} and nothing else. */
     static List<TargetDescription> onlyTarget(String instanceId) {
-        return argThat(targets -> targets.size() == 1 && instanceId.equals(targets.getFirst().getId()));
+        return exactlyTargets(instanceId);
+    }
+
+    /** Matches a target list holding exactly {@code instanceIds}, in that order. */
+    static List<TargetDescription> exactlyTargets(String... instanceIds) {
+        return argThat(targets -> targets.stream().map(TargetDescription::getId).toList().equals(List.of(instanceIds)));
     }
 }

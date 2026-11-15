@@ -634,6 +634,14 @@ public class AutoScalingService implements PassedRoleLookup {
                 // is not terminated, and stays in the target groups another of their groups has attached.
                 deregisterFromUnsharedTargetGroups(asg, memberIds(asg), attachedTargetGroups(asg));
             } else if (forceDelete && ec2Service != null && !active.isEmpty()) {
+                // The instances leave the group's load balancers before they are terminated, as on a scale-in.
+                List<String> leaving = active.stream().map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                if (elbV2Service != null) {
+                    deregisterFromTargetGroups(elbV2Service, asg, leaving);
+                }
+                if (elbClassicService != null) {
+                    deregisterFromClassicLoadBalancers(elbClassicService, asg, leaving);
+                }
                 active.stream()
                         .map(AsgInstance::getInstanceId)
                         .filter(Objects::nonNull)
@@ -1037,16 +1045,30 @@ public class AutoScalingService implements PassedRoleLookup {
      */
     static void registerWithTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
                                          String instanceId, boolean strict) {
+        registerWithTargetGroups(elb, asg, targetGroupArns, List.of(instanceId), strict);
+    }
+
+    /** As above, for several instances, with one call to each target group. */
+    static void registerWithTargetGroups(ElbV2Service elb, AutoScalingGroup asg, Collection<String> targetGroupArns,
+                                         List<String> instanceIds, boolean strict) {
+        if (instanceIds.isEmpty()) {
+            return;
+        }
+        String instances = String.join(", ", instanceIds);
         for (String tgArn : targetGroupArns) {
+            // Fresh targets for each target group: ELBv2 fills a target's missing port in with the group's own.
+            List<TargetDescription> targets = instanceIds.stream().map(id -> {
+                TargetDescription target = new TargetDescription();
+                target.setId(id);
+                return target;
+            }).toList();
             try {
-                TargetDescription td = new TargetDescription();
-                td.setId(instanceId);
-                elb.registerTargets(asg.getRegion(), tgArn, List.of(td));
+                elb.registerTargets(asg.getRegion(), tgArn, targets);
                 LOG.debugv("ASG {0}: registered {1} with TG {2}",
-                        asg.getAutoScalingGroupName(), instanceId, tgArn);
+                        asg.getAutoScalingGroupName(), instances, tgArn);
             } catch (Exception e) {
                 LOG.warnv(e, "ASG {0}: could not register {1} with TG {2}: {3}",
-                        asg.getAutoScalingGroupName(), instanceId, tgArn, e.getMessage());
+                        asg.getAutoScalingGroupName(), instances, tgArn, e.getMessage());
                 if (strict && !(e instanceof AwsException aws
                         && "TargetGroupNotFound".equals(aws.getErrorCode()))) {
                     throw e;
@@ -1071,8 +1093,9 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    /** Deregisters {@code instanceIds} from every target group attached to {@code asg}, elbv2 sources included. */
     static void deregisterFromTargetGroups(ElbV2Service elb, AutoScalingGroup asg, List<String> instanceIds) {
-        deregisterFromTargetGroups(elb, asg, asg.getTargetGroupARNs(), instanceIds);
+        deregisterFromTargetGroups(elb, asg, attachedTargetGroups(asg), instanceIds);
     }
 
     /** As above, from {@code targetGroupArns} rather than from every target group the group has attached. */
@@ -1495,9 +1518,9 @@ public class AutoScalingService implements PassedRoleLookup {
     // unified ASG-to-load-balancer wiring API (elb, elbv2, vpc-lattice), which
     // aws_autoscaling_traffic_source_attachment uses instead of the older
     // AttachLoadBalancerTargetGroups. Like the target-group attachment above, each source is
-    // stored with its type, and only an EKS group's node is registered with an elbv2 source as
-    // it is attached and deregistered as it is detached. Floci has no real health-checking loop,
-    // so every attached traffic source is reported InService immediately.
+    // stored with its type, and the group's instances join and leave an elbv2 source as they
+    // do a target group attached the older way. Floci has no real health-checking loop, so
+    // every attached traffic source is reported InService immediately.
 
     public record TrafficSourceIdentifier(String identifier, String type) {}
 
@@ -1533,7 +1556,7 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     /** The target groups attached to {@code asg}: as target groups, and as {@code elbv2} traffic sources. */
-    private static Set<String> attachedTargetGroups(AutoScalingGroup asg) {
+    static Set<String> attachedTargetGroups(AutoScalingGroup asg) {
         Set<String> attached = new LinkedHashSet<>(asg.getTargetGroupARNs());
         asg.getTrafficSourceTypeByIdentifier().forEach((identifier, type) -> {
             if ("elbv2".equals(type)) {
@@ -1615,19 +1638,13 @@ public class AutoScalingService implements PassedRoleLookup {
 
     /**
      * Applies {@code change} to the target groups and traffic sources attached to the group {@code name}, and
-     * stores it. An EKS group's in-service members are then registered with the target groups the change attached
-     * and deregistered from those it detached, as AWS does, all under the Region's lock and then the group's, like
-     * every change to an EKS group's members or target groups. Other groups' members are left as they are: the
-     * reconciler registers them as they come into service.
+     * stores it. The group's members are deregistered from the target groups the change detached, and its in-service
+     * members registered with those it attached, as AWS does, all under the Region's lock and then the group's, in
+     * the order {@code attachInstances} and the changes to an EKS group's members take them. An instance an EKS group
+     * shares with another group stays in a target group that other group still has attached.
      */
     private void changeAttachments(String region, String name, Consumer<AutoScalingGroup> change) {
         String key = asgKey(region, name);
-        AutoScalingGroup asg = requireGroup(region, name);
-        if (!asg.isEksManaged()) {
-            change.accept(asg);
-            groups.put(key, asg);
-            return;
-        }
         synchronized (lockFor(region)) {
             synchronized (lockFor(key)) {
                 AutoScalingGroup current = requireGroup(region, name);
@@ -1639,21 +1656,25 @@ public class AutoScalingService implements PassedRoleLookup {
                 Set<String> detached = new LinkedHashSet<>(attachedBefore);
                 detached.removeAll(attached);
                 attached.removeAll(attachedBefore);
-                // The node leaves the target groups the change detached before the change is stored: when ELBv2
+                // The members leave the target groups the change detached before the change is stored: when ELBv2
                 // refuses, the group keeps them attached, so the detach can be sent again.
                 try {
-                    deregisterFromUnsharedTargetGroups(current, memberIds(current), detached);
+                    if (current.isEksManaged()) {
+                        deregisterFromUnsharedTargetGroups(current, memberIds(current), detached);
+                    } else if (!detached.isEmpty() && !memberIds(current).isEmpty()) {
+                        // An ordinary group's instances are its own, so they leave every target group it detached.
+                        deregisterFromTargetGroups(elbV2Service, current, detached, memberIds(current));
+                    }
                 } catch (RuntimeException e) {
                     current.setTargetGroupARNs(targetGroupsBefore);
                     current.setTrafficSourceTypeByIdentifier(trafficSourcesBefore);
                     throw e;
                 }
                 groups.put(key, current);
-                for (AsgInstance member : current.getInstances()) {
-                    if ("InService".equals(member.getLifecycleState())) {
-                        registerWithTargetGroups(elbV2Service, current, attached, member.getInstanceId(), false);
-                    }
-                }
+                List<String> inService = current.getInstances().stream()
+                        .filter(member -> "InService".equals(member.getLifecycleState()))
+                        .map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                registerWithTargetGroups(elbV2Service, current, attached, inService, false);
             }
         }
     }
