@@ -217,7 +217,7 @@ public class MwaaService implements TagHandler {
                 }
                 environmentManager.startEnvironment(environment, version, startupScriptContent,
                         requirements != null ? requirements.getData() : null);
-                proxyPort = portAllocator.allocate(
+                proxyPort = portAllocator.allocateForInProcessListener(
                         config.services().mwaa().proxyBasePort(), config.services().mwaa().proxyMaxPort());
                 environment.setProxyPort(proxyPort);
                 environment.setWebserverUrl(buildWebserverUrl(proxyPort));
