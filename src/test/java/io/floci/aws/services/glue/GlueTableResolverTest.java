@@ -223,7 +223,8 @@ class GlueTableResolverTest {
         String from = GlueTableResolver.readPlan(table).fromClause();
 
         assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = '|', quote = '''', "
-                + "escape = '\\', nullstr = 'NA', columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
+                + "escape = '\\', nullstr = 'NA', auto_detect = false, null_padding = true, strict_mode = false, "
+                + "columns = {'id': 'VARCHAR', 'name': 'VARCHAR'})"));
     }
 
     @Test
@@ -234,7 +235,9 @@ class GlueTableResolverTest {
 
         String from = GlueTableResolver.readPlan(table).fromClause();
 
-        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', "
+        // A table naming no SerDe is read as LazySimpleSerDe reads it: a quote is text and \\N is NULL.
+        assertThat(from, equalTo("read_csv('s3://bucket/events/**', header = false, delim = ',', quote = '', "
+                + "nullstr = '\\N', auto_detect = false, null_padding = true, strict_mode = false, "
                 + "columns = {'id': 'VARCHAR'})"));
     }
 

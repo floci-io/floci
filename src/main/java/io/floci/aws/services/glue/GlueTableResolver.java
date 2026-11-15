@@ -5,6 +5,7 @@ import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,6 +35,8 @@ public final class GlueTableResolver {
 
     /** Hive table property naming how many header lines a delimited file carries. */
     private static final String PARAM_SKIP_HEADER = "skip.header.line.count";
+    /** The null marker Hive's LazySimpleSerDe reads when a table declares none ({@code serialization.null.format}). */
+    private static final String LAZY_SIMPLE_NULL_FORMAT = "\\N";
 
     /**
      * The column a templated table's read adds to carry each row's object path, from which its
@@ -132,6 +135,10 @@ public final class GlueTableResolver {
     }
 
     private static String csvReadExpressionForInput(Table table, String inputExpression) {
+        return csvReadExpressionForInput(table, inputExpression, "");
+    }
+
+    private static String csvReadExpressionForInput(Table table, String inputExpression, String extraOptions) {
         Map<String, String> options = csvParameters(table);
         int skip = skipCount(options.get(PARAM_SKIP_HEADER));
         StringBuilder sql = new StringBuilder("read_csv(").append(inputExpression);
@@ -141,11 +148,24 @@ public final class GlueTableResolver {
         }
         String delimiter = options.containsKey("field.delim") ? options.get("field.delim") : options.get("separatorChar");
         sql.append(", delim = '").append(escape(delimiter == null || delimiter.isEmpty() ? "," : delimiter)).append("'");
-        appendOption(sql, "quote", options.get("quoteChar"));
+        boolean lazySimple = isLazySimpleSerDe(table);
+        String quote = options.get("quoteChar");
+        if (quote != null && !quote.isEmpty()) {
+            appendOption(sql, "quote", quote);
+        } else if (lazySimple) {
+            // LazySimpleSerDe reads a quote as text: Athena points quoted fields to OpenCSVSerDe.
+            sql.append(", quote = ''");
+        }
         appendOption(sql, "escape", options.get("escapeChar"));
-        appendOption(sql, "nullstr", options.get("serialization.null.format"));
+        String nullFormat = options.get("serialization.null.format");
+        // LazySimpleSerDe's null marker is \N unless the table says otherwise, so an empty field reads as ''.
+        appendOption(sql, "nullstr", nullFormat == null && lazySimple ? LAZY_SIMPLE_NULL_FORMAT : nullFormat);
         List<Column> dataColumns = table.getStorageDescriptor().getColumns();
         if (dataColumns != null && !dataColumns.isEmpty()) {
+            // The declared columns are the files' columns, as Hive reads them: a row with fewer fields gets NULL for
+            // the rest (a file written before ALTER TABLE ADD COLUMNS), and one with more drops the extra ones. The
+            // dialect is the one declared, not sniffed, since DuckDB's sniffer refuses rows of varying length.
+            sql.append(", auto_detect = false, null_padding = true, strict_mode = false");
             // Every column is read as VARCHAR: DuckDB's own type sniffing would disagree with the Glue types,
             // and the caller casts each column to its declared type afterwards.
             sql.append(", columns = {");
@@ -157,7 +177,15 @@ public final class GlueTableResolver {
             }
             sql.append('}');
         }
-        return sql.append(')').toString();
+        return sql.append(extraOptions).append(')').toString();
+    }
+
+    /** Whether the table reads its text with Hive's LazySimpleSerDe, the default when it names no SerDe. */
+    private static boolean isLazySimpleSerDe(Table table) {
+        String serde = table.getStorageDescriptor().getSerdeInfo() != null
+                ? table.getStorageDescriptor().getSerdeInfo().getSerializationLibrary()
+                : null;
+        return serde == null || serde.isBlank() || serde.endsWith(".LazySimpleSerDe");
     }
 
     private static void appendOption(StringBuilder sql, String name, String value) {
@@ -244,6 +272,7 @@ public final class GlueTableResolver {
 
         PartitionProjection.LocationTemplate template = locationTemplate(table);
         Map<String, Column> templatedKeys = templatedKeys(table, template);
+        Map<String, Column> textColumns = readsDelimitedText(table) ? columnsByName(declared) : Map.of();
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < names.size(); i++) {
             if (i > 0) {
@@ -251,10 +280,40 @@ public final class GlueTableResolver {
             }
             String name = names.get(i);
             Column key = templatedKeys.get(name.toLowerCase(Locale.ROOT));
-            String value = key == null ? quote(name) : partitionValue(template, key);
+            Column text = textColumns.get(name.toLowerCase(Locale.ROOT));
+            String value = key != null ? partitionValue(template, key)
+                    : text != null ? typedText(quote(name), text.getType())
+                    : quote(name);
             sb.append(value).append(" AS ").append(quote(name));
         }
         return sb.toString();
+    }
+
+    /**
+     * Whether the table is read as text with its own CSV options, which leaves every data column and
+     * Hive partition value a VARCHAR for {@link #buildProjection} to give its declared type.
+     */
+    private static boolean readsDelimitedText(Table table) {
+        return !isIcebergTable(table) && "read_csv_auto".equals(inferReadFunction(table)) && hasCsvOptions(table);
+    }
+
+    private static Map<String, Column> columnsByName(List<Column> declared) {
+        Map<String, Column> columns = new HashMap<>();
+        for (Column column : declared) {
+            if (column != null && column.getName() != null) {
+                columns.putIfAbsent(column.getName().toLowerCase(Locale.ROOT), column);
+            }
+        }
+        return columns;
+    }
+
+    /**
+     * A text value as its declared type. Like Hive's LazySimpleSerDe, which Athena reads delimited
+     * text with, a value the type cannot hold reads as NULL rather than failing the query.
+     */
+    private static String typedText(String text, String glueType) {
+        String type = scalarType(glueType);
+        return "VARCHAR".equals(type) ? text : "TRY_CAST(" + text + " AS " + type + ")";
     }
 
     /**
@@ -287,7 +346,7 @@ public final class GlueTableResolver {
                 terms.add(pathSegment(template, groups.getFirst()) + " = "
                         + pathSegment(template, groups.get(occurrence)));
             }
-            if (!"VARCHAR".equals(partitionValueType(key.getType()))) {
+            if (!"VARCHAR".equals(scalarType(key.getType()))) {
                 terms.add(partitionValue(template, key) + " IS NOT NULL");
             }
         }
@@ -345,8 +404,7 @@ public final class GlueTableResolver {
      */
     private static String partitionValue(PartitionProjection.LocationTemplate template, Column key) {
         String text = pathSegment(template, template.groups().get(key.getName().toLowerCase(Locale.ROOT)).getFirst());
-        String type = partitionValueType(key.getType());
-        return "VARCHAR".equals(type) ? text : "TRY_CAST(" + text + " AS " + type + ")";
+        return typedText(text, key.getType());
     }
 
     /**
@@ -357,7 +415,7 @@ public final class GlueTableResolver {
      * other than ISO ({@code yyyy-MM-dd}, {@code yyyy-MM-dd HH:mm:ss}) needs {@code strptime} with the
      * Java pattern translated; until then its values do not parse and its objects are not read.
      */
-    private static String partitionValueType(String glueType) {
+    private static String scalarType(String glueType) {
         String type = glueType == null ? "" : glueType.trim().toLowerCase(Locale.ROOT);
         if (DECIMAL_TYPE.matcher(type).matches()) {
             return type.toUpperCase(Locale.ROOT);
@@ -424,14 +482,18 @@ public final class GlueTableResolver {
      * also reads each row's object path, which {@link #buildProjection} takes its partition values
      * from. Hive partitioning is switched off for it: the template is the only source of those
      * values, and a {@code col=value} segment it happens to contain would otherwise be read as a
-     * second, untyped column.
+     * second, untyped column. A table that declares CSV options (a delimiter, header lines) is read
+     * with them and its declared column names, as {@link #hasCsvOptions} explains.
      */
     public static String readExpression(Table table, String readFn, String normalizedLocation) {
-        if (locationTemplate(table) == null) {
-            return readExpression(readFn, normalizedLocation);
+        boolean templated = locationTemplate(table) != null;
+        String options = templated ? ", hive_partitioning = false, filename = '" + escape(OBJECT_PATH_COLUMN) + "'" : "";
+        if ("read_csv_auto".equals(readFn) && hasCsvOptions(table)) {
+            // Hive partition values stay text too, so they take their declared type like the data columns.
+            return csvReadExpressionForInput(table, "'" + escape(normalizedLocation) + "/**'",
+                    templated ? options : ", hive_types_autocast = false");
         }
-        return readExpression(readFn, normalizedLocation,
-                ", hive_partitioning = false, filename = '" + escape(OBJECT_PATH_COLUMN) + "'");
+        return readExpression(readFn, normalizedLocation, options);
     }
 
     private static String readExpression(String readFn, String normalizedLocation, String options) {
