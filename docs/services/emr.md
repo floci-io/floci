@@ -462,6 +462,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `ErrorData` is a list of maps, and no source shows how AWS spreads the keys over them: Floci gives one map holding
   them all. `ErrorMessage` is the reason's message and the error code's page, in Floci's words, as AWS advises
   against parsing that text. A cluster that ends with `INTERNAL_ERROR` has no `ErrorDetails`.
+* **Node files**: an EMR node's `/mnt/var/lib/info/instance.json` says whether it is the primary node, in its
+  `isMaster`, which the Management Guide's bootstrap action reads (`grep isMaster /mnt/var/lib/info/instance.json |
+  grep false` on any other node), and its `/mnt/var/lib/instance-controller/extraInstanceData.json` gives its
+  `instanceRole`, which AWS's Knowledge Center reads with `jq` and compares, lowercased, with `master`, `core` and
+  `task`. AWS documents nothing else in either file, so Floci writes those two fields alone: `{"isMaster": true}` and
+  `{"instanceRole": "MASTER"}` in the bootstrap actions' container and each step's, which run as on the primary node,
+  and in the primary node's own, and `false` with `CORE` or `TASK` in each core or task node's, the roles as the API's
+  `InstanceRoleType` names them. The actions run once, as on the primary node, so an action's branch for the other
+  nodes does not run. Files that cannot be written fail the bootstrap, the step or the node they are for.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then

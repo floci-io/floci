@@ -177,6 +177,35 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "exec env \"$@\"");
     /** Writes {@link #SUDO} to /tmp/floci-bin/sudo, a folder that is there already. */
     public static final String SUDO_FILE = String.join("\n", "cat > /tmp/floci-bin/sudo <<'SUDO'", SUDO, "SUDO");
+    /** The variable naming the instance role of an EMR cluster's container, MASTER, CORE or TASK (see NODE_INFO). */
+    public static final String INSTANCE_ROLE_VARIABLE = "FLOCI_INSTANCE_ROLE";
+    /** The file an EMR node's {@code isMaster} is in, which the EMR Management Guide's bootstrap action reads. */
+    public static final String INSTANCE_FILE = "/mnt/var/lib/info/instance.json";
+    /** The file an EMR node's {@code instanceRole} is in, which AWS's Knowledge Center reads with jq. */
+    public static final String EXTRA_INSTANCE_DATA_FILE = "/mnt/var/lib/instance-controller/extraInstanceData.json";
+    // Run as the image's user with the node's role as $1: each file written whole, then moved in place, so a step
+    // starting beside another, which shares its /mnt, reads it whole too.
+    private static final String NODE_INFO_FILES = String.join("\n",
+            "w() { t=$(mktemp \"$1.XXXXXX\") && printf \"%s\\n\" \"$2\" > \"$t\" && chmod 644 \"$t\""
+                    + " && mv -f \"$t\" \"$1\"; }",
+            "m=false; [ \"$1\" != MASTER ] || m=true",
+            "mkdir -p /mnt/var/lib/info /mnt/var/lib/instance-controller"
+                    + " && w " + INSTANCE_FILE + " \"{\\\"isMaster\\\": $m}\""
+                    + " && w " + EXTRA_INSTANCE_DATA_FILE + " \"{\\\"instanceRole\\\": \\\"$1\\\"}\"");
+    /**
+     * Where {@link #INSTANCE_ROLE_VARIABLE} names a role, writes what AWS documents of the files an EMR node keeps
+     * about itself, and only that: {@link #INSTANCE_FILE}'s {@code isMaster}, as the EMR Management Guide's bootstrap
+     * action reads it ("grep isMaster /mnt/var/lib/info/instance.json | grep false" on a node that is not the primary),
+     * and {@link #EXTRA_INSTANCE_DATA_FILE}'s {@code instanceRole}, which AWS's Knowledge Center reads with jq and
+     * compares, lowercased, with master, core and task, given as the API's {@code InstanceRoleType} names it. Written
+     * as the image's user, whose /mnt is, so a folder made there is that user's too, as Hive's metastore, which writes
+     * under /mnt/var/lib, runs as that user.
+     */
+    public static final String NODE_INFO = String.join("\n",
+            "if [ -n \"${" + INSTANCE_ROLE_VARIABLE + ":-}\" ]; then",
+            "  as=; [ \"$(id -u)\" != 0 ] || as=\"setpriv --reuid=hadoop --regid=hadoop --clear-groups\"",
+            "  $as bash -c '" + NODE_INFO_FILES + "' floci \"$" + INSTANCE_ROLE_VARIABLE + "\" || exit",
+            "fi");
     // A Spark configuration of the container's own: a copy of the folder a spark-env export of SPARK_CONF_DIR names,
     // else of the image's, links followed, whose log4j2.properties ends with the job's lines, passed in
     // SPARK_LOG4J2_VARIABLE, a later line winning. What is added to a file starts on a line of its own, as the
@@ -377,6 +406,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  chmod 755 /tmp/floci-bin/sudo",
             "  export PATH=\"/tmp/floci-bin:$PATH\"",
             "fi",
+            NODE_INFO,
             HIVE_ONE_SDK,
             "export HOME=~" + IMAGE_USER,
             "cd \"$HOME\" || exit",
@@ -510,8 +540,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 container.withEnv(SPARK_LOG4J2_VARIABLE, sparkLog4j2File(job));
             }
             if (job.storage() != null) {
+                // A step runs on its cluster's primary node, whose files say so.
                 container.withNamedVolume(job.storage().home(), "/home/hadoop")
-                        .withNamedVolume(job.storage().mnt(), "/mnt");
+                        .withNamedVolume(job.storage().mnt(), "/mnt")
+                        .withEnv(INSTANCE_ROLE_VARIABLE, "MASTER");
                 // The primary node's name leads to its HDFS, as the cluster's DNS resolves it.
                 if (job.storage().hdfsHost() != null) {
                     container.withExtraHost(job.storage().hdfsHost(), job.storage().hdfsAddress());
@@ -1300,7 +1332,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A wrapper's script: the lines of each part, in order, then what it runs.
     @SafeVarargs
     private static String wrapper(List<String>... parts) {
-        List<String> lines = new ArrayList<>();
+        List<String> lines = new ArrayList<>(List.of(NODE_INFO));
         for (List<String> part : parts) {
             lines.addAll(part);
         }

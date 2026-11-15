@@ -180,6 +180,12 @@ class EmrClusterStorageTest {
         // Only a core node holds a DataNode, and with one the primary node holds neither.
         verify(spec).withEnv("FLOCI_NODE_CORE", "1");
         verify(spec).withEnv("FLOCI_NODE_WORKERS", "1");
+        // Each node's files say which it is, before its daemons start.
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "MASTER");
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "CORE");
+        verify(spec).withEnv("FLOCI_INSTANCE_ROLE", "TASK");
+        verify(spec, times(3)).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.NODE_INFO + "\n")));
         // What the primary node has of YARN too, and Floci in reach.
         verify(spec, times(3)).withEnv("FLOCI_YARN_MEMORY_MB", "4096");
         verify(spec, times(3)).withEnv("FLOCI_YARN_VCORES", "4");
@@ -1584,7 +1590,8 @@ class EmrClusterStorageTest {
         // A table's location in S3 is the metastore's to look at, with S3A, so it too leaves Hive one SDK first, as
         // root, which owns Hive's lib folder.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.HIVE_ONE_SDK + "\n")));
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.NODE_INFO + "\n"
+                        + EmrServerlessSparkRunner.HIVE_ONE_SDK + "\n")));
 
         // The session goes with the container.
         storage.remove("j-1");
