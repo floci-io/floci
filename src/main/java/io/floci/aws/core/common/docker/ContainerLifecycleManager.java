@@ -250,6 +250,15 @@ public class ContainerLifecycleManager {
                         "Failed to attach pre-start network configuration for container " + containerId, e);
             }
         }
+        for (String network : spec.joinedNetworks()) {
+            try {
+                dockerClient.connectToNetworkCmd().withContainerId(containerId).withNetworkId(network).exec();
+            } catch (RuntimeException e) {
+                removeFailedContainer(containerId, e, removeAnonymousVolumes);
+                throw new IllegalStateException("Could not connect container " + containerId + " to Docker network "
+                        + network + ": " + e.getMessage(), e);
+            }
+        }
         return containerId;
     }
 

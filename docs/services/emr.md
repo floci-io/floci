@@ -222,9 +222,17 @@ holding the driver and its executors, or a command or a script. The cluster itse
   settings, as EMR's primary node does, so a `hive-site` setting of `hive.metastore.warehouse.dir`, say, holds for the
   service as for the Hive steps. A primary node with the service that an earlier Floci left running starts again, on
   the data its volume keeps, as its session went with that Floci. The container is on a Docker network of the cluster's own, also
-  `emr-<cluster-id>-hdfs`, which the cluster's steps join besides their own, so the steps of other clusters, another
-  account's included, cannot reach its files or tables; each cluster whose HDFS runs takes one network from the
-  Docker daemon's address pools. When Floci runs in a container, that container joins the network of each cluster
+  `emr-<cluster-id>-hdfs`, which the cluster's steps join besides their own, where the cluster's nodes and steps reach
+  it by the primary node's name; each cluster whose HDFS runs takes one network from the Docker daemon's address pools.
+  Each of the cluster's nodes, this one and its core and task nodes (see **YARN**), is on the steps' network too, the
+  one Floci's other containers are on, from before it starts, with Floci's DNS, as a cluster's nodes reach what is in
+  their VPC: a cluster-mode driver or an executor reaches an MSK cluster's brokers or an RDS instance by the endpoints
+  Floci gives, and a virtual-hosted bucket name under Floci's host name, as Iceberg's `S3FileIO` uses by default,
+  resolves to Floci. The nodes' HDFS and YARN listen on their address on the cluster's network alone, so a container on
+  the steps' network, another cluster's included, reaches neither. Hive 3's metastore has no setting for the address it
+  listens on, so on a cluster with Hive or HCatalog the primary node, which runs it, stays on the cluster's network
+  alone, and the executors YARN runs there, on such a cluster with no core node, reach Floci at its address on the
+  cluster's network. Where Docker does not say the subnet of the cluster's network, its nodes stay on it alone. A node an earlier Floci started on the cluster's network alone starts again, on its data. When Floci runs in a container, that container joins the network of each cluster
   with Hive too, as `floci`, which is how the metastore reaches Floci's S3, and leaves it when the HDFS container
   goes. The cluster's first step starts it, and waits for it: a step whose cluster's HDFS is not ready within two
   minutes fails ("The step could not start: The HDFS of EMR cluster ... did not start within 120 seconds"). If its
@@ -274,10 +282,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   offers `yarn-node-memory-mb` and `yarn-node-vcores`, 4096 MB and 4 by default, and an executor is 1 GB and one core
   and a driver 2 GB and one core, which the cluster's `spark-defaults` and a step's own options replace. A container
   larger than the NodeManager offers is refused by YARN, and its step fails. Dynamic allocation is on, as it is on
-  EMR, through Spark's shuffle tracking: the images have no external shuffle service. Executors reach Floci's S3 at
-  Floci's address on the cluster's network, which Floci's container joins as for the metastore (see **Storage**), over
-  HTTP, which Floci serves beside HTTPS with TLS on, so no certificate is involved, with the step's AWS credentials,
-  and find the driver at its container's name on that network.
+  EMR, through Spark's shuffle tracking: the images have no external shuffle service. Executors reach Floci's S3 as the
+  steps do, their node being on the steps' network (see **Storage**), or, where the steps have no network of Floci's,
+  at Floci's address on the cluster's network, which Floci's container joins as for the metastore, over HTTP, which
+  Floci serves beside HTTPS with TLS on, so no certificate is involved, with the step's AWS credentials, and find the
+  driver at its container's name on the cluster's network.
   Each core and task node is a container of its own on that network, `emr-<cluster-id>-node-<group>-<n>`, with its data
   in a volume of its own: "Core nodes run the Data Node daemon", "a core node runs YARN NodeManager daemons, Hadoop
   MapReduce tasks, and Spark executors", and "Task nodes don't run the Data Node daemon". Its name on the network is the
