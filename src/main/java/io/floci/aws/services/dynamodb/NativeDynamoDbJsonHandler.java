@@ -909,6 +909,7 @@ public class NativeDynamoDbJsonHandler {
             ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         }
 
+        DynamoDbTableNames.resolveForItemCall(tableName);
         JsonNode item = dynamoDbService.getItem(tableName, key, region);
         int itemBytes = item != null
                 ? DynamoDbItemSize.billedItemSize(dynamoDbService.requireTableForItemCall(tableName, region), item)
@@ -976,7 +977,11 @@ public class NativeDynamoDbJsonHandler {
             requireValidOlderUpdate(request);
         }
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        // UpdateItem lists every problem of a short name, the pattern first.
+        if (!tableName.isEmpty() && !AwsArnUtils.looksLikeArn(tableName)) {
+            throwValidationErrors(nameViolations(tableName, "tableName"));
+        }
+        DynamoDbTableNames.resolve(tableName);
         JsonNode key = request.path("Key");
         JsonNode attributeUpdates = request.path("AttributeUpdates");
         JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
@@ -1322,7 +1327,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleQuery(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        DynamoDbTableNames.resolveForItemCall(tableName); // validate tableName first
         JsonNode keyConditions = request.has("KeyConditions") ? request.get("KeyConditions") : null;
         JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
                 ? request.get("ExpressionAttributeValues") : null;
@@ -1531,7 +1536,7 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
-        DynamoDbTableNames.resolve(tableName);
+        DynamoDbTableNames.resolveForItemCall(tableName);
         requireValidConditionalOperator(request, "ScanFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");

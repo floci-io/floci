@@ -26,6 +26,17 @@ public final class DynamoDbTableNames {
         return resolveInternal(input).name();
     }
 
+    /** Resolves the table of an item call, which reports only the first problem of a short name. */
+    public static String resolveForItemCall(String input) {
+        if (input != null && !input.isEmpty() && !AwsArnUtils.looksLikeArn(input)) {
+            String violation = nameViolation(input);
+            if (violation != null) {
+                throw SmithyValidationErrors.validationException(violation);
+            }
+        }
+        return resolve(input);
+    }
+
     /**
      * Validates a short table name for use with CreateTable.
      * CreateTable requires min length 3 and missing TableName is a distinct error.
@@ -121,30 +132,44 @@ public final class DynamoDbTableNames {
     }
 
     private static void validateTableName(String tableName) {
-        String violation = nameViolation(tableName);
-        if (violation != null) {
-            throw SmithyValidationErrors.validationException(violation);
+        List<String> violations = nameViolations(tableName);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
         }
     }
 
-    /** The violation for a short table name, or {@code null} for a valid one. A bad length hides a bad pattern. */
+    /**
+     * The first violation of a short table name as an item call reports it, or {@code null} for a
+     * valid one. The length counts characters and hides a bad pattern.
+     */
     static String nameViolation(String tableName) {
-        List<String> violations = nameViolations(tableName);
-        return violations.isEmpty() ? null : violations.getFirst();
-    }
-
-    /** Every violation of a short table name, the length first. */
-    static List<String> nameViolations(String tableName) {
-        List<String> violations = new ArrayList<>();
         String lengthViolation = SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255);
         if (lengthViolation != null) {
-            violations.add(lengthViolation);
+            return lengthViolation;
+        }
+        return TABLE_NAME_CHARS.matcher(tableName).matches() ? null : patternViolation(tableName);
+    }
+
+    /**
+     * Every violation of a short table name as the table calls and the older item validator
+     * report them, the length first. The length counts UTF-16 units, so an emoji counts twice.
+     */
+    static List<String> nameViolations(String tableName) {
+        List<String> violations = new ArrayList<>();
+        if (tableName.length() < 3) {
+            violations.add(SmithyValidationErrors.lengthTooShort("tableName", tableName, 3));
+        } else if (255 < tableName.length()) {
+            violations.add(SmithyValidationErrors.Violations.QUOTED.constraint("tableName", tableName,
+                    "Member must have length less than or equal to 255"));
         }
         if (!TABLE_NAME_CHARS.matcher(tableName).matches()) {
-            violations.add("Value '" + tableName
-                    + "' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+            violations.add(patternViolation(tableName));
         }
         return violations;
+    }
+
+    private static String patternViolation(String tableName) {
+        return SmithyValidationErrors.pattern("tableName", tableName, "[a-zA-Z0-9_.-]+");
     }
 
     private static AwsException invalid(String message) {

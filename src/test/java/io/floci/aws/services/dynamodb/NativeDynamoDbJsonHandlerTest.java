@@ -3445,6 +3445,24 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            DescribeTable | {}                                                                 | pattern
+            UpdateTable   | {"BillingMode":"PAY_PER_REQUEST"}                                  | pattern
+            PutItem       | {"Item":{"userId":{"S":"u1"}},"Expected":{"d":{"Value":"DEEP"}}} | pattern
+            GetItem       | {"Key":{"userId":{"S":"u1"}}}                                      | short
+            Query         | {"KeyConditionExpression":"userId = :v","ExpressionAttributeValues":{":v":{"S":"u1"}}} | short
+            UpdateItem    | {"Key":{"userId":{"S":"u1"}}}                                      | pattern, short
+            """)
+    void eachCallMeasuresATableNameItsOwnWay(String operation, String request, String problems) throws Exception {
+        ObjectNode body = (ObjectNode) mapper.readTree(
+                request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(63))));
+        body.put("TableName", "😀😀");
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals(DynamoDbTableNamesTest.nameErrors("😀😀", problems), ex.getMessage());
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             61 | {"TransactItems":[{},{"Delete":{"TableName":"bad!name","Key":{}}}]}     | Invalid Request: TransactWriteRequest should contain Delete or Put or Update request
             61 | {"TransactItems":[{}],"ReturnConsumedCapacity":"BOGUS"}                 | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
