@@ -101,6 +101,7 @@ import java.util.function.Function;
 import java.util.function.LongConsumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -3937,10 +3938,34 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /** Replaces the tags of the bucket a control-plane tagging ARN names, in the partition it names. */
     public void putBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> tags != null ? tags : new HashMap<>());
+    }
+
+    public void mergeBucketTaggingForAccount(String accountId, String bucketName, Map<String, String> tags) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> {
+            Map<String, String> updated = new HashMap<>(existing);
+            updated.putAll(tags);
+            return updated;
+        });
+    }
+
+    public void removeBucketTagsForAccount(String accountId, String bucketName, List<String> tagKeys) {
+        updateBucketTaggingForAccount(accountId, bucketName, existing -> {
+            Map<String, String> updated = new HashMap<>(existing);
+            tagKeys.forEach(updated::remove);
+            return updated;
+        });
+    }
+
+    private void updateBucketTaggingForAccount(String accountId, String bucketName,
+                                               UnaryOperator<Map<String, String>> update) {
         Bucket bucket = bucketForAccount(accountId, bucketName);
-        bucket.setTags(tags != null ? tags : new HashMap<>());
-        writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
-        LOG.debugv("Put tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
+        synchronized (bucket) {
+            Map<String, String> existing = bucket.getTags() != null ? bucket.getTags() : Map.of();
+            bucket.setTags(update.apply(existing));
+            writeBucketForAccount(namedAccount(accountId), bucketName, bucket);
+        }
+        LOG.debugv("Updated tags on bucket {0} of account {1}", bucketName, namedAccount(accountId));
     }
 
     /**
@@ -4142,12 +4167,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     public void deleteBucketTagging(String bucketName) {
-        Bucket bucket = bucketStore.get(bucketName)
-                .orElseThrow(() -> new AwsException("NoSuchBucket",
-                        "The specified bucket does not exist.", 404));
-        bucket.setTags(new java.util.HashMap<>());
-        bucketStore.put(bucketName, bucket);
-        LOG.debugv("Deleted tags from bucket: {0}", bucketName);
+        putBucketTagging(bucketName, Map.of());
     }
 
     // --- Metrics Configurations ---
