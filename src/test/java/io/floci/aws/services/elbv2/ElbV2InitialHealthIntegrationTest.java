@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.floci.aws.testing.AlbFixtures.createListener;
@@ -19,8 +20,8 @@ import static io.floci.aws.testing.AlbFixtures.deleteTargetGroup;
 import static io.floci.aws.testing.AlbFixtures.registerTarget;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
@@ -42,19 +43,8 @@ class ElbV2InitialHealthIntegrationTest {
         backend.start();
         String groupArn = null;
         try {
-            groupArn = given()
-                    .header("Authorization", AUTH)
-                    .formParam("Action", "CreateTargetGroup")
-                    .formParam("Name", "initial-health-wire")
-                    .formParam("Protocol", "HTTP")
-                    .formParam("Port", backend.getAddress().getPort())
-                    .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1"))
-                    .formParam("TargetType", "ip")
-                    .formParam("HealthCheckIntervalSeconds", 300)
-                    .formParam("HealthyThresholdCount", 10)
-                    .when().post("/")
-                    .then().statusCode(200)
-                    .extract().path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
+            groupArn = createTargetGroup("initial-health-wire", backend.getAddress().getPort(),
+                    "HealthyThresholdCount", 10);
             given()
                     .header("Authorization", AUTH)
                     .formParam("Action", "RegisterTargets")
@@ -65,16 +55,10 @@ class ElbV2InitialHealthIntegrationTest {
                     .then().statusCode(200);
 
             String registeredGroupArn = groupArn;
-            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> given()
-                    .header("Authorization", AUTH)
-                    .formParam("Action", "DescribeTargetHealth")
-                    .formParam("TargetGroupArn", registeredGroupArn)
-                    .when().post("/")
-                    .then().statusCode(200)
-                    .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.State",
-                            equalTo("healthy"))
-                    .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.Reason.size()",
-                            equalTo(0)));
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+                assertEquals(List.of("healthy"), targetHealth(registeredGroupArn, "State"));
+                assertEquals(List.of(), targetHealth(registeredGroupArn, "Reason"));
+            });
             assertEquals(1, probes.get(), "Initial admission must not wait for the recovery threshold");
         } finally {
             try {
@@ -106,41 +90,17 @@ class ElbV2InitialHealthIntegrationTest {
         String groupArn = null;
         try {
             loadBalancerArn = createLoadBalancer("initial-health-routing");
-            groupArn = given()
-                    .header("Authorization", AUTH)
-                    .formParam("Action", "CreateTargetGroup")
-                    .formParam("Name", "initial-health-routing")
-                    .formParam("Protocol", "HTTP")
-                    .formParam("Port", serving.getAddress().getPort())
-                    .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1"))
-                    .formParam("TargetType", "ip")
-                    .formParam("HealthCheckIntervalSeconds", 300)
-                    .formParam("UnhealthyThresholdCount", 10)
-                    .when().post("/")
-                    .then().statusCode(200)
-                    .extract().path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
+            groupArn = createTargetGroup("initial-health-routing", serving.getAddress().getPort(),
+                    "UnhealthyThresholdCount", 10);
             registerTarget(groupArn, "127.0.0.1", serving.getAddress().getPort());
             createListener(loadBalancerArn, groupArn, listenerPort);
             String registeredGroupArn = groupArn;
-            await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> given()
-                    .header("Authorization", AUTH)
-                    .formParam("Action", "DescribeTargetHealth")
-                    .formParam("TargetGroupArn", registeredGroupArn)
-                    .when().post("/")
-                    .then().statusCode(200)
-                    .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.State",
-                            equalTo("healthy")));
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    assertEquals(List.of("healthy"), targetHealth(registeredGroupArn, "State")));
 
             // A replacement that is not listening yet stays initial: one failed probe is below the threshold.
             registerTarget(groupArn, "127.0.0.1", notListening);
-            given()
-                    .header("Authorization", AUTH)
-                    .formParam("Action", "DescribeTargetHealth")
-                    .formParam("TargetGroupArn", groupArn)
-                    .when().post("/")
-                    .then().statusCode(200)
-                    .body("DescribeTargetHealthResponse.DescribeTargetHealthResult.TargetHealthDescriptions.member.TargetHealth.State",
-                            hasItems("healthy", "initial"));
+            assertThat(targetHealth(groupArn, "State"), containsInAnyOrder("healthy", "initial"));
             for (int i = 0; i < 6; i++) {
                 given().baseUri("http://127.0.0.1").port(listenerPort)
                         .when().get("/")
@@ -158,5 +118,34 @@ class ElbV2InitialHealthIntegrationTest {
                 serving.stop(0);
             }
         }
+    }
+
+    /** An HTTP ip target group probed every 300 s, with {@code threshold} set to {@code value}. */
+    private static String createTargetGroup(String name, int port, String threshold, int value) {
+        return given()
+                .header("Authorization", AUTH)
+                .formParam("Action", "CreateTargetGroup")
+                .formParam("Name", name)
+                .formParam("Protocol", "HTTP")
+                .formParam("Port", port)
+                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1"))
+                .formParam("TargetType", "ip")
+                .formParam("HealthCheckIntervalSeconds", 300)
+                .formParam(threshold, value)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
+    }
+
+    /** One {@code TargetHealth} field, such as {@code State} or {@code Reason}, for each registered target. */
+    private static List<String> targetHealth(String groupArn, String field) {
+        return given()
+                .header("Authorization", AUTH)
+                .formParam("Action", "DescribeTargetHealth")
+                .formParam("TargetGroupArn", groupArn)
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().xmlPath().getList("DescribeTargetHealthResponse.DescribeTargetHealthResult"
+                        + ".TargetHealthDescriptions.member.TargetHealth." + field);
     }
 }
