@@ -1,10 +1,12 @@
 package io.floci.aws.services.appsync.graphql.auth;
 
+import io.floci.aws.services.appsync.graphql.AppSyncTransportException;
 import io.floci.aws.services.appsync.model.AdditionalAuthenticationProvider;
 import io.floci.aws.services.appsync.model.AuthenticationType;
 import io.floci.aws.services.appsync.model.GraphqlApi;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -14,6 +16,8 @@ import java.util.Set;
 
 @ApplicationScoped
 public class AuthMiddleware {
+
+    private static final Logger LOG = Logger.getLogger(AuthMiddleware.class);
 
     private final ApiKeyAuthValidator apiKeyAuthValidator;
     private final IamAuthValidator iamAuthValidator;
@@ -45,22 +49,31 @@ public class AuthMiddleware {
             case API_KEY -> authenticateApiKey(headers, api, configured, info);
             case AWS_IAM -> authenticateIam(headers, api, configured, info);
             case BEARER_JWT -> authenticateBearer(headers, api, configured, info);
-            case AWS_LAMBDA -> isBareJwtForBearerModes(headers, configured)
-                    ? authenticateBearer(headers, api, configured, info)
-                    : authenticateLambda(headers, api, configured, info);
+            case AWS_LAMBDA -> authenticateBareJwtOrLambda(headers, api, configured, info);
         };
     }
 
     /**
      * AppSync takes the JWT itself as the {@code Authorization} value for Cognito and OIDC APIs, the
-     * {@code Bearer } scheme being optional. A bare JWT only goes to those modes when no Lambda
-     * authorizer is configured, because with one the same shape is a legitimate Lambda token.
+     * {@code Bearer } scheme being optional. A bare JWT is tried against those providers first; when
+     * a Lambda authorizer is configured too and no provider accepts the token, it goes to Lambda.
      */
-    private static boolean isBareJwtForBearerModes(Map<String, String> headers, Set<AuthenticationType> configured) {
-        return !configured.contains(AuthenticationType.AWS_LAMBDA)
-                && (configured.contains(AuthenticationType.AMAZON_COGNITO_USER_POOLS)
-                || configured.contains(AuthenticationType.OPENID_CONNECT))
-                && CredentialClassifier.isBareJwt(CredentialClassifier.header(headers, "authorization"));
+    private AppSyncAuthContext authenticateBareJwtOrLambda(
+            Map<String, String> headers, GraphqlApi api, Set<AuthenticationType> configured, AuthRequestInfo info) {
+        boolean bearerModes = configured.contains(AuthenticationType.AMAZON_COGNITO_USER_POOLS)
+                || configured.contains(AuthenticationType.OPENID_CONNECT);
+        if (!bearerModes || !CredentialClassifier.isBareJwt(CredentialClassifier.header(headers, "authorization"))) {
+            return authenticateLambda(headers, api, configured, info);
+        }
+        if (!configured.contains(AuthenticationType.AWS_LAMBDA)) {
+            return authenticateBearer(headers, api, configured, info);
+        }
+        try {
+            return authenticateBearer(headers, api, configured, info);
+        } catch (AppSyncTransportException e) {
+            LOG.debugv("Bare JWT not accepted by Cognito or OIDC, trying the Lambda authorizer: {0}", e.getMessage());
+            return authenticateLambda(headers, api, configured, info);
+        }
     }
 
     private AppSyncAuthContext authenticateApiKey(

@@ -140,8 +140,26 @@ class AuthMiddlewareTest {
     }
 
     @Test
-    void bareJwtGoesToLambdaWhenLambdaIsConfigured() {
+    void bareJwtAcceptedByCognitoDoesNotReachLambdaWhenLambdaIsConfigured() {
         GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
+        api.setUserPoolConfig(Map.of("userPoolId", "pool", "awsRegion", "us-east-1"));
+        AdditionalAuthenticationProvider lambda = new AdditionalAuthenticationProvider();
+        lambda.setAuthenticationType(AuthenticationType.AWS_LAMBDA);
+        api.setAdditionalAuthenticationProviders(List.of(lambda));
+        String jwt = JwtClaimsDecoder.encode(new HashMap<>(Map.of("sub", "s")), new ObjectMapper());
+        when(cognitoAuthValidator.matchesProvider(any(), any())).thenReturn(true);
+        when(cognitoAuthValidator.validate(any(), any(), any())).thenReturn(Map.of("sub", "s"));
+
+        AppSyncAuthContext ctx = middleware.authenticate(Map.of("Authorization", jwt), api, info);
+
+        assertEquals(AuthenticationType.AMAZON_COGNITO_USER_POOLS, ctx.authenticationType());
+        verify(lambdaAuthorizerValidator, never()).authorize(any(), any(), any(), any());
+    }
+
+    @Test
+    void bareJwtNoProviderAcceptsGoesToLambda() {
+        GraphqlApi api = api(AuthenticationType.AMAZON_COGNITO_USER_POOLS);
+        api.setUserPoolConfig(Map.of("userPoolId", "pool", "awsRegion", "us-east-1"));
         AdditionalAuthenticationProvider lambda = new AdditionalAuthenticationProvider();
         lambda.setAuthenticationType(AuthenticationType.AWS_LAMBDA);
         api.setAdditionalAuthenticationProviders(List.of(lambda));
