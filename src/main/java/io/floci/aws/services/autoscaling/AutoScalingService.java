@@ -634,6 +634,14 @@ public class AutoScalingService implements PassedRoleLookup {
                 // is not terminated, and stays in the target groups another of their groups has attached.
                 deregisterFromUnsharedTargetGroups(asg, memberIds(asg), attachedTargetGroups(asg));
             } else if (forceDelete && ec2Service != null && !active.isEmpty()) {
+                // The instances leave the group's load balancers before they are terminated, as on a scale-in.
+                List<String> leaving = active.stream().map(AsgInstance::getInstanceId).filter(Objects::nonNull).toList();
+                if (elbV2Service != null) {
+                    deregisterFromTargetGroups(elbV2Service, asg, leaving);
+                }
+                if (elbClassicService != null) {
+                    deregisterFromClassicLoadBalancers(elbClassicService, asg, leaving);
+                }
                 active.stream()
                         .map(AsgInstance::getInstanceId)
                         .filter(Objects::nonNull)
@@ -1046,13 +1054,14 @@ public class AutoScalingService implements PassedRoleLookup {
         if (instanceIds.isEmpty()) {
             return;
         }
-        List<TargetDescription> targets = instanceIds.stream().map(id -> {
-            TargetDescription target = new TargetDescription();
-            target.setId(id);
-            return target;
-        }).toList();
         String instances = String.join(", ", instanceIds);
         for (String tgArn : targetGroupArns) {
+            // Fresh targets for each target group: ELBv2 fills a target's missing port in with the group's own.
+            List<TargetDescription> targets = instanceIds.stream().map(id -> {
+                TargetDescription target = new TargetDescription();
+                target.setId(id);
+                return target;
+            }).toList();
             try {
                 elb.registerTargets(asg.getRegion(), tgArn, targets);
                 LOG.debugv("ASG {0}: registered {1} with TG {2}",

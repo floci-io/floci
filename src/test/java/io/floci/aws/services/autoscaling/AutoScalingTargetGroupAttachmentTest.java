@@ -7,9 +7,12 @@ import io.floci.aws.services.autoscaling.model.AutoScalingGroup;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.elbv2.model.TargetDescription;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -19,8 +22,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -60,6 +66,36 @@ class AutoScalingTargetGroupAttachmentTest {
         verify(targets).registerTargets(eq(REGION), eq("tg-new"), onlyTarget(IN_SERVICE));
         verifyNoMoreInteractions(targets);
         assertEquals(List.of("tg-attached", "tg-new"), group.getTargetGroupARNs());
+    }
+
+    /**
+     * Each target group gets targets of its own: ELBv2 fills a target's missing port in with its group's port, so
+     * targets shared between two groups would join the second with the first group's port.
+     */
+    @Test
+    void eachTargetGroupAttachedAtOnceRegistersTargetsOfItsOwn() {
+        List<Integer> portsGiven = new ArrayList<>();
+        doAnswer(call -> {
+            List<TargetDescription> given = call.getArgument(2);
+            given.forEach(target -> portsGiven.add(target.getPort()));
+            given.forEach(target -> target.setPort("tg-http".equals(call.getArgument(1)) ? 80 : 8080));
+            return null;
+        }).when(targets).registerTargets(eq(REGION), anyString(), anyList());
+
+        service.attachLoadBalancerTargetGroups(REGION, GROUP, List.of("tg-http", "tg-admin"));
+
+        Integer noPort = null;
+        assertEquals(Arrays.asList(noPort, noPort), portsGiven);
+    }
+
+    /** A group deleted with its instances takes them out of its target groups before it terminates them. */
+    @Test
+    void aForceDeleteDeregistersTheInstancesBeforeTerminatingThem() {
+        service.deleteAutoScalingGroup(REGION, GROUP, true);
+
+        InOrder order = inOrder(targets, service.ec2Service);
+        order.verify(targets).deregisterTargets(eq(REGION), eq("tg-attached"), exactlyTargets(IN_SERVICE, STANDBY));
+        order.verify(service.ec2Service).terminateInstances(REGION, List.of(IN_SERVICE));
     }
 
     @Test
