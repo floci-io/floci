@@ -56,6 +56,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1915,6 +1916,31 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     @Override
     public String namespace() {
         return "events";
+    }
+
+    /** The tags of the exact bus or rule ARN, read without changing the stored resource. */
+    @Override
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "events")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        if (!regionResolver.partitionForRegion(arn.region()).equals(arn.partition())) {
+            return Map.of();
+        }
+        if (arn.resource().startsWith("event-bus/")) {
+            String name = arn.resource().substring("event-bus/".length());
+            return accountGet(busStore, arn.accountId(), busKey(arn.region(), name))
+                    .filter(bus -> resourceArn.equals(bus.getArn()))
+                    .map(EventBus::getTags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
+        }
+        if (arn.resource().startsWith("rule/")) {
+            RuleRef ref = parseRuleResource(arn.resource());
+            return accountGet(ruleStore, arn.accountId(), ruleKey(arn.region(), ref.busName(), ref.ruleName()))
+                    .filter(rule -> resourceArn.equals(rule.getArn()))
+                    .map(Rule::getTags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
+        }
+        return Map.of();
     }
 
     /** The Region's default event bus, which a request naming no bus acts on. */
