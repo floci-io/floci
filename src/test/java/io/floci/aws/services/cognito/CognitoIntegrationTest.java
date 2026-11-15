@@ -2,6 +2,7 @@ package io.floci.aws.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testutil.SesMailbox;
 import io.quarkus.test.junit.QuarkusTest;
@@ -3931,8 +3932,7 @@ class CognitoIntegrationTest {
 
     private static void clearSes(String accountId) {
         given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
-                        + "/20260905/us-east-1/email/aws4_request")
+                .header("Authorization", EnforcementFixtures.auth(accountId, "email"))
                 .when()
                 .delete("/_aws/ses")
                 .then()

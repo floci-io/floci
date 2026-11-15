@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import io.floci.aws.testing.EnforcementFixtures;
 import io.restassured.specification.RequestSpecification;
 
 import static io.restassured.RestAssured.given;
@@ -32,7 +33,7 @@ public final class SesMailbox {
      * the mailbox.
      */
     public static ArrayNode messagesTo(String accountId, String recipient) {
-        return messages(given().header("Authorization", authorization(accountId)), recipient);
+        return messages(given().header("Authorization", EnforcementFixtures.auth(accountId, "email")), recipient);
     }
 
     private static ArrayNode messages(RequestSpecification request, String recipient) {
@@ -53,9 +54,5 @@ public final class SesMailbox {
             }
         }
         return matching;
-    }
-
-    private static String authorization(String accountId) {
-        return "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260905/us-east-1/email/aws4_request";
     }
 }
