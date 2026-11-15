@@ -1,6 +1,7 @@
 package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -70,6 +72,7 @@ class RedshiftRegionalRecordsMigrationTest {
             east.setSnapshotCopyGrantName("copies");
             clusters.putForAccount(ACCOUNT, "east", east);
 
+            // A service built without CDI, so no @PostConstruct ran: its startup observer moves the records.
             service(factory, config, "us-east-1").onStart(null);
 
             assertEquals(Set.of(regionalKey("us-east-1", "analytics"), regionalKey("eu-west-1", "analytics")),
@@ -110,7 +113,7 @@ class RedshiftRegionalRecordsMigrationTest {
             west.setSnapshotCopyDestinationRegion("us-west-2");
             west.setSnapshotCopyGrantName("copies");
             clusters.putForAccount(ACCOUNT, "west", west);
-            service(factory, config, "us-east-1").onStart(null);
+            service(factory, config, "us-east-1").migrateRegionalRecords();
 
             RedshiftService westService = service(factory, config, "eu-west-1");
             westService.modifyClusterParameterGroup("analytics",
@@ -133,6 +136,108 @@ class RedshiftRegionalRecordsMigrationTest {
                     grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getTags());
             assertEquals(Map.of(),
                     grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "copies")).orElseThrow().getTags());
+        } finally {
+            factory.shutdownAll();
+        }
+    }
+
+    /**
+     * A grant copied to another Region that held its first Region's default key, as a grant created without
+     * {@code KmsKeyId} does, holds the other Region's default key; a key the grant named stays as it was.
+     */
+    @Test
+    void aGrantCopiedToAnotherRegionTakesThatRegionsDefaultKey() {
+        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
+        StorageFactory factory = StorageFactories.open(config, "persistent");
+        try {
+            AccountAwareStorageBackend<SnapshotCopyGrant> grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
+                    new TypeReference<Map<String, SnapshotCopyGrant>>() { });
+            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
+                    new TypeReference<Map<String, Cluster>>() { });
+            String eastDefault = "arn:aws:kms:us-east-1:" + ACCOUNT + ":alias/aws/redshift";
+            String named = "arn:aws:kms:us-east-1:" + ACCOUNT + ":key/1234abcd-12ab-34cd-56ef-1234567890ab";
+            grants.putForAccount(ACCOUNT, "defaulted", new SnapshotCopyGrant("defaulted", eastDefault));
+            grants.putForAccount(ACCOUNT, "named", new SnapshotCopyGrant("named", named));
+            Cluster first = pausedCluster("first", null);
+            first.setSnapshotCopyDestinationRegion("us-west-2");
+            first.setSnapshotCopyGrantName("defaulted");
+            clusters.putForAccount(ACCOUNT, "first", first);
+            Cluster second = pausedCluster("second", null);
+            second.setSnapshotCopyDestinationRegion("us-west-2");
+            second.setSnapshotCopyGrantName("named");
+            clusters.putForAccount(ACCOUNT, "second", second);
+
+            service(factory, config, "us-east-1").migrateRegionalRecords();
+
+            assertEquals("arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift",
+                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "defaulted")).orElseThrow().getKmsKeyId());
+            assertEquals(eastDefault,
+                    grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "defaulted")).orElseThrow().getKmsKeyId());
+            assertEquals(named,
+                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "named")).orElseThrow().getKmsKeyId());
+        } finally {
+            factory.shutdownAll();
+        }
+    }
+
+    /**
+     * A grant created in another Region, so holding that Region's default key, is moved to the default Region with
+     * the default Region's key, and the copy made for the Region that created it keeps that Region's.
+     */
+    @Test
+    void aGrantMovedToTheDefaultRegionTakesItsDefaultKeyToo() {
+        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
+        StorageFactory factory = StorageFactories.open(config, "persistent");
+        try {
+            AccountAwareStorageBackend<SnapshotCopyGrant> grants = factory.create("redshift", "redshift-snapshot-copy-grants.json",
+                    new TypeReference<Map<String, SnapshotCopyGrant>>() { });
+            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
+                    new TypeReference<Map<String, Cluster>>() { });
+            String westDefault = "arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift";
+            grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", westDefault));
+            Cluster east = pausedCluster("east", null);
+            east.setSnapshotCopyDestinationRegion("us-west-2");
+            east.setSnapshotCopyGrantName("copies");
+            clusters.putForAccount(ACCOUNT, "east", east);
+
+            service(factory, config, "us-east-1").migrateRegionalRecords();
+
+            assertEquals("arn:aws:kms:us-east-1:" + ACCOUNT + ":alias/aws/redshift",
+                    grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "copies")).orElseThrow().getKmsKeyId());
+            assertEquals(westDefault,
+                    grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getKmsKeyId());
+        } finally {
+            factory.shutdownAll();
+        }
+    }
+
+    /**
+     * A service given a plain ObjectMapper, without the Java time module, still copies a record carrying an
+     * {@code Instant}: a snapshot schedule's {@code updatedAt}.
+     */
+    @Test
+    void aRecordWithAnInstantIsCopiedWhateverMapperTheServiceWasGiven() {
+        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
+        StorageFactory factory = StorageFactories.open(config, "persistent");
+        try {
+            AccountAwareStorageBackend<SnapshotSchedule> schedules = factory.create("redshift", "redshift-snapshot-schedules.json",
+                    new TypeReference<Map<String, SnapshotSchedule>>() { });
+            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
+                    new TypeReference<Map<String, Cluster>>() { });
+            SnapshotSchedule nightly = new SnapshotSchedule("nightly", "d", List.of("rate(12 hours)"));
+            nightly.setUpdatedAt(Instant.parse("2026-11-01T00:00:00Z"));
+            schedules.putForAccount(ACCOUNT, "nightly", nightly);
+            Cluster west = pausedCluster("west", "eu-west-1");
+            west.setSnapshotScheduleIdentifier("nightly");
+            clusters.putForAccount(ACCOUNT, "west", west);
+
+            new RedshiftService(factory, mock(RedshiftContainerManager.class), config,
+                    new RegionResolver("us-east-1", ACCOUNT), mock(RedshiftProxyManager.class),
+                    mock(DockerHostResolver.class), new RedshiftCredentialBroker(), null, new ObjectMapper(), null)
+                    .migrateRegionalRecords();
+
+            assertEquals(Instant.parse("2026-11-01T00:00:00Z"),
+                    schedules.getForAccount(ACCOUNT, regionalKey("eu-west-1", "nightly")).orElseThrow().getUpdatedAt());
         } finally {
             factory.shutdownAll();
         }
