@@ -16,6 +16,7 @@ import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import io.floci.aws.services.mwaa.model.UpdateEnvironmentRequest;
 import io.floci.aws.services.mwaa.proxy.MwaaProxyManager;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,8 @@ import org.mockito.Mockito;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -551,6 +554,8 @@ class MwaaServiceTest {
         private MwaaEnvironmentManager environmentManager;
         private MwaaProxyManager proxyManager;
         private MwaaService realModeService;
+        private S3Service s3Service;
+        private final List<Runnable> queuedInstalls = new ArrayList<>();
         private boolean keepRunningOnShutdown;
 
         @BeforeEach
@@ -573,6 +578,7 @@ class MwaaServiceTest {
                         case "proxyMaxPort" -> 8799;
                         case "dagSyncIntervalSeconds" -> 30;
                         case "keepRunningOnShutdown" -> keepRunningOnShutdown;
+                        case "installRequirements" -> true;
                         default -> defaultValue(method);
                     });
             EmulatorConfig.ServicesConfig servicesConfig = proxy(EmulatorConfig.ServicesConfig.class,
@@ -592,14 +598,14 @@ class MwaaServiceTest {
             });
 
             RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
-            S3Service s3Service = Mockito.mock(S3Service.class);
+            s3Service = Mockito.mock(S3Service.class);
             environmentManager = Mockito.mock(MwaaEnvironmentManager.class);
             proxyManager = Mockito.mock(MwaaProxyManager.class);
             portAllocator = Mockito.mock(PortAllocator.class);
             when(portAllocator.allocate(8700, 8799)).thenReturn(8701);
 
             realModeService = new MwaaService(storageFactory, config, regionResolver,
-                    environmentManager, proxyManager, portAllocator, s3Service);
+                    environmentManager, proxyManager, portAllocator, s3Service, queuedInstalls::add);
         }
 
         @Test
@@ -638,6 +644,99 @@ class MwaaServiceTest {
             verify(portAllocator).release(8701);
             verify(environmentManager).stopEnvironment(environment);
             verify(proxyManager).stopProxy(mwaaService.environmentIdentity(environment));
+        }
+
+        private Environment createWithRequirements(String name, byte[] requirements) {
+            return createWithRequirements(name, requirements, 0);
+        }
+
+        private Environment createWithRequirements(String name, byte[] requirements, int bootstrapExitCode) {
+            when(s3Service.getObject("my-bucket", "requirements.txt"))
+                    .thenReturn(new S3Object("my-bucket", "requirements.txt", requirements, "text/plain"));
+            when(environmentManager.lastRequirementsInstallExitCode(any())).thenReturn(bootstrapExitCode);
+            CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+            request.setRequirementsS3Path("requirements.txt");
+            Environment environment = realModeService.createEnvironment(name, request);
+            when(environmentManager.isReady(environment)).thenReturn(true);
+            realModeService.checkReadiness(environment);
+            return environment;
+        }
+
+        @Test
+        void requirementsReachTheContainerBeforeAirflowStartsAndTheFirstSyncDoesNotReinstall() {
+            byte[] requirements = "boto3==1.35.0\n".getBytes(StandardCharsets.UTF_8);
+
+            Environment environment = createWithRequirements("req-env", requirements);
+            realModeService.syncDags(environment);
+
+            verify(environmentManager).startEnvironment(environment, "2.10.5", null, requirements);
+            assertTrue(queuedInstalls.isEmpty());
+        }
+
+        @Test
+        void aFailedBootstrapInstallIsInstalledAgainByTheFirstSync() {
+            byte[] requirements = "boto3==1.35.0\n".getBytes(StandardCharsets.UTF_8);
+            Environment environment = createWithRequirements("req-failed-env", requirements, 1);
+
+            realModeService.syncDags(environment);
+            queuedInstalls.forEach(Runnable::run);
+
+            verify(environmentManager).installRequirements(environment, requirements);
+        }
+
+        @Test
+        void aReinstallStillRunningIsNotStartedAgain() {
+            Environment environment = createWithRequirements("req-slow-env",
+                    "boto3==1.35.0\n".getBytes(StandardCharsets.UTF_8));
+            when(s3Service.getObject("my-bucket", "requirements.txt")).thenReturn(new S3Object("my-bucket",
+                    "requirements.txt", "boto3==1.36.0\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+
+            realModeService.syncDags(environment);
+            realModeService.syncDags(environment);
+
+            assertEquals(1, queuedInstalls.size());
+        }
+
+        @Test
+        void changedRequirementsAreReinstalledByTheNextSync() {
+            Environment environment = createWithRequirements("req-change-env",
+                    "boto3==1.35.0\n".getBytes(StandardCharsets.UTF_8));
+            byte[] changed = "boto3==1.36.0\n".getBytes(StandardCharsets.UTF_8);
+            when(s3Service.getObject("my-bucket", "requirements.txt"))
+                    .thenReturn(new S3Object("my-bucket", "requirements.txt", changed, "text/plain"));
+
+            realModeService.syncDags(environment);
+            queuedInstalls.forEach(Runnable::run);
+            realModeService.syncDags(environment);
+
+            verify(environmentManager).installRequirements(environment, changed);
+            assertEquals(1, queuedInstalls.size());
+        }
+
+        @Test
+        void anS3FaultReadingRequirementsFailsTheEnvironment() {
+            when(s3Service.getObject("my-bucket", "requirements.txt")).thenThrow(new AwsException("InternalError",
+                    "We encountered an internal error. Please try again.", 500));
+            CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+            request.setRequirementsS3Path("requirements.txt");
+
+            Environment environment = realModeService.createEnvironment("faulty-req-env", request);
+
+            assertEquals(EnvironmentStatus.CREATE_FAILED, environment.getStatus());
+            verify(environmentManager, Mockito.never()).startEnvironment(any(), any(), any(), any());
+        }
+
+        @Test
+        void aMissingRequirementsObjectDoesNotFailTheEnvironment() {
+            when(s3Service.getObject("my-bucket", "requirements.txt")).thenThrow(new AwsException("NoSuchKey",
+                    "The specified key does not exist.", 404));
+            CreateEnvironmentRequest request = createRequest("arn:aws:s3:::my-bucket", "dags");
+            request.setRequirementsS3Path("requirements.txt");
+
+            Environment environment = realModeService.createEnvironment("missing-req-env", request);
+
+            assertEquals(EnvironmentStatus.CREATING, environment.getStatus());
+            verify(environmentManager).startEnvironment(environment, "2.10.5", null, null);
         }
 
         @Test

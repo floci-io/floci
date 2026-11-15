@@ -38,7 +38,7 @@ Floci starts two containers per environment:
 Legacy environments retain the region recorded in their ARN. A request in another region does not
 adopt that environment; recreate it in the requested region instead.
 
-Once Airflow's unauthenticated `/health` endpoint reports both `metadatabase` and `scheduler` as `"healthy"`, the environment transitions to `AVAILABLE`. If the Postgres or Airflow container instead exits before that (a startup script or `airflow db migrate` failing partway through, or Postgres itself dying), the same poller detects the stopped container and transitions the environment to `CREATE_FAILED` rather than polling dead containers forever.
+Once Airflow's unauthenticated `/health` endpoint reports `metadatabase`, `scheduler` and `triggerer` as `"healthy"`, the environment transitions to `AVAILABLE`. If the Postgres or Airflow container instead exits before that (a startup script or `airflow db migrate` failing partway through, or Postgres itself dying), the same poller detects the stopped container and transitions the environment to `CREATE_FAILED` rather than polling dead containers forever.
 
 ### Web/CLI proxy
 
@@ -46,7 +46,7 @@ Floci runs its own HTTP proxy per environment (published on a host port from the
 
 ### Startup scripts (`StartupScriptS3Path`)
 
-If configured, the script is fetched from S3 at environment-creation time and injected into the Airflow container before it starts (before `airflow db migrate`/scheduler/webserver), matching real MWAA's ordering. Two behaviors worth knowing about since they're not obvious from the API surface:
+If configured, the script is fetched from S3 at environment-creation time and injected into the Airflow container before it starts. It runs first, then `requirements.txt` is installed, then `airflow db migrate` and the triggerer, scheduler and webserver start, matching real MWAA's ordering. Variables the script exports (a private index URL for `pip`, for example) are still set when `requirements.txt` installs, at creation and on every later reinstall. Two behaviors worth knowing about since they're not obvious from the API surface:
 
 - The `airflow` OS user is granted passwordless `sudo` inside the container specifically so scripts using `sudo apt-get ...`-style commands (the pattern shown in AWS's own startup-script documentation) work — the stock `apache/airflow` image ships `sudo` but requires a password by default, so without this grant any `sudo` line would hang.
 - A fixed set of Floci-managed environment variables (the Fernet key, the database connection string, the executor setting, and the AWS-SDK-redirection variables described below) are snapshotted before the script runs and restored immediately after, so a script that touches one of these — intentionally or not — can't break the environment. This mirrors real MWAA's "reserved environment variables" behavior.
@@ -86,11 +86,11 @@ services:
 | `FLOCI_SERVICES_MWAA_DOCKER_NETWORK` | *(unset)* | Docker network for the Postgres/Airflow containers (falls back to the global `FLOCI_SERVICES_DOCKER_NETWORK`, then Floci's own network) |
 | `FLOCI_SERVICES_MWAA_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave Postgres/Airflow containers running after Floci stops |
 | `FLOCI_SERVICES_MWAA_DAG_SYNC_INTERVAL_SECONDS` | `30` | How often to poll S3 for DAG and `requirements.txt` changes |
-| `FLOCI_SERVICES_MWAA_INSTALL_REQUIREMENTS` | `true` | Install `RequirementsS3Path` (via `pip install -r`) when it changes |
+| `FLOCI_SERVICES_MWAA_INSTALL_REQUIREMENTS` | `true` | Install `RequirementsS3Path` (via `pip install -r`) before Airflow starts, and again when it changes |
 
 ## DAG and requirements sync
 
-Every `dag-sync-interval-seconds`, Floci lists the environment's `DagS3Path` prefix in the bucket referenced by `SourceBucketArn` and copies any changed files into the container's `/opt/airflow/dags` — reusing Floci's existing in-process S3 emulation rather than any new AWS-facing surface. `RequirementsS3Path`, if set, is fetched and `pip install -r`'d the same way whenever its content changes. A broken DAG file or a failing `pip install` is logged but never fails the environment, matching real MWAA behavior.
+Every `dag-sync-interval-seconds`, Floci lists the environment's `DagS3Path` prefix in the bucket referenced by `SourceBucketArn` and copies any changed files into the container's `/opt/airflow/dags`, reusing Floci's existing in-process S3 emulation rather than any new AWS-facing surface. `RequirementsS3Path`, if set, is fetched at creation and installed inside the container after the startup script and before Airflow starts, so a DAG can import its packages from the first parse. If that first install fails, the first DAG-sync pass logs pip's exit code and installs the file again. After that it is installed again whenever its content changes. Every install stops after 15 minutes, and reinstalls run in the background, one at a time per environment, so a slow one never holds up the DAG sync. A broken DAG file or a failing `pip install` is logged but never fails the environment, matching real MWAA behavior.
 
 ## ARN Format
 
@@ -186,7 +186,6 @@ The following are current, known gaps:
 - `PluginsS3Path` is accepted and stored on the environment but not fetched or applied — real MWAA's `plugins.zip` mechanism for shipping custom binaries has no equivalent here yet.
 - `UpdateEnvironment` supports metadata-only fields (tags, description, logging-config toggles). Changing `AirflowVersion`, `AirflowConfigurationOptions`, or `RequirementsS3Path` requires deleting and recreating the environment — these would require recreating the running container, which is out of scope for an in-place update today.
 - `CreateWebLoginToken` returns a stubbed token rather than performing a real Airflow FAB/JWT SSO handshake.
-- No per-component `MWAA_AIRFLOW_COMPONENT` environment variable — real MWAA runs the startup script separately on webserver, scheduler, and worker; Floci runs webserver and scheduler together in one container, so there's no per-component distinction to expose.
-- No `triggerer` process — DAGs using deferrable operators will log warnings, since only the scheduler and webserver run.
+- No per-component `MWAA_AIRFLOW_COMPONENT` environment variable. Real MWAA runs the startup script separately on webserver, scheduler, and worker; Floci runs the webserver, scheduler and triggerer together in one container, so there's no per-component distinction to expose.
 - Docker container and volume names are namespace-aware (via `FLOCI_DOCKER_RESOURCE_NAMESPACE`, same as every other Docker-backed service) but not scoped by AWS account id — two accounts creating an identically-named environment can collide. This is a pre-existing characteristic shared by every Docker-backed Floci service (EKS, RDS, ...), not unique to MWAA.
 - Environments loaded from persistent storage on Floci restart are not automatically reconnected to their Docker containers — again, a gap shared by every Docker-backed service today, not specific to MWAA.
