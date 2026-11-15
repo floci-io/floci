@@ -791,14 +791,15 @@ type comes from the Service Authorization Reference:
 | `arn:aws:states:::aws-sdk:sfn:describeMapRun` | `states:DescribeMapRun` | The Map Run | `Sfn.AccessDeniedException` |
 | `arn:aws:states:::states:startExecution`, with `.sync`, `.sync:2` or `.waitForTaskToken` | `states:StartExecution` | The child state machine | `StepFunctions.AccessDeniedException` |
 
-A CloudFormation action is evaluated on the stack or stack set the request reaches, under the id
-CloudFormation holds for it, so a name and the id it stands for are one resource:
-`stack/<StackName>/<id>` and `stackset/<StackSetName>:<id>`. `createStack` and `createChangeSet` on a stack
-not there yet evaluate `stack/<StackName>/*`. A change set named by its ARN, or a `describeStackResources`
-naming a `PhysicalResourceId`, is evaluated on the stack that holds it. `describeStacks` and
-`getTemplateSummary` without a `StackName` are on `*`, as are `validateTemplate`, `listStacks`, `listExports`,
-`createStackSet`, `listStackSets`, `describeOrganizationsAccess` and `activateOrganizationsAccess`, which
-have no resource type.
+A CloudFormation action is evaluated as the same request made directly is, from the generated request resources:
+on the stack or stack set the request names, under the id CloudFormation holds for it, so a name and the id it
+stands for are one resource: `stack/<StackName>/<id>` and `stackset/<StackSetName>:<id>`. A stack or stack set
+CloudFormation does not hold has its id open, `stack/<StackName>/*` or `stackset/<StackSetName>:*`, and a stack
+id it does not hold is evaluated as given. A request naming its stack by no `StackName` (a change set by its ARN
+alone, a `describeStackResources` by `PhysicalResourceId` alone, a `describeStacks` or `getTemplateSummary` with
+none) is on `*`, as are `validateTemplate`, `listStacks`, `listExports`, `createStackSet`, `listStackSets`,
+`describeOrganizationsAccess` and `activateOrganizationsAccess`, which have no resource type. An API the handler
+does not serve is evaluated the same way, and CloudFormation then answers it with `UnknownAction`.
 
 `states:InvokeHTTPEndpoint` has no resource type in the Service Authorization Reference, and the CDK grants
 it on `*`, while the Developer Guide's example scopes it to the state machine, so the state machine is what is
@@ -819,11 +820,11 @@ Every integration that evaluates a role is refused on its `.waitForTaskToken` fo
 task starts nothing and waits for nothing. With the permission, it calls its service and then waits on its
 token.
 
-A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, a stack
-or stack set name its service does not have, no `SecretId`, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or
-`MapRunArn` that is not one, or a token naming no task. A stack named by an ARN of what does not exist here is left
-to the service. A secret is evaluated as a direct `DescribeSecret` naming it is, from the generated request resources. An API Floci does not serve keeps its
-answer, whatever the role: it is "Unsupported", or CloudFormation's `UnknownAction`, and the role is not checked.
+A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, no
+`SecretId`, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or `MapRunArn` that is not one, or a token naming no
+task. A secret is evaluated as a direct `DescribeSecret` naming it is, from the generated request resources. An API
+Floci does not serve keeps its answer, whatever the role: it is "Unsupported", and the role is not checked, except a
+CloudFormation API, which is evaluated as above before CloudFormation answers it with `UnknownAction`.
 
 An activity task is not evaluated: the CDK's own task needs no permission for it, and the worker calling
 `GetActivityTask` is authorized by its own request. `Map`'s `ItemReader` and `ResultWriter` S3 calls are not
