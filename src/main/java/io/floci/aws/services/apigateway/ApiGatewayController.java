@@ -277,12 +277,16 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis/{apiId}/authorizers")
-    public Response getAuthorizers(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+    public Response getAuthorizers(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                   @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<io.floci.aws.services.apigateway.model.Authorizer> auths = service.getAuthorizers(region, apiId);
+        ApiGatewayService.AuthorizerPage page = service.getAuthorizerPage(region, apiId, limit, position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        auths.forEach(a -> items.add(toAuthorizerNode(a)));
+        page.items().forEach(a -> items.add(toAuthorizerNode(a)));
+        if (page.position() != null) {
+            root.put("position", page.position());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

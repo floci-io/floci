@@ -1251,6 +1251,31 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return authorizerStore.scan(k -> k.startsWith(prefix));
     }
 
+    public record AuthorizerPage(List<Authorizer> items, String position) {}
+
+    public AuthorizerPage getAuthorizerPage(String region, String apiId, Integer limit, String position) {
+        List<Authorizer> authorizers = getAuthorizers(region, apiId).stream()
+                .sorted(Comparator.comparing(Authorizer::getId))
+                .toList();
+        if (limit != null && limit < 1) {
+            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
+        }
+        int pageSize = limit == null ? 25 : Math.min(limit, 500);
+        int start = 0;
+        if (position != null && !position.isBlank()) {
+            while (start < authorizers.size() && !position.equals(authorizers.get(start).getId())) {
+                start++;
+            }
+            if (start == authorizers.size()) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            start++;
+        }
+        int end = Math.min(start + pageSize, authorizers.size());
+        String nextPosition = end < authorizers.size() ? authorizers.get(end - 1).getId() : null;
+        return new AuthorizerPage(List.copyOf(authorizers.subList(start, end)), nextPosition);
+    }
+
     public void deleteAuthorizer(String region, String apiId, String authorizerId) {
         getAuthorizer(region, apiId, authorizerId);
         authorizerStore.delete(authorizerKey(region, apiId, authorizerId));
