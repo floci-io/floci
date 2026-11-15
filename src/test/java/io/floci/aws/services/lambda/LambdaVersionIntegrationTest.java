@@ -1,15 +1,13 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.io.ByteArrayOutputStream;
 import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -301,19 +299,14 @@ class LambdaVersionIntegrationTest {
     }
 
     private void createInvocableFunction(String fnName) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write("""
-                    exports.handler = async (event, context) => ({
-                        ok: true,
-                        envVersion: process.env.AWS_LAMBDA_FUNCTION_VERSION,
-                        contextVersion: context.functionVersion
-                    });
-                    """.getBytes());
-            zos.closeEntry();
-        }
-        String base64Zip = Base64.getEncoder().encodeToString(baos.toByteArray());
+        byte[] archive = LambdaCodeFixtures.nodeJsZip("""
+                exports.handler = async (event, context) => ({
+                    ok: true,
+                    envVersion: process.env.AWS_LAMBDA_FUNCTION_VERSION,
+                    contextVersion: context.functionVersion
+                });
+                """);
+        String base64Zip = Base64.getEncoder().encodeToString(archive);
 
         given()
             .contentType("application/json")

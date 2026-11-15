@@ -1,15 +1,13 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.io.ByteArrayOutputStream;
 import java.time.Duration;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -29,13 +27,7 @@ class LambdaReactiveSyncIntegrationTest {
     private static final String FN     = "reactive-sync-fn";
 
     private static byte[] makeZip(String body) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write(("exports.handler = async (e) => ({ body: '" + body + "' });").getBytes());
-            zos.closeEntry();
-        }
-        return baos.toByteArray();
+        return LambdaCodeFixtures.nodeJsZip("exports.handler = async (e) => ({ body: '" + body + "' });");
     }
 
     @Test

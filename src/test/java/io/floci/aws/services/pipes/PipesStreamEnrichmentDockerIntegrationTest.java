@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.DynamoDbRequests;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SqsTestQueue;
 import io.quarkus.test.junit.QuarkusTest;
@@ -14,14 +15,11 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -177,22 +175,17 @@ class PipesStreamEnrichmentDockerIntegrationTest {
     }
 
     private static String enrichmentZipBase64() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("""
-                    exports.handler = async (records) => records.flatMap((record) => {
-                      const rowId = record.dynamodb.Keys.sk.S.split('#')[1];
-                      return [1, 2].map((part) => ({
-                        Source: 'orders',
-                        DetailType: 'Order Written',
-                        Detail: JSON.stringify({rowId, part}),
-                      }));
-                    });
-                    """.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+        byte[] bytes = LambdaCodeFixtures.nodeJsZip("""
+                exports.handler = async (records) => records.flatMap((record) => {
+                  const rowId = record.dynamodb.Keys.sk.S.split('#')[1];
+                  return [1, 2].map((part) => ({
+                    Source: 'orders',
+                    DetailType: 'Order Written',
+                    Detail: JSON.stringify({rowId, part}),
+                  }));
+                });
+                """);
+        return Base64.getEncoder().encodeToString(bytes);
     }
 
     private static void putItem(String table, String sortKey) {

@@ -1,13 +1,10 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -119,18 +116,13 @@ class LambdaGetFunctionConcurrencyIntegrationTest {
     }
 
     private static void createFunction(String account, String region, String name) throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => ({});".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
+        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({});");
         given().header("Authorization", auth(account, region)).contentType("application/json")
                 .body("""
                     {"FunctionName":"%s","Runtime":"nodejs20.x",
                      "Role":"arn:aws:iam::%s:role/lambda-role","Handler":"index.handler",
                      "Code":{"ZipFile":"%s"}}
-                    """.formatted(name, account, Base64.getEncoder().encodeToString(bytes.toByteArray())))
+                    """.formatted(name, account, Base64.getEncoder().encodeToString(bytes)))
                 .when().post(FUNCTIONS).then().statusCode(201);
     }
 

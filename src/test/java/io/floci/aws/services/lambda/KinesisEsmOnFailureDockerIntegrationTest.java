@@ -6,6 +6,7 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.kinesis.KinesisService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.SqsTestQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -13,14 +14,11 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -150,20 +148,15 @@ class KinesisEsmOnFailureDockerIntegrationTest {
     }
 
     private static String poisonRaisingZipBase64() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("""
-                    exports.handler = async (event) => {
-                      for (const record of event.Records) {
-                        if (Buffer.from(record.kinesis.data, 'base64').toString() === 'poison') {
-                          throw new Error('poison record');
-                        }
-                      }
-                    };
-                    """.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+        byte[] bytes = LambdaCodeFixtures.nodeJsZip("""
+                exports.handler = async (event) => {
+                  for (const record of event.Records) {
+                    if (Buffer.from(record.kinesis.data, 'base64').toString() === 'poison') {
+                      throw new Error('poison record');
+                    }
+                  }
+                };
+                """);
+        return Base64.getEncoder().encodeToString(bytes);
     }
 }

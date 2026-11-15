@@ -18,6 +18,7 @@ import io.floci.aws.services.lambda.zip.ZipExtractor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -2864,13 +2865,8 @@ class LambdaServiceTest {
     }
 
     private static String zipWithBody(String body) throws Exception {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-            zos.putNextEntry(new ZipEntry("index.js"));
-            zos.write((body + "\n").getBytes(StandardCharsets.UTF_8));
-            zos.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(baos.toByteArray());
+        byte[] archive = LambdaCodeFixtures.nodeJsZip(body + "\n");
+        return Base64.getEncoder().encodeToString(archive);
     }
 
     @Test

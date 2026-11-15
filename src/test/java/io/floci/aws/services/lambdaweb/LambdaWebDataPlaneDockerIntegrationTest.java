@@ -10,6 +10,7 @@ import io.floci.aws.services.cloudfront.model.OriginAccessControl;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.lambdaweb.LambdaWebEnvironmentManager.Environment;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -23,7 +24,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -44,8 +44,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -943,13 +941,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     }
 
     private static byte[] zip(String indexJs) throws IOException {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write(indexJs.getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return bytes.toByteArray();
+        return LambdaCodeFixtures.nodeJsZip(indexJs);
     }
 
     private boolean isDockerAvailable() {

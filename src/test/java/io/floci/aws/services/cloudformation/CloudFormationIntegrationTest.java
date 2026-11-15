@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.cloudformation.model.Stack;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.MutableClock;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -17,8 +18,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
@@ -28,8 +27,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -75,13 +72,7 @@ class CloudFormationIntegrationTest {
 
     private static byte[] buildHandlerZip() {
         try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return baos.toByteArray();
+            return LambdaCodeFixtures.nodeJsZip("exports.handler=async(e)=>({statusCode:200})");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

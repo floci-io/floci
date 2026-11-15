@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
@@ -11,14 +12,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -238,15 +235,10 @@ class SamTransformIntegrationTest {
             .header("X-Amz-Executed-Version", equalTo("1"))
             .body("ok", equalTo(true));
 
-        ByteArrayOutputStream changedCode = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(changedCode)) {
-            zip.putNextEntry(new ZipEntry("index.js"));
-            zip.write("exports.handler = async () => ({ ok: false });".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
+        byte[] changedCode = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ ok: false });");
         given()
             .contentType("application/json")
-            .body("{\"ZipFile\":\"" + Base64.getEncoder().encodeToString(changedCode.toByteArray()) + "\"}")
+            .body("{\"ZipFile\":\"" + Base64.getEncoder().encodeToString(changedCode) + "\"}")
         .when()
             .put("/2015-03-31/functions/sam-alias-func/code")
         .then()
@@ -2383,13 +2375,7 @@ class SamTransformIntegrationTest {
 
     private static byte[] buildHandlerZip() {
         try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return baos.toByteArray();
+            return LambdaCodeFixtures.nodeJsZip("exports.handler=async(e)=>({statusCode:200})");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

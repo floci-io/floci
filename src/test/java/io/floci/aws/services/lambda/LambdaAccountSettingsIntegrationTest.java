@@ -1,14 +1,12 @@
 package io.floci.aws.services.lambda;
 
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -89,13 +87,8 @@ class LambdaAccountSettingsIntegrationTest {
 
     private static String zipBase64() {
         try {
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            try (ZipOutputStream zip = new ZipOutputStream(out)) {
-                zip.putNextEntry(new ZipEntry("index.js"));
-                zip.write("exports.handler = async () => ({ ok: true });".getBytes());
-                zip.closeEntry();
-            }
-            return Base64.getEncoder().encodeToString(out.toByteArray());
+            byte[] archive = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ ok: true });");
+            return Base64.getEncoder().encodeToString(archive);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
