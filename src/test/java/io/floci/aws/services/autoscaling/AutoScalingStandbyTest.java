@@ -807,10 +807,9 @@ class AutoScalingStandbyTest {
             doThrow(failure).doNothing().when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
         }
 
-        // Target groups are registered through AutoScalingService.registerWithTargetGroups, which logs there.
-        List<LogRecord> records = LogCapture.capture(
-                classicFailure ? AutoScalingReconciler.class : AutoScalingService.class,
-                () -> reconciler.reconcile(group()));
+        // Both are registered through AutoScalingService's registerWithTargetGroups and
+        // registerWithClassicLoadBalancers, which log there.
+        List<LogRecord> records = LogCapture.capture(AutoScalingService.class, () -> reconciler.reconcile(group()));
 
         List<LogRecord> warnings = records.stream()
                 .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
