@@ -54,7 +54,7 @@ class PaymentCryptographyAs2805CryptogramTest {
 
     @ParameterizedTest
     @EnumSource(value = PaymentCryptographyKeyAlgorithm.class,
-            names = {"TDES_2KEY", "TDES_3_KEY"})
+            names = {"TDES_2KEY", "TDES_3KEY"})
     void aCryptogramComesBackUnderTheKeyItWasWrappedUnder(PaymentCryptographyKeyAlgorithm algorithm) {
         String key = keyOf(algorithm.bytes(), KEY_SEED);
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
@@ -69,7 +69,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     @ParameterizedTest
     @ValueSource(strings = {"marker", "ciphertext", "tag"})
     void aCryptogramThatWasChangedDoesNotOpen(String part) {
-        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3_KEY;
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3KEY;
         String key = keyOf(algorithm.bytes(), KEY_SEED);
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
@@ -85,7 +85,7 @@ class PaymentCryptographyAs2805CryptogramTest {
         // The check value inside the cryptogram is the check value of the key the
         // ciphertext carries, so a ciphertext of another key passes it. The tag is over the
         // ciphertext, so the substitution is caught.
-        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3_KEY;
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3KEY;
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(keyOf(algorithm.bytes(), KEY_SEED), PIN_VARIANT, algorithm,
                 wrappingKey);
@@ -104,7 +104,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     void aCryptogramUnderOneVariantDoesNotOpenUnderAnother() {
         // The tag is over the variant, so a cryptogram bound to one purpose does not open
         // under another even though the key it carries is the same.
-        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3_KEY;
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3KEY;
         String key = keyOf(algorithm.bytes(), KEY_SEED);
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
@@ -119,7 +119,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     void aCryptogramWhoseAlgorithmWasChangedDoesNotOpen() {
         // The tag is over the algorithm as well, so a cryptogram that names another
         // algorithm does not open under it.
-        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3_KEY;
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3KEY;
         String key = keyOf(algorithm.bytes(), KEY_SEED);
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
@@ -133,7 +133,7 @@ class PaymentCryptographyAs2805CryptogramTest {
 
     @Test
     void aCryptogramUnderOneWrappingKeyDoesNotOpenUnderAnother() {
-        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3_KEY;
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3KEY;
         String key = keyOf(algorithm.bytes(), KEY_SEED);
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
         String cryptogram = wrap(key, PIN_VARIANT, algorithm, wrappingKey);
@@ -149,7 +149,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     void twoCryptogramsOfTheSameKeyAreNotTheSameBytes() {
         // The vector is fresh for every cryptogram, so the same key under the same wrapping
         // key does not give the same bytes twice.
-        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3_KEY;
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.TDES_3KEY;
         String key = keyOf(algorithm.bytes(), KEY_SEED);
         String wrappingKey = keyOf(algorithm.bytes(), WRAPPING_KEY_SEED);
 
@@ -162,8 +162,8 @@ class PaymentCryptographyAs2805CryptogramTest {
     @Test
     void aCryptogramThatIsNotHexadecimalIsRefused() {
         assertThrows(IllegalArgumentException.class,
-                () -> unwrap("not hexadecimal", PIN_VARIANT, PaymentCryptographyKeyAlgorithm.TDES_3_KEY,
-                        keyOf(PaymentCryptographyKeyAlgorithm.TDES_3_KEY.bytes(), WRAPPING_KEY_SEED)));
+                () -> unwrap("not hexadecimal", PIN_VARIANT, PaymentCryptographyKeyAlgorithm.TDES_3KEY,
+                        keyOf(PaymentCryptographyKeyAlgorithm.TDES_3KEY.bytes(), WRAPPING_KEY_SEED)));
     }
 
     /**

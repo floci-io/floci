@@ -724,16 +724,6 @@ public final class Tr34 {
 
     /** The given byte arrays, one after the other. */
     private static byte[] concat(byte[]... parts) {
-        int length = 0;
-        for (byte[] part : parts) {
-            length += part.length;
-        }
-        byte[] out = new byte[length];
-        int offset = 0;
-        for (byte[] part : parts) {
-            System.arraycopy(part, 0, out, offset, part.length);
-            offset += part.length;
-        }
-        return out;
+        return Bytes.concat(parts);
     }
 }

@@ -827,19 +827,14 @@ final class PaymentCryptographyKeyExchange {
         return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
-    /** Whether a string is hexadecimal. */
-    private static boolean isHex(String text) {
-        if (text == null || text.isEmpty() || text.length() % 2 != 0) {
-            return false;
+    /** Whether a key is TDES — AS2805 cryptography is all TDES. */
+    private static void requireTdes(PaymentCryptographyKey key, String role) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        if (!algorithm.isTdes()) {
+            throw validation("an AS2805 key is a TDES key, but the " + role + " "
+                    + key.getArn() + " is " + key.getKeyAlgorithm());
         }
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if (!hex) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /**
@@ -1305,6 +1300,7 @@ final class PaymentCryptographyKeyExchange {
                     + "which it needs to wrap a key cryptogram");
         }
         requireKeyEncryptionKey(kek);
+        requireTdes(kek, "the AS2805 wrapping key");
         PaymentCryptographyKeyAlgorithm kekAlgorithm =
                 PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
         PaymentCryptographyKeyAlgorithm algorithm =
@@ -1444,6 +1440,7 @@ final class PaymentCryptographyKeyExchange {
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
         PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
         requireKeyEncryptionKey(kek);
+        requireTdes(kek, "the AS2805 wrapping key");
         // The wrapping key opens an incoming cryptogram, so it has to be allowed to unwrap.
         // The model names no error code of its own for this, so it is a validation error,
         // as the rest of the refusals about a key's modes of use are.
