@@ -112,6 +112,9 @@ class CfnReplacementIntegrationTest {
 
     private static final String SQS_TYPE = "AWS::SQS::Queue";
     private static final String S3_TYPE = "AWS::S3::Bucket";
+    private static final String DDB_KEYS = "\"BillingMode\": \"PAY_PER_REQUEST\","
+            + " \"KeySchema\": [{\"AttributeName\": \"id\", \"KeyType\": \"HASH\"}],"
+            + " \"AttributeDefinitions\": [{\"AttributeName\": \"id\", \"AttributeType\": \"S\"}]";
 
     /**
      * A {@code type} whose {@code nameProperty} is {@code name} by {@code Fn::If} on {@code Named}, which is
@@ -173,6 +176,8 @@ class CfnReplacementIntegrationTest {
                         "Subject", "True", true, null),
                 createOnlyRow("ECR repository RepositoryName removed", "", "", "AWS::ECR::Repository",
                         "\"RepositoryName\": \"repl-ecr-named\"", "", "True", false, null),
+                createOnlyRow("DynamoDB table explicit TableName removed", "", "", "AWS::DynamoDB::Table",
+                        DDB_KEYS + ", \"TableName\": \"repl-ddb-removed\"", DDB_KEYS, "True", false, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
                         locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
