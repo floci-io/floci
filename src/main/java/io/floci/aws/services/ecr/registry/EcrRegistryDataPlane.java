@@ -8,6 +8,7 @@ import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
+import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.json.JsonArray;
@@ -18,10 +19,12 @@ import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -35,6 +38,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class EcrRegistryDataPlane {
 
+    private static final Logger LOG = Logger.getLogger(EcrRegistryDataPlane.class);
     private static final Pattern ECR_HOST = Pattern.compile(
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.localhost(?:\\.floci\\.io)?(?::[0-9]+)?$");
     private static final String MANIFESTS_PATH = "/manifests/";
@@ -298,8 +302,7 @@ public class EcrRegistryDataPlane {
                     failUnlessGone(context, 502);
                     return;
                 }
-                copyResponseHeaders(context, upstreamResponse.result(), request);
-                upstreamResponse.result().pipeTo(context.response()).onComplete(ignored -> exchange.end());
+                handleRegistryResponse(context, request, exchange, upstreamResponse.result());
             });
             Buffer waitingBody = exchange.replayBody();
             if (waitingBody == null) {
@@ -315,6 +318,42 @@ public class EcrRegistryDataPlane {
                 });
             }
         });
+    }
+
+    private void handleRegistryResponse(RoutingContext context, RegistryRequest request, Exchange exchange,
+                                        HttpClientResponse upstream) {
+        if (exchange.ended()) {
+            return;
+        }
+        String digest = upstream.getHeader("Docker-Content-Digest");
+        if (exchange.holdingWriteLock() && context.request().method() == HttpMethod.PUT
+                && upstream.statusCode() == 201 && digest != null && !digest.isBlank()) {
+            Instant pushedAt = Instant.now();
+            upstream.pause();
+            exchange.recordingPush = true;
+            vertx.executeBlocking(() -> ecrService.recordImagePush(request.accountId(), request.region(),
+                    request.repositoryName(), digest, pushedAt), false).onComplete(result -> {
+                exchange.recordingPush = false;
+                if (result.failed()) {
+                    LOG.warnv(result.cause(), "Could not record the push time of ECR manifest {0} in {1}",
+                            digest, request.storageRepositoryName());
+                    failUnlessGone(context, 502);
+                    exchange.end();
+                } else if (exchange.endRequested) {
+                    exchange.end();
+                } else {
+                    forwardResponse(context, request, exchange, upstream);
+                }
+            });
+            return;
+        }
+        forwardResponse(context, request, exchange, upstream);
+    }
+
+    private static void forwardResponse(RoutingContext context, RegistryRequest request, Exchange exchange,
+                                        HttpClientResponse upstream) {
+        copyResponseHeaders(context, upstream, request);
+        upstream.pipeTo(context.response()).onComplete(ignored -> exchange.end());
     }
 
     private static void registryUnavailable(RoutingContext context) {
@@ -361,7 +400,7 @@ public class EcrRegistryDataPlane {
     }
 
     private static void copyResponseHeaders(RoutingContext context,
-                                            io.vertx.core.http.HttpClientResponse upstream,
+                                            HttpClientResponse upstream,
                                             RegistryRequest request) {
         context.response().setStatusCode(upstream.statusCode());
         upstream.headers().forEach(header -> {
@@ -419,6 +458,8 @@ public class EcrRegistryDataPlane {
         private final AtomicBoolean admissionReleased = new AtomicBoolean();
         private Buffer waitingBody;
         private boolean waitingBodyRead;
+        private boolean recordingPush;
+        private boolean endRequested;
         private HttpClient client;
 
         private Exchange(String immutableTag, String writeLockRepository, boolean isWrite) {
@@ -498,6 +539,11 @@ public class EcrRegistryDataPlane {
         }
 
         private void end() {
+            if (recordingPush) {
+                // Keep the repository lock until the metadata write finishes, even on disconnect.
+                endRequested = true;
+                return;
+            }
             if (!ended.compareAndSet(false, true)) {
                 return;
             }

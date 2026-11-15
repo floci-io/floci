@@ -45,12 +45,15 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
+    private EcrService ecrService;
     private Semaphore repositoryWriteLock;
     private CountDownLatch repositoryWriteLockRefused;
 
@@ -241,6 +244,41 @@ class EcrRegistryDataPlaneTest {
         assertEquals("/v2/platform/api/blobs/uploads/upload-id",
                 EcrRegistryDataPlane.externalLocation(
                         "/v2/000000000000/us-east-1/platform/api/blobs/uploads/upload-id", request));
+    }
+
+    @Test
+    void recordsOnlyAcceptedManifestWritesBeforeResponding() throws Exception {
+        String digest = "sha256:" + "a".repeat(64);
+        AtomicBoolean accept = new AtomicBoolean();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> request.bodyHandler(body -> request.response()
+                        .putHeader("Docker-Content-Digest", digest)
+                        .setStatusCode(accept.get() ? 201 : 400).end()))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        try {
+            dataPlane = dataPlane(registry, false);
+            assertEquals(400, putManifest(dataPlane.actualPort()).statusCode());
+            Mockito.verify(ecrService, Mockito.never()).recordImagePush(anyString(), anyString(),
+                    anyString(), anyString(), any());
+
+            Mockito.doAnswer(call -> {
+                assertEquals(0, repositoryWriteLock.availablePermits());
+                return null;
+            }).when(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                    eq("platform/api"), eq(digest), any());
+            accept.set(true);
+            assertEquals(201, putManifest(dataPlane.actualPort()).statusCode());
+            Mockito.verify(ecrService).recordImagePush(eq("000000000000"), eq("us-east-1"),
+                    eq("platform/api"), eq(digest), any());
+        } finally {
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
     }
 
     @Test
@@ -914,7 +952,7 @@ class EcrRegistryDataPlaneTest {
 
     private HttpServer dataPlane(EcrRegistryManager registryManager, boolean immutableTags,
                                  CountDownLatch tagReleased) throws Exception {
-        EcrService ecrService = Mockito.mock(EcrService.class);
+        ecrService = Mockito.mock(EcrService.class);
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().ecr().enabled()).thenReturn(true);
         when(config.services().ecr().uriStyle()).thenReturn("hostname");

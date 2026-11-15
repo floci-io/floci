@@ -801,12 +801,8 @@ public class EcrService implements ResourceProvider {
                 d.setImageManifestMediaType(m.mediaType());
                 d.setArtifactMediaType(RegistryHttpClient.artifactMediaTypeFromManifest(m.body()));
 
-                String metaKey = imageMetaKey(region, repo.getRegistryId(), repositoryName, m.digest());
-                ImageMetadata meta = imageMetaStore.get(metaKey).orElseGet(() -> {
-                    ImageMetadata fresh = new ImageMetadata(m.digest(), Instant.now());
-                    imageMetaStore.put(metaKey, fresh);
-                    return fresh;
-                });
+                ImageMetadata meta = recordImagePush(repo.getRegistryId(), region, repositoryName,
+                        m.digest(), Instant.now());
                 d.setImagePushedAt(meta.getPushedAt());
                 details.add(d);
             } catch (Exception e) {
@@ -1102,10 +1098,7 @@ public class EcrService implements ResourceProvider {
         String stored = http.putManifest(storage, imageTag != null ? imageTag : digest, mediaType, imageManifest);
         String finalDigest = stored != null ? stored : digest;
         // A retag keeps the image's first push time, as DescribeImages records it.
-        String metaKey = imageMetaKey(region, repo.getRegistryId(), repositoryName, finalDigest);
-        if (imageMetaStore.get(metaKey).isEmpty()) {
-            imageMetaStore.put(metaKey, new ImageMetadata(finalDigest, Instant.now()));
-        }
+        recordImagePush(repo.getRegistryId(), region, repositoryName, finalDigest, Instant.now());
 
         Image image = new Image();
         image.setRegistryId(repo.getRegistryId());
@@ -1804,6 +1797,21 @@ public class EcrService implements ResourceProvider {
         String account = effectiveAccount(registryId);
         Repository repo = repoStore.get(key(region, account, name)).orElseThrow(() -> notFound(name, account));
         return refreshRepositoryUri(repo, region);
+    }
+
+    public ImageMetadata recordImagePush(String account, String region, String repositoryName,
+                                         String digest, Instant pushedAt) {
+        String key = imageMetaKey(region, account, repositoryName, digest);
+        synchronized (imageMetaStore) {
+            Optional<ImageMetadata> existing = imageMetaStore instanceof AccountAwareStorageBackend<ImageMetadata> aware
+                    ? aware.getForAccountMigratingLegacy(account, key, metadata -> digest.equals(metadata.getDigest()))
+                    : imageMetaStore.get(key);
+            return existing.orElseGet(() -> {
+                ImageMetadata metadata = new ImageMetadata(digest, pushedAt);
+                AccountAwareStorageBackend.putInAccount(imageMetaStore, account, key, metadata);
+                return metadata;
+            });
+        }
     }
 
     private static String imageMetaKey(String region, String account, String repoName, String digest) {

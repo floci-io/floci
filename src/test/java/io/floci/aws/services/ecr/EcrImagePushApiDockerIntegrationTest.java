@@ -25,6 +25,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Random;
@@ -37,6 +38,7 @@ import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pushes an image through the ECR API alone, as SDK-based copy tools do: a layer uploaded in parts,
@@ -292,6 +294,31 @@ class EcrImagePushApiDockerIntegrationTest {
     /** Last, since every class on this profile shares one registry. */
     @Test
     @Order(10)
+    void registryUploadRecordsPushTimeBeforeTheFirstDescribe() throws Exception {
+        String host = "000000000000.dkr.ecr.us-east-1.localhost";
+        String path = "/v2/" + repo + "/manifests/";
+        long before = Instant.now().getEpochSecond();
+        Fetched pushed = registryRequest(host, path + "registry", null, manifest);
+        long after = Instant.now().getEpochSecond();
+        assertEquals(201, pushed.statusCode());
+        assertEquals(manifestDigest, pushed.digest());
+
+        TimeUnit.SECONDS.sleep(1);
+        long pushTime = call("DescribeImages", "{\"repositoryName\":\"" + repo
+                + "\",\"imageIds\":[{\"imageTag\":\"registry\"}]}")
+                .statusCode(200).extract().jsonPath().getLong("imageDetails[0].imagePushedAt");
+        assertTrue(pushTime >= before && pushTime <= after,
+                () -> "Expected push time in [" + before + ", " + after + "], got " + pushTime);
+
+        assertEquals(201, registryRequest(host, path + "registry-retag", null, manifest).statusCode());
+        long retaggedPushTime = call("DescribeImages", "{\"repositoryName\":\"" + repo
+                + "\",\"imageIds\":[{\"imageTag\":\"registry-retag\"}]}")
+                .statusCode(200).extract().jsonPath().getLong("imageDetails[0].imagePushedAt");
+        assertEquals(pushTime, retaggedPushTime);
+    }
+
+    @Test
+    @Order(11)
     void cleanUp() {
         call("DeleteRepository", "{\"repositoryName\":\"" + repo + "\",\"force\":true}").statusCode(200);
         call("DeleteRepository", "{\"repositoryName\":\"" + immutableRepo + "\",\"force\":true}").statusCode(200);
@@ -322,18 +349,25 @@ class EcrImagePushApiDockerIntegrationTest {
 
     /** A GET through Floci's registry data plane, by the host name a Docker client would use. */
     private Fetched registryGet(String host, String path, String accept) throws Exception {
+        return registryRequest(host, path, accept, null);
+    }
+
+    private Fetched registryRequest(String host, String path, String accept, String manifestBody) throws Exception {
         int port = RestAssured.port;
         HttpClient client = vertx.createHttpClient();
         RequestOptions options = new RequestOptions()
                 .setServer(SocketAddress.inetSocketAddress(port, "127.0.0.1"))
                 .setHost(host)
                 .setPort(port)
-                .setMethod(HttpMethod.GET)
+                .setMethod(manifestBody == null ? HttpMethod.GET : HttpMethod.PUT)
                 .setURI(path);
         return client.request(options)
                 .compose(request -> {
                     if (accept != null) {
                         request.putHeader("Accept", accept);
+                    }
+                    if (manifestBody != null) {
+                        return request.putHeader("Content-Type", DOCKER_MANIFEST).send(manifestBody);
                     }
                     return request.send();
                 })
