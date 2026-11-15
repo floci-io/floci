@@ -292,6 +292,36 @@ class ProvisionContextTest {
     }
 
     @Test
+    void resolveOptionalBooleanReadsABooleanAndRefusesAnythingElse() {
+        ProvisionContext ctx = context(null);
+        JsonNode flag = props("{\"Ref\": \"Flag\"}");
+        when(engine.resolve(flag)).thenReturn("TRUE");
+
+        assertEquals(true, ctx.resolveOptionalBoolean(props("{\"On\": true}"), "On"), "a boolean");
+        assertEquals(false, ctx.resolveOptionalBoolean(props("{\"On\": \"false\"}"), "On"), "a boolean string");
+        assertEquals(false, ctx.resolveOptionalBoolean(props("{\"On\": \" False \"}"), "On"),
+                "any case, surrounding blanks trimmed");
+        assertEquals(true, ctx.resolveOptionalBoolean(props("{\"On\": {\"Ref\": \"Flag\"}}"), "On"),
+                "an intrinsic's result");
+        assertNull(ctx.resolveOptionalBoolean(props("{}"), "On"), "absent");
+        assertNull(ctx.resolveOptionalBoolean(props("{\"On\": null}"), "On"), "explicitly null");
+        assertNull(ctx.resolveOptionalBoolean(null, "On"), "no properties at all");
+        assertNull(ctx.resolveOptionalBoolean(props("{\"On\": {\"Ref\": \"AWS::NoValue\"}}"), "On"),
+                "an intrinsic that resolves to empty, as AWS::NoValue does");
+        JsonNode whitespace = props("{\"Ref\": \"Blank\"}");
+        when(engine.resolve(whitespace)).thenReturn(" ");
+        AwsException blank = assertThrows(AwsException.class,
+                () -> ctx.resolveOptionalBoolean(props("{\"On\": {\"Ref\": \"Blank\"}}"), "On"));
+        assertEquals("Value of property On must be a boolean.", blank.getMessage(), "a whitespace intrinsic result");
+        for (String literal : List.of("\"\"", "\"yes\"", "1", "0")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ctx.resolveOptionalBoolean(props("{\"On\": " + literal + "}"), "On"), literal);
+            assertEquals("ValidationError", e.getErrorCode(), literal);
+            assertEquals("Value of property On must be a boolean.", e.getMessage(), literal);
+        }
+    }
+
+    @Test
     void stablePhysicalNamePrefersTheTemplatesName() {
         assertEquals("chosen",
                 context("prior").stablePhysicalName("chosen", "Bucket", 63, true));

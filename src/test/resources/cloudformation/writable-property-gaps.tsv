@@ -337,6 +337,21 @@ AWS::ElastiCache::CacheCluster	PreferredAvailabilityZones	accepted and ignored, 
 AWS::ElastiCache::CacheCluster	SnapshotArns	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	SnapshotName	accepted and ignored, a warning is logged
 AWS::ElastiCache::CacheCluster	TransitEncryptionEnabled	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	AutoMinorVersionUpgrade	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	DataTieringEnabled	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	Durability	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	GlobalReplicationGroupId	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	IpDiscovery	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	LogDeliveryConfigurations	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	NetworkType	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	NodeGroupConfiguration	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	NotificationTopicArn	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	PreferredCacheClusterAZs	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	PreferredMaintenanceWindow	accepted and ignored
+AWS::ElastiCache::ReplicationGroup	PrimaryClusterId	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshotArns	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshotName	accepted and ignored, a warning is logged
+AWS::ElastiCache::ReplicationGroup	SnapshottingClusterId	accepted and ignored, a warning is logged
 AWS::ElastiCache::ServerlessCache	FinalSnapshotName	accepted and ignored
 AWS::ElasticLoadBalancingV2::Listener	AlpnPolicy	accepted and ignored
 AWS::ElasticLoadBalancingV2::Listener	ListenerAttributes	accepted and ignored

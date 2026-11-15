@@ -82,11 +82,11 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         if (customerId != null && !customerId.isBlank()) {
             request.put("customerId", customerId);
         }
-        Boolean enabled = resolveBoolean(props, "Enabled", ctx);
+        Boolean enabled = ctx.resolveOptionalBoolean(props, "Enabled");
         if (enabled != null) {
             request.put("enabled", enabled);
         }
-        Boolean generateDistinctId = resolveBoolean(props, "GenerateDistinctId", ctx);
+        Boolean generateDistinctId = ctx.resolveOptionalBoolean(props, "GenerateDistinctId");
         if (generateDistinctId != null) {
             request.put("generateDistinctId", generateDistinctId);
         }
@@ -110,7 +110,7 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         if (value != null && !value.isBlank()) {
             rejectIfChanged("Value", existing.getValue(), value);
         }
-        Boolean requestedDistinct = resolveBoolean(props, "GenerateDistinctId", ctx);
+        Boolean requestedDistinct = ctx.resolveOptionalBoolean(props, "GenerateDistinctId");
         if (requestedDistinct != null) {
             boolean existingDistinct = !Objects.equals(existing.getId(), existing.getValue());
             if (requestedDistinct != existingDistinct) {
@@ -119,7 +119,7 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
         }
 
         // Enabled defaults to false when the template omits it, as in the AWS registry schema.
-        Boolean enabled = resolveBoolean(props, "Enabled", ctx);
+        Boolean enabled = ctx.resolveOptionalBoolean(props, "Enabled");
         List<Map<String, String>> patches = patchesTo(existing, ctx.resolveOptional(props, "CustomerId"),
                 ctx.resolveOptional(props, "Description"), enabled != null && enabled);
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
@@ -180,11 +180,6 @@ public class ApiGatewayApiKeyCfnProvisioner implements CfnResourceProvisioner {
     private static void record(StackResource r, ApiKey key) {
         r.setPhysicalId(key.getId());
         r.getAttributes().put("APIKeyId", key.getId());
-    }
-
-    private static Boolean resolveBoolean(JsonNode props, String name, ProvisionContext ctx) {
-        String resolved = ctx.resolveOptional(props, name);
-        return resolved == null || resolved.isBlank() ? null : Boolean.parseBoolean(resolved);
     }
 
     private static void rejectIfChanged(String property, String existing, String requested) {
