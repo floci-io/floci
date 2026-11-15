@@ -1002,18 +1002,32 @@ def test_the_vendored_file_is_well_formed():
     assert not any("when" in resource or "unless" in resource
                    for operation, entry in operations.items() if operation.startswith("events:")
                    and "endpoint" in json.dumps(entry) for resource in entry["resources"])
-    # A state machine's version or alias is checked on the state machine.
-    assert document["unqualified"] == {"lambda": ["function"], "ssm": ["parameter"], "states": ["statemachine"]}
+    # A state machine's version or alias is checked on the state machine; a Lambda function's is checked qualified.
+    assert document["unqualified"] == {"ssm": ["parameter"], "states": ["statemachine"]}
     assert document["integerVariables"] == {"lambda": {"layerVersion": ["LayerVersion"]}}
-    assert {operation for operation in operations if operation.startswith("lambda:")} == {
-        "lambda:GetLayerVersion", "lambda:GetLayerVersionByArn", "lambda:DeleteLayerVersion"}
+    # Lambda is read whole: a partial ARN names a function, a provisioned concurrency config acts on the version or
+    # alias its Qualifier names, the action the reference gives it, and AddPermission's SourceAccount is its source's.
+    assert "lambda" in document["namespaces"] and "lambda" not in document["handBuilt"]
+    assert operations["lambda:Invoke"]["resources"] == [
+        {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
+    assert operations["lambda:PublishVersion"]["resources"] == [
+        {"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True}]
+    assert operations["lambda:GetProvisionedConcurrencyConfig"]["resources"] == [
+        {"type": kind, "fill": {"FunctionName": "FunctionName", variable: "Qualifier"},
+         "arnOf": {"FunctionName": "function"}, "partialArn": True}
+        for kind, variable in (("function alias", "Alias"), ("function version", "Version"))]
+    assert not any("account" in resource for resource in operations["lambda:AddPermission"]["resources"])
+    assert operations["lambda:GetMicrovm"]["resources"] == [{"types": ["microvmImage"], "through": "microvmIdentifier"}]
+    assert operations["lambda:SendDurableExecutionCallbackSuccess"]["resources"] == [
+        {"types": ["durable execution"], "through": "CallbackId"}]
+    assert operations["lambda:GetWebFunctionEndpoint"]["resources"][0]["arnOf"] == {"functionName": "webFunction"}
     # A listener is made under a load balancer, and a rule under a listener.
     assert operations["elasticloadbalancing:CreateListener"]["creates"] == [
         {"type": f"listener/{kind}", "parent": f"loadbalancer/{kind}/", "arn": "LoadBalancerArn"}
         for kind in ("app", "gwy", "net")]
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
-    assert set(document["handBuilt"]) >= {"lambda", "s3", "sqs"}
+    assert set(document["handBuilt"]) >= {"s3", "sqs"}
     # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
     assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
@@ -2148,3 +2162,119 @@ def test_eip_operations_read_scalar_targets_from_models(operation, members, kind
     action = "ec2:" + operation
     entry = r.entry_for(action, {"action": action, "types": kinds}, formats, {"ec2": ec2})
     assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]
+
+
+QUALIFIED_FORMATS = {"function": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}",
+                     "function alias": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Alias}",
+                     "function version": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Version}"}
+
+
+def _qualified_model() -> dict:
+    functions = model({"Invoke": {"FunctionName": "FunctionName", "Qualifier": "String"},
+                       "GetConfig": {"FunctionName": "FunctionName", "Qualifier": "String"},
+                       "CreateAlias": {"FunctionName": "FunctionName", "Name": "String", "FunctionVersion": "String"},
+                       "ListAliases": {"FunctionName": "FunctionName", "FunctionVersion": "String"},
+                       "Publish": {"FunctionName": "FunctionName"}})
+    functions["shapes"]["FunctionName"] = {"type": "string", "pattern": (
+        r"(arn:(aws[a-zA-Z-]*)?:svc:)?([a-z]{2}(-gov)?-[a-z]+-\d{1}:)?(\d{12}:)?(function:)?([a-zA-Z0-9-_\.]+)"
+        r"(:(\$LATEST|[a-zA-Z0-9-_]+))?")}
+    docs = {("Invoke", "Qualifier"): "<p>Specify a version or alias to invoke a published version of the function.</p>",
+            ("GetConfig", "Qualifier"): "<p>The version number or alias name.</p>",
+            ("CreateAlias", "FunctionVersion"): "<p>The function version that the alias invokes.</p>",
+            ("ListAliases", "FunctionVersion"): "<p>Specify a function version to only list aliases that invoke that "
+                                                "version.</p>"}
+    for (operation, member), text in docs.items():
+        functions["shapes"][operation + "In"]["members"][member]["documentation"] = text
+    return functions
+
+
+def test_a_member_documented_as_a_version_or_alias_names_the_qualified_types_an_action_acts_on():
+    functions = {"svc": _qualified_model()}
+    assert r.qualified_kinds(QUALIFIED_FORMATS) == {
+        "function": {"alias": "function alias", "version": "function version"}}
+    assert r.qualifier_members(functions, "Invoke", {"alias", "version"}) == ["Qualifier"]
+    assert r.qualifier_members(functions, "GetConfig", {"alias", "version"}) == ["Qualifier"]
+    # What an alias points to, or a filter naming aliases, is no qualifier of the request's function.
+    assert r.qualifier_members(functions, "CreateAlias", {"alias", "version"}) == []
+    assert r.qualifier_members(functions, "ListAliases", {"alias", "version"}) == []
+    named = [{"type": "function", "fill": {"FunctionName": "FunctionName"}}]
+    members = {"FunctionName": "FunctionName", "Qualifier": "Qualifier"}
+    # An action acting on the type alone is checked on it as its members name it.
+    assert r.with_qualifier(named, ["function"], QUALIFIED_FORMATS, members, functions, "Invoke") == named
+    # An action acting on the qualified types names each by the function and the qualifier.
+    assert r.with_qualifier([], ["function alias", "function version"], QUALIFIED_FORMATS, members, functions,
+                            "GetConfig") == [
+        {"type": "function alias", "fill": {"FunctionName": "FunctionName", "Alias": "Qualifier"},
+         "arnOf": {"FunctionName": "function"}},
+        {"type": "function version", "fill": {"FunctionName": "FunctionName", "Version": "Qualifier"},
+         "arnOf": {"FunctionName": "function"}}]
+    # A request with no qualifier member is as it was.
+    assert r.with_qualifier(named, ["function"], QUALIFIED_FORMATS, {"FunctionName": "FunctionName"}, functions,
+                            "Publish") == named
+
+
+def test_a_member_whose_pattern_takes_an_arn_without_its_leading_parts_names_its_type_by_a_partial_arn():
+    functions = {"svc": _qualified_model()}
+    assert r.partial_arn_members(functions, "Publish", QUALIFIED_FORMATS) == {
+        "FunctionName": {"function", "function alias", "function version"}}
+    # A pattern that does not spell the type's resource word takes no partial ARN of it.
+    functions["svc"]["shapes"]["FunctionName"]["pattern"] = "[a-zA-Z0-9-_:]+"
+    assert r.partial_arn_members(functions, "Publish", QUALIFIED_FORMATS) == {}
+    marked = r.with_partial_arns([{"type": "function", "fill": {"FunctionName": "FunctionName"}},
+                                  {"types": ["function"], "arn": "Other"}], {"FunctionName": {"function"}})
+    assert marked == [{"type": "function", "fill": {"FunctionName": "FunctionName"}, "partialArn": True},
+                      {"types": ["function"], "arn": "Other"}]
+
+
+def test_an_account_id_beside_an_arn_of_the_same_name_is_that_arns_account(tmp_path):
+    write_models(tmp_path, {"svc": model({"AddPermission": {"FunctionName": "String", "SourceArn": "String",
+                                                            "SourceAccount": "AccountId"},
+                                          "GetThing": {"ThingName": "String", "OwnerAccount": "AccountId"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.account_members(models, "AddPermission") == []
+    assert r.account_members(models, "GetThing") == ["OwnerAccount"]
+
+
+def test_a_record_field_named_after_the_end_of_a_types_name_reaches_that_type_and_a_request_names_it_by_its_identifier():
+    formats = {"microvmImage": "arn:${Partition}:svc:${Region}:${Account}:microvm-image:${MicrovmImageName}"}
+    vms = model({"GetMicrovm": {"microvmIdentifier": "String"}})
+    vms["shapes"]["MicrovmItem"] = {"type": "structure", "members": {
+        "microvmId": {"shape": "String"}, "imageArn": {"shape": "String"}, "state": {"shape": "String"}}}
+    models = {"svc": vms}
+    assert r.through_members(models, formats) == {"microvmId": ["microvmImage"]}
+    assert r.with_through([], ["microvmImage"], {"microvmIdentifier": "microvmIdentifier"},
+                          {"microvmId": ["microvmImage"]}) == [{"types": ["microvmImage"], "through": "microvmIdentifier"}]
+
+
+def test_an_operation_documented_as_acting_on_a_thing_in_a_resource_reaches_that_resource_through_the_things_id():
+    formats = {"durable execution": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Version}"
+                                    "/durable-execution/${ExecutionName}/${ExecutionId}"}
+    callbacks = model({"SendCallbackSuccess": {"CallbackId": "String"}, "Other": {"CallbackId": "String"}})
+    callbacks["operations"]["SendCallbackSuccess"]["documentation"] = (
+        "<p>Sends a successful completion response for a callback operation in a durable execution.</p>")
+    assert r.documented_through({"svc": callbacks}, formats) == {"CallbackId": {"durable execution"}}
+    callbacks["operations"]["SendCallbackSuccess"]["documentation"] = "<p>Sends a response for a callback.</p>"
+    assert r.documented_through({"svc": callbacks}, formats) == {}
+
+
+def test_a_path_member_documented_as_either_a_name_or_an_arn_takes_the_arn_of_the_thing_it_leads_with():
+    assert r._documented_name_or_arn(
+        "<p>The web function to retrieve. You can specify either of the following:</p> <ul> <li> <p>The function "
+        "name, for example <code>my-function</code>.</p> </li> <li> <p>The function ARN.</p> </li> </ul>",
+        located=True) == "web-function"
+    # A body member keeps the phrasings it had.
+    assert r._documented_name_or_arn("<p>The web function. You can specify either of the following: The function "
+                                     "name. The function ARN.</p>") is None
+
+
+def test_clients_sharing_an_endpoint_keep_every_type_an_arn_member_may_name_and_others_narrow_by_the_arns_word():
+    formats = {"function": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}",
+               "eventSourceMapping": "arn:${Partition}:svc:${Region}:${Account}:event-source-mapping:${UUID}",
+               "image": "arn:${Partition}:svc:${Region}:${Account}:image:${ImageName}"}
+    tags = model({"TagResource": {"Resource": "TaggableArn"}})
+    tags["shapes"]["TaggableArn"] = {"type": "string",
+                                     "pattern": "arn:aws:svc:[a-z0-9-]+:[0-9]{12}:(function:[a-z]+|event-source-mapping:[a-f0-9-]+)"}
+    resources = [{"types": ["eventSourceMapping", "function", "image"], "arn": "Resource"}]
+    assert r.narrowed(resources, set(), tags, "TagResource", formats) == [
+        {"types": ["eventSourceMapping", "function"], "arn": "Resource"}]
+    assert r.narrowed(resources, set(), tags, "TagResource", formats, arn_types=False) == resources

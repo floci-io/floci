@@ -158,8 +158,9 @@ class RequestResourceMembersTest {
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
-        assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "lambda", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertTrue(table.namespaces().contains("lambda"));
+        assertFalse(table.handBuilt().contains("lambda"));
+        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
         Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
                 "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
@@ -168,9 +169,6 @@ class RequestResourceMembersTest {
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("logs:PutDestination");
-        expected.add("lambda:GetLayerVersion");
-        expected.add("lambda:GetLayerVersionByArn");
-        expected.add("lambda:DeleteLayerVersion");
         // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
         expected.add("dynamodb:ListTables");
         assertEquals(expected, table.operations().keySet().stream()

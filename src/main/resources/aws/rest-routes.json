@@ -1178,6 +1178,33 @@
         "UpdateMicrovmImageVersion": {"method": "PATCH", "requestUri": "/2025-09-09/microvm-images/{imageIdentifier}/versions/{imageVersion}"}
       }
     },
+    "lambda-web": {
+      "credentialScope": "lambda",
+      "apiVersion": "2025-03-07",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "CreateWebFunction": {"method": "PUT", "requestUri": "/2025-03-07/web-functions"},
+        "CreateWebFunctionEndpoint": {"method": "PUT", "requestUri": "/2025-03-07/web-functions/{functionName}/endpoints"},
+        "CreateWebFunctionRevision": {"method": "POST", "requestUri": "/2025-03-07/web-functions/{functionName}/revisions"},
+        "DeleteResourcePolicy": {"method": "DELETE", "requestUri": "/2025-03-07/resource-policy/{resourceArn}"},
+        "DeleteWebFunction": {"method": "DELETE", "requestUri": "/2025-03-07/web-functions/{functionName}"},
+        "DeleteWebFunctionEndpoint": {"method": "DELETE", "requestUri": "/2025-03-07/web-functions/{functionName}/endpoints/{endpointName}"},
+        "DeleteWebFunctionRevision": {"method": "DELETE", "requestUri": "/2025-03-07/web-functions/{functionName}/revisions/{revisionId}"},
+        "GetResourcePolicy": {"method": "GET", "requestUri": "/2025-03-07/resource-policy/{resourceArn}"},
+        "GetWebAccountSettings": {"method": "GET", "requestUri": "/2025-03-07/web-account-settings"},
+        "GetWebFunction": {"method": "GET", "requestUri": "/2025-03-07/web-functions/{functionName}"},
+        "GetWebFunctionEndpoint": {"method": "GET", "requestUri": "/2025-03-07/web-functions/{functionName}/endpoints/{endpointName}"},
+        "GetWebFunctionRevision": {"method": "GET", "requestUri": "/2025-03-07/web-functions/{functionName}/revisions/{revisionId}"},
+        "ListTags": {"method": "GET", "requestUri": "/2025-03-07/tags/{resource}"},
+        "ListWebFunctionEndpoints": {"method": "POST", "requestUri": "/2025-03-07/web-functions/{functionName}/list-endpoints"},
+        "ListWebFunctionRevisions": {"method": "POST", "requestUri": "/2025-03-07/web-functions/{functionName}/list-revisions"},
+        "ListWebFunctions": {"method": "POST", "requestUri": "/2025-03-07/web-functions"},
+        "PutResourcePolicy": {"method": "PUT", "requestUri": "/2025-03-07/resource-policy/{resourceArn}"},
+        "TagResource": {"method": "POST", "requestUri": "/2025-03-07/tags/{resource}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/2025-03-07/tags/{resource}"},
+        "UpdateWebFunctionEndpoint": {"method": "PATCH", "requestUri": "/2025-03-07/web-functions/{functionName}/endpoints/{endpointName}"}
+      }
+    },
     "macie2": {
       "credentialScope": "macie2",
       "apiVersion": "2020-01-01",

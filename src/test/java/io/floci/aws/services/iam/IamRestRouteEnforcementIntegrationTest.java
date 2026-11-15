@@ -415,9 +415,10 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void lambdaTaggingIsCheckedAgainstTheCallersOwnResourceWhateverAccountTheArnNames() {
-        // Lambda tags the caller's own function or MicroVM image of the ARN's name, so a grant on another
-        // account's ARN of that name does not cover it, and a grant on the caller's own does.
+    void lambdaTaggingByAnotherAccountsArnIsCheckedOnThatArnAndTheCallersOwnResourceOfItsName() {
+        // The ARN names another account's function or MicroVM image, which is checked, and Lambda tags the caller's
+        // own of that name, which is checked too, so a grant on either alone does not cover it; one on the caller's
+        // own covers a request naming its own ARN.
         String user = user("route-lambda-tags-account");
         String name = "route-tagged-" + suffix();
         String body = "{\"Tags\":{\"team\":\"a\"}}";
@@ -428,7 +429,8 @@ class IamRestRouteEnforcementIntegrationTest {
             policy(user, allow("lambda:TagResource", foreign));
             refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
             policy(user, allow("lambda:TagResource", own));
-            as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then().statusCode(not(403));
+            refused(as(user, "lambda").body(body).post("/2017-03-31/tags/" + foreign).then(), "lambda:TagResource");
+            as(user, "lambda").body(body).post("/2017-03-31/tags/" + own).then().statusCode(not(403));
         }
     }
 

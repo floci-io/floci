@@ -115,15 +115,18 @@ part in authorizing calls to the function:
 - Provisioned-concurrency configuration operations also act in the account named by the function
   reference. Cross-account access requires that function's policy to allow the caller.
 - Other operations act on the caller's own function of the name the ARN gives, whatever account
-  the ARN names, and are authorized against that function. Floci does not serve them on another
-  account's function, which AWS allows through a function policy.
+  the ARN names, and are authorized against both the function the ARN names and the caller's own
+  function of that name. Floci does not serve them on another account's function, which AWS allows
+  through a function policy.
 - Within one account, a statement naming the caller grants on its own. One naming only the
   account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
   caller's identity policy has to allow the call too.
-- An invoke or provisioned-concurrency configuration operation is authorized against the version or
-  alias it names, in the function name or in `Qualifier`. A grant added with `Qualifier` covers that
-  version or alias only, and a grant on the function does not cover a qualified operation.
-  Other operations are authorized against the unqualified function.
+- A version or alias written into the function name is part of the function an operation is
+  authorized against, so a grant added with `Qualifier` covers a call naming that version or alias,
+  and a grant on the function does not. `Qualifier` itself names a version or alias only for the
+  provisioned-concurrency configuration operations, which act on it; every other operation is
+  authorized against the function as its name gives it, as the Service Reference lists the function
+  alone for those actions.
 - A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
 - `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
   admits no caller.

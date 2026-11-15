@@ -8,7 +8,6 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SignedMarkers;
 import io.floci.aws.core.common.SmithyValidationErrors;
-import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
 import io.floci.aws.services.lambda.zip.DeploymentPackage;
 import io.floci.aws.services.lambda.zip.ZipExtractor;
@@ -35,7 +34,7 @@ import java.util.stream.Collectors;
  * Business logic for Lambda Layer management.
  */
 @ApplicationScoped
-public class LambdaLayerService implements StoredResourceArns {
+public class LambdaLayerService {
 
     private static final Logger LOG = Logger.getLogger(LambdaLayerService.class);
 
@@ -101,19 +100,8 @@ public class LambdaLayerService implements StoredResourceArns {
         this.s3Service = s3Service;
     }
 
-    @Override
-    public String namespace() {
-        return "lambda";
-    }
-
-    @Override
-    public Optional<String> find(String type, List<String> names, String region) {
-        // Layer version selectors supply the complete identifier, so no generated suffix needs a lookup.
-        return Optional.empty();
-    }
-
-    @Override
-    public Optional<String> resolveStoredArn(String arn) {
+    /** The caller's stored layer version a layer version ARN selects; empty for another ARN or no such version. */
+    public Optional<String> storedLayerVersionArn(String arn) {
         if (!LAYER_VERSION_ARN.matcher(arn).matches()) {
             return Optional.empty();
         }

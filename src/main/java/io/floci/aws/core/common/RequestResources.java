@@ -47,6 +47,8 @@ public final class RequestResources {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{(\\w+)}");
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
+    /** An ARN without its leading {@code arn:<partition>:<service>:}, its Region optional: {@code 123456789012:function:f}. */
+    private static final Pattern PARTIAL_ARN = Pattern.compile("(?:([a-z]{2}(?:-[a-z0-9]+)+-\\d+):)?(\\d{12}):(.+)");
     private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
@@ -639,6 +641,8 @@ public final class RequestResources {
                     .map(value -> variable.getKey().endsWith(WITHOUT_LEADING_SLASH)
                             ? asVariable(variable.getKey(), value)
                             : withoutTypePath(value, resource.types().getFirst()))
+                    .map(value -> resource.partialArn() ? completed(value, variable.getValue(), resource, formats,
+                            format, partition, region, accountId) : value)
                     .toList();
             // An element of a list naming no resource names its service's default (a PutEvents entry with no bus).
             if (variable.getValue().eachElement() && stored != null && resource.fill().size() == 1) {
@@ -712,6 +716,39 @@ public final class RequestResources {
                         region, accountId, stored);
             }
         }
+    }
+
+    /**
+     * The value of a member of a {@code partialArn} type as an ARN: one giving its account and resource
+     * ({@code 123456789012:function:my-function}), or its Region too, completed in the request's partition and, where
+     * it leaves the Region out, the request's; one giving the resource alone ({@code function:my-function}) in the
+     * caller's account too; as given otherwise, a name or a whole ARN. A member that may give the ARN of another type
+     * ({@code arnOf}) is completed as that type's.
+     */
+    static String completed(String value, RequestResourceMembers.Member member,
+                            RequestResourceMembers.Resource resource,
+                            Map<String, RequestResourceMembers.ArnFormat> formats,
+                            RequestResourceMembers.ArnFormat format, String partition, String region,
+                            String accountId) {
+        RequestResourceMembers.ArnFormat named = arnOf(resource, member.path(), formats);
+        RequestResourceMembers.ArnFormat type = named == null ? format : named;
+        String[] parts = type.format().split(":", 6);
+        int variable = parts.length < 6 ? -1 : parts[5].indexOf("${");
+        if (variable <= 0) {
+            return value;
+        }
+        String word = parts[5].substring(0, variable);
+        Matcher partial = PARTIAL_ARN.matcher(value);
+        String arn;
+        if (partial.matches() && partial.group(3).startsWith(word)) {
+            arn = new AwsArnUtils.Arn(partition, parts[2], partial.group(1) == null ? region : partial.group(1),
+                    partial.group(2), partial.group(3)).toString();
+        } else if (value.startsWith(word) && value.length() > word.length()) {
+            arn = new AwsArnUtils.Arn(partition, parts[2], region, accountId, value).toString();
+        } else {
+            return value;
+        }
+        return type.pattern().matcher(arn).matches() ? arn : value;
     }
 
     /**
