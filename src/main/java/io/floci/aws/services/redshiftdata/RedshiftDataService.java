@@ -483,7 +483,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
             return null;
         }
         if (target.cluster() != null) {
-            return RedshiftAuditTarget.of(target.cluster());
+            return RedshiftAuditLogPublisher.targetOf(target.cluster());
         }
         String backendKey = target.backendKey();
         int separator = backendKey == null ? -1 : backendKey.indexOf(':');

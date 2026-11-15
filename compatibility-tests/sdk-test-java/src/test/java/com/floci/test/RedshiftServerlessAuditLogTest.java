@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
@@ -24,6 +25,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 @DisplayName("Redshift Serverless audit log export")
 class RedshiftServerlessAuditLogTest {
 
+    private static final Logger LOG = Logger.getLogger(RedshiftServerlessAuditLogTest.class);
     private static final String STREAM = "serverless";
 
     @Test
@@ -57,8 +59,13 @@ class RedshiftServerlessAuditLogTest {
                 Thread.sleep(Duration.ofSeconds(3).toMillis());
                 assertThat(messages(logs, activityGroup)).noneMatch(line -> line.contains("sdk_audit_off_marker"));
             } finally {
-                deleteBestEffort(() -> serverless.deleteWorkgroup(request -> request.workgroupName(workgroup)));
-                deleteBestEffort(() -> serverless.deleteNamespace(request -> request.namespaceName(namespace)));
+                try {
+                    deleteBestEffort(() -> serverless.deleteWorkgroup(request -> request.workgroupName(workgroup)),
+                            "workgroup " + workgroup);
+                } finally {
+                    deleteBestEffort(() -> serverless.deleteNamespace(request -> request.namespaceName(namespace)),
+                            "namespace " + namespace);
+                }
             }
         }
     }
@@ -90,11 +97,13 @@ class RedshiftServerlessAuditLogTest {
         assertThat(messages).anyMatch(line -> line.contains(text));
     }
 
-    private static void deleteBestEffort(Runnable deletion) {
+    private static void deleteBestEffort(Runnable deletion, String resource) {
         try {
             deletion.run();
-        } catch (RuntimeException ignored) {
-            // The test may have failed before creating the resource.
+        } catch (software.amazon.awssdk.services.redshiftserverless.model.ResourceNotFoundException ignored) {
+            // Name clash with cloudwatchlogs ResourceNotFoundException; resource was not created or already deleted.
+        } catch (RuntimeException cleanupError) {
+            LOG.warnf(cleanupError, "Best-effort cleanup failed for %s", resource);
         }
     }
 }

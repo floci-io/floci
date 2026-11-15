@@ -159,7 +159,7 @@ public class RedshiftAuditLogPublisher {
      * Builds the target of a cluster for the publish overloads, which must never fail the statement being audited:
      * a cluster whose stored logging settings are malformed is reported and treated as having no target.
      */
-    private static RedshiftAuditTarget targetOf(Cluster cluster) {
+    public static RedshiftAuditTarget targetOf(Cluster cluster) {
         try {
             return RedshiftAuditTarget.of(cluster);
         } catch (RuntimeException ex) {

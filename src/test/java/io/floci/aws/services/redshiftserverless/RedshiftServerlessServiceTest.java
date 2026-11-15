@@ -26,6 +26,7 @@ import org.mockito.Mockito;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -1140,6 +1141,61 @@ class RedshiftServerlessServiceTest {
         ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
         verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
         assertTrue(registered.getValue().activityLoggingEnabled());
+    }
+
+    @Test
+    void recoveryIgnoresNullLogExportsAndKeepsWorkgroupRuntime() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        Namespace namespace = service.createNamespace("null-export-ns", "admin", null, null, null, null,
+                List.of("connectionlog"), Map.of(), REGION);
+        namespace.setLogExports(Arrays.asList("connectionlog", null));
+        store.put(REGION + "::null-export-ns", namespace);
+        createWorkgroup("null-export-wg", "null-export-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        Workgroup recovered = service.getWorkgroup("null-export-wg", REGION);
+        assertEquals("127.0.0.1", recovered.getRuntimeHost());
+        assertEquals(55432, recovered.getRuntimePort());
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals(List.of("connectionlog"), registered.getValue().exports());
+    }
+
+    @Test
+    void recoveryKeepsWorkgroupRuntimeWhenAuditRegistrationThrows() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        doThrow(new IllegalStateException("audit failure")).when(publisher)
+                .register(eq(ACCOUNT_ID), eq(REGION), any(RedshiftAuditTarget.class));
+        service.createNamespace("audit-err-ns", "admin", null, null, null, null, List.of("connectionlog"),
+                Map.of(), REGION);
+        createWorkgroup("audit-err-wg", "audit-err-ns");
+        when(endpoints.restore(any(Endpoint.class))).thenAnswer(call -> call.getArgument(0));
+        service.auditPublisher = instanceOf(publisher);
+
+        service.onStart(null);
+
+        Workgroup recovered = service.getWorkgroup("audit-err-wg", REGION);
+        assertEquals("127.0.0.1", recovered.getRuntimeHost());
+        assertEquals(55432, recovered.getRuntimePort());
+    }
+
+    @Test
+    void clearUnregistersAuditTargetEvenWhenRuntimeStopFails() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("clear-err-ns", "admin", null, null, null, null, List.of("connectionlog"),
+                Map.of(), REGION);
+        Workgroup created = createWorkgroup("clear-err-wg", "clear-err-ns");
+        doThrow(new RuntimeException("stop failed")).when(runtime).stop(ACCOUNT_ID, REGION, "clear-err-wg");
+
+        service.clear();
+
+        verify(publisher).unregister(ACCOUNT_ID, "serverless_us-east-1_clear-err-wg");
+        verify(endpoints, never()).release(created.getEndpoint());
+        assertTrue(service.listWorkgroups(REGION, null, null).items().isEmpty());
     }
 
     @SuppressWarnings("unchecked")
