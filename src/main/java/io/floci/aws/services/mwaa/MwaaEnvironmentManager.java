@@ -70,6 +70,8 @@ public class MwaaEnvironmentManager {
     private static final String STARTUP_ENV_PATH = REQUIREMENTS_DIR + "/mwaa-startup.env";
     /** A first {@code pip install} of a real requirements file can take minutes. */
     private static final int REQUIREMENTS_INSTALL_TIMEOUT_SECONDS = 900;
+    /** The Airflow web UI admin Floci creates, and the identity a web login token signs in as. */
+    static final String AIRFLOW_ADMIN_USER = "admin";
     private static final Set<String> MWAA_CLI_COMMANDS = Set.of("cheat-sheet", "version");
     private static final Map<String, Set<String>> MWAA_CLI_SUBCOMMANDS = Map.of(
             "connections", Set.of("add", "delete"),
@@ -168,8 +170,8 @@ public class MwaaEnvironmentManager {
         lifecycleManager.ensureVolume(logsVolume);
 
         String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
-        String adminUser = "admin";
         String adminPassword = generateSecret(24);
+        environment.setAirflowAdminPassword(adminPassword);
         String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
 
         // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
@@ -183,9 +185,10 @@ public class MwaaEnvironmentManager {
                 "AIRFLOW__CORE__FERNET_KEY=" + generateFernetKey(),
                 "AIRFLOW__WEBSERVER__SECRET_KEY=" + generateSecret(32),
                 "AIRFLOW__CORE__LOAD_EXAMPLES=false",
-                "_AIRFLOW_WWW_USER_USERNAME=" + adminUser,
+                "_AIRFLOW_WWW_USER_USERNAME=" + AIRFLOW_ADMIN_USER,
                 "_AIRFLOW_WWW_USER_PASSWORD=" + adminPassword));
         env.addAll(airflowConfigurationOptionsEnv(environment.getAirflowConfigurationOptions()));
+        env.addAll(signInRateLimitEnv(airflowVersion, environment.getAirflowConfigurationOptions()));
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(airflowContainerName)
@@ -564,6 +567,22 @@ public class MwaaEnvironmentManager {
      */
     static String pythonTagFor(String airflowVersion) {
         return isAtLeast(airflowVersion, 2, 11) ? "python3.12" : "python3.11";
+    }
+
+    /**
+     * Turns off Airflow's sign-in rate limit, which counts sign-ins by client address (5 per 40 seconds by default):
+     * every sign-in reaches Airflow from the web proxy's one address, each {@code /aws_mwaa/login} and each UI login
+     * it forwards, so the limit would count every client of the environment together. The option moved from
+     * {@code webserver} to {@code fab} in Airflow 2.9. An {@code AirflowConfigurationOptions} entry setting it in
+     * either section is kept.
+     */
+    static List<String> signInRateLimitEnv(String airflowVersion, Map<String, String> options) {
+        if (options != null && (options.containsKey("webserver.auth_rate_limited")
+                || options.containsKey("fab.auth_rate_limited"))) {
+            return List.of();
+        }
+        return List.of((isAtLeast(airflowVersion, 2, 9) ? "AIRFLOW__FAB__" : "AIRFLOW__WEBSERVER__")
+                + "AUTH_RATE_LIMITED=False");
     }
 
     static boolean isAtLeast(String airflowVersion, int major, int minor) {

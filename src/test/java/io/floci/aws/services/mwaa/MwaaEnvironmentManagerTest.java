@@ -31,6 +31,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -214,6 +215,37 @@ class MwaaEnvironmentManagerTest {
         // The colliding entry must not have replaced Floci's own required executor setting.
         assertTrue(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=LocalExecutor"));
         assertFalse(captor.getValue().env().contains("AIRFLOW__CORE__EXECUTOR=CeleryExecutor"));
+    }
+
+    @Test
+    void theGeneratedAdminPasswordIsKeptOnTheEnvironmentForWebLogins() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+        when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(new ContainerInfo(
+                "airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+        Environment environment = new Environment();
+        environment.setName("my-env");
+
+        manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
+
+        ArgumentCaptor<ContainerSpec> captor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(captor.capture());
+        assertNotNull(environment.getAirflowAdminPassword());
+        assertTrue(captor.getValue().env().contains("_AIRFLOW_WWW_USER_PASSWORD=" + environment.getAirflowAdminPassword()));
+        assertTrue(captor.getValue().env().contains("_AIRFLOW_WWW_USER_USERNAME=admin"));
+        assertTrue(captor.getValue().env().contains("AIRFLOW__FAB__AUTH_RATE_LIMITED=False"));
+    }
+
+    @Test
+    void theSignInRateLimitIsOffInTheSectionEachVersionReadsUnlessAnOptionSetsIt() {
+        assertEquals(List.of("AIRFLOW__WEBSERVER__AUTH_RATE_LIMITED=False"),
+                MwaaEnvironmentManager.signInRateLimitEnv("2.8.4", null));
+        assertEquals(List.of("AIRFLOW__FAB__AUTH_RATE_LIMITED=False"),
+                MwaaEnvironmentManager.signInRateLimitEnv("2.9.2", Map.of()));
+        assertEquals(List.of(), MwaaEnvironmentManager.signInRateLimitEnv("2.10.5",
+                Map.of("fab.auth_rate_limited", "True")));
+        assertEquals(List.of(), MwaaEnvironmentManager.signInRateLimitEnv("2.10.5",
+                Map.of("webserver.auth_rate_limited", "True")));
     }
 
     @Test
