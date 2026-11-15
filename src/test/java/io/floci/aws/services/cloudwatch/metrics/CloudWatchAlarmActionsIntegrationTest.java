@@ -1,6 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -24,7 +24,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,7 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class CloudWatchAlarmActionsIntegrationTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SCOPE =
             "AWS4-HMAC-SHA256 Credential=test/20261110/cn-north-1/monitoring/aws4_request";
 
@@ -206,30 +204,9 @@ class CloudWatchAlarmActionsIntegrationTest {
                 : result.xmlPath().getString("DescribeAlarmsResponse.DescribeAlarmsResult." + type + ".member." + name);
     }
 
-    private static Response call(boolean json, String action, Map<String, ?> body) throws Exception {
-        if (json) {
-            return given().header("Authorization", SCOPE).contentType("application/x-amz-json-1.0")
-                    .header("X-Amz-Target", "GraniteServiceVersion20100801." + action)
-                    .body(MAPPER.writeValueAsString(body)).post("/");
-        }
-        Map<String, Object> parameters = new LinkedHashMap<>();
-        parameters.put("Action", action);
-        parameters.put("Version", "2010-08-01");
-        for (Map.Entry<String, ?> member : body.entrySet()) {
-            if (member.getValue() instanceof List<?> items) {
-                if (items.isEmpty()) {
-                    parameters.put(member.getKey(), "");
-                }
-                for (int i = 0; i < items.size(); i++) {
-                    parameters.put(member.getKey() + ".member." + (i + 1), items.get(i));
-                }
-            } else {
-                parameters.put(member.getKey(), member.getValue());
-            }
-        }
-        Response response = given().header("Authorization", SCOPE)
-                .contentType("application/x-www-form-urlencoded").formParams(parameters).post("/");
-        if (response.statusCode() == 200) {
+    private Response call(boolean json, String action, Map<String, ?> body) throws JsonProcessingException {
+        Response response = CloudWatchTestRequests.call(endpoint, SCOPE, json, action, body);
+        if (!json && response.statusCode() == 200) {
             assertTrue(response.asString().contains(action + "Response"));
         }
         return response;
