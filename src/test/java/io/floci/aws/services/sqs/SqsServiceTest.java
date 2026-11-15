@@ -1971,6 +1971,55 @@ class SqsServiceTest {
     }
 
     @Test
+    void receiveMessage_redrivePolicyChangedAfterFirstReceive_usesNewMaxReceiveCount() {
+        Queue dlq = sqsService.createQueue("chg-dlq", null, "us-east-1");
+        String dlqArn = queueArn("chg-dlq");
+        Queue source = sqsService.createQueue("chg-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 5)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "m", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+
+        sqsService.setQueueAttributes(source.getQueueUrl(),
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+
+        assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(List.of("m"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void receiveMessage_redrivePolicyRemovedAfterFirstReceive_stopsRedriving() {
+        Queue dlq = sqsService.createQueue("rm-dlq", null, "us-east-1");
+        String dlqArn = queueArn("rm-dlq");
+        Queue source = sqsService.createQueue("rm-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "m", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+
+        sqsService.setQueueAttributes(source.getQueueUrl(), Map.of("RedrivePolicy", ""), "us-east-1");
+
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(0, sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1").size());
+    }
+
+    @Test
+    void receiveMessage_queueRecreatedWithDifferentRedrivePolicy_doesNotInheritOldPolicy() {
+        sqsService.createQueue("rc-dlq", null, "us-east-1");
+        String dlqArn = queueArn("rc-dlq");
+        Queue first = sqsService.createQueue("rc-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+        sqsService.sendMessage(first.getQueueUrl(), "old", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(first.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        sqsService.deleteQueue(first.getQueueUrl(), "us-east-1");
+
+        Queue second = sqsService.createQueue("rc-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 5)), "us-east-1");
+        sqsService.sendMessage(second.getQueueUrl(), "new", 0, null, null, "us-east-1");
+
+        assertEquals(1, sqsService.receiveMessage(second.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(1, sqsService.receiveMessage(second.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+    }
+
+    @Test
     void startMessageMoveTask_movesEveryMessageOfANonDefaultAccountQueue() throws Exception {
         String account = "111111111111";
         RequestContext requestContext = new RequestContext();
@@ -2099,6 +2148,10 @@ class SqsServiceTest {
 
     private static String redrivePolicy(String dlqArn) {
         return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+    }
+
+    private static String redrivePolicy(String dlqArn, int maxReceiveCount) {
+        return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"" + maxReceiveCount + "\"}";
     }
 
     private static List<String> bodies(List<Message> messages) {

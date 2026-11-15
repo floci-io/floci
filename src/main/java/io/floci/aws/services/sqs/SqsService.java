@@ -832,6 +832,7 @@ public class SqsService implements Resettable, ResourceProvider {
         deduplicationCache.remove(storageKey);
         deduplicationIdentityCache.remove(storageKey);
         deduplicationLocks.remove(storageKey);
+        redrivePolicyCache.remove(storageKey);
         if (messageStore != null) {
             messageStore.delete(storageKey);
         }
@@ -1834,6 +1835,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 }
             }
         }
+        redrivePolicyCache.remove(storageKey);
         queue.setLastModifiedTimestamp(Instant.now());
         queueStore.put(storageKey, queue);
         getOrCreateQueue(storageKey).activity().accessed();
