@@ -305,6 +305,7 @@ User data is returned as the original base64-decoded bytes, without decompressin
 | `GET /latest/meta-data/mac` | MAC address of first ENI |
 | `GET /latest/meta-data/security-groups` | Security group names |
 | `GET /latest/meta-data/placement/availability-zone` | AZ |
+| `GET /latest/meta-data/placement/availability-zone-id` | AZ ID (for example `use1-az1`), the same ID `DescribeSubnets` reports for the zone |
 | `GET /latest/meta-data/placement/region` | Region |
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
