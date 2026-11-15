@@ -123,7 +123,7 @@ class PaymentCryptographyTest {
     private static Key createKeyEncryptionKey() {
         Key key = client.createKey(r -> r
                 .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.TDES_3KEY)
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
                         .keyClass(KeyClass.SYMMETRIC_KEY)
                         .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
                         .keyModesOfUse(m -> m.wrap(true).unwrap(true)))
@@ -274,7 +274,7 @@ class PaymentCryptographyTest {
     @Test
     void aKeyLeavesTheServiceAndComesBackThroughAnAs2805Cryptogram() {
         Key encryptionKey = createKeyEncryptionKey();
-        Key key = createKey(KeyAlgorithm.TDES_3KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+        Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
         ExportKeyResponse exported = client.exportKey(r -> r
                 .exportKeyIdentifier(key.keyArn())
@@ -291,7 +291,7 @@ class PaymentCryptographyTest {
                         .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
                         .wrappingKeyIdentifier(encryptionKey.keyArn())
                         .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
-                        .keyAlgorithm(KeyAlgorithm.TDES_3KEY)
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
                         .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
                         .exportable(true))));
 
@@ -310,7 +310,7 @@ class PaymentCryptographyTest {
         // The model carries the exportability at the top level of the AS2805 import, so a
         // key imported as one that may not leave is one that may not leave.
         Key encryptionKey = createKeyEncryptionKey();
-        Key key = createKey(KeyAlgorithm.TDES_3KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+        Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
         ExportKeyResponse exported = client.exportKey(r -> r
                 .exportKeyIdentifier(key.keyArn())
@@ -323,7 +323,7 @@ class PaymentCryptographyTest {
                         .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
                         .wrappingKeyIdentifier(encryptionKey.keyArn())
                         .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
-                        .keyAlgorithm(KeyAlgorithm.TDES_3KEY)
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
                         .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
                         .exportable(false))));
 
@@ -352,7 +352,7 @@ class PaymentCryptographyTest {
         for (Map.Entry<As2805KeyVariant, KeyUsage> entry : usages.entrySet()) {
             As2805KeyVariant variant = entry.getKey();
             // AS2805's cryptography is all TDES, so every key is a TDES one.
-            Key key = createKey(KeyAlgorithm.TDES_3KEY, entry.getValue());
+            Key key = createKey(KeyAlgorithm.TDES_3_KEY, entry.getValue());
 
             ExportKeyResponse exported = client.exportKey(r -> r
                     .exportKeyIdentifier(key.keyArn())
@@ -390,14 +390,14 @@ class PaymentCryptographyTest {
         // under.
         Key dataKey = client.createKey(r -> r
                 .keyAttributes(a -> a
-                        .keyAlgorithm(KeyAlgorithm.TDES_3KEY)
+                        .keyAlgorithm(KeyAlgorithm.TDES_3_KEY)
                         .keyClass(KeyClass.SYMMETRIC_KEY)
                         .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
                         .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true)))
                 .exportable(true))
                 .key();
         keyArns.add(dataKey.keyArn());
-        Key key = createKey(KeyAlgorithm.TDES_3KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+        Key key = createKey(KeyAlgorithm.TDES_3_KEY, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
 
         assertThatThrownBy(() -> client.exportKey(r -> r
                 .exportKeyIdentifier(key.keyArn())
