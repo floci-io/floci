@@ -37,6 +37,8 @@ final class EmrClusterLifecycle {
     static final String TERMINATING = "TERMINATING";
     static final String TERMINATED = "TERMINATED";
     static final String PENDING = "PENDING";
+    // The ActionOnFailure of a step that names none.
+    static final String DEFAULT_ACTION_ON_FAILURE = "TERMINATE_CLUSTER";
     static final String COMPLETED = "COMPLETED";
     static final String CANCEL_PENDING = "CANCEL_PENDING";
     static final String CANCELLED = "CANCELLED";
@@ -127,7 +129,7 @@ final class EmrClusterLifecycle {
             step.setState(PENDING);
             step.setCreationDateTime(now);
             if (step.getActionOnFailure() == null) {
-                step.setActionOnFailure("TERMINATE_CLUSTER");
+                step.setActionOnFailure(DEFAULT_ACTION_ON_FAILURE);
             }
             events.queue(events.stepStatusChange(cluster, step, PENDING), region);
         }

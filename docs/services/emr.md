@@ -72,6 +72,18 @@ them returns.
 adding that it "is idempotent but asynchronous". On an earlier release a `RUNNING` step answers `FAILED` with "Step
 is not in a cancellable state: RUNNING".
 
+The limits the API reference and the Management Guide give steps are checked, in each operation's own error code, in
+Floci's words, as no source gives AWS's: a `StepConcurrencyLevel` from 1 to 256 ("You can specify a minimum of 1 step
+and a maximum of 256 steps"), which `RunJobFlow` refuses with `ValidationException` and `ModifyCluster` with
+`InvalidRequestException`; at most 256 steps `PENDING` or `RUNNING` ("only 256 steps can be RUNNING or PENDING at any
+given time", a `CANCEL_PENDING` one counted as running), which `RunJobFlow` and `AddJobFlowSteps` refuse with
+`ValidationException`; no step with an `ActionOnFailure` other than `CONTINUE` added while the level is above 1 ("The
+step is not submitted and the action fails with a message that the ActionOnFailure setting is not valid"), which
+`AddJobFlowSteps` refuses with `ValidationException`, a step naming none taking `TERMINATE_CLUSTER`, as it is
+submitted, and so refused too; and `CancelSteps` "Available only
+in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0", with at most 256 steps a request, refused otherwise
+with `InvalidRequestException`.
+
 In the `docker` runner mode a cancelled `RUNNING` step is `CANCEL_PENDING` while its driver stops, and keeps its
 place among the running steps until the driver is gone: then it is `CANCELLED`, and the next `PENDING` step starts.
 That is Floci's reading of the Management Guide's "Canceling a running step does not allow a pending step to start
