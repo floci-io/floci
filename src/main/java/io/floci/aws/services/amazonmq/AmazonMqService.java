@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -49,6 +50,7 @@ public class AmazonMqService implements ResourceProvider {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final RabbitMqManager rabbitMqManager;
+    private final StripedLocks brokerLocks = new StripedLocks(256);
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
@@ -118,65 +120,69 @@ public class AmazonMqService implements ResourceProvider {
         validateUserPassword(admin.getPassword());
 
         String region = regionResolver.getRegion();
-        if (regionBrokers(region).stream().anyMatch(b -> name.equals(b.getBrokerName()))) {
-            throw new AwsException("ConflictException", "Broker already exists: " + name, 409);
-        }
-
-        String brokerId = "b-" + UUID.randomUUID();
         String accountId = regionResolver.getAccountId();
-        String brokerArn = AwsArnUtils.Arn.of("mq", region, accountId,
-                "broker:" + name + ":" + brokerId).toString();
-        String engineVersion = (params.engineVersion() == null || params.engineVersion().isBlank())
-                ? DEFAULT_ENGINE_VERSION : params.engineVersion();
-
-        Broker broker = new Broker(brokerId, brokerArn, name, ENGINE_RABBITMQ,
-                engineVersion, deploymentMode, params.hostInstanceType());
-        broker.setAccountId(accountId);
-        broker.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
-        // Stamp the volume name now, with the current prefix, so it is persisted rather than
-        // recomputed later. Only records predating this field fall back to the legacy name.
-        broker.setDockerVolumeName(ContainerStorageHelper.resourceName(
-                config, "amazonmq", broker.getVolumeId(), broker.getBrokerId()));
-        broker.setPubliclyAccessible(params.publiclyAccessible());
-        broker.setAutoMinorVersionUpgrade(params.autoMinorVersionUpgrade());
-        if (params.users() != null) {
-            broker.setUsers(new ArrayList<>(params.users()));
-        }
-        if (params.tags() != null) {
-            broker.setTags(new HashMap<>(params.tags()));
-        }
-        broker.setSecurityGroups(params.securityGroups());
-        broker.setSubnetIds(params.subnetIds());
-        broker.setLogs(params.logs());
-        broker.setMaintenanceWindowStartTime(params.maintenanceWindowStartTime());
-        broker.setStorageType(params.storageType());
-        broker.setAuthenticationStrategy(params.authenticationStrategy());
-        broker.setEncryptionOptions(params.encryptionOptions());
-        broker.setConfiguration(params.configuration());
-
-        if (config.services().amazonmq().mock()) {
-            // No backing container: come up immediately with synthetic endpoints.
-            applyLocalEndpoints(broker);
-            broker.setBrokerState(BrokerState.RUNNING);
-        } else {
-            try {
-                // Start the container; the broker stays CREATION_IN_PROGRESS until
-                // the readiness poller observes the management API answering.
-                rabbitMqManager.startContainer(broker);
-            } catch (RuntimeException e) {
-                broker.setBrokerState(BrokerState.CREATION_FAILED);
-                storage.put(brokerKey(region, brokerId), broker);
-                // Keep the cause in the logs; don't leak internal details (or a null
-                // message) into the AWS error envelope returned to the client.
-                LOG.errorv(e, "Failed to provision broker {0} ({1})", name, brokerId);
-                throw new AwsException("InternalServerErrorException",
-                        "Failed to provision broker " + name, 500);
+        // The name check and the store hold one lock for the name in its account and Region, so two creates of
+        // one name can't both find it free.
+        synchronized (brokerLocks.lockFor(accountId + ":" + region + ":" + name)) {
+            if (regionBrokers(region).stream().anyMatch(b -> name.equals(b.getBrokerName()))) {
+                throw new AwsException("ConflictException", "Broker already exists: " + name, 409);
             }
-        }
 
-        storage.put(brokerKey(region, brokerId), broker);
-        LOG.infov("Created Amazon MQ broker {0} ({1})", name, brokerId);
-        return broker;
+            String brokerId = "b-" + UUID.randomUUID();
+            String brokerArn = AwsArnUtils.Arn.of("mq", region, accountId,
+                    "broker:" + name + ":" + brokerId).toString();
+            String engineVersion = (params.engineVersion() == null || params.engineVersion().isBlank())
+                    ? DEFAULT_ENGINE_VERSION : params.engineVersion();
+
+            Broker broker = new Broker(brokerId, brokerArn, name, ENGINE_RABBITMQ,
+                    engineVersion, deploymentMode, params.hostInstanceType());
+            broker.setAccountId(accountId);
+            broker.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
+            // Stamp the volume name now, with the current prefix, so it is persisted rather than
+            // recomputed later. Only records predating this field fall back to the legacy name.
+            broker.setDockerVolumeName(ContainerStorageHelper.resourceName(
+                    config, "amazonmq", broker.getVolumeId(), broker.getBrokerId()));
+            broker.setPubliclyAccessible(params.publiclyAccessible());
+            broker.setAutoMinorVersionUpgrade(params.autoMinorVersionUpgrade());
+            if (params.users() != null) {
+                broker.setUsers(new ArrayList<>(params.users()));
+            }
+            if (params.tags() != null) {
+                broker.setTags(new HashMap<>(params.tags()));
+            }
+            broker.setSecurityGroups(params.securityGroups());
+            broker.setSubnetIds(params.subnetIds());
+            broker.setLogs(params.logs());
+            broker.setMaintenanceWindowStartTime(params.maintenanceWindowStartTime());
+            broker.setStorageType(params.storageType());
+            broker.setAuthenticationStrategy(params.authenticationStrategy());
+            broker.setEncryptionOptions(params.encryptionOptions());
+            broker.setConfiguration(params.configuration());
+
+            if (config.services().amazonmq().mock()) {
+                // No backing container: come up immediately with synthetic endpoints.
+                applyLocalEndpoints(broker);
+                broker.setBrokerState(BrokerState.RUNNING);
+            } else {
+                try {
+                    // Start the container; the broker stays CREATION_IN_PROGRESS until
+                    // the readiness poller observes the management API answering.
+                    rabbitMqManager.startContainer(broker);
+                } catch (RuntimeException e) {
+                    broker.setBrokerState(BrokerState.CREATION_FAILED);
+                    storage.put(brokerKey(region, brokerId), broker);
+                    // Keep the cause in the logs; don't leak internal details (or a null
+                    // message) into the AWS error envelope returned to the client.
+                    LOG.errorv(e, "Failed to provision broker {0} ({1})", name, brokerId);
+                    throw new AwsException("InternalServerErrorException",
+                            "Failed to provision broker " + name, 500);
+                }
+            }
+
+            storage.put(brokerKey(region, brokerId), broker);
+            LOG.infov("Created Amazon MQ broker {0} ({1})", name, brokerId);
+            return broker;
+        }
     }
 
     public Broker describeBroker(String brokerId) {
