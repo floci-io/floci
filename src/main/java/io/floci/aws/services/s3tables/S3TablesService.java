@@ -67,6 +67,11 @@ public class S3TablesService {
         return bucket;
     }
 
+    public synchronized Object getTableBucketEncryption(String tableBucketArn, String region) {
+        Object configuration = getTableBucket(tableBucketArn, region).getEncryptionConfiguration();
+        return configuration == null ? Map.of("sseAlgorithm", "AES256") : configuration;
+    }
+
     public synchronized List<TableBucket> listTableBuckets(String prefix, String region) {
         return store.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(bucket -> prefix == null || bucket.getName().startsWith(prefix))
