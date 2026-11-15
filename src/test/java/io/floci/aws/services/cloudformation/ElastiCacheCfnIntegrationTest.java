@@ -220,6 +220,25 @@ class ElastiCacheCfnIntegrationTest {
     }
 
     @Test
+    void userGroupCanListTheBuiltInDefaultUser() {
+        String stack = "elasticache-cfn-builtin-member-it";
+        cloudFormation(stack, "CreateStack", """
+            {"Resources": {"UserGroup": {"Type": "AWS::ElastiCache::UserGroup",
+              "Properties": {"UserGroupId": "cfn-it-builtin-members", "Engine": "redis",
+                             "UserIds": ["default"]}}}}
+            """);
+        describeStacks(stack, "CREATE_COMPLETE");
+
+        try (ElastiCacheClient client = client()) {
+            assertEquals(List.of("default"), client.describeUserGroups(r -> r.userGroupId("cfn-it-builtin-members"))
+                    .userGroups().getFirst().userIds());
+        }
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
     void cacheClusterExposesEndpoints() throws Exception {
         Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the cache data plane");
         cloudFormation(DATA_STACK, "CreateStack", DATA_TEMPLATE);
