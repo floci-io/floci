@@ -122,7 +122,7 @@ attributes. Access-token claims are exposed under `context.token`.
 
 Policy stores and all child resources use Floci's configured storage backend. Keys include the
 resolved AWS Region and are wrapped by the normal account-aware storage layer, preserving
-account and Region isolation. `/_floci/reset` clears policy stores, policies, templates,
+account and Region isolation. `POST /_floci/state/reset` clears policy stores, policies, templates,
 aliases, identity sources, and idempotency records with other resettable service state.
 
 A policy store's ARN carries no Region, `arn:aws:verifiedpermissions::<account>:policy-store/<id>`,
