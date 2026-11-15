@@ -41,7 +41,7 @@ class EcsExecuteCommandIntegrationTest {
     private static final String CLUSTER = "exec-cluster";
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":"
-                    + "[" + Ec2Service.defaultSubnetId("us-east-1", "a") + "]}}";
+                    + "[\"" + Ec2Service.defaultSubnetId("us-east-1", "a") + "\"]}}";
 
     @BeforeAll
     static void configure() {
