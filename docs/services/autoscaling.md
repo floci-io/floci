@@ -29,7 +29,7 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | `CreateAutoScalingGroup` | Creates a group with min/max/desired capacity, AZs, tags, launch configuration, launch template, or mixed instances policy; starts capacity reconciliation loop |
 | `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state and mixed instances policy shape when configured |
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
-| `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
+| `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion, except in an [EKS nodegroup's group](eks.md#auto-scaling-group) |
 | `DescribeTags` | Group tags; filters `auto-scaling-group`, `key`, `value`, `propagate-at-launch` (values ORed, filters ANDed); `MaxRecords`/`NextToken` paging |
 | `CreateOrUpdateTags` | Creates or updates group tags and their propagate-at-launch setting |
 | `DeleteTags` | Removes named group tags |
@@ -103,7 +103,7 @@ EC2 instance can use a default subnet in a different zone.
 | `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
 | `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService`. Refuses the whole batch with `ValidationError` when an instance already belongs to a group |
-| `DetachInstances` | Detaches instances from a group; optionally decrements desired capacity |
+| `DetachInstances` | Detaches instances from a group and deregisters them from its target groups; optionally decrements desired capacity |
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
 | `EnterStandby` | Moves `InService` instances to `EnteringStandby` and returns one `InProgress` activity (progress 50) per instance; the reconciler deregisters them from the group's target groups and Classic Load Balancers and sets `Standby` within 10 s. `ShouldDecrementDesiredCapacity=true` lowers desired capacity by the number of instances, refused with `ValidationError` below `MinSize`; `false` keeps it, so the group launches replacements |
 | `ExitStandby` | Moves `Standby` instances to `Pending`, raises desired capacity by the number of instances (refused with `ValidationError` above `MaxSize`) and returns one `PreInService` activity (progress 30) per instance; the reconciler registers them with the group's load balancers and sets `InService` within 10 s |
@@ -180,8 +180,8 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 
 | Operation | Notes |
 |---|---|
-| `AttachLoadBalancerTargetGroups` | Attaches ELB v2 target group ARNs; new instances auto-registered on InService |
-| `DetachLoadBalancerTargetGroups` | Detaches target groups; instances deregistered |
+| `AttachLoadBalancerTargetGroups` | Attaches ELB v2 target group ARNs. The reconciler registers each instance with them as it comes into service; instances already in service stay unregistered, which AWS registers. An EKS nodegroup's group registers its node at once |
+| `DetachLoadBalancerTargetGroups` | Detaches target groups. The group's instances stay registered with them, which AWS deregisters; an EKS nodegroup's group deregisters its node at once |
 | `DescribeLoadBalancerTargetGroups` | Lists target groups attached to a group |
 | `AttachLoadBalancers` | Classic ELB attachment (stored; no ELB v1 routing) |
 | `DetachLoadBalancers` | Classic ELB detachment |
@@ -191,8 +191,8 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 
 | Operation | Notes |
 |---|---|
-| `AttachTrafficSources` | Unified elb/elbv2/vpc-lattice attachment API; stored per identifier with its type |
-| `DetachTrafficSources` | Removes a traffic source by identifier |
+| `AttachTrafficSources` | Unified elb/elbv2/vpc-lattice attachment API; stored per identifier with its type. Instances are not registered with an `elbv2` source, which AWS does, except an EKS nodegroup's node, registered at once |
+| `DetachTrafficSources` | Removes a traffic source by identifier; an EKS nodegroup's group deregisters its node from an `elbv2` source at once |
 | `DescribeTrafficSources` | Lists attached sources, optionally filtered by type; every source reports `InService` |
 
 ### Lifecycle Hooks
@@ -270,6 +270,7 @@ Floci runs a background reconciler (10 s fixed rate) that keeps each group's InS
 - **Scale-out**: calls `RunInstances` with the group's launch configuration; new instances are tracked as `Pending` until the EC2 state transitions to `running`, at which point they move to `InService` and are registered with all attached ELB v2 target groups.
 - **Scale-in**: selects InService instances not protected from scale-in, deregisters them from target groups, then calls `TerminateInstances`.
 - Activity records are written on each scale-out and scale-in event.
+- **EKS nodegroups**: the group EKS keeps for a managed nodegroup is left alone. Its instance is the cluster's node, which the reconciler never launches, terminates or replaces, so attaching a target group to such a group registers the node at once and detaching it deregisters the node, and operations that would terminate, replace or move the node are refused. See the [EKS nodegroup Auto Scaling group](eks.md#auto-scaling-group).
 
 `SuspendProcesses` pauses desired-capacity scale-out for `Launch` and scale-in for
 `Terminate`. The desired count remains stored, and `ResumeProcesses` allows the

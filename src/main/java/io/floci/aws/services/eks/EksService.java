@@ -17,6 +17,7 @@ import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.ec2.Ec2InstanceLaunchListener;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.Ipv4Cidrs;
@@ -64,6 +65,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -112,6 +114,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
+    private final AutoScalingService autoScaling;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
     private final Map<String, Object> nodeGroupCapacityLocks = new ConcurrentHashMap<>();
@@ -127,7 +130,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries,
             EksPodIdentityAssociationService podIdentityAssociations,
-            EksAddonService addons) {
+            EksAddonService addons, AutoScalingService autoScaling) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -145,9 +148,19 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         this.accessEntries = accessEntries;
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
+        this.autoScaling = autoScaling;
         if (this.clusterManager != null) {
             this.clusterManager.setEc2Service(this.ec2Service);
         }
+    }
+
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations,
+            EksAddonService addons) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, podIdentityAssociations, addons, null);
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -185,6 +198,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 ec2Service.restoreAttachedVolumesForInstance(reg, nodeInst);
             });
         }
+        if (clusterManager != null && autoScaling != null) {
+            clusterManager.addNodeRegistrationListener(this::addNodeToNodeGroupAutoScalingGroups);
+        }
+        restoreNodeGroupAutoScalingGroups();
         if (!config.services().eks().mock()) {
             restorePersistedClusters();
         } else {
@@ -270,6 +287,14 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getAccountId(),
                         cluster.getName(), cluster))
                 .toList();
+    }
+
+    /** Every account's cluster stored under {@code key}, read with one get per account rather than a scan. */
+    private List<AccountAwareStorageBackend.AccountEntry<Cluster>> clusterEntries(String key) {
+        if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
+            return aware.findAllAccountEntries(key);
+        }
+        return allClusterEntries().stream().filter(entry -> key.equals(clusterKey(entry.value()))).toList();
     }
 
     private boolean isClusterDeleting(String accountId, Cluster cluster) {
@@ -430,6 +455,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
         try {
             clearAppliedClusterUserData(cluster, clusterName);
+            if (cluster != null) {
+                deleteNodeGroupAutoScalingGroups(accountId, cluster);
+            }
             if (cluster == null || cluster.getArn() == null) {
                 String fallbackArn = AwsArnUtils.Arn.of("eks", regionOfKey(clusterKey), accountId,
                         "cluster/" + clusterName).toString();
@@ -1113,6 +1141,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 }
             }
             deleteClusterSecurityGroup(cluster);
+            deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
             accessEntries.deleteClusterEntries(cluster);
             if (podIdentityAssociations != null) {
                 podIdentityAssociations.deleteClusterAssociations(cluster);
@@ -1306,6 +1335,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                             nodeGroup.setStatus(NodegroupStatus.ACTIVE);
                         }
                     }
+                    // The node group is already stored, so a node registering meanwhile finds it.
+                    createNodeGroupAutoScalingGroup(accountId, currentCluster, nodeGroup);
                     nodeGroupStorage.put(storageKey, nodeGroup);
                     stored = true;
                 }
@@ -1416,6 +1447,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         Object capacityLock = capacityLock(regionResolver.getAccountId(), clusterKey);
         synchronized (capacityLock) {
             Nodegroup nodeGroup = describeNodeGroup(clusterName, nodegroupName);
+            deleteNodeGroupAutoScalingGroup(regionResolver.getAccountId(), regionOfKey(clusterKey), nodeGroup);
             nodeGroup.setStatus(NodegroupStatus.DELETING);
             nodeGroup.setModifiedAt(Instant.now());
             nodeGroupStorage.delete(nodeGroupKey(clusterKey, nodegroupName));
@@ -1845,6 +1877,162 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         autoScalingGroup.put("name", "eks-" + nodegroupName + "-" + UUID.randomUUID().toString().substring(0, 8));
         resources.put("autoScalingGroups", List.of(autoScalingGroup));
         return resources;
+    }
+
+    /** The name of the Auto Scaling group {@code nodeGroup} reports in its resources, or null when it reports none. */
+    private static String autoScalingGroupName(Nodegroup nodeGroup) {
+        if (nodeGroup.getResources() instanceof Map<?, ?> resources
+                && resources.get("autoScalingGroups") instanceof List<?> autoScalingGroups
+                && !autoScalingGroups.isEmpty()
+                && autoScalingGroups.getFirst() instanceof Map<?, ?> autoScalingGroup
+                && autoScalingGroup.get("name") instanceof String name) {
+            return name;
+        }
+        return null;
+    }
+
+    /**
+     * The tags EKS puts on a managed node group's Auto Scaling group: the cluster and node group it belongs to, and
+     * the two the Kubernetes Cluster Autoscaler discovers a cluster's groups by.
+     */
+    private static Map<String, String> nodeGroupAutoScalingTags(String clusterName, String nodegroupName) {
+        return Map.of(
+                EksClusterManager.CLUSTER_NAME_TAG, clusterName,
+                "eks:nodegroup-name", nodegroupName,
+                "k8s.io/cluster-autoscaler/enabled", "true",
+                "k8s.io/cluster-autoscaler/" + clusterName, "owned");
+    }
+
+    /**
+     * Creates the Auto Scaling group {@code nodeGroup} reports, in its account and Region, unless it exists, with
+     * the cluster's node in it once the node is registered, and records on the node group that it was created; the
+     * caller stores the node group. Floci runs one node per cluster, so every node group's group holds that node.
+     * The node is looked up after the group exists: a node registering meanwhile is added by
+     * {@link #addNodeToNodeGroupAutoScalingGroups}, which finds the group, since the node group is stored first.
+     */
+    private void createNodeGroupAutoScalingGroup(String accountId, Cluster cluster, Nodegroup nodeGroup) {
+        String groupName = autoScalingGroupName(nodeGroup);
+        if (autoScaling == null || groupName == null) {
+            return;
+        }
+        String region = resolveClusterRegion(cluster);
+        NodegroupScalingConfig defaults = defaultScalingConfig();
+        NodegroupScalingConfig scaling = nodeGroup.getScalingConfig() != null ? nodeGroup.getScalingConfig() : defaults;
+        List<String> subnets = nodeGroup.getSubnets() != null ? nodeGroup.getSubnets() : List.of();
+        try {
+            RequestScopes.runAs(accountId, region, () -> {
+                autoScaling.createEksManagedGroup(region, groupName,
+                        Objects.requireNonNullElse(scaling.getMinSize(), defaults.getMinSize()),
+                        Objects.requireNonNullElse(scaling.getMaxSize(), defaults.getMaxSize()),
+                        Objects.requireNonNullElse(scaling.getDesiredSize(), defaults.getDesiredSize()),
+                        subnets, nodeGroupAutoScalingTags(cluster.getName(), nodeGroup.getNodegroupName()));
+                Instance node = clusterManager != null ? clusterManager.getRegisteredClusterNodeInstance(cluster) : null;
+                if (node != null) {
+                    autoScaling.addEksManagedInstance(region, groupName, node);
+                }
+            });
+            nodeGroup.setAutoScalingGroupCreated(true);
+        } catch (RuntimeException e) {
+            // The node group stands without it, as it did before Floci kept these groups, and the next start
+            // tries again.
+            LOG.warnv("Could not create Auto Scaling group {0} of EKS node group {1} in cluster {2}: {3}",
+                    groupName, nodeGroup.getNodegroupName(), cluster.getName(), e.getMessage());
+        }
+    }
+
+    /**
+     * Adds a cluster's node, once it registers, to the Auto Scaling group of each of the cluster's node groups. The
+     * node carries its cluster's Region and, in its {@code eks:cluster-name} tag, its name, so only the clusters
+     * stored under that Region and name are read. An instance that joins a cluster from EC2 is in no managed node
+     * group, and is not added.
+     */
+    private void addNodeToNodeGroupAutoScalingGroups(Instance node) {
+        String clusterName = node.getTags() == null ? null : node.getTags().stream()
+                .filter(tag -> EksClusterManager.CLUSTER_NAME_TAG.equals(tag.getKey()))
+                .map(Tag::getValue).findFirst().orElse(null);
+        if (clusterName == null || node.getRegion() == null) {
+            return;
+        }
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry
+                : clusterEntries(clusterKey(node.getRegion(), clusterName))) {
+            Cluster cluster = entry.value();
+            Instance registered = clusterManager.getRegisteredClusterNodeInstance(cluster);
+            if (registered == null || !registered.getInstanceId().equals(node.getInstanceId())) {
+                continue;
+            }
+            String region = resolveClusterRegion(cluster);
+            for (Nodegroup nodeGroup : listNodeGroupsForCluster(clusterKey(cluster), entry.accountId())) {
+                String groupName = autoScalingGroupName(nodeGroup);
+                if (groupName == null) {
+                    continue;
+                }
+                try {
+                    RequestScopes.runAs(entry.accountId(), region,
+                            () -> autoScaling.addEksManagedInstance(region, groupName, node));
+                } catch (RuntimeException e) {
+                    LOG.warnv("Could not add the node of EKS cluster {0} to Auto Scaling group {1} of node group {2}: {3}",
+                            cluster.getName(), groupName, nodeGroup.getNodegroupName(), e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Gives each node group stored before Floci kept their Auto Scaling groups the group it reports, once: a node
+     * group whose group was created is skipped, so a group deleted through Auto Scaling stays deleted. Runs as this
+     * bean is created, from {@link #init()}.
+     */
+    void restoreNodeGroupAutoScalingGroups() {
+        if (autoScaling == null) {
+            return;
+        }
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : allClusterEntries()) {
+            Cluster cluster = entry.value();
+            for (Nodegroup nodeGroup : listNodeGroupsForCluster(clusterKey(cluster), entry.accountId())) {
+                if (nodeGroup.isAutoScalingGroupCreated()) {
+                    continue;
+                }
+                createNodeGroupAutoScalingGroup(entry.accountId(), cluster, nodeGroup);
+                if (nodeGroup.isAutoScalingGroupCreated()) {
+                    putNodeGroupForAccount(entry.accountId(),
+                            nodeGroupKey(clusterKey(cluster), nodeGroup.getNodegroupName()), nodeGroup);
+                }
+            }
+        }
+    }
+
+    private void putNodeGroupForAccount(String accountId, String key, Nodegroup nodeGroup) {
+        if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
+            aware.putForAccount(accountId, key, nodeGroup);
+            return;
+        }
+        nodeGroupStorage.put(key, nodeGroup);
+    }
+
+    /**
+     * Deletes the Auto Scaling group {@code nodeGroup} reports, which takes the cluster's node out of its target
+     * groups, except those another node group's group has attached. A failure is logged, so the node group, and
+     * the other node groups of a cluster being deleted, are deleted all the same.
+     */
+    private void deleteNodeGroupAutoScalingGroup(String accountId, String region, Nodegroup nodeGroup) {
+        String groupName = autoScalingGroupName(nodeGroup);
+        if (autoScaling == null || groupName == null) {
+            return;
+        }
+        try {
+            RequestScopes.runAs(accountId, region, () -> autoScaling.deleteEksManagedGroup(region, groupName));
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not delete Auto Scaling group {0} of EKS node group {1} in cluster {2}: {3}",
+                    groupName, nodeGroup.getNodegroupName(), nodeGroup.getClusterName(), e.getMessage());
+        }
+    }
+
+    /** Deletes the Auto Scaling groups of {@code cluster}'s node groups, as deleting each node group does. */
+    private void deleteNodeGroupAutoScalingGroups(String accountId, Cluster cluster) {
+        String region = resolveClusterRegion(cluster);
+        for (Nodegroup nodeGroup : listNodeGroupsForCluster(clusterKey(cluster), accountId)) {
+            deleteNodeGroupAutoScalingGroup(accountId, region, nodeGroup);
+        }
     }
 
     private Map<String, List<Object>> defaultNodeGroupHealth() {

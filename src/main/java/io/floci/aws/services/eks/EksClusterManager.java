@@ -115,6 +115,8 @@ public class EksClusterManager
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
+    /** The tag naming the cluster, on the cluster's node and on its node groups' Auto Scaling groups. */
+    static final String CLUSTER_NAME_TAG = "eks:cluster-name";
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
     private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
     private static final String ENDPOINT_HOST_LABEL = "io.floci.eks.endpoint-host";
@@ -3283,7 +3285,7 @@ public class EksClusterManager
         List<Tag> tags = new ArrayList<>();
         tags.add(new Tag("Name", safeClusterName + "-node"));
         tags.add(new Tag("kubernetes.io/cluster/" + safeClusterName, "owned"));
-        tags.add(new Tag("eks:cluster-name", safeClusterName));
+        tags.add(new Tag(CLUSTER_NAME_TAG, safeClusterName));
         inst.setTags(tags);
         return inst;
     }
