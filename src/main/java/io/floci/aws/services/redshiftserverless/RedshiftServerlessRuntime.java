@@ -184,16 +184,33 @@ public class RedshiftServerlessRuntime {
         }
     }
 
-    /**
-     * Puts the role and the proxy back to {@code password} after a rotation the caller could not
-     * store. The proxy is only reset once the role is, so a failed role restore never leaves the two
-     * disagreeing; the failure propagates instead.
-     */
     public void restoreMasterPassword(String accountId, String region, String workgroupName,
                                       String masterUsername, String dbName, String password) {
+        restoreMasterPassword(accountId, region, workgroupName, masterUsername, dbName, password, null);
+    }
+
+    /**
+     * Puts the role and the proxy back to {@code password} after a rotation the caller could not
+     * store. If the proxy refuses {@code password} after the role changed and {@code failedPassword}
+     * is given, the role is put back to {@code failedPassword} so the two never disagree.
+     */
+    public void restoreMasterPassword(String accountId, String region, String workgroupName,
+                                      String masterUsername, String dbName, String password,
+                                      String failedPassword) {
         String backendId = backendId(region, workgroupName);
         containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
-        proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
+        try {
+            proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
+        } catch (RuntimeException e) {
+            if (failedPassword != null) {
+                try {
+                    containerManager.alterUserPassword(accountId, backendId, masterUsername, failedPassword, dbName);
+                } catch (RuntimeException revertFailure) {
+                    e.addSuppressed(revertFailure);
+                }
+            }
+            throw e;
+        }
     }
 
     public TempCredential issueCredential(String accountId, String region, String workgroupName,

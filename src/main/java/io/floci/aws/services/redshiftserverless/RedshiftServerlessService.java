@@ -1516,12 +1516,10 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             namespaces.putForAccount(accountId, entry.key(), rotated);
             return requireAdminSecrets().value(rotated);
         }, () -> {
-            try {
-                runtime.restoreMasterPassword(accountId, region, workgroup.getWorkgroupName(),
-                        workgroup.getMasterUsername(), current.getDbName(), current.getAdminUserPassword());
-            } finally {
-                namespaces.putForAccount(accountId, entry.key(), current);
-            }
+            runtime.restoreMasterPassword(accountId, region, workgroup.getWorkgroupName(),
+                    workgroup.getMasterUsername(), current.getDbName(), current.getAdminUserPassword(),
+                    rotated.getAdminUserPassword());
+            namespaces.putForAccount(accountId, entry.key(), current);
         });
     }
 

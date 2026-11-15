@@ -52,6 +52,9 @@ class RedshiftServerlessSecretRotationIntegrationTest {
     @Inject
     ObjectMapper mapper;
 
+    @Inject
+    RedshiftServerlessService service;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
@@ -117,12 +120,12 @@ class RedshiftServerlessSecretRotationIntegrationTest {
         secrets.rotateSecret(request -> request.secretId(secretArn));
 
         verify(runtime, timeout(10_000)).restoreMasterPassword(anyString(), eq("us-east-1"), anyString(),
-                eq("admin"), eq("dev"), eq(INITIAL_PASSWORD));
+                eq("admin"), eq("dev"), eq(INITIAL_PASSWORD), eq(ROTATED_PASSWORD));
         assertEquals(INITIAL_PASSWORD, passwordOf(secretArn));
     }
 
     @Test
-    void aNamespaceOfAnotherAccountIsRotatedOnTheRotationThread() throws Exception {
+    void aNamespaceOfAnotherAccountIsRotatedOnTheRotationThread() {
         StaticCredentialsProvider other = StaticCredentialsProvider.create(
                 AwsBasicCredentials.create("222222222222", "test"));
         RedshiftServerlessClient otherRedshift = RedshiftServerlessClient.builder().endpointOverride(endpoint)
@@ -146,6 +149,23 @@ class RedshiftServerlessSecretRotationIntegrationTest {
         Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> ROTATED_PASSWORD.equals(
                 mapper.readTree(otherSecrets.getSecretValue(request -> request.secretId(secretArn)).secretString())
                         .path("password").asText()));
+    }
+
+    @Test
+    void aFailedBackendRestoreKeepsTheRotatedPasswordOnTheNamespace() {
+        String namespaceName = name();
+        String secretArn = managedNamespaceWithWorkgroup(namespaceName).adminPasswordSecretArn();
+        doThrow(new IllegalStateException("restore failed")).when(runtime).restoreMasterPassword(
+                anyString(), eq("us-east-1"), anyString(), eq("admin"), eq("dev"), eq(INITIAL_PASSWORD),
+                eq(ROTATED_PASSWORD));
+
+        assertThrows(IllegalStateException.class, () -> service.rotate(secretArn, "us-east-1",
+                (changeBackend, rollbackBackend) -> {
+                    changeBackend.get();
+                    rollbackBackend.run();
+                }));
+
+        assertEquals(ROTATED_PASSWORD, service.getNamespace(namespaceName, "us-east-1").getAdminUserPassword());
     }
 
     private Namespace managedNamespaceWithWorkgroup(String namespaceName) {

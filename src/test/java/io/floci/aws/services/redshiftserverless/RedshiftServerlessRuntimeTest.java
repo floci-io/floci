@@ -311,4 +311,17 @@ class RedshiftServerlessRuntimeTest {
         assertTrue(first.matches(".*[A-Z].*") && first.matches(".*[a-z].*") && first.matches(".*[0-9].*"), first);
         assertNotEquals(first, second);
     }
+
+    @Test
+    void restoreMasterPasswordRevertsTheRoleWhenTheProxyRejectsThePreviousPassword() {
+        doThrow(new RuntimeException("proxy failed")).when(proxies).updateMasterPassword(RELAY_KEY, "Old123");
+
+        assertThrows(RuntimeException.class, () -> runtime.restoreMasterPassword(
+                ACCOUNT, REGION, "my-wg", "root", "analytics", "Old123", "New456"));
+
+        InOrder order = inOrder(containers, proxies);
+        order.verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "Old123", "analytics");
+        order.verify(proxies).updateMasterPassword(RELAY_KEY, "Old123");
+        order.verify(containers).alterUserPassword(ACCOUNT, BACKEND_ID, "root", "New456", "analytics");
+    }
 }
