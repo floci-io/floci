@@ -33,7 +33,7 @@ public final class WebSocketTestSupport {
      * Creates a Base64-encoded ZIP file containing a single index.js with the given handler code.
      * Used to create Lambda function deployment packages in tests.
      */
-    public static String createLambdaZip(String handlerCode) throws Exception {
+    public static String createLambdaZip(String handlerCode) {
         return LambdaCodeFixtures.nodeJsZipBase64(handlerCode);
     }
 

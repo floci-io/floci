@@ -173,7 +173,7 @@ class PipesStreamEnrichmentDockerIntegrationTest {
                 .statusCode(201);
     }
 
-    private static String enrichmentZipBase64() throws Exception {
+    private static String enrichmentZipBase64() {
         return LambdaCodeFixtures.nodeJsZipBase64("""
                 exports.handler = async (records) => records.flatMap((record) => {
                   const rowId = record.dynamodb.Keys.sk.S.split('#')[1];

@@ -146,7 +146,7 @@ class KinesisEsmOnFailureDockerIntegrationTest {
                 + " s, checkpoints: " + checkpoints);
     }
 
-    private static String poisonRaisingZipBase64() throws Exception {
+    private static String poisonRaisingZipBase64() {
         return LambdaCodeFixtures.nodeJsZipBase64("""
                 exports.handler = async (event) => {
                   for (const record of event.Records) {

@@ -163,7 +163,7 @@ class LambdaAsyncRetryDockerIntegrationTest {
         given().when().delete(BASE_PATH + "/functions/" + functionName);
     }
 
-    private static String failingZipBase64() throws Exception {
+    private static String failingZipBase64() {
         return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => { throw new Error('boom'); };\n");
     }
 

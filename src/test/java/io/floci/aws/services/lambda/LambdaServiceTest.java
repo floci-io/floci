@@ -2864,7 +2864,7 @@ class LambdaServiceTest {
                 .map(LambdaFunction::getVersion).collect(Collectors.toSet()));
     }
 
-    private static String zipWithBody(String body) throws Exception {
+    private static String zipWithBody(String body) {
         return LambdaCodeFixtures.nodeJsZipBase64(body + "\n");
     }
 

@@ -42,7 +42,7 @@ class LambdaLayerIntegrationTest {
         return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 
-    private static String functionZipBase64() throws Exception {
+    private static String functionZipBase64() {
         return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 200 });");
     }
 

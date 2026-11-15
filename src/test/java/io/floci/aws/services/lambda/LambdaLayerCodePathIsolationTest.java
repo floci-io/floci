@@ -217,7 +217,7 @@ class LambdaLayerCodePathIsolationTest {
         return Base64.getEncoder().encodeToString(zipBytes(content));
     }
 
-    private static byte[] zipBytes(String content) throws Exception {
+    private static byte[] zipBytes(String content) {
         return LambdaCodeFixtures.nodeJsZip(content);
     }
 
