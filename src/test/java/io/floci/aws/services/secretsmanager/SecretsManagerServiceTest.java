@@ -727,6 +727,18 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void listSecretVersionIds_valuelessPendingVersion_isExcluded() {
+        String pendingToken = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", null, null, pendingToken, REGION, List.of("AWSPENDING"));
+
+        Map<String, List<String>> versions = service.listSecretVersionIds("my-secret", REGION);
+
+        assertEquals(1, versions.size());
+        assertFalse(versions.containsKey(pendingToken));
+    }
+
+    @Test
     void getSecretValueByVersionId() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         SecretVersion v1 = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);

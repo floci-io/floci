@@ -2020,7 +2020,11 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
         Map<String, List<String>> result = new HashMap<>();
         if (secret.getVersions() != null) {
             for (Map.Entry<String, SecretVersion> entry : secret.getVersions().entrySet()) {
-                result.put(entry.getKey(), entry.getValue().getVersionStages());
+                SecretVersion version = entry.getValue();
+                if (version.getSecretString() == null && version.getSecretBinary() == null) {
+                    continue;
+                }
+                result.put(entry.getKey(), version.getVersionStages());
             }
         }
         return result;
