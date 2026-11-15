@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.UuidShapes;
 import io.floci.aws.services.identitystore.model.Group;
 import io.floci.aws.services.identitystore.model.Membership;
 import io.floci.aws.services.identitystore.model.User;
@@ -69,9 +70,6 @@ public class ScimController {
             "preferredLanguage", "locale", "timezone", "name", "enterprise", "emails", "addresses", "phoneNumbers");
     private static final Pattern PREFIXED_TENANT = Pattern.compile(
             "([0-9a-f]{10})-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-            Pattern.CASE_INSENSITIVE);
-    private static final Pattern LEGACY_TENANT = Pattern.compile(
-            "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
             Pattern.CASE_INSENSITIVE);
 
     private final IdentityStoreService identityStoreService;
@@ -686,7 +684,7 @@ public class ScimController {
         Matcher prefixed = PREFIXED_TENANT.matcher(tenantId);
         if (prefixed.matches()) {
             identityStoreId = "d-" + prefixed.group(1).toLowerCase(Locale.ROOT);
-        } else if (LEGACY_TENANT.matcher(tenantId).matches()) {
+        } else if (UuidShapes.matchesEitherCase(tenantId)) {
             identityStoreId = tenantId.toLowerCase(Locale.ROOT);
         } else {
             throw unauthorized("Authorization header is invalid or tenant ID is incorrect.");
