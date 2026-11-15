@@ -548,6 +548,7 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             }
         }
         namespaces.put(storageKey(region, previous.getNamespaceName()), previous);
+        syncAudit(workgroups.accountId(), region, previous);
     }
 
     public synchronized Namespace deleteNamespace(String namespaceName, String region) {

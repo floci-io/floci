@@ -14,7 +14,6 @@ import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClie
 import software.amazon.awssdk.services.redshiftserverless.model.ConfigParameter;
 
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -56,7 +55,6 @@ class RedshiftServerlessAuditLogTest {
                 serverless.updateNamespace(request -> request.namespaceName(namespace)
                         .logExportsWithStrings(new ArrayList<>(List.of("connectionlog"))));
                 execute(data, workgroup, "select 'sdk_audit_off_marker'");
-                Thread.sleep(Duration.ofSeconds(3).toMillis());
                 assertThat(messages(logs, activityGroup)).noneMatch(line -> line.contains("sdk_audit_off_marker"));
             } finally {
                 try {
@@ -87,14 +85,11 @@ class RedshiftServerlessAuditLogTest {
         }
     }
 
-    private static void awaitMessage(CloudWatchLogsClient logs, String group, String text) throws InterruptedException {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(30));
-        List<String> messages = messages(logs, group);
-        while (messages.stream().noneMatch(line -> line.contains(text)) && Instant.now().isBefore(deadline)) {
-            Thread.sleep(500);
-            messages = messages(logs, group);
-        }
-        assertThat(messages).anyMatch(line -> line.contains(text));
+    private static void awaitMessage(CloudWatchLogsClient logs, String group, String text)
+            throws InterruptedException {
+        TestFixtures.await(() -> messages(logs, group).stream().anyMatch(line -> line.contains(text)),
+                group, "a record containing " + text, Duration.ofSeconds(30).toNanos(), 500,
+                () -> ": " + messages(logs, group));
     }
 
     private static void deleteBestEffort(Runnable deletion, String resource) {

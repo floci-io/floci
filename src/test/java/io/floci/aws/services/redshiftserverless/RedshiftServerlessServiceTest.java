@@ -1098,6 +1098,25 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void restoringANamespaceUpdateReregistersThePreviousLogExports() {
+        RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
+        service.auditPublisher = instanceOf(publisher);
+        service.createNamespace("rollback-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(),
+                REGION);
+        createWorkgroup("rollback-wg", "rollback-ns");
+        RedshiftServerlessService.NamespaceUpdateSnapshot snapshot =
+                service.snapshotNamespaceUpdate("rollback-ns", REGION);
+        service.updateNamespace("rollback-ns", null, null, null, null, List.of("userlog"), REGION);
+
+        service.restoreNamespaceUpdate(snapshot, REGION);
+
+        ArgumentCaptor<RedshiftAuditTarget> registered = ArgumentCaptor.forClass(RedshiftAuditTarget.class);
+        verify(publisher, times(3)).register(eq(ACCOUNT_ID), eq(REGION), registered.capture());
+        assertEquals(List.of("userlog"), registered.getAllValues().get(1).exports());
+        assertEquals(List.of("connectionlog"), registered.getAllValues().get(2).exports());
+    }
+
+    @Test
     void aRestartRegistersTheTargetOfEveryRecoveredWorkgroup() {
         RedshiftAuditLogPublisher publisher = mock(RedshiftAuditLogPublisher.class);
         service.createNamespace("boot-ns", "admin", null, null, null, null, List.of("connectionlog"), Map.of(), REGION);

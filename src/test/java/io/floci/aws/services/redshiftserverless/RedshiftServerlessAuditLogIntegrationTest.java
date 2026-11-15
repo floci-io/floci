@@ -1,5 +1,7 @@
 package io.floci.aws.services.redshiftserverless;
 
+import io.floci.aws.services.redshift.RedshiftConnections;
+import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ExtractableResponse;
@@ -13,12 +15,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.List;
-import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -47,8 +47,8 @@ class RedshiftServerlessAuditLogIntegrationTest {
 
     /** Creates the workgroup once, as {@code RedshiftServerlessRuntimeIntegrationTest} does. */
     @BeforeEach
-    void ensureWorkgroup() {
-        Assumptions.assumeTrue(dockerAvailable(), "Docker is required for Redshift Serverless audit log tests");
+    void ensureWorkgroup() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for Redshift Serverless audit log tests");
         RestAssuredJsonUtils.configureAwsContentTypes();
         if (created) {
             return;
@@ -74,26 +74,10 @@ class RedshiftServerlessAuditLogIntegrationTest {
         }
     }
 
-    private static boolean dockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true).start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
     private Connection connect() throws SQLException {
         // 127.0.0.1 rather than the advertised address: CI sets floci.emulator.hostname to a name that does not
         // resolve from the test JVM.
-        String url = "jdbc:postgresql://127.0.0.1:" + endpointPort + "/dev";
-        return Awaitility.await()
-                .atMost(Duration.ofSeconds(30))
-                .pollDelay(Duration.ZERO)
-                .pollInterval(Duration.ofMillis(500))
-                .ignoreExceptions()
-                .until(() -> DriverManager.getConnection(url, "admin", ADMIN_PASSWORD), Objects::nonNull);
+        return RedshiftConnections.waitForConnection("127.0.0.1", endpointPort, "admin", ADMIN_PASSWORD);
     }
 
     private void executeOnTheWire(String... statements) throws SQLException {
