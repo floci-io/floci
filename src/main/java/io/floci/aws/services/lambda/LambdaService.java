@@ -3540,6 +3540,7 @@ public class LambdaService implements ResourceProvider {
 
     public PaginatedResult<LambdaUrlConfig> listFunctionUrlConfigs(
             String region, String functionName, String maxItems, String marker) {
+        requireFunctionUrlsAvailable(region);
         int limit = 50;
         if (maxItems != null) {
             try {

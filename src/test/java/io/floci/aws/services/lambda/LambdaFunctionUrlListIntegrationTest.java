@@ -73,6 +73,22 @@ class LambdaFunctionUrlListIntegrationTest {
         assertEquals(404, missing.statusCode());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "cn-north-1", "cn-northwest-1"})
+    void listingIsRejectedWhereFunctionUrlsAreUnavailable(String region) throws IOException {
+        try (LambdaClient regional = AwsTestClients.create(
+                LambdaClient.builder(), ACCOUNT, Region.of(region), endpoint)) {
+            String arn = createFunction(regional, functionName, ACCOUNT, Region.of(region));
+            for (String reference : List.of(functionName, arn, ACCOUNT + ":function:" + functionName)) {
+                InvalidParameterValueException unavailable = assertThrows(InvalidParameterValueException.class,
+                        () -> regional.listFunctionUrlConfigs(request -> request.functionName(reference)));
+                assertEquals(400, unavailable.statusCode());
+            }
+            assertEquals(arn, regional.getFunction(request -> request.functionName(functionName))
+                    .configuration().functionArn());
+        }
+    }
+
     @Test
     void listsStoredLatestAndAliasConfigurationsThroughAllDocumentedNameForms() {
         createUrls();
