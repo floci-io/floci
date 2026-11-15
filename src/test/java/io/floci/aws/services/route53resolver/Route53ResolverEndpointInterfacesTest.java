@@ -114,7 +114,7 @@ class Route53ResolverEndpointInterfacesTest {
         AtomicReference<Throwable> deleteError = new AtomicReference<>();
         Thread delete = new Thread(() -> {
             try {
-                service.deleteResolverEndpoint(id);
+                service.deleteResolverEndpoint(id, REGION);
             } catch (Throwable t) {
                 deleteError.set(t);
             }
@@ -145,7 +145,7 @@ class Route53ResolverEndpointInterfacesTest {
                 400)).when(ec2).deleteNetworkInterface(REGION, "eni-2");
 
         List<LogRecord> records = LogCapture.capture(Route53ResolverService.class,
-                () -> service.deleteResolverEndpoint(id));
+                () -> service.deleteResolverEndpoint(id, REGION));
 
         List<LogRecord> warnings = records.stream().filter(r -> r.getLevel().intValue() == Level.WARNING.intValue()).toList();
         assertEquals(1, warnings.size(), "only the unexpected failure is logged");
