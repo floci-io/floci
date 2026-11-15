@@ -16,6 +16,8 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -157,6 +159,105 @@ class EmrServiceTest {
 
         assertEquals(List.of("COMPLETED", "COMPLETED", "COMPLETED"), stepStates(service.listSteps(id, null, null)));
         assertEquals("WAITING", service.describeCluster(id).getState());
+    }
+
+    @Test
+    void aStepConcurrencyLevelBelowOneOrAbove256IsRefused() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster wide = cluster("wide", true);
+        wide.setStepConcurrencyLevel(257);
+
+        // "You can specify a minimum of 1 step and a maximum of 256 steps", in each operation's own code.
+        AwsException created = assertThrows(AwsException.class, () -> service.runJobFlow(wide, REGION));
+        assertEquals("ValidationException", created.getErrorCode());
+        assertEquals("The StepConcurrencyLevel 257 is not valid: it must be from 1 to 256.", created.getMessage());
+        String id = service.runJobFlow(cluster("narrow", true), REGION).getId();
+        AwsException modified = assertThrows(AwsException.class, () -> service.modifyCluster(id, 0));
+        assertEquals("InvalidRequestException", modified.getErrorCode());
+        assertEquals("The StepConcurrencyLevel 0 is not valid: it must be from 1 to 256.", modified.getMessage());
+        assertEquals(1, service.describeCluster(id).getStepConcurrencyLevel());
+        assertEquals(256, service.modifyCluster(id, 256));
+    }
+
+    @Test
+    void onlyContinueMayBeAddedToAClusterThatRunsStepsInParallel() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster parallel = cluster("parallel", true);
+        parallel.setStepConcurrencyLevel(2);
+        String id = service.runJobFlow(parallel, REGION).getId();
+        EmrStep terminating = step("terminating");
+        terminating.setActionOnFailure("TERMINATE_CLUSTER");
+
+        // "The step is not submitted and the action fails with a message that the ActionOnFailure setting is not
+        // valid."
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.addJobFlowSteps(id, List.of(step("fine"), terminating)));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("The ActionOnFailure setting TERMINATE_CLUSTER is not valid for a step added to a cluster whose"
+                + " StepConcurrencyLevel is greater than 1: only CONTINUE is.", refused.getMessage());
+        assertEquals(List.of(), service.listSteps(id, null, null));
+        // One that names none takes TERMINATE_CLUSTER, so it is refused too.
+        EmrStep unnamed = step("unnamed");
+        unnamed.setActionOnFailure(null);
+        assertThrows(AwsException.class, () -> service.addJobFlowSteps(id, List.of(unnamed)));
+        assertEquals(List.of(), service.listSteps(id, null, null));
+        // At a level of 1 both are fine.
+        service.modifyCluster(id, 1);
+        assertEquals(2, service.addJobFlowSteps(id, List.of(terminating, unnamed)).size());
+        assertEquals("TERMINATE_CLUSTER", service.describeStep(id, unnamed.getId()).getActionOnFailure());
+    }
+
+    @Test
+    void onlyTwoHundredFiftySixStepsMayBePendingOrRunningAtOnce() {
+        EmrService service = new EmrServiceFixture(0, 3600, 0).service;
+        List<EmrStep> many = new ArrayList<>();
+        for (int n = 0; n < 257; n++) {
+            many.add(step("step-" + n));
+        }
+        EmrCluster crowded = cluster("crowded", true);
+        crowded.getSteps().addAll(many);
+
+        AwsException created = assertThrows(AwsException.class, () -> service.runJobFlow(crowded, REGION));
+        assertEquals("ValidationException", created.getErrorCode());
+        assertEquals("Only 256 steps can be PENDING or RUNNING at any given time, and this would make 257.",
+                created.getMessage());
+        EmrCluster full = cluster("full", true);
+        full.getSteps().addAll(many.subList(0, 256));
+        String id = service.runJobFlow(full, REGION).getId();
+        AwsException added = assertThrows(AwsException.class,
+                () -> service.addJobFlowSteps(id, List.of(step("one-more"))));
+        assertEquals("Only 256 steps can be PENDING or RUNNING at any given time, and this would make 257.",
+                added.getMessage());
+        // One ended makes room again.
+        service.cancelSteps(id, List.of(service.listSteps(id, List.of("PENDING"), null).get(0).getId()));
+        assertEquals(1, service.addJobFlowSteps(id, List.of(step("one-more"))).size());
+    }
+
+    @Test
+    void cancelStepsTakesReleasesFrom480ButNot500AndAtMost256Steps() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster old = cluster("old", true);
+        old.setReleaseLabel("emr-4.7.2");
+        String oldId = service.runJobFlow(old, REGION).getId();
+        EmrCluster first = cluster("first", true);
+        first.setReleaseLabel("emr-5.0.0");
+        String firstId = service.runJobFlow(first, REGION).getId();
+        EmrCluster patched = cluster("patched", true);
+        patched.setReleaseLabel("emr-5.0.3");
+        String patchedId = service.runJobFlow(patched, REGION).getId();
+
+        // "Available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0."
+        AwsException older = assertThrows(AwsException.class, () -> service.cancelSteps(oldId, List.of("s-1")));
+        assertEquals("InvalidRequestException", older.getErrorCode());
+        assertEquals("CancelSteps is available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0,"
+                + " and cluster " + oldId + " runs emr-4.7.2.", older.getMessage());
+        assertThrows(AwsException.class, () -> service.cancelSteps(firstId, List.of("s-1")));
+        assertEquals(1, service.cancelSteps(patchedId, List.of("s-1")).size());
+        // "A maximum of 256 steps are allowed in each CancelSteps request."
+        List<String> ids = Collections.nCopies(257, "s-1");
+        AwsException tooMany = assertThrows(AwsException.class, () -> service.cancelSteps(patchedId, ids));
+        assertEquals("A CancelSteps request can cancel at most 256 steps, and this one names 257.",
+                tooMany.getMessage());
     }
 
     @Test

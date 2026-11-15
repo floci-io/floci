@@ -72,6 +72,8 @@ import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * EMR management-plane business logic. Clusters and steps go through the states of
@@ -182,6 +184,15 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
     private static final long MIN_IDLE_TIMEOUT_SECONDS = 60;
     private static final long MAX_IDLE_TIMEOUT_SECONDS = 604_800;
+    // StepConcurrencyLevel: "You can specify a minimum of 1 step and a maximum of 256 steps" (ModifyCluster), "The
+    // maximum value is 256" (RunJobFlow). And "only 256 steps can be RUNNING or PENDING at any given time" (Management
+    // Guide), and "A maximum of 256 steps are allowed in each CancelSteps request". No source gives AWS's answer to
+    // any of them, so their words are Floci's.
+    private static final int MAX_STEP_CONCURRENCY = 256;
+    private static final int MAX_ACTIVE_STEPS = 256;
+    private static final int MAX_CANCELLED_STEPS = 256;
+    // A release label's major, minor and patch versions.
+    private static final Pattern RELEASE_VERSION = Pattern.compile("emr-(\\d{1,6})\\.(\\d{1,6})\\.(\\d{1,6})");
     private static final int MAX_PORT = 65_535;
     // The AWS default: block public access enabled in every Region, with port 22 as an exception.
     private static final String DEFAULT_BLOCK_PUBLIC_ACCESS =
@@ -407,6 +418,14 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             }
             // A security configuration is created first and named here; no source gives AWS's answer for one that is
             // not there, so the code is RunJobFlow's own for its input and the wording that of the other calls.
+            if (outOfStepConcurrencyRange(cluster.getStepConcurrencyLevel())) {
+                throw new AwsException("ValidationException",
+                        stepConcurrencyOutOfRange(cluster.getStepConcurrencyLevel()), 400);
+            }
+            // Each of its steps is PENDING as it starts.
+            if (cluster.getSteps().size() > MAX_ACTIVE_STEPS) {
+                throw new AwsException("ValidationException", tooManyActiveSteps(cluster.getSteps().size()), 400);
+            }
             if (cluster.getSecurityConfiguration() != null
                     && secConfigStore.get(cluster.getSecurityConfiguration()).isEmpty()) {
                 throw new AwsException("ValidationException",
@@ -527,6 +546,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return call(() -> {
             EmrCluster cluster = requireCluster(id);
             rejectShutDownCluster(cluster, EmrService::jobFlowShutDown);
+            if (stepConcurrencyLevel != null && outOfStepConcurrencyRange(stepConcurrencyLevel)) {
+                throw invalid(stepConcurrencyOutOfRange(stepConcurrencyLevel));
+            }
             if (stepConcurrencyLevel != null) {
                 cluster.setStepConcurrencyLevel(stepConcurrencyLevel);
                 lifecycle.concurrencyChanged(cluster, now(), regionOf(cluster));
@@ -546,6 +568,27 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     () -> new AwsException("ValidationException", "Specified job flow ID does not exist.", 400));
             if (isShutDown(cluster)) {
                 throw jobFlowShutDownValidation();
+            }
+            // "If a cluster's StepConcurrencyLevel is greater than 1, do not use AddJobFlowSteps to submit a step with
+            // this parameter set to CANCEL_AND_WAIT or TERMINATE_CLUSTER. The step is not submitted and the action
+            // fails with a message that the ActionOnFailure setting is not valid", and the guide: "You cannot add a
+            // step with an ActionOnFailure other than CONTINUE while the step concurrency level of the cluster is
+            // greater than 1". A step that names none takes TERMINATE_CLUSTER, as it is submitted, so it is refused
+            // too.
+            if (cluster.getStepConcurrencyLevel() > 1) {
+                for (EmrStep step : steps) {
+                    String action = step.getActionOnFailure() != null ? step.getActionOnFailure()
+                            : EmrClusterLifecycle.DEFAULT_ACTION_ON_FAILURE;
+                    if (!"CONTINUE".equals(action)) {
+                        throw new AwsException("ValidationException", "The ActionOnFailure setting " + action
+                                + " is not valid for a step added to a cluster whose StepConcurrencyLevel is greater"
+                                + " than 1: only CONTINUE is.", 400);
+                    }
+                }
+            }
+            long active = cluster.getSteps().stream().filter(EmrService::activeStep).count() + steps.size();
+            if (active > MAX_ACTIVE_STEPS) {
+                throw new AwsException("ValidationException", tooManyActiveSteps(active), 400);
             }
             steps.forEach(step -> step.setId("s-" + randomId(13)));
             cluster.getSteps().addAll(steps);
@@ -588,6 +631,15 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds) {
         return call(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            // CancelSteps is "Available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0".
+            if (!cancelsSteps(cluster.getReleaseLabel())) {
+                throw invalid("CancelSteps is available only in Amazon EMR versions 4.8.0 and later, excluding"
+                        + " version 5.0.0, and cluster " + clusterId + " runs " + cluster.getReleaseLabel() + ".");
+            }
+            if (stepIds.size() > MAX_CANCELLED_STEPS) {
+                throw invalid("A CancelSteps request can cancel at most " + MAX_CANCELLED_STEPS + " steps, and this"
+                        + " one names " + stepIds.size() + ".");
+            }
             List<CancelStepInfo> result = new ArrayList<>();
             for (String stepId : stepIds) {
                 EmrStep step = stepOf(cluster, stepId).orElse(null);
@@ -1184,6 +1236,40 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
 
     private static AwsException invalid(String message) {
         return new AwsException("InvalidRequestException", message, 400);
+    }
+
+    private static boolean outOfStepConcurrencyRange(int level) {
+        return level < 1 || level > MAX_STEP_CONCURRENCY;
+    }
+
+    private static String stepConcurrencyOutOfRange(int level) {
+        return "The StepConcurrencyLevel " + level + " is not valid: it must be from 1 to " + MAX_STEP_CONCURRENCY
+                + ".";
+    }
+
+    private static String tooManyActiveSteps(long active) {
+        return "Only " + MAX_ACTIVE_STEPS + " steps can be PENDING or RUNNING at any given time, and this would make "
+                + active + ".";
+    }
+
+    // A step PENDING or RUNNING, one whose cancel is pending among them, as it still runs.
+    private static boolean activeStep(EmrStep step) {
+        return EmrClusterLifecycle.PENDING.equals(step.getState())
+                || EmrClusterLifecycle.RUNNING.equals(step.getState())
+                || EmrClusterLifecycle.CANCEL_PENDING.equals(step.getState());
+    }
+
+    // Whether a cluster of releaseLabel takes CancelSteps: from 4.8.0 on but 5.0.0; a label not of the emr-x.y.z form
+    // is taken as current.
+    static boolean cancelsSteps(String releaseLabel) {
+        Matcher version = RELEASE_VERSION.matcher(releaseLabel == null ? "" : releaseLabel);
+        if (!version.matches()) {
+            return true;
+        }
+        int major = Integer.parseInt(version.group(1));
+        int minor = Integer.parseInt(version.group(2));
+        int patch = Integer.parseInt(version.group(3));
+        return (major > 4 || major == 4 && minor >= 8) && !(major == 5 && minor == 0 && patch == 0);
     }
 
     // Why a cluster gets no instance group or fleet of the other kind: "The configuration option you choose applies to
