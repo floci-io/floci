@@ -104,12 +104,15 @@ class CfnReplacementIntegrationTest {
             "True", true, "repl-sng-b");
 
     private static final String SQS_TYPE = "AWS::SQS::Queue";
-    private static final String QUEUE_NAME_IF =
-            "{\"Fn::If\": [\"Named\", \"repl-q-if\", {\"Ref\": \"AWS::NoValue\"}]}";
+    private static final String S3_TYPE = "AWS::S3::Bucket";
 
-    /** A queue named by {@code Fn::If} on {@code Named}, which is {@code Fn::Equals} of {@code equalsArgs}. */
-    private static String namedByCondition(String equalsArgs) {
-        return subjectStack("", "", SQS_TYPE, "\"QueueName\": " + QUEUE_NAME_IF).replace("\"Resources\"",
+    /**
+     * A {@code type} whose {@code nameProperty} is {@code name} by {@code Fn::If} on {@code Named}, which is
+     * {@code Fn::Equals} of {@code equalsArgs}, and {@code AWS::NoValue} otherwise.
+     */
+    private static String namedByCondition(String type, String nameProperty, String name, String equalsArgs) {
+        return subjectStack("", "", type, "\"" + nameProperty + "\": {\"Fn::If\": [\"Named\", \"" + name
+                + "\", {\"Ref\": \"AWS::NoValue\"}]}").replace("\"Resources\"",
                 "\"Conditions\": {\"Named\": {\"Fn::Equals\": " + equalsArgs + "}}, \"Resources\"");
     }
 
@@ -147,8 +150,14 @@ class CfnReplacementIntegrationTest {
                 createOnlyRow("SQS queue explicit QueueName removed", "", "", SQS_TYPE,
                         "\"QueueName\": \"repl-q-removed\"", "\"VisibilityTimeout\": 30", "True", false, null),
                 new Row("SQS queue QueueName dropped by Fn::If choosing AWS::NoValue",
-                        namedByCondition("[\"x\", \"x\"]"),
-                        namedByCondition("[\"x\", \"y\"]"),
+                        namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"x\"]"),
+                        namedByCondition(SQS_TYPE, "QueueName", "repl-q-if", "[\"x\", \"y\"]"),
+                        "Subject", "True", true, null),
+                createOnlyRow("S3 bucket explicit BucketName removed", "", "", S3_TYPE,
+                        "\"BucketName\": \"repl-s3-removed\"", "", "True", false, null),
+                new Row("S3 bucket BucketName dropped by Fn::If choosing AWS::NoValue",
+                        namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"x\"]"),
+                        namedByCondition(S3_TYPE, "BucketName", "repl-s3-if", "[\"x\", \"y\"]"),
                         "Subject", "True", true, null),
                 new Row("deployed parameter renamed, same value",
                         locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
