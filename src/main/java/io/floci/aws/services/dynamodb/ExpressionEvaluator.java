@@ -15,6 +15,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 /**
  * Proper tokenizer/parser/evaluator for DynamoDB filter expressions and key condition expressions.
@@ -759,6 +760,7 @@ final class ExpressionEvaluator {
     // ── Evaluator ──
 
     private static final String DOT_ESCAPE = "\uFF0E";
+    private static final Pattern LIST_INDEX_SEGMENT = Pattern.compile("\\[\\d+\\]");
 
     /**
      * Evaluates a parsed expression against a DynamoDB item.
@@ -1097,7 +1099,7 @@ final class ExpressionEvaluator {
         for (int i = 0; i < segments.size(); i++) {
             if (current == null) return null;
             String segment = segments.get(i);
-            if (segment.matches("\\[\\d+\\]")) {
+            if (LIST_INDEX_SEGMENT.matcher(segment).matches()) {
                 // List index navigation
                 int idx = Integer.parseInt(segment.substring(1, segment.length() - 1));
                 JsonNode listNode = current.has("L") ? current.get("L") : (current.isArray() ? current : null);

@@ -1708,9 +1708,9 @@ public class DynamoDbService {
         List<JsonNode> scannedItems = evaluatedItems;
 
         if (filterExpression != null) {
+            ExpressionEvaluator.Expr filter = ExpressionEvaluator.parse(filterExpression);
             evaluatedItems = evaluatedItems.stream()
-                    .filter(item -> matchesFilterExpression(item, filterExpression,
-                            exprAttrNames, expressionAttrValues))
+                    .filter(item -> ExpressionEvaluator.evaluate(filter, item, exprAttrNames, expressionAttrValues))
                     .toList();
         }
 
@@ -1777,6 +1777,7 @@ public class DynamoDbService {
                 ? items.tailMap(buildItemKeyFromNode(exclusiveStartKey, pkName, skName), false).values()
                 : items.values();
 
+        ExpressionEvaluator.Expr filter = filterExpression != null ? ExpressionEvaluator.parse(filterExpression) : null;
         final int MAX_RESPONSE_BYTES = 1024 * 1024;
         int totalScanned = 0;
         int accSize = 0;
@@ -1819,8 +1820,8 @@ public class DynamoDbService {
             totalScanned++;
             scannedItems.add(item);
             lastScanned = item;
-            boolean matched = (filterExpression == null
-                    || matchesFilterExpression(filtered, filterExpression, expressionAttrNames, expressionAttrValues))
+            boolean matched = (filter == null
+                    || ExpressionEvaluator.evaluate(filter, filtered, expressionAttrNames, expressionAttrValues))
                     && (scanFilter == null || matchesScanFilterPublic(filtered, scanFilter, conditionalOperator));
             if (matched) {
                 results.add(item);
@@ -5050,12 +5051,13 @@ public class DynamoDbService {
         String partitionKeyValue = expressionAttrValues != null && partitionKeyValuePlaceholder != null
                 ? extractScalarValue(expressionAttrValues.get(partitionKeyValuePlaceholder))
                 : null;
+        ExpressionEvaluator.Expr keyCondition = ExpressionEvaluator.parse(expression);
         for (JsonNode item : queryCandidates(items, accessPath, partitionKeyValue)) {
             if (partitionKeyValue != null
                     && !matchesAttributeValue(item.get(partitionKeyName), partitionKeyValue)) {
                 continue;
             }
-            if (ExpressionEvaluator.matches(expression, item, exprAttrNames, expressionAttrValues)) {
+            if (ExpressionEvaluator.evaluate(keyCondition, item, exprAttrNames, expressionAttrValues)) {
                 results.add(item);
             }
         }
