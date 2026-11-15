@@ -2,6 +2,7 @@ package io.floci.aws.services.amazonmq;
 
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
@@ -42,6 +43,12 @@ class AmazonMqControllerIntegrationTest {
     }
 
     private static String createRabbitBroker(RequestSpecification request, String name) {
+        return postRabbitBroker(request, name)
+            .statusCode(200)
+            .extract().path("brokerId");
+    }
+
+    private static ValidatableResponse postRabbitBroker(RequestSpecification request, String name) {
         return request
             .contentType("application/json")
             .body("""
@@ -52,9 +59,7 @@ class AmazonMqControllerIntegrationTest {
                 """.formatted(name))
         .when()
             .post("/v1/brokers")
-        .then()
-            .statusCode(200)
-            .extract().path("brokerId");
+        .then();
     }
 
     @Test
@@ -230,8 +235,8 @@ class AmazonMqControllerIntegrationTest {
 
     /**
      * Brokers are Regional: another Region of the account neither lists, describes, reboots nor deletes
-     * one, and its name can be used there. The test works in an account of its own, so each listing holds
-     * only its brokers.
+     * one. Its name is unique in the account, so another Region refuses it too. The test works in an account
+     * of its own, so each listing holds only its brokers.
      */
     @Test
     void aBrokerIsSeenOnlyInTheRegionItWasCreatedIn() {
@@ -261,7 +266,10 @@ class AmazonMqControllerIntegrationTest {
         .then()
             .statusCode(404);
 
-        String inVirginia = createRabbitBroker(account, "us-east-1", "it-regional");
+        postRabbitBroker(mq(account, "us-east-1"), "it-regional")
+            .statusCode(409)
+            .body("__type", equalTo("ConflictException"));
+        String inVirginia = createRabbitBroker(account, "us-east-1", "it-regional-virginia");
 
         mq(account, "eu-west-1")
         .when()

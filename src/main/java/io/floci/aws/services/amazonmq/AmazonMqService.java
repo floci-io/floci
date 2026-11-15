@@ -121,10 +121,11 @@ public class AmazonMqService implements ResourceProvider {
 
         String region = regionResolver.getRegion();
         String accountId = regionResolver.getAccountId();
-        // The name check and the store hold one lock for the name in its account and Region, so two creates of
-        // one name can't both find it free.
-        synchronized (brokerLocks.lockFor(accountId + ":" + region + ":" + name)) {
-            if (regionBrokers(region).stream().anyMatch(b -> name.equals(b.getBrokerName()))) {
+        // A broker name is unique in the account, across its Regions, as the CreateBroker reference documents.
+        // The name check and the store hold one lock for the name in its account, so two creates of one name
+        // can't both find it free.
+        synchronized (brokerLocks.lockFor(accountId + ":" + name)) {
+            if (storage.scan(key -> true).stream().anyMatch(b -> name.equals(b.getBrokerName()))) {
                 throw new AwsException("ConflictException", "Broker already exists: " + name, 409);
             }
 
@@ -191,13 +192,10 @@ public class AmazonMqService implements ResourceProvider {
                         "Broker not found: " + brokerId, 404));
     }
 
+    /** The calling account's brokers in the request's Region. */
     public List<Broker> listBrokers() {
-        return regionBrokers(regionResolver.getRegion());
-    }
-
-    /** The calling account's brokers in {@code region}. */
-    private List<Broker> regionBrokers(String region) {
-        return storage.scan(key -> key.startsWith(region + KEY_SEPARATOR));
+        String prefix = regionResolver.getRegion() + KEY_SEPARATOR;
+        return storage.scan(key -> key.startsWith(prefix));
     }
 
     @Override

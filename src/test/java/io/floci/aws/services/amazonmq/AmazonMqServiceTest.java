@@ -212,18 +212,21 @@ class AmazonMqServiceTest {
         assertEquals("orders", service.describeBroker(brokerId).getBrokerName());
     }
 
+    /**
+     * A broker name is unique in the account, across its Regions, as the CreateBroker reference documents: another
+     * Region refuses it, and a broker created there under another name carries that Region's ARN.
+     */
     @Test
-    void aBrokerNameIsUniqueWithinItsRegionOnly() {
+    void aBrokerNameIsUniqueAcrossTheAccountsRegions() {
         service.createBroker(rabbitParams("orders"));
 
         inRegion("eu-west-1");
-        Broker inIreland = service.createBroker(rabbitParams("orders"));
-        assertEquals("arn:aws:mq:eu-west-1:" + ACCOUNT + ":broker:orders:" + inIreland.getBrokerId(),
-                inIreland.getBrokerArn());
-
-        inRegion("us-east-1");
         assertEquals("ConflictException",
                 assertThrows(AwsException.class, () -> service.createBroker(rabbitParams("orders"))).getErrorCode());
+        assertEquals(List.of(), service.listBrokers());
+        Broker inIreland = service.createBroker(rabbitParams("payments"));
+        assertEquals("arn:aws:mq:eu-west-1:" + ACCOUNT + ":broker:payments:" + inIreland.getBrokerId(),
+                inIreland.getBrokerArn());
     }
 
     /** A broker stored before brokers were keyed by Region moves, at startup, to the Region its ARN names. */
