@@ -228,7 +228,7 @@ public class AthenaService {
                     List<Table> projectionTables = tablesForProjectionCheck(database);
                     PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
                     PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
-                    String setupDdl = TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database);
+                    String setupDdl = TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query);
                     String duckQuery = TrinoSqlCompatibility.translate(query);
                     if (outputLocation != null) {
                         ensureOutputBucket(outputLocation);
