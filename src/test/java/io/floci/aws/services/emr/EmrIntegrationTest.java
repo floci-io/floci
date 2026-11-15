@@ -319,6 +319,39 @@ class EmrIntegrationTest {
     }
 
     @Test
+    @Order(19)
+    void aClusterNamesASecurityConfigurationThatExists() {
+        String instances = "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}";
+        emr("RunJobFlow", "{\"Name\":\"secured\",\"SecurityConfiguration\":\"floci-emr-missing\"," + instances + "}")
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Security configuration does not exist: floci-emr-missing"));
+        emr("ListClusters", "{}")
+                .then().statusCode(200)
+                .body("Clusters.findAll { it.Name == 'secured' }", hasSize(0));
+        emr("DescribeCluster", "{\"ClusterId\":\"" + clusterId + "\"}")
+                .then().statusCode(200)
+                .body("Cluster", not(hasKey("SecurityConfiguration")));
+
+        emr("CreateSecurityConfiguration", "{\"Name\":\"floci-emr-cluster-sec\","
+                + "\"SecurityConfiguration\":\"{\\\"EncryptionConfiguration\\\":{}}\"}")
+                .then().statusCode(200);
+        String secured = null;
+        try {
+            secured = emr("RunJobFlow", "{\"Name\":\"secured\",\"SecurityConfiguration\":\"floci-emr-cluster-sec\","
+                    + instances + "}").then().statusCode(200).extract().path("JobFlowId");
+            emr("DescribeCluster", "{\"ClusterId\":\"" + secured + "\"}")
+                    .then().statusCode(200)
+                    .body("Cluster.SecurityConfiguration", equalTo("floci-emr-cluster-sec"));
+        } finally {
+            if (secured != null) {
+                emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + secured + "\"]}").then().statusCode(200);
+            }
+            emr("DeleteSecurityConfiguration", "{\"Name\":\"floci-emr-cluster-sec\"}").then().statusCode(200);
+        }
+    }
+
+    @Test
     @Order(12)
     void tagsRoundTrip() {
         emr("AddTags", "{\"ResourceId\":\"" + clusterId + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")

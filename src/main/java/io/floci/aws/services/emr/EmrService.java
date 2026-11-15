@@ -382,6 +382,13 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 throw new AwsException("ValidationException", "The RunJobFlow request can contain InstanceFleets"
                         + " parameters or InstanceGroups parameters, but not both.", 400);
             }
+            // A security configuration is created first and named here; no source gives AWS's answer for one that is
+            // not there, so the code is RunJobFlow's own for its input and the wording that of the other calls.
+            if (cluster.getSecurityConfiguration() != null
+                    && secConfigStore.get(cluster.getSecurityConfiguration()).isEmpty()) {
+                throw new AwsException("ValidationException",
+                        "Security configuration does not exist: " + cluster.getSecurityConfiguration(), 400);
+            }
             String id = "j-" + randomId(13);
             cluster.setId(id);
             cluster.setRegion(region);

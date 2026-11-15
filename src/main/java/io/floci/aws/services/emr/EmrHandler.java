@@ -703,6 +703,9 @@ public class EmrHandler {
         if (c.getServiceRole() != null) {
             node.put("ServiceRole", c.getServiceRole());
         }
+        if (c.getSecurityConfiguration() != null) {
+            node.put("SecurityConfiguration", c.getSecurityConfiguration());
+        }
         node.put("NormalizedInstanceHours", c.getNormalizedInstanceHours());
         if (c.getMasterPublicDnsName() != null) {
             node.put("MasterPublicDnsName", EmrService.masterDnsName(c.getRegion()));
