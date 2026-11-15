@@ -1520,10 +1520,10 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
-            JsonNode oldProps = withoutNoValue(withoutMissing(oldDef.path("Properties"), newDef.path("Properties")),
-                    oldParams, oldConditions, oldTemplate);
-            JsonNode newProps = withoutNoValue(withoutMissing(newDef.path("Properties"), oldDef.path("Properties")),
-                    newParams, newConditions, newTemplate);
+            JsonNode oldBlock = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
+            JsonNode newBlock = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
+            JsonNode oldProps = withoutNoValue(logicalId, oldBlock, oldParams, oldConditions, oldTemplate);
+            JsonNode newProps = withoutNoValue(logicalId, newBlock, newParams, newConditions, newTemplate);
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
@@ -1543,13 +1543,17 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
-        private JsonNode withoutNoValue(JsonNode block, Map<String, String> params,
+        private JsonNode withoutNoValue(String logicalId, JsonNode block, Map<String, String> params,
                                         Map<String, Boolean> conditions, JsonNode template) {
             try {
                 JsonNode omitted = engineOver(ownerAccount(stack), params, Map.of(), Map.of(), conditions, template)
                         .omitNoValue(block);
                 return omitted.isMissingNode() ? block : omitted;
             } catch (RuntimeException e) {
+                if (warned.add(logicalId)) {
+                    LOG.warnv("AWS::NoValue members of {0} could not be left out for the diff; the preview "
+                            + "compares the block as written: {1}", logicalId, e.getMessage());
+                }
                 return block;
             }
         }
