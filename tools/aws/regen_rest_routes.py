@@ -81,6 +81,7 @@ MODELS: dict[str, str] = {
     "s3": "s3",
     "s3control": "s3",
     "s3tables": "s3tables",
+    "s3vectors": "s3vectors",
     "scheduler": "scheduler",
     "securityhub": "securityhub",
     "signer": "signer",

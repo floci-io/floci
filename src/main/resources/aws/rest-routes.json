@@ -2200,6 +2200,34 @@
         "UpdateTableMetadataLocation": {"method": "PUT", "requestUri": "/tables/{tableBucketARN}/{namespace}/{name}/metadata-location"}
       }
     },
+    "s3vectors": {
+      "credentialScope": "s3vectors",
+      "apiVersion": "2025-07-15",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "CreateIndex": {"method": "POST", "requestUri": "/CreateIndex"},
+        "CreateVectorBucket": {"method": "POST", "requestUri": "/CreateVectorBucket"},
+        "DeleteIndex": {"method": "POST", "requestUri": "/DeleteIndex"},
+        "DeleteVectorBucket": {"method": "POST", "requestUri": "/DeleteVectorBucket"},
+        "DeleteVectorBucketPolicy": {"method": "POST", "requestUri": "/DeleteVectorBucketPolicy"},
+        "DeleteVectors": {"method": "POST", "requestUri": "/DeleteVectors"},
+        "GetIndex": {"method": "POST", "requestUri": "/GetIndex"},
+        "GetVectorBucket": {"method": "POST", "requestUri": "/GetVectorBucket"},
+        "GetVectorBucketPolicy": {"method": "POST", "requestUri": "/GetVectorBucketPolicy"},
+        "GetVectors": {"method": "POST", "requestUri": "/GetVectors"},
+        "ListIndexes": {"method": "POST", "requestUri": "/ListIndexes"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn}"},
+        "ListVectorBuckets": {"method": "POST", "requestUri": "/ListVectorBuckets"},
+        "ListVectors": {"method": "POST", "requestUri": "/ListVectors"},
+        "PutVectorBucketDefaultIndexMode": {"method": "POST", "requestUri": "/PutVectorBucketDefaultIndexMode"},
+        "PutVectorBucketPolicy": {"method": "POST", "requestUri": "/PutVectorBucketPolicy"},
+        "PutVectors": {"method": "POST", "requestUri": "/PutVectors"},
+        "QueryVectors": {"method": "POST", "requestUri": "/QueryVectors"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn}"},
+        "UpdateIndexMode": {"method": "POST", "requestUri": "/UpdateIndexMode"}
+      }
+    },
     "scheduler": {
       "credentialScope": "scheduler",
       "apiVersion": "2021-06-30",
