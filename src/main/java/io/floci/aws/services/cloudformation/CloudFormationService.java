@@ -1520,8 +1520,8 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
-            JsonNode oldProps = oldDef.path("Properties");
-            JsonNode newProps = newDef.path("Properties");
+            JsonNode oldProps = withoutMissing(oldDef.path("Properties"), newDef.path("Properties"));
+            JsonNode newProps = withoutMissing(newDef.path("Properties"), oldDef.path("Properties"));
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
@@ -1538,6 +1538,14 @@ public class CloudFormationService implements ResourceProvider {
                         ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             return resolved;
+        }
+
+        /**
+         * A missing Properties block counts as an empty one when the other side has a block, as adding or
+         * dropping every property in it does.
+         */
+        private JsonNode withoutMissing(JsonNode block, JsonNode other) {
+            return block.isMissingNode() && other.isObject() ? objectMapper.createObjectNode() : block;
         }
 
         private static boolean holdsDynamicReference(JsonNode subtree) {
@@ -1557,6 +1565,9 @@ public class CloudFormationService implements ResourceProvider {
             }
             JsonNode before = compared[0].path(logicalId).path("Properties");
             JsonNode after = compared[1].path(logicalId).path("Properties");
+            JsonNode comparedBefore = withoutMissing(before, after);
+            after = withoutMissing(after, before);
+            before = comparedBefore;
             if (!before.isObject() || !after.isObject()) {
                 return false;
             }
@@ -1695,11 +1706,7 @@ public class CloudFormationService implements ResourceProvider {
             return false;
         }
         if (newProps == null || newProps.isMissingNode()) {
-            // A dropped Properties block removes every property in it, as removing them one by one does.
-            if (!oldProps.isObject()) {
-                return false;
-            }
-            newProps = objectMapper.createObjectNode();
+            return false;
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
             // The registry table names the exact pointers; only a value at one of them replaces.
@@ -1718,7 +1725,7 @@ public class CloudFormationService implements ResourceProvider {
             if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
                 JsonNode oldVal = oldProps.get(field);
                 JsonNode newVal = newProps.get(field);
-                if (oldVal != null && !oldVal.equals(newVal)) {
+                if (!newVal.equals(oldVal)) {
                     return true;
                 }
                 if (newVal != null && (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions))) {
