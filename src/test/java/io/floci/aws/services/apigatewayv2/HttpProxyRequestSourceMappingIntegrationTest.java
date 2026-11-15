@@ -132,21 +132,13 @@ class HttpProxyRequestSourceMappingIntegrationTest {
     }
 
     private void configureApi(Map<String, String> requestParameters) {
-        apiId = given().contentType(ContentType.JSON)
-                .body(Map.of("name", "request-source-mapping", "protocolType", "HTTP"))
-                .post("/v2/apis").then().statusCode(201).extract().path("apiId");
+        apiId = HttpProxyApiFixtures.createProxyApi("request-source-mapping", "", "test", Map.of("backend", "blue"),
+                "POST", backend.getAddress().getPort(), "/orders");
         String apiPath = "/v2/apis/" + apiId;
-        given().contentType(ContentType.JSON)
-                .body(Map.of("stageName", "test", "autoDeploy", true, "stageVariables", Map.of("backend", "blue")))
-                .post(apiPath + "/stages").then().statusCode(201);
-        String integrationId = given().contentType(ContentType.JSON)
-                .body(Map.of("integrationType", "HTTP_PROXY", "integrationMethod", "POST",
-                        "integrationUri", "http://127.0.0.1:" + backend.getAddress().getPort() + "/orders",
-                        "payloadFormatVersion", "1.0", "requestParameters", requestParameters))
-                .post(apiPath + "/integrations").then().statusCode(201).extract().path("integrationId");
-        given().contentType(ContentType.JSON)
-                .body(Map.of("routeKey", "POST /orders", "target", "integrations/" + integrationId))
-                .post(apiPath + "/routes").then().statusCode(201);
+        String integrationId = given().get(apiPath + "/integrations").then().statusCode(200)
+                .extract().path("items[0].integrationId");
+        given().contentType(ContentType.JSON).body(Map.of("requestParameters", requestParameters))
+                .patch(apiPath + "/integrations/" + integrationId).then().statusCode(200);
     }
 
     private void invoke(String body) {

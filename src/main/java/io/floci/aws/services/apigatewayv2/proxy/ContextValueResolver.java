@@ -19,18 +19,18 @@ import java.util.Map;
  *
  * <p>Supported expressions:
  * <ul>
- *   <li>{@code $context.authorizer.claims.<name>} — JWT claim from authorizer</li>
- *   <li>{@code $context.authorizer.<name>} — authorizer context value</li>
- *   <li>{@code $context.requestId} — UUID assigned per request</li>
- *   <li>{@code $context.identity.sourceIp} — client IP</li>
- *   <li>{@code $context.<name>} — any other context variable the request carries</li>
- *   <li>{@code $request.header.<name>} — case-insensitive header lookup</li>
- *   <li>{@code $request.querystring.<name>} — query parameter</li>
- *   <li>{@code $request.path.<name>} — captured path parameter</li>
- *   <li>{@code $request.body} — the request body as text, null when it is empty</li>
- *   <li>{@code $request.body.<JSONPath>} — a value selected from a JSON request body</li>
- *   <li>{@code $stageVariables.<name>} — stage variable</li>
- *   <li>literal strings — returned unchanged</li>
+ *   <li>{@code $context.authorizer.claims.<name>}: JWT claim from authorizer</li>
+ *   <li>{@code $context.authorizer.<name>}: authorizer context value</li>
+ *   <li>{@code $context.requestId}: UUID assigned per request</li>
+ *   <li>{@code $context.identity.sourceIp}: client IP</li>
+ *   <li>{@code $context.<name>}: any other context variable the request carries</li>
+ *   <li>{@code $request.header.<name>}: case-insensitive header lookup</li>
+ *   <li>{@code $request.querystring.<name>}: query parameter</li>
+ *   <li>{@code $request.path.<name>}: captured path parameter</li>
+ *   <li>{@code $request.body}: the request body as text, null when it is empty</li>
+ *   <li>{@code $request.body.<JSONPath>}: a value selected from a JSON request body</li>
+ *   <li>{@code $stageVariables.<name>}: stage variable</li>
+ *   <li>literal strings: returned unchanged</li>
  * </ul>
  */
 public class ContextValueResolver {
