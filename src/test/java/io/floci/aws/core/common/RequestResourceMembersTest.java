@@ -170,6 +170,7 @@ class RequestResourceMembersTest {
         expected.add("logs:PutDestination");
         expected.add("lambda:GetLayerVersion");
         expected.add("lambda:GetLayerVersionByArn");
+        expected.add("lambda:DeleteLayerVersion");
         // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
         expected.add("dynamodb:ListTables");
         assertEquals(expected, table.operations().keySet().stream()
