@@ -14,8 +14,9 @@ import software.amazon.awssdk.services.cloudfront.model.OriginAccessControlConfi
 import software.amazon.awssdk.services.cloudfront.model.UpdateOriginAccessControlResponse;
 
 import java.net.URI;
-import java.util.UUID;
 
+import static io.floci.aws.services.cloudfront.CloudFrontOriginAccessControlFixtures.configuration;
+import static io.floci.aws.services.cloudfront.CloudFrontOriginAccessControlFixtures.deleteIfPresent;
 import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -79,12 +80,6 @@ class CloudFrontOriginAccessControlSdkIntegrationTest {
         return AwsTestClients.create(CloudFrontClient.builder(), "000000000000", Region.US_EAST_1, endpoint);
     }
 
-    private static OriginAccessControlConfig configuration() {
-        return OriginAccessControlConfig.builder().name("oac-sdk-" + UUID.randomUUID())
-                .description("owned SDK configuration").originAccessControlOriginType("s3")
-                .signingProtocol("sigv4").signingBehavior("always").build();
-    }
-
     private static String assertReadback(CloudFrontClient client, String id,
                                          OriginAccessControlConfig expected) {
         GetOriginAccessControlResponse full = client.getOriginAccessControl(request -> request.id(id));
@@ -96,14 +91,5 @@ class CloudFrontOriginAccessControlSdkIntegrationTest {
         assertFalse(full.eTag().isBlank());
         assertEquals(full.eTag(), config.eTag());
         return full.eTag();
-    }
-
-    private static void deleteIfPresent(CloudFrontClient client, String id) {
-        try {
-            String etag = client.getOriginAccessControlConfig(request -> request.id(id)).eTag();
-            client.deleteOriginAccessControl(request -> request.id(id).ifMatch(etag));
-        } catch (NoSuchOriginAccessControlException ignored) {
-            // The lifecycle assertion may already have deleted this owned control.
-        }
     }
 }

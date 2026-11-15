@@ -17,6 +17,8 @@ import software.amazon.awssdk.services.cloudfront.model.OriginAccessControlConfi
 import java.net.URI;
 import java.util.UUID;
 
+import static io.floci.aws.services.cloudfront.CloudFrontOriginAccessControlFixtures.configuration;
+import static io.floci.aws.services.cloudfront.CloudFrontOriginAccessControlFixtures.deleteIfPresent;
 import static io.floci.aws.testing.AwsSdkErrors.assertAwsError;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -129,20 +131,13 @@ class CloudFrontOriginAccessControlIamIntegrationTest {
     }
 
     private String create(CloudFrontClient client) {
-        String id = client.createOriginAccessControl(request -> request.originAccessControlConfig(config -> config
-                        .name("oac-iam-" + UUID.randomUUID()).description("owned IAM control")
-                        .signingProtocol("sigv4").signingBehavior("always").originAccessControlOriginType("s3")))
+        String id = client.createOriginAccessControl(request -> request.originAccessControlConfig(configuration()))
                 .originAccessControl().id();
         cleanup.register(() -> {
             try (CloudFrontClient admin = client(ACCOUNT, "test")) {
-                delete(admin, id);
+                deleteIfPresent(admin, id);
             }
         });
         return id;
-    }
-
-    private static void delete(CloudFrontClient client, String id) {
-        String etag = client.getOriginAccessControlConfig(request -> request.id(id)).eTag();
-        client.deleteOriginAccessControl(request -> request.id(id).ifMatch(etag));
     }
 }
