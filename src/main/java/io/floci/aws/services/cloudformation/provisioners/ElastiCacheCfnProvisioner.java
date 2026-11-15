@@ -364,12 +364,12 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         List<String> userGroupIds = ctx.resolveStringList(props, "UserGroupIds");
         List<String> securityGroupIds = ctx.resolveStringList(props, "SecurityGroupIds");
         ReplicationGroupSettings settings = new ReplicationGroupSettings(
-                optionalBoolean(ctx, props, "AtRestEncryptionEnabled"),
+                ctx.resolveOptionalBoolean(props, "AtRestEncryptionEnabled"),
                 ctx.resolveOptional(props, "KmsKeyId"),
                 ctx.resolveOptionalInt(props, "SnapshotRetentionLimit"),
                 ctx.resolveOptional(props, "SnapshotWindow"),
                 ctx.resolveOptional(props, "TransitEncryptionMode"),
-                optionalBoolean(ctx, props, "TransitEncryptionEnabled"));
+                ctx.resolveOptionalBoolean(props, "TransitEncryptionEnabled"));
         return elastiCacheService.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 id,
                 description,
@@ -385,8 +385,8 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
                 ctx.resolveOptionalInt(props, "NumNodeGroups"),
                 ctx.resolveOptionalInt(props, "ReplicasPerNodeGroup"),
                 ctx.resolveOptionalInt(props, "NumCacheClusters"),
-                optionalBoolean(ctx, props, "AutomaticFailoverEnabled"),
-                optionalBoolean(ctx, props, "MultiAZEnabled"),
+                ctx.resolveOptionalBoolean(props, "AutomaticFailoverEnabled"),
+                ctx.resolveOptionalBoolean(props, "MultiAZEnabled"),
                 ctx.resolveOptionalInt(props, "Port"),
                 settings,
                 ctx.resolveTags(props, "Tags"),
@@ -609,19 +609,6 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
             default -> {
             }
         }
-    }
-
-    /** CloudFormation passes a template boolean as true, false or their string forms. */
-    private static Boolean optionalBoolean(ProvisionContext ctx, JsonNode props, String name) {
-        String raw = ctx.resolveOptional(props, name);
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-        // parseBoolean reads every unrecognised value as false, which would hide a malformed template.
-        if (!"true".equalsIgnoreCase(raw.trim()) && !"false".equalsIgnoreCase(raw.trim())) {
-            throw new AwsException("ValidationError", "Value of property " + name + " must be a boolean.", 400);
-        }
-        return Boolean.parseBoolean(raw.trim());
     }
 
     private static Integer optionalInt(String raw) {
