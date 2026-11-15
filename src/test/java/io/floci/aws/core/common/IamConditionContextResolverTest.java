@@ -42,6 +42,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -849,6 +850,59 @@ class IamConditionContextResolverTest {
                 spellings(), mock(Instance.class), requestContext, new RegionResolver("us-east-1", "123456789012"),
                 config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+    }
+
+    /** A resolver whose only finder of stored resources is {@code stored}. */
+    private IamConditionContextResolver resolverReading(StoredResourceArns stored) {
+        @SuppressWarnings("unchecked")
+        Instance<StoredResourceArns> instance = mock(Instance.class);
+        when(instance.iterator()).thenAnswer(invocation -> List.of(stored).iterator());
+        return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                spellings(), instance, requestContext, new RegionResolver("us-east-1", "123456789012"), config,
+                null, serviceCatalog, Clock.systemUTC());
+    }
+
+    @Test
+    void resourceTagsAreTheGeneratedKeysOfTheArnsTypeValuedFromItsServicesStoredTags() {
+        String secret = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app-AbCdEf";
+        Map<String, String> held = new LinkedHashMap<>();
+        held.put("Environment", "prod");
+        held.put("environment", "dev");
+        IamConditionContextResolver reading = resolverReading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "secretsmanager";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, String> tags(String arn) {
+                return secret.equals(arn) ? held : Map.of();
+            }
+        });
+
+        Map<String, List<String>> tags = reading.resourceTags(secret);
+        assertEquals(2, tags.size());
+        assertEquals(List.of("prod", "dev"), tags.get("aws:ResourceTag/Environment"));
+        assertEquals(List.of("prod", "dev"), tags.get("secretsmanager:resourcetag/environment"));
+        assertNull(reading.resourceTags(secret.replace("AbCdEf", "ZyXwVu")));
+        assertNull(reading.resourceTags("*"));
+        // Events' types have resource-tag keys too, but no finder of its stored resources is registered here.
+        assertNull(reading.resourceTags("arn:aws:events:eu-west-1:123456789012:rule/nightly"));
+
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        context.put("AWS:ResourceTag/environment", List.of("forged"));
+        context.put("aws:RequestTag/Owner", List.of("me"));
+        Map<String, List<String>> checked = IamConditionContextResolver.withResourceTags(context, tags);
+        assertEquals(List.of("prod", "dev"), checked.get("aws:ResourceTag/Environment"));
+        assertFalse(checked.containsKey("AWS:ResourceTag/environment"));
+        assertEquals(List.of("me"), checked.get("aws:RequestTag/Owner"));
+        assertSame(context, IamConditionContextResolver.withResourceTags(context, null));
     }
 
     @Test

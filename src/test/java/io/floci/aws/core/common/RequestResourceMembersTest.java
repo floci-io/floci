@@ -99,6 +99,11 @@ class RequestResourceMembersTest {
     void generatedResourceTagKeysValidateTheirPrefixesAndResourceTypes() throws Exception {
         assertEquals(List.of("aws:ResourceTag/", "ec2:ResourceTag/"),
                 RequestResourceMembers.table().resourceTagKeys().get("ec2").get("instance"));
+        // Secrets Manager writes its key `secretsmanager:ResourceTag/tag-key`, SSM spells the word `resourceTag`.
+        assertEquals(List.of("aws:ResourceTag/", "secretsmanager:ResourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("secretsmanager").get("Secret"));
+        assertEquals(List.of("aws:ResourceTag/", "ssm:resourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("ssm").get("parameter"));
         ObjectNode document = (ObjectNode) MAPPER.readTree("""
                 {"namespaces":{"example":["example"]},"arnFormats":{"example":{
                 "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},

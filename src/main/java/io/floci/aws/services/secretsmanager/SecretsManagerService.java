@@ -62,6 +62,8 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
     private static final String AWSCURRENT = "AWSCURRENT";
     private static final String AWSPREVIOUS = "AWSPREVIOUS";
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    /** The random characters Secrets Manager adds after a hyphen at the end of a secret's ARN. */
+    private static final int RANDOM_SUFFIX_LENGTH = 6;
     private static final String AWS_MANAGED_KEY = "aws/secretsmanager";
     private static final String PENDING_DELETION_STATE = "PendingDeletion";
     private static final Pattern SECRET_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9/_+=.@-]+");
@@ -549,19 +551,22 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
         return findArnByName(accountId, nameFromArn, arn.region());
     }
 
-    /** Current tags of the exact stored ARN, without reading a value or changing access timestamps. */
-    public Map<String, String> storedSecretTags(String resourceArn) {
-        AwsArnUtils.Arn arn = parseOrNull(resourceArn);
-        String resourceName = secretNameOrNull(arn);
-        if (resourceName == null || resourceName.length() < 8
-                || resourceName.charAt(resourceName.length() - 7) != '-') {
+    /**
+     * The tags of the secret stored under the full ARN {@code arn}, in the account and Region it names; empty when
+     * there is none. The secret is stored by the ARN's name without the hyphen and random characters Secrets Manager
+     * adds, so this reads that one entry and matches it on the whole ARN, never scanning the store; it reads no value
+     * and leaves the secret's last-accessed date as it is.
+     */
+    @Override
+    public Map<String, String> tags(String arn) {
+        AwsArnUtils.Arn parsed = parseOrNull(arn);
+        String name = secretNameOrNull(parsed);
+        int named = name == null ? -1 : name.length() - RANDOM_SUFFIX_LENGTH - 1;
+        if (named < 1 || name.charAt(named) != '-') {
             return Map.of();
         }
-        String key = regionKey(arn.region(), resourceName.substring(0, resourceName.length() - 7));
-        Optional<Secret> stored = store instanceof AccountAwareStorageBackend<Secret> aware
-                ? aware.getForAccount(arn.accountId(), key).or(() -> aware.getLegacyForAccount(arn.accountId(), key))
-                : store.get(key);
-        Secret secret = stored.filter(candidate -> resourceArn.equals(candidate.getArn())).orElse(null);
+        Secret secret = stored(parsed.accountId(), regionKey(parsed.region(), name.substring(0, named)))
+                .filter(candidate -> arn.equals(candidate.getArn())).orElse(null);
         if (secret == null || secret.getTags() == null) {
             return Map.of();
         }
@@ -574,11 +579,14 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
 
     /** The full ARN of the secret with this name in the given account and region, or empty when there is none. */
     Optional<String> findArnByName(String accountId, String name, String region) {
-        String key = regionKey(region, name);
-        Optional<Secret> secret = store instanceof AccountAwareStorageBackend<Secret> aware
+        return stored(accountId, regionKey(region, name)).map(Secret::getArn);
+    }
+
+    /** The secret the account holds under the storage key, a legacy entry included. */
+    private Optional<Secret> stored(String accountId, String key) {
+        return store instanceof AccountAwareStorageBackend<Secret> aware
                 ? aware.getForAccount(accountId, key).or(() -> aware.getLegacyForAccount(accountId, key))
                 : store.get(key);
-        return secret.map(Secret::getArn);
     }
 
     /**
@@ -2298,8 +2306,8 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
 
     private static String randomSuffix() {
         ThreadLocalRandom rng = ThreadLocalRandom.current();
-        StringBuilder sb = new StringBuilder(6);
-        for (int i = 0; i < 6; i++) {
+        StringBuilder sb = new StringBuilder(RANDOM_SUFFIX_LENGTH);
+        for (int i = 0; i < RANDOM_SUFFIX_LENGTH; i++) {
             sb.append(ALPHABET.charAt(rng.nextInt(ALPHABET.length())));
         }
         return sb.toString();

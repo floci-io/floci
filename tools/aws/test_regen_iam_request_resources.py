@@ -1443,16 +1443,30 @@ def test_instance_target_member_is_derived_from_the_arn_variable_not_the_action_
                        renamed_formats, {"ec2": renamed})["targets"]["member"] == "MachineIds[]"
 
 
-def test_resource_tag_prefixes_cover_every_type_of_an_id_target_namespace_from_the_reference():
+def test_resource_tag_prefixes_cover_every_type_with_a_format_of_the_namespaces_read_from_the_reference():
     documents = [{"Name": "ec2", "Resources": [
         {"Name": "instance", "ConditionKeys": ["vendor:ResourceTag/${TagKey}", "aws:RequestTag/${TagKey}",
                                                "aws:ResourceTag/${TagKey}", "ec2:Region"]},
         {"Name": "volume", "ConditionKeys": ["volume:ResourceTag/${TagKey}"]},
+        {"Name": "unformatted", "ConditionKeys": ["aws:ResourceTag/${TagKey}"]},
         {"Name": "untaggable", "ConditionKeys": ["ec2:Region"]}]},
+        {"Name": "secretsmanager", "Resources": [{"Name": "Secret", "ConditionKeys": [
+            "aws:ResourceTag/${TagKey}", "secretsmanager:ResourceTag/tag-key", "secretsmanager:SecretPrimaryRegion"]}]},
+        {"Name": "ssm", "Resources": [{"Name": "parameter", "ConditionKeys": [
+            "aws:ResourceTag/${TagKey}", "ssm:resourceTag/${TagKey}", "ssm:resourceTag/tag-key",
+            "ssm:resourceTag/aws:ssmmessages:session-id"]}]},
         {"Name": "other", "Resources": [{"Name": "thing", "ConditionKeys": ["aws:ResourceTag/${TagKey}"]}]}]
-    assert r.resource_tag_keys(documents) == {"ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"],
-                                                      "volume": ["volume:ResourceTag/"]}}
-    assert r.resource_tag_keys([]) == {}
+    formats = {"ec2": {kind: f"arn:${{Partition}}:ec2:${{Region}}:${{Account}}:{kind}/${{Id}}"
+                       for kind in ("instance", "volume", "untaggable")},
+               "secretsmanager": {"Secret": "arn:${Partition}:secretsmanager:${Region}:${Account}:secret:${SecretId}"},
+               "ssm": {"parameter": "arn:${Partition}:ssm:${Region}:${Account}:parameter/${ParameterNameWithoutLeadingSlash}"}}
+    # A key naming one tag key of its own (`aws:ssmmessages:session-id`) is not a prefix; a namespace not read, or a
+    # type without an ARN format, has none.
+    assert r.resource_tag_keys(documents, formats) == {
+        "ec2": {"instance": ["aws:ResourceTag/", "vendor:ResourceTag/"], "volume": ["volume:ResourceTag/"]},
+        "secretsmanager": {"Secret": ["aws:ResourceTag/", "secretsmanager:ResourceTag/"]},
+        "ssm": {"parameter": ["aws:ResourceTag/", "ssm:resourceTag/"]}}
+    assert r.resource_tag_keys([], formats) == {}
 
 
 def test_resource_keys_are_the_reference_keys_a_member_of_the_types_shape_names(monkeypatch):
@@ -1988,7 +2002,7 @@ def test_vpc_operations_read_vpc_ids_and_stored_tag_keys():
     assert r.entry_for("ec2:ModifyVpcAttribute", {"action": "ec2:ModifyVpcAttribute", "types": ["vpc"]},
                        formats, {"ec2": ec2})["resources"] == [{"type": "vpc", "fill": {"VpcId": "VpcId"}}]
     assert r.resource_tag_keys([{"Name": "ec2", "Resources": [{"Name": "vpc", "ConditionKeys": [
-        "aws:ResourceTag/${TagKey}", "ec2:ResourceTag/${TagKey}", "ec2:Region"]}]}]) == {
+        "aws:ResourceTag/${TagKey}", "ec2:ResourceTag/${TagKey}", "ec2:Region"]}]}], {"ec2": formats}) == {
             "ec2": {"vpc": ["aws:ResourceTag/", "ec2:ResourceTag/"]}}
 
 

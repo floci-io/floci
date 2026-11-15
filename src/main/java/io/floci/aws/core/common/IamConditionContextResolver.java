@@ -25,7 +25,6 @@ import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.s3.S3Service;
-import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -52,6 +51,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Function;
 
 /**
@@ -110,7 +110,7 @@ public class IamConditionContextResolver {
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
     private final Instance<RequestConditionSpelling> requestConditionSpellings;
-    private final Instance<SecretsManagerService> secretsManagerService;
+    private final Instance<StoredResourceArns> storedResourceArns;
     private final RequestContext requestContext;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
@@ -131,14 +131,14 @@ public class IamConditionContextResolver {
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
                                        Instance<RequestConditionSpelling> requestConditionSpellings,
-                                       Instance<SecretsManagerService> secretsManagerService,
+                                       Instance<StoredResourceArns> storedResourceArns,
                                        RequestContext requestContext,
                                        RegionResolver regionResolver,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
         this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
-                lambdaWebService, requestConditionSpellings, secretsManagerService, requestContext, regionResolver,
+                lambdaWebService, requestConditionSpellings, storedResourceArns, requestContext, regionResolver,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -150,7 +150,7 @@ public class IamConditionContextResolver {
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
                                 Instance<RequestConditionSpelling> requestConditionSpellings,
-                                Instance<SecretsManagerService> secretsManagerService,
+                                Instance<StoredResourceArns> storedResourceArns,
                                 RequestContext requestContext,
                                 RegionResolver regionResolver,
                                 EmulatorConfig config,
@@ -164,7 +164,7 @@ public class IamConditionContextResolver {
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
         this.requestConditionSpellings = requestConditionSpellings;
-        this.secretsManagerService = secretsManagerService;
+        this.storedResourceArns = storedResourceArns;
         this.requestContext = requestContext;
         this.regionResolver = regionResolver;
         this.config = config;
@@ -173,36 +173,83 @@ public class IamConditionContextResolver {
         this.serviceCatalog = serviceCatalog;
     }
 
-    /** Resolve tags separately for each authorized secret ARN; request tags cannot supply stored tags. */
-    public Map<String, List<String>> withSecretResourceTags(String scope, String action, String resource,
-                                                           Map<String, List<String>> context) {
-        if (!"secretsmanager".equals(scope)) {
+    /**
+     * The condition keys the tags of the resource {@code resource} names give: each resource-tag key the
+     * request-resources table gives the ARN's type ({@code aws:ResourceTag/<key>},
+     * {@code secretsmanager:ResourceTag/<key>}) for each tag the service of the ARN's namespace holds on it
+     * ({@link StoredResourceArns#tags}), whatever the namespace; null when the table gives the type no such keys or
+     * the service holds no tags there. Tag keys differing only in case are one condition key, as IAM's keys are,
+     * holding every value, so a set operator sees each. Read for each ARN on its own, never borrowed from another
+     * target in the same request; {@link #withResourceTags} puts them in that ARN's context.
+     */
+    public Map<String, List<String>> resourceTags(String resource) {
+        if (!AwsArnUtils.isArn(resource)) {
+            return null;
+        }
+        String namespace = AwsArnUtils.parse(resource).service();
+        Map<String, List<String>> types = RequestResourceMembers.table().resourceTagKeys()
+                .getOrDefault(namespace, Map.of());
+        StoredResourceArns stored = types.isEmpty() ? null : storedResourceArns(namespace);
+        Map<String, String> tags = stored == null ? Map.of() : stored.tags(resource);
+        List<String> prefixes = tags.isEmpty() ? List.of() : resourceTagPrefixes(namespace, resource, types);
+        if (prefixes.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        tags.forEach((key, value) -> prefixes.forEach(prefix ->
+                conditions.computeIfAbsent(prefix + key, ignored -> new ArrayList<>()).add(value)));
+        return conditions;
+    }
+
+    /**
+     * {@code context} with the condition keys {@link #resourceTags} read from a resource's stored tags, each in place of
+     * any key of the same name, case aside, the context held; {@code context} itself when there are none.
+     */
+    public static Map<String, List<String>> withResourceTags(Map<String, List<String>> context,
+                                                             Map<String, List<String>> resourceTags) {
+        if (resourceTags == null || resourceTags.isEmpty()) {
             return context;
         }
         Map<String, List<String>> result = context == null ? new LinkedHashMap<>() : new LinkedHashMap<>(context);
-        List<String> prefixes = new ArrayList<>();
-        for (String key : List.of("aws:ResourceTag/${TagKey}", "secretsmanager:ResourceTag/tag-key")) {
-            if (RequestConditionKeys.takes(action, key)) {
-                prefixes.add(key.substring(0, key.indexOf('/') + 1));
+        resourceTags.forEach((key, values) -> {
+            result.keySet().removeIf(key::equalsIgnoreCase);
+            result.put(key, List.copyOf(values));
+        });
+        return result;
+    }
+
+    /**
+     * The resource-tag key prefixes {@code types} gives the namespace's type whose ARN format {@code resource} fits,
+     * the longest format where several do (a type whose ARN extends another's is its own); none when it fits none.
+     */
+    private static List<String> resourceTagPrefixes(String namespace, String resource,
+                                                    Map<String, List<String>> types) {
+        Map<String, RequestResourceMembers.ArnFormat> formats = RequestResourceMembers.table().formats()
+                .getOrDefault(namespace, Map.of());
+        RequestResourceMembers.ArnFormat fitted = null;
+        List<String> prefixes = List.of();
+        for (Map.Entry<String, List<String>> type : types.entrySet()) {
+            RequestResourceMembers.ArnFormat format = formats.get(type.getKey());
+            if (format != null && format.pattern().matcher(resource).matches()
+                    && (fitted == null || format.format().length() > fitted.format().length())) {
+                fitted = format;
+                prefixes = type.getValue();
             }
         }
-        if (prefixes.isEmpty()) {
-            return context;
+        return prefixes;
+    }
+
+    /** The registered finder of the namespace's stored resources; null when there is none. */
+    private StoredResourceArns storedResourceArns(String namespace) {
+        if (storedResourceArns == null || storedResourceArns.isUnsatisfied()) {
+            return null;
         }
-        result.keySet().removeIf(key -> prefixes.stream().anyMatch(prefix ->
-                key.regionMatches(true, 0, prefix, 0, prefix.length())));
-        if (secretsManagerService.isResolvable()) {
-            secretsManagerService.get().storedSecretTags(resource).forEach((key, value) -> {
-                for (String prefix : prefixes) {
-                    String contextKey = prefix + key;
-                    String existingKey = result.keySet().stream()
-                            .filter(candidate -> candidate.equalsIgnoreCase(contextKey))
-                            .findFirst().orElse(contextKey);
-                    result.computeIfAbsent(existingKey, ignored -> new ArrayList<>()).add(value);
-                }
-            });
+        for (StoredResourceArns stored : storedResourceArns) {
+            if (stored.namespace().equals(namespace)) {
+                return stored;
+            }
         }
-        return result;
+        return null;
     }
 
     public Map<String, List<String>> resolve(String credentialScope, String action,

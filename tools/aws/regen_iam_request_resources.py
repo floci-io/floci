@@ -102,9 +102,10 @@ and capitalization), and the id prefix botocore gives each type, in its document
 example, i-0123456789abcdef0)") or its examples (`"GroupId": "sg-903004f8"`), distinguishes them. Each generated
 `targets` entry preserves the request's order and duplicates, including a wildcard for each unsupported id; only
 resolved ARNs use the corresponding target's condition context. Every other request of those namespaces is read by
-the ordinary rules, its EC2 Query wire names (`ec2Query`) from botocore. `resourceTagKeys` gives every type of those
-namespaces its Service Reference resource-tag condition keys, as their service keeps tags by resource id, and
-`resourceKeys` the type's other condition keys that name a member of its botocore shape (`ec2:Vpc` a network
+the ordinary rules, its EC2 Query wire names (`ec2Query`) from botocore. `resourceTagKeys` gives every type of the
+namespaces read its Service Reference resource-tag condition keys (`aws:ResourceTag/`, `secretsmanager:ResourceTag/`),
+which the condition resolver fills with the tags the type's service holds on the resource an ARN names, and, for those
+id-list namespaces, `resourceKeys` the type's other condition keys that name a member of its botocore shape (`ec2:Vpc` a network
 interface's `VpcId`), which its service answers from the resource it holds, as an ARN where the reference types the
 key as one.
 Beyond the members' names, botocore's shapes and documentation say what a member names, and the rule reads them:
@@ -455,6 +456,11 @@ ID_TARGETS = {"ec2": ("instance", "network-acl", "network-interface", "route-tab
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
+# A resource-tag condition key the reference gives a type, named after the tag key it compares, which it writes as the
+# variable `${TagKey}` or as `tag-key`, as the IAM User Guide writes `aws:ResourceTag/tag-key` ("There is one context
+# key for each tag key-value pair"): Secrets Manager's `secretsmanager:ResourceTag/tag-key`. SSM spells the word
+# `resourceTag`; condition key names are not case-sensitive.
+RESOURCE_TAG_KEY_RE = re.compile(r"(?P<prefix>[a-z0-9-]+:(?i:ResourceTag)/)(?:\$\{TagKey}|tag-key)")
 # A type's id with the example botocore documents it by: "the instance ID (for example, i-0123456789abcdef0)".
 ID_EXAMPLE_RE = re.compile(r"\b([a-z][a-z ]*?) ID \(for example, ([a-z0-9]+-)[0-9a-f]{8,}\)")
 # An id one of botocore's request or response examples gives a member: "GroupId": "sg-903004f8".
@@ -536,17 +542,18 @@ def checked_actions(documents: list[dict]) -> dict[str, dict]:
     return found
 
 
-def resource_tag_keys(documents: list[dict]) -> dict[str, dict[str, list[str]]]:
-    """Stored-tag key prefixes for every resource type of the id-target namespaces, as the Service Reference gives each
-    type's resource-tag condition keys: their service keeps a resource's tags by its id, whatever its type."""
+def resource_tag_keys(documents: list[dict], formats: dict[str, dict[str, str]]) -> dict[str, dict[str, list[str]]]:
+    """Stored-tag key prefixes for every resource type of the namespaces read that has an ARN format (`formats`), as
+    the Service Reference gives each type's resource-tag condition keys: one key per tag the resource holds, named
+    after its tag key (`RESOURCE_TAG_KEY_RE`). A key naming one tag key of its own is not a prefix."""
     result = {}
     for document in documents:
         namespace = document["Name"]
-        if namespace not in ID_TARGETS:
+        if namespace not in formats:
             continue
-        types = {resource["Name"]: sorted(key.removesuffix("${TagKey}")
-                 for key in resource.get("ConditionKeys", []) if key.endswith(":ResourceTag/${TagKey}"))
-                 for resource in document.get("Resources", [])}
+        types = {resource["Name"]: sorted({match.group("prefix") for match in map(
+                 RESOURCE_TAG_KEY_RE.fullmatch, resource.get("ConditionKeys", [])) if match})
+                 for resource in document.get("Resources", []) if resource["Name"] in formats[namespace]}
         types = {kind: keys for kind, keys in types.items() if keys}
         if types:
             result[namespace] = dict(sorted(types.items()))
@@ -2743,7 +2750,7 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
                                   if namespace not in NAMESPACES and namespace not in HAND_BUILT
                                   and namespace not in NOT_COVERED),
         "arnFormats": formats,
-        "resourceTagKeys": resource_tag_keys(documents),
+        "resourceTagKeys": resource_tag_keys(documents, formats),
         "resourceKeys": resource_keys(documents, data, namespaces),
         "unqualified": unqualified,
         "mintedIds": minted,
@@ -2978,7 +2985,7 @@ def validate(document: dict) -> list[str]:
     if not isinstance(tag_keys, dict) or any(
             not isinstance(kinds, dict) or any(kind not in formats.get(namespace, {})
                 or not isinstance(keys, list) or not all(isinstance(key, str) for key in keys) or keys != sorted(set(keys))
-                or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:ResourceTag/", key) for key in keys)
+                or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key) for key in keys)
                 for kind, keys in kinds.items()) for namespace, kinds in tag_keys.items()):
         problems.append("resourceTagKeys is not stored-tag prefixes for supported resource types")
     resource_keys_document = document.get("resourceKeys", {})
@@ -3336,7 +3343,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: could not read the Service Reference ({e})", file=sys.stderr)
             return 2
         untrue, added = verify_against(document, upstream, formats)
-        if document.get("resourceTagKeys", {}) != resource_tag_keys(documents):
+        if document.get("resourceTagKeys", {}) != resource_tag_keys(documents, formats):
             untrue.append("resourceTagKeys differ from AWS Service Reference")
         if document.get("resourceKeys", {}) != resource_keys(documents, resolve_botocore_data(args.botocore_data)[0],
                                                              document["namespaces"]):
