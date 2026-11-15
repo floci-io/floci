@@ -1048,8 +1048,8 @@ public class RedshiftInterceptingBridge {
         if (auditLogPublisher == null) {
             return;
         }
-        auditLogPublisher.publishRegisteredActivity(clusterAccountId, clusterIdentifier(), databaseName,
-                databaseUser, sql);
+        auditLogPublisher.publishRegisteredActivity(clusterAccountId, SpectrumSession.clusterIdentifier(clusterKey),
+                databaseName, databaseUser, sql);
     }
 
     private BiConsumer<Character, byte[]> auditResponses(String sql) {
@@ -1088,14 +1088,10 @@ public class RedshiftInterceptingBridge {
 
     private void publishCompletedUserChanges() {
         for (UserChange change : auditUserChanges.drainCommitted()) {
-            auditLogPublisher.publishRegisteredUserChange(clusterAccountId, clusterIdentifier(), databaseName,
-                    change.username(), change.action(), change.oldUsername());
+            auditLogPublisher.publishRegisteredUserChange(clusterAccountId,
+                    SpectrumSession.clusterIdentifier(clusterKey), databaseName, change.username(), change.action(),
+                    change.oldUsername());
         }
-    }
-
-    private String clusterIdentifier() {
-        int separator = clusterKey.indexOf(':');
-        return separator < 0 ? clusterKey : clusterKey.substring(separator + 1);
     }
 
     private void closeQuietly(Socket socket, String which) {

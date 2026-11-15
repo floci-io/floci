@@ -32,7 +32,8 @@
 the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDocument`, and in each
 `ListDocuments` entry. With IAM enforcement on, the tag calls are checked against the resource their
 `ResourceType` and `ResourceId` name: `document/<name>`, `association/<id>` or `parameter/<name>`
-without its leading `/`. `CreateDocument` is checked against `document/<name>`.
+without its leading `/`. `CreateDocument` is checked against `document/<name>`, and `CreateAssociation` against the
+association and the `document/<name>` its `Name` gives.
 
 `GetParameters` returns successful parameters alphabetically by `Name`, preserving
 the selected versions and labels.

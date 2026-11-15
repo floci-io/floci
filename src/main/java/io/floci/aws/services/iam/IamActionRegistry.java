@@ -743,6 +743,19 @@ public class IamActionRegistry {
                 .map(IamRestRoutes.Match::labels).orElse(Map.of());
     }
 
+    /** Keep the modeled operation when AWS authorizes its route under a different action name. */
+    public String operationForRoute(String credentialScope, String action, ContainerRequestContext ctx) {
+        if (credentialScope == null || action == null) {
+            return action;
+        }
+        String method = ctx.getMethod().toUpperCase();
+        return restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)),
+                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx))
+                .filter(operation -> action.equals(IamAuthorizedActions.actionFor(credentialScope, operation, method)))
+                .map(operation -> credentialScope + ":" + operation)
+                .orElse(action);
+    }
+
     /** Member locations of a generated alternative route; absent entries keep the operation's model locations. */
     public static Map<String, String> routeMemberLocations(String operation, ContainerRequestContext ctx) {
         int separator = operation.indexOf(':');

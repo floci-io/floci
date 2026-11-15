@@ -23,6 +23,8 @@
 # model by tools/aws/regen_apigateway_shapes.py.
 # src/main/resources/aws/ecs-request-shapes.json is generated from botocore's ECS model
 # by tools/aws/regen_ecs_shapes.py.
+# src/main/resources/aws/eks-request-shapes.json is generated from botocore's EKS model
+# by tools/aws/regen_eks_shapes.py.
 # src/main/resources/aws/organizations-request-shapes.json is generated from botocore's Organizations
 # model by tools/aws/regen_organizations_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
@@ -300,6 +302,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_securityhub_shapes.py
 	$(PYTHON) tools/aws/regen_rekognition_shapes.py
 	$(PYTHON) tools/aws/regen_kinesis_shapes.py
+	$(PYTHON) tools/aws/regen_config_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
@@ -307,6 +310,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_documentation_shapes.py
 	$(PYTHON) tools/aws/regen_ecs_shapes.py
+	$(PYTHON) tools/aws/regen_eks_shapes.py
 	$(PYTHON) tools/aws/regen_organizations_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
@@ -436,6 +440,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "error: Kinesis request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_config_shapes.py --check || { \
+		echo "error: AWS Config request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_apigateway_types.py --check || { \
 		echo "error: API Gateway integration types are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
@@ -461,6 +469,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_ecs_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/ecs-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_eks_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/eks-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}

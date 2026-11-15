@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
@@ -112,6 +113,14 @@ public class Ec2MetadataServer {
         }
     }
 
+    void rollbackContainerRegistration(String containerIp, Instance instance) {
+        containerIpToInstance.remove(containerIp, instance);
+        if (!containerIpToInstance.containsValue(instance)) {
+            credentials.unregister(instance);
+            tokens.values().removeIf(token -> token.instance() == instance);
+        }
+    }
+
     /** Reconcile every Docker attachment without retaining stale addresses after restart. */
     public void reconcileContainerAddresses(Set<String> addresses, Instance instance) {
         for (String address : addresses) {
@@ -172,10 +181,10 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/hostname").handler(ctx -> handleText(ctx, inst -> inst.getPrivateDnsName()));
         router.get("/latest/meta-data/mac").handler(ctx -> handleMac(ctx));
         router.get("/latest/meta-data/security-groups").handler(ctx -> handleSecurityGroups(ctx));
-        router.get("/latest/meta-data/placement/availability-zone").handler(ctx -> handleText(ctx, inst ->
-                inst.getPlacement() != null
-                        ? inst.getPlacement().getAvailabilityZone()
-                        : config.defaultAvailabilityZone()));
+        router.get("/latest/meta-data/placement/availability-zone").handler(ctx -> handleText(ctx,
+                this::availabilityZone));
+        router.get("/latest/meta-data/placement/availability-zone-id").handler(ctx -> handleText(ctx, inst ->
+                AvailabilityZoneIds.forZoneName(inst.getRegion(), availabilityZone(inst))));
         router.get("/latest/meta-data/placement/region").handler(ctx -> handleText(ctx, inst -> inst.getRegion()));
         router.get("/latest/meta-data/iam/info").handler(ctx -> handleIamInfo(ctx));
         router.get("/latest/meta-data/iam/security-credentials/").handler(ctx -> handleCredentialsList(ctx));
@@ -440,6 +449,11 @@ public class Ec2MetadataServer {
             return;
         }
         ctx.response().putHeader("content-type", "application/json").end(credentialsJson(result.get()));
+    }
+
+    /** The instance's zone; one without a placement is in the configured default zone. */
+    private String availabilityZone(Instance inst) {
+        return inst.getPlacement() != null ? inst.getPlacement().getAvailabilityZone() : config.defaultAvailabilityZone();
     }
 
     /** The account that launched the instance; instances persisted before it was recorded belong to the default one. */

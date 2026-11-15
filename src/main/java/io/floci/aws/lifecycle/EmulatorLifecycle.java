@@ -10,6 +10,7 @@ import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
+import io.floci.aws.services.codeartifact.CodeArtifactService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
@@ -120,6 +121,7 @@ public class EmulatorLifecycle {
     private final Instance<ContainerTeardown> containerTeardowns;
     private final PersistentPathValidator persistentPathValidator;
     private final EksService eksService;
+    private final CodeArtifactService codeArtifactService;
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
     // Set on the boot thread, read by the async HttpServerStart observer.
@@ -166,7 +168,8 @@ public class EmulatorLifecycle {
                              PersistentPathValidator persistentPathValidator,
                              DynamoDbRuntime dynamoDbRuntime,
                              RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
-                             EksService eksService) {
+                             EksService eksService,
+                             CodeArtifactService codeArtifactService) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -207,6 +210,7 @@ public class EmulatorLifecycle {
         this.containerTeardowns = containerTeardowns;
         this.persistentPathValidator = persistentPathValidator;
         this.eksService = eksService;
+        this.codeArtifactService = codeArtifactService;
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
     }
@@ -293,6 +297,9 @@ public class EmulatorLifecycle {
         // After the load balancers: the reconciler registers the tasks it starts as their targets.
         if (config.services().ecs().enabled()) {
             ecsService.restorePersistedRuntime();
+        }
+        if (config.services().codeartifact().enabled()) {
+            codeArtifactService.seedRootPackageGroups();
         }
 
         if (isMetadataServerNeeded()) {

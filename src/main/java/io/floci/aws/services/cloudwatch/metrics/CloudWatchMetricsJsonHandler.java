@@ -85,6 +85,8 @@ public class CloudWatchMetricsJsonHandler {
             case "PutCompositeAlarm" -> handlePutCompositeAlarm(request, region);
             case "DescribeAlarms" -> handleDescribeAlarms(request, region);
             case "DeleteAlarms" -> handleDeleteAlarms(request, region);
+            case "DisableAlarmActions" -> handleAlarmActions(request, region, false);
+            case "EnableAlarmActions" -> handleAlarmActions(request, region, true);
             case "SetAlarmState" -> handleSetAlarmState(request, region);
             case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
@@ -437,6 +439,25 @@ public class CloudWatchMetricsJsonHandler {
             namesNode.forEach(n -> alarmNames.add(n.asText()));
         }
         metricsService.deleteAlarms(alarmNames, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleAlarmActions(JsonNode request, String region, boolean enabled) {
+        JsonNode names = request.get("AlarmNames");
+        List<String> alarmNames = null;
+        if (names != null && !names.isNull()) {
+            if (!names.isArray()) {
+                throw new AwsException("SerializationException", "AlarmNames must be an array", 400);
+            }
+            alarmNames = new ArrayList<>();
+            for (JsonNode name : names) {
+                if (!name.isTextual() && !name.isNull()) {
+                    throw new AwsException("SerializationException", "AlarmNames members must be strings", 400);
+                }
+                alarmNames.add(name.asText(null));
+            }
+        }
+        metricsService.setAlarmActionsEnabled(alarmNames, enabled, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

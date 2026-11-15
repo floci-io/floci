@@ -75,9 +75,12 @@ OPTIONS, POST, PUT, PATCH and DELETE).
 | `CreateOriginAccessControl` | POST | `/2020-05-31/origin-access-control` |
 | `GetOriginAccessControl` | GET | `/2020-05-31/origin-access-control/{Id}` |
 | `GetOriginAccessControlConfig` | GET | `/2020-05-31/origin-access-control/{Id}/config` |
-| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}` |
+| `UpdateOriginAccessControl` | PUT | `/2020-05-31/origin-access-control/{Id}/config` |
 | `DeleteOriginAccessControl` | DELETE | `/2020-05-31/origin-access-control/{Id}` |
 | `ListOriginAccessControls` | GET | `/2020-05-31/origin-access-control` |
+
+`UpdateOriginAccessControl` accepts the current `If-Match` ETag and a complete configuration.
+With IAM enforcement enabled, its permission can be scoped to the selected origin access control ARN.
 
 ### Origin Access Identity (OAI — legacy)
 

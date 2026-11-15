@@ -127,6 +127,12 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
+
+    /**
+     * The suffix S3 Tables gives the bucket behind each table's warehouse. Such a bucket is the table's
+     * storage, not a general purpose bucket, so it is left out of {@code ListBuckets} as on AWS.
+     */
+    public static final String TABLE_WAREHOUSE_BUCKET_SUFFIX = "--table-s3";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
@@ -669,6 +675,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
                 .filter(bucket -> !isScratchBucket(bucket))
+                .filter(bucket -> !bucket.getName().endsWith(TABLE_WAREHOUSE_BUCKET_SUFFIX))
                 .toList();
     }
 

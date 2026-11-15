@@ -33,6 +33,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +56,10 @@ public class MwaaService implements TagHandler {
      */
     private static final Pattern AIRFLOW_VERSION_PATTERN = Pattern.compile("\\d+\\.\\d+(\\.\\d+)?");
 
+    /** S3 errors that mean the requirements object is not there (yet), rather than a fault. */
+    private static final Set<String> MISSING_OBJECT_ERRORS = Set.of("NoSuchKey", "NoSuchBucket");
+    private static final int REQUIREMENTS_INSTALL_THREADS = 2;
+
     private final StorageBackend<String, Environment> storage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -61,6 +67,8 @@ public class MwaaService implements TagHandler {
     private final MwaaProxyManager proxyManager;
     private final PortAllocator portAllocator;
     private final S3Service s3Service;
+    /** Runs DAG-sync reinstalls, which can take minutes, off the poller that syncs every environment. */
+    private final Executor requirementsInstaller;
 
     private final ScheduledExecutorService readinessPoller = Executors.newSingleThreadScheduledExecutor();
     private final ScheduledExecutorService dagSyncPoller = Executors.newSingleThreadScheduledExecutor();
@@ -74,10 +82,27 @@ public class MwaaService implements TagHandler {
     /** Last-installed requirements.txt ETag, per environment. */
     private final Map<String, String> requirementsEtagByEnvironment = new ConcurrentHashMap<>();
 
+    /** Environments whose bootstrap install the first DAG-sync pass still has to check. */
+    private final Set<String> bootstrapInstallsToCheck = ConcurrentHashMap.newKeySet();
+
+    /** Environments with a reinstall running, so a slow one is never started twice. */
+    private final Set<String> requirementsInstallsInFlight = ConcurrentHashMap.newKeySet();
+
     @Inject
     public MwaaService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                        MwaaEnvironmentManager environmentManager, MwaaProxyManager proxyManager,
                        PortAllocator portAllocator, S3Service s3Service) {
+        this(storageFactory, config, regionResolver, environmentManager, proxyManager, portAllocator, s3Service,
+                Executors.newFixedThreadPool(REQUIREMENTS_INSTALL_THREADS, runnable -> {
+                    Thread thread = new Thread(runnable, "mwaa-requirements-install");
+                    thread.setDaemon(true);
+                    return thread;
+                }));
+    }
+
+    MwaaService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                MwaaEnvironmentManager environmentManager, MwaaProxyManager proxyManager,
+                PortAllocator portAllocator, S3Service s3Service, Executor requirementsInstaller) {
         this.storage = storageFactory.create("mwaa", "mwaa-environments.json",
                 new TypeReference<Map<String, Environment>>() {
                 });
@@ -87,6 +112,7 @@ public class MwaaService implements TagHandler {
         this.proxyManager = proxyManager;
         this.portAllocator = portAllocator;
         this.s3Service = s3Service;
+        this.requirementsInstaller = requirementsInstaller;
     }
 
     @PostConstruct
@@ -101,6 +127,9 @@ public class MwaaService implements TagHandler {
     public void shutdown() {
         readinessPoller.shutdownNow();
         dagSyncPoller.shutdownNow();
+        if (requirementsInstaller instanceof ExecutorService installer) {
+            installer.shutdownNow();
+        }
         if (!config.services().mwaa().mock() && !config.services().mwaa().keepRunningOnShutdown()) {
             for (Environment environment : allEnvironments()) {
                 proxyManager.stopProxy(environmentIdentity(environment));
@@ -165,7 +194,16 @@ public class MwaaService implements TagHandler {
             boolean provisioned = false;
             try {
                 byte[] startupScriptContent = fetchStartupScript(environment);
-                environmentManager.startEnvironment(environment, version, startupScriptContent);
+                S3Object requirements = fetchRequirements(environment);
+                if (requirements != null) {
+                    // The container's bootstrap installs this file, so the DAG-sync pass must not
+                    // install it again unless that install failed. Recorded before the start, so no
+                    // sync can run in between.
+                    requirementsEtagByEnvironment.put(environmentIdentity(environment), requirements.getETag());
+                    bootstrapInstallsToCheck.add(environmentIdentity(environment));
+                }
+                environmentManager.startEnvironment(environment, version, startupScriptContent,
+                        requirements != null ? requirements.getData() : null);
                 proxyPort = portAllocator.allocate(
                         config.services().mwaa().proxyBasePort(), config.services().mwaa().proxyMaxPort());
                 environment.setProxyPort(proxyPort);
@@ -174,7 +212,7 @@ public class MwaaService implements TagHandler {
                 proxyManager.startProxy(environmentIdentity(environment), proxyPort,
                         environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
                         this::isValidCliToken,
-                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, cliCommand));
+                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, version, cliCommand));
                 provisioned = true;
             } catch (Exception e) {
                 LOG.errorv(e, "Failed to start MWAA environment {0}", name);
@@ -320,6 +358,7 @@ public class MwaaService implements TagHandler {
         cliTokensByEnvironment.remove(environmentIdentity);
         dagSyncState.remove(environmentIdentity);
         requirementsEtagByEnvironment.remove(environmentIdentity);
+        bootstrapInstallsToCheck.remove(environmentIdentity);
         deleteEnvironment(environment);
         return environment;
     }
@@ -549,7 +588,8 @@ public class MwaaService implements TagHandler {
         }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
     }
 
-    private void syncDags(Environment environment) {
+    // Package-private (not private) so MwaaServiceTest can run a single sync pass directly.
+    void syncDags(Environment environment) {
         if (environment.getSourceBucketArn() == null || environment.getDagS3Path() == null) {
             return;
         }
@@ -595,23 +635,70 @@ public class MwaaService implements TagHandler {
 
     // installRequirements re-checks on every DAG-sync pass (rather than only at CreateEnvironment
     // time) so that updating requirements.txt in S3 after creation takes effect automatically,
-    // matching how DAG file changes are already picked up — at the cost of re-running `pip install`
-    // on every pass where the file's ETag changed, which is the same cadence as DAG changes.
+    // matching how DAG file changes are already picked up. The install itself runs on
+    // requirementsInstaller, one at a time per environment, so a slow pip never holds up the DAG
+    // sync of every other environment.
     private void syncRequirementsIfNeeded(Environment environment, String bucket) {
         if (!config.services().mwaa().installRequirements() || environment.getRequirementsS3Path() == null) {
             return;
         }
+        String environmentIdentity = environmentIdentity(environment);
+        if (bootstrapInstallsToCheck.remove(environmentIdentity)) {
+            checkBootstrapInstall(environment, environmentIdentity);
+        }
         try {
             S3Object requirements = s3Service.getObject(bucket, environment.getRequirementsS3Path());
-            String environmentIdentity = environmentIdentity(environment);
-            String lastEtag = requirementsEtagByEnvironment.get(environmentIdentity);
-            if (!requirements.getETag().equals(lastEtag)) {
-                environmentManager.installRequirements(environment, requirements.getData());
-                requirementsEtagByEnvironment.put(environmentIdentity, requirements.getETag());
+            if (requirements.getETag().equals(requirementsEtagByEnvironment.get(environmentIdentity))
+                    || !requirementsInstallsInFlight.add(environmentIdentity)) {
+                return;
             }
+            requirementsInstaller.execute(() -> reinstallRequirements(environment, environmentIdentity, requirements));
         } catch (Exception e) {
             LOG.warnv("Could not sync requirements.txt for environment {0}: {1}",
                     environment.getName(), e.getMessage());
+        }
+    }
+
+    // A failed bootstrap install forgets the recorded ETag, so the same sync pass installs the file again.
+    private void checkBootstrapInstall(Environment environment, String environmentIdentity) {
+        Integer exitCode = environmentManager.lastRequirementsInstallExitCode(environment);
+        if (exitCode != null && exitCode != 0) {
+            LOG.warnv("pip install -r requirements.txt exited {0} while MWAA environment {1} started; "
+                    + "installing it again", String.valueOf(exitCode), environment.getName());
+            requirementsEtagByEnvironment.remove(environmentIdentity);
+        }
+    }
+
+    private void reinstallRequirements(Environment environment, String environmentIdentity, S3Object requirements) {
+        try {
+            environmentManager.installRequirements(environment, requirements.getData());
+            if (environment.getStatus() == EnvironmentStatus.AVAILABLE) {
+                requirementsEtagByEnvironment.put(environmentIdentity, requirements.getETag());
+            }
+        } finally {
+            requirementsInstallsInFlight.remove(environmentIdentity);
+        }
+    }
+
+    // Fetched at creation so the container installs requirements.txt before Airflow starts, the
+    // order real MWAA uses. A missing object does not fail the environment, since the DAG-sync pass
+    // installs the file once it appears; any other S3 error fails CreateEnvironment, as it does for
+    // the startup script.
+    private S3Object fetchRequirements(Environment environment) {
+        if (!config.services().mwaa().installRequirements() || environment.getRequirementsS3Path() == null
+                || environment.getSourceBucketArn() == null) {
+            return null;
+        }
+        try {
+            return s3Service.getObject(bucketNameFromArn(environment.getSourceBucketArn()),
+                    environment.getRequirementsS3Path());
+        } catch (AwsException e) {
+            if (!MISSING_OBJECT_ERRORS.contains(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.warnv("requirements.txt for environment {0} is not in S3 yet ({1}); the DAG-sync pass installs it "
+                    + "once it is", environment.getName(), e.getErrorCode());
+            return null;
         }
     }
 

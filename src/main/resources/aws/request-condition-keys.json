@@ -11,6 +11,17 @@
       "ec2-instance-connect:privateIpAddress",
       "ec2-instance-connect:remotePort"
     ],
+    "eks:CreateCluster": [
+      "eks:authenticationMode",
+      "eks:bootstrapClusterCreatorAdminPermissions",
+      "eks:endpointPrivateAccess",
+      "eks:endpointPublicAccess"
+    ],
+    "eks:UpdateClusterConfig": [
+      "eks:authenticationMode",
+      "eks:endpointPrivateAccess",
+      "eks:endpointPublicAccess"
+    ],
     "lambda:CreateWebFunction": [
       "lambda:Request/WebFunctionAuthType"
     ],
@@ -54,6 +65,31 @@
         "remotePort"
       ]
     },
+    "eks:CreateCluster": {
+      "eks:authenticationMode": [
+        "accessConfig.authenticationMode"
+      ],
+      "eks:bootstrapClusterCreatorAdminPermissions": [
+        "accessConfig.bootstrapClusterCreatorAdminPermissions"
+      ],
+      "eks:endpointPrivateAccess": [
+        "resourcesVpcConfig.endpointPrivateAccess"
+      ],
+      "eks:endpointPublicAccess": [
+        "resourcesVpcConfig.endpointPublicAccess"
+      ]
+    },
+    "eks:UpdateClusterConfig": {
+      "eks:authenticationMode": [
+        "accessConfig.authenticationMode"
+      ],
+      "eks:endpointPrivateAccess": [
+        "resourcesVpcConfig.endpointPrivateAccess"
+      ],
+      "eks:endpointPublicAccess": [
+        "resourcesVpcConfig.endpointPublicAccess"
+      ]
+    },
     "lambda:CreateWebFunction": {
       "lambda:Request/WebFunctionAuthType": [
         "endpointConfig.authType"
@@ -87,6 +123,17 @@
     }
   },
   "memberShapes": {
+    "eks:CreateCluster": {
+      "accessConfig.authenticationMode": "AuthenticationMode",
+      "accessConfig.bootstrapClusterCreatorAdminPermissions": "BoxedBoolean",
+      "resourcesVpcConfig.endpointPrivateAccess": "BoxedBoolean",
+      "resourcesVpcConfig.endpointPublicAccess": "BoxedBoolean"
+    },
+    "eks:UpdateClusterConfig": {
+      "accessConfig.authenticationMode": "AuthenticationMode",
+      "resourcesVpcConfig.endpointPrivateAccess": "BoxedBoolean",
+      "resourcesVpcConfig.endpointPublicAccess": "BoxedBoolean"
+    },
     "lambda:CreateWebFunction": {
       "endpointConfig.authType": "AuthType"
     },
@@ -106,6 +153,7 @@
     }
   },
   "protocols": {
+    "eks": "rest-json",
     "lambda": "rest-json",
     "redshift": "query",
     "route53": "rest-xml"

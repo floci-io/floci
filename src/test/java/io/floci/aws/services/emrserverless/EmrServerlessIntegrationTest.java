@@ -251,8 +251,14 @@ public class EmrServerlessIntegrationTest {
             .patch("/applications/" + applicationId)
         .then()
             .statusCode(200)
-            .body("applicationId", equalTo(applicationId));
-            
+            // UpdateApplicationResponse: "Information about the updated application", as GetApplication's.
+            .body("applicationId", nullValue())
+            .body("application.applicationId", equalTo(applicationId))
+            .body("application.state", equalTo("STOPPED"))
+            .body("application.releaseLabel", equalTo("emr-6.7.0"))
+            .body("application.runtimeConfiguration[0].properties.'spark.executor.memory'", equalTo("4g"))
+            .body("application", not(hasKey("clientToken")));
+
         // Verify releaseLabel and new configurations updated
         givenReq()
         .when()

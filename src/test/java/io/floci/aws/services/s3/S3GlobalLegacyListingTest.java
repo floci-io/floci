@@ -125,6 +125,14 @@ class S3GlobalLegacyListingTest {
                     invocation.<Runnable>getArgument(1).run();
                     return null;
                 }));
+        // A Firehose flush runs as the stream's account and in its Region.
+        scopes.when(() -> RequestScopes.callAs(anyString(), anyString(), any(Supplier.class))).thenAnswer(invocation ->
+                inScope(invocation.getArgument(0), invocation.getArgument(1), invocation.getArgument(2)));
+        scopes.when(() -> RequestScopes.runAs(anyString(), anyString(), any(Runnable.class))).thenAnswer(invocation ->
+                inScope(invocation.getArgument(0), invocation.getArgument(1), () -> {
+                    invocation.<Runnable>getArgument(2).run();
+                    return null;
+                }));
         s3.createBucket(BUCKET, "us-east-1");
         s3.putObject(BUCKET, "object.txt", "owner-data".getBytes(UTF_8), "text/plain", Map.of());
     }
@@ -244,6 +252,16 @@ class S3GlobalLegacyListingTest {
             return action.get();
         } finally {
             request.setAccountId(previous);
+        }
+    }
+
+    private <T> T inScope(String account, String regionName, Supplier<T> action) {
+        String previous = request.getRegion();
+        request.setRegion(regionName);
+        try {
+            return inAccount(account, action);
+        } finally {
+            request.setRegion(previous);
         }
     }
 }

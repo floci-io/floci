@@ -72,7 +72,12 @@ final class IamPolicyDocuments {
 
     private static final String STATEMENT_WITHOUT_RESOURCES = "Policy statement must contain resources.";
 
-    /** What a statement declaring an effect the language does not define is refused with. */
+    /**
+     * What an INLINE write refuses a statement declaring an effect the language does not define
+     * with. The managed validator words that same clause {@link #SYNTAX_ERRORS_IN_POLICY}, which is
+     * the one clause of an identity-based document the two validators do not word alike, so each
+     * passes the sentence its own callers are owed.
+     */
     private static final String POLICY_PARSE_FAILED = "The policy failed legacy parsing";
 
     private static final String ANY_RESOURCE = "*";
@@ -121,7 +126,7 @@ final class IamPolicyDocuments {
             return;
         }
         checkIdentityGrammar(document, false);
-        checkIdentityValues(document);
+        checkIdentityValues(document, POLICY_PARSE_FAILED);
     }
 
     /**
@@ -134,7 +139,7 @@ final class IamPolicyDocuments {
             return;
         }
         checkIdentityGrammar(document, true);
-        checkIdentityValues(document);
+        checkIdentityValues(document, SYNTAX_ERRORS_IN_POLICY);
     }
 
     /**
@@ -168,7 +173,7 @@ final class IamPolicyDocuments {
      * document the grammar accepted, so a text that is no policy is answered as one rather than
      * through whichever value it happens to carry.
      */
-    private static void checkIdentityValues(String document) {
+    private static void checkIdentityValues(String document, String unreadableEffect) {
         JsonNode root = parse(document);
         if (root == null || !root.isObject()) {
             return;
@@ -180,7 +185,7 @@ final class IamPolicyDocuments {
         for (JsonNode statement : statements(root)) {
             JsonNode effect = statement.get("Effect");
             if (effect != null && !EFFECTS.contains(effect.asText())) {
-                throw malformed(POLICY_PARSE_FAILED);
+                throw malformed(unreadableEffect);
             }
             for (String resource : resourceValues(statement)) {
                 if (!resource.startsWith(ARN_PREFIX) && !ANY_RESOURCE.equals(resource)) {
@@ -261,7 +266,14 @@ final class IamPolicyDocuments {
         return false;
     }
 
-    /** Every value a statement's resource elements name, in the order the document carries them. */
+    /**
+     * Every value a statement's resource elements name, in the order the document carries them. A
+     * value that is no string names the text of that value, which is how the {@code Version} and
+     * the {@code Effect} above are already read: a number or a boolean is held to naming a resource
+     * rather than passed over, so {@code 123} and {@code "123"} are refused alike. A null names
+     * nothing, as {@link #namesSomething} reads it, and a list or an object is no value of this
+     * element at all.
+     */
     private static List<String> resourceValues(JsonNode statement) {
         List<String> values = new ArrayList<>();
         for (String spelling : new String[] {"Resource", "NotResource"}) {
@@ -270,7 +282,7 @@ final class IamPolicyDocuments {
                 continue;
             }
             for (JsonNode value : element.isArray() ? element : List.of(element)) {
-                if (value.isTextual()) {
+                if (value.isValueNode() && !value.isNull()) {
                     values.add(value.asText());
                 }
             }

@@ -9,6 +9,7 @@ import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -121,7 +122,8 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class EcsService implements ContainerTeardown, ResourceProvider, Resettable, PassedRoleLookup {
+public class EcsService implements ContainerTeardown, ResourceProvider, Resettable, PassedRoleLookup,
+        StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EcsService.class);
     private static final String DEFAULT_CLUSTER = "default";
@@ -4820,6 +4822,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * The task set id a service revision's ARN ends in, its last segment, whether it is under its service
+     * ({@code service-revision/<cluster>/<service>/<id>}) or was minted before it was ({@code service-revision/<id>}).
+     */
+    private static String revisionTaskSetId(String revisionArn) {
+        return revisionArn.substring(revisionArn.lastIndexOf('/') + 1);
+    }
+
+    /**
      * Records the deployment and the revision it targets. The revision is the snapshot of the
      * service's configuration, so it is copied out of the service rather than read back from it
      * later; the deployment links to it, which is how a caller gets from
@@ -4828,16 +4838,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * <p>The revision ARN ends in the deployment's task set id, the {@code <id>} of
      * {@code ecs-svc/<id>}, as AWS's does. The Terraform AWS provider's
      * {@code wait_for_steady_state} finds the deployment to poll by looking for that id in each
-     * deployment's {@code targetServiceRevisionArn}. The ARN built here is
-     * {@code service-revision/<id>}; AWS's is {@code service-revision/<cluster>/<service>/<id>}.
+     * deployment's {@code targetServiceRevisionArn}. Both ARNs are under the service's cluster and name, as AWS's
+     * are and as IAM checks them: {@code service-revision/<cluster>/<service>/<id>}.
      */
+    /**
+     * The ARN of a deployment or a revision of the service, {@code <type>/<cluster>/<service>/<id>}, as AWS mints them
+     * and as the Service Authorization Reference gives their formats.
+     */
+    private String underService(EcsServiceModel svc, String type, String id, String region) {
+        String cluster = svc.getClusterArn().substring(svc.getClusterArn().lastIndexOf('/') + 1);
+        return regionResolver.buildArn("ecs", region, type + "/" + cluster + "/" + svc.getServiceName() + "/" + id);
+    }
+
     private void recordServiceDeployment(EcsServiceModel svc, String taskDefinition, String region) {
         svc.setFailedDeploymentId(null);
         String deploymentId = UUID.randomUUID().toString().replace("-", "");
-        String deploymentArn = regionResolver.buildArn("ecs", region,
-                "service-deployment/" + deploymentId);
-        String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + taskSetId(svc));
+        String deploymentArn = underService(svc, "service-deployment", deploymentId, region);
+        String revisionArn = underService(svc, "service-revision", taskSetId(svc), region);
         Instant now = Instant.now();
 
         List<String> priorRevisions = serviceRevisions.values().stream()
@@ -5086,7 +5103,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void restoreServiceRevision(EcsServiceModel svc, ServiceRevision revision) {
         String revisionArn = revision.getServiceRevisionArn();
-        String taskSetId = taskSetId(revisionArn);
+        String taskSetId = revisionTaskSetId(revisionArn);
         svc.setTaskDefinition(revision.getTaskDefinition());
         svc.setLaunchType(revision.getLaunchType());
         svc.setCapacityProviderStrategy(revision.getCapacityProviderStrategy());
@@ -5141,7 +5158,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (targetRevisionArn == null) {
             return false;
         }
-        String failedTaskSetId = taskSetId(targetRevisionArn);
+        String failedTaskSetId = revisionTaskSetId(targetRevisionArn);
         String failedDeploymentId = "ecs-svc/" + failedTaskSetId;
         EcsCluster cluster = resolveClusterByArn(svc.getClusterArn());
         if (cluster == null) {
@@ -6110,15 +6127,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         Instant createdAt = svc.getLastDeploymentAt() != null ? svc.getLastDeploymentAt() : svc.getCreatedAt();
-        String revisionArn = regionResolver.buildArn("ecs", region,
-                "service-revision/" + taskSetId(svc));
+        String revisionArn = underService(svc, "service-revision", taskSetId(svc), region);
         ServiceRevision revision = newServiceRevision(svc, pinnedTaskDefinitionArn(svc, key, region),
                 revisionArn, createdAt, region);
         serviceRevisions.putIfAbsent(revisionArn, revision);
 
         ServiceDeployment recovered = newServiceDeployment(svc, revision.getTaskDefinition(),
-                regionResolver.buildArn("ecs", region,
-                        "service-deployment/" + UUID.randomUUID().toString().replace("-", "")),
+                underService(svc, "service-deployment", UUID.randomUUID().toString().replace("-", ""), region),
                 revisionArn, createdAt);
         recovered.setSourceServiceRevisionArns(List.of());
         ServiceDeployment existing = serviceDeployments.putIfAbsent(
@@ -6257,6 +6272,34 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return Optional.ofNullable(findTaskDefinition(ref, region)).map(TaskDefinition::getTaskDefinitionArn);
     }
 
+    @Override
+    public String namespace() {
+        return "ecs";
+    }
+
+    /** ECS stores no resource under a name a request fills an ARN with: a family a create names is a new revision. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The revision a task definition reference a request names resolves to, as {@code RunTask} resolves it (a family
+     * alone is its latest revision), for a request the table finds its task definition for ({@code find}). Reads only.
+     */
+    @Override
+    public Optional<String> findByMembers(String type, List<String> names, String region) {
+        return "task-definition".equals(type) && names.size() == 1
+                ? taskDefinitionArn(names.getFirst(), region) : Optional.empty();
+    }
+
+    /** The cluster ECS acts on for a request naming none, {@code default}, which every account has. */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        return "cluster".equals(type)
+                ? Optional.of(regionResolver.buildArn("ecs", region, "cluster/" + DEFAULT_CLUSTER)) : Optional.empty();
+    }
+
     /** The roles a task started from the definition runs with, for the {@code iam:PassRole} check of RunTask and the rest. */
     @Override
     public List<String> taskDefinitionRoles(String reference, String region) {
@@ -6341,31 +6384,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return services.values().stream()
                 .filter(s -> s.getServiceArn().equals(serviceId) || s.getServiceName().equals(serviceId))
                 .findFirst().orElse(null);
-    }
-
-    /**
-     * The ARN of the service {@code updateService} would act on, found the way it finds it: by the last segment of
-     * the reference within the cluster the request names. Reads only, so it creates no default cluster.
-     */
-    public Optional<String> updatedServiceArn(String clusterRef, String serviceRef, String region) {
-        return existingClusterName(clusterRef, region)
-                .map(cluster -> services.get(serviceKey(region, cluster, extractServiceName(serviceRef))))
-                .map(EcsServiceModel::getServiceArn);
-    }
-
-    /** The ARN of the service {@code describeServices} would answer for the reference. Reads only. */
-    public Optional<String> describedServiceArn(String clusterRef, String serviceRef, String region) {
-        return existingClusterName(clusterRef, region)
-                .map(cluster -> resolveService(cluster, serviceRef, region))
-                .map(EcsServiceModel::getServiceArn);
-    }
-
-    /** The name of the cluster {@code resolveClusterOrDefault} would answer with, without creating the default. */
-    private Optional<String> existingClusterName(String clusterRef, String region) {
-        if (clusterRef == null || clusterRef.isBlank() || DEFAULT_CLUSTER.equals(clusterRef)) {
-            return Optional.of(DEFAULT_CLUSTER);
-        }
-        return Optional.ofNullable(resolveCluster(clusterRef, region)).map(EcsCluster::getClusterName);
     }
 
     private EcsServiceModel resolveServiceOrThrow(String clusterName, String serviceId, String region) {

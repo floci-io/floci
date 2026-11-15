@@ -132,7 +132,8 @@ def test_the_vendored_table_covers_its_namespaces():
         "route53:ChangeResourceRecordSets"]
     assert document["memberShapes"]["route53:ChangeResourceRecordSets"][
         "ChangeBatch.Changes.Change.ResourceRecordSet.Name"] == "DNSName"
-    assert document["protocols"] == {"lambda": "rest-json", "redshift": "query", "route53": "rest-xml"}
+    assert document["protocols"] == {"eks": "rest-json", "lambda": "rest-json",
+                                     "redshift": "query", "route53": "rest-xml"}
 
 
 @pytest.mark.parametrize("changed", [
@@ -181,3 +182,18 @@ def run_aggregate_gate(tmp_path, changed, fail):
         ["make", "--no-print-directory", "iam-data-verify", "CHANGED=" + changed,
          "MAKE=" + str(recursive_make)],
         cwd=OUTPUT.parents[4], capture_output=True, text=True, check=False)
+
+
+def test_eks_cluster_request_members_and_create_only_bootstrap_key():
+    document = json.loads(OUTPUT.read_text())
+    create = document["members"]["eks:CreateCluster"]
+    assert create == {
+        "eks:authenticationMode": ["accessConfig.authenticationMode"],
+        "eks:bootstrapClusterCreatorAdminPermissions": ["accessConfig.bootstrapClusterCreatorAdminPermissions"],
+        "eks:endpointPrivateAccess": ["resourcesVpcConfig.endpointPrivateAccess"],
+        "eks:endpointPublicAccess": ["resourcesVpcConfig.endpointPublicAccess"],
+    }
+    assert document["members"]["eks:UpdateClusterConfig"] == {
+        key: paths for key, paths in create.items() if key != "eks:bootstrapClusterCreatorAdminPermissions"
+    }
+    assert "eks:DescribeCluster" not in document["actions"]

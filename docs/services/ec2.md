@@ -2,6 +2,15 @@
 
 **Protocol:** EC2 Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+A request acting on a network interface carries its `ec2:Vpc` and `ec2:Subnet` (as ARNs),
+`ec2:AvailabilityZone` and `ec2:NetworkInterfaceID`, read from the interface Floci holds:
+stored, held by an instance as its primary interface, or owned by a VPC endpoint, NAT
+gateway or Instance Connect endpoint. Which keys a resource type takes, and the member of
+its botocore shape each comes from, are generated from the Service Reference and botocore
+(`resourceKeys` in `iam-request-resources.json`). In a `CreateTags` or `DeleteTags` batch
+every interface is checked against its own keys and tags before any tag changes; another
+interface's VPC or tags cannot authorize it. Authorization reads do not create default resources.
+
 ## Instance IAM authorization
 
 With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.
@@ -84,6 +93,11 @@ The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
 `DescribeInstanceTypes` and the emulator's `DescribeInstanceTypeOfferings` use
 these same entries. Catalog consumers also use their ARM64 architecture and
 CPU/memory capacity for launch validation and container resource limits.
+
+`RunInstances` refuses an AMI whose architecture the instance type cannot run, as
+AWS does. An `x86_64` AMI on `m6g.large` answers `InvalidParameterValue` with
+`The architecture 'arm64' of the specified instance type does not match the
+architecture 'x86_64' of the specified AMI.`, so a Graviton type needs an `arm64` AMI.
 
 The values were captured from AWS `DescribeInstanceTypes` in `us-east-1` on
 2026-11-04, including each size's network-card/interface limits and each family's
@@ -254,6 +268,12 @@ instance ID. The check bypasses any HTTP proxy the image configures, a failed or
 response does not fall back to a tokenless request, and the check passes on an instance that
 requires tokens.
 
+For EC2 guests, a working `iptables` or `nft` NAT backend routes link-local port `80` to the IMDS
+relay on port `42169`, leaving the guest's wildcard port `80` available. If no NAT backend works
+(for example, an offline image without firewall tools), Floci uses the older link-local port `80`
+listener to preserve IMDS access. That fallback can still conflict with a guest server binding
+`0.0.0.0:80`.
+
 `iam/info` returns the ARN and ID that IAM holds for the attached profile, and 404 when that
 profile is missing, has no role or does not match the attached ARN. An EKS cluster node, whose
 profile Floci synthesizes, reports the synthesized ARN and a stable ID instead while IAM holds no
@@ -290,6 +310,7 @@ User data is returned as the original base64-decoded bytes, without decompressin
 | `GET /latest/meta-data/mac` | MAC address of first ENI |
 | `GET /latest/meta-data/security-groups` | Security group names |
 | `GET /latest/meta-data/placement/availability-zone` | AZ |
+| `GET /latest/meta-data/placement/availability-zone-id` | AZ ID (for example `use1-az1`), the same ID `DescribeSubnets` reports for the zone |
 | `GET /latest/meta-data/placement/region` | Region |
 | `GET /latest/meta-data/iam/info` | IAM instance profile info |
 | `GET /latest/meta-data/iam/security-credentials/` | Role name list |
@@ -309,7 +330,7 @@ Guests with an instance profile receive endpoint and region settings without Flo
 
 ### IMDS and SSM managed instances
 
-IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record. A restarted container (`StopInstances` then `StartInstances`) has a new network namespace, so once the instance is `running` `StartInstances` sets the proxy up again; an instance under security-group enforcement keeps its helper container's namespace, and the proxy with it.
+IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record. A restarted container (`StopInstances` then `StartInstances`) has a new network namespace, so once the instance is `running` `StartInstances` sets the proxy up again. An instance under security-group enforcement keeps its helper container's namespace; `StartInstances` attempts to migrate an older TCP/80 listener before starting the workload.
 
 Registering a container with SSM is independent of this: an SSM agent that calls `UpdateInstanceInformation` becomes a managed instance, but that does not create an EC2 instance record, does not install the IMDS proxy, and does not register the container with IMDS. From such a container, `curl http://169.254.169.254/...` fails outright (no proxy), and a request sent straight to the host IMDS port returns `404` with a message explaining that no EC2 instance is registered for the source IP. Floci also logs a warning when an SSM agent registers from a container that is not backed by a Floci EC2 instance.
 
@@ -1414,13 +1435,13 @@ All three actions honor `DryRun`. A request that would otherwise succeed returns
 | DescribeIpams | Lists or returns stored IPAMs. |
 | ModifyIpam | Updates an IPAM's description, tier, metered account and operating regions. |
 | DeleteIpam | Deletes an IPAM and, leniently, the pools that belong to it. |
-| CreateIpamPool | Creates a pool under a scope, optionally sourced from a parent pool. |
+| CreateIpamPool | Creates a pool under a scope, optionally sourced from a parent pool. An `ipam-pool` `TagSpecification` tags it. |
 | DescribeIpamPools | Lists or returns stored pools. |
 | ModifyIpamPool | Updates a pool's description, auto-import flag and netmask-length bounds. |
 | DeleteIpamPool | Deletes a pool. |
 | ProvisionIpamPoolCidr | Provisions a CIDR onto a pool, validated against its source pool. |
 | GetIpamPoolCidrs | Returns a pool's provisioned CIDRs. |
-| AllocateIpamPoolCidr | Allocates a CIDR from a pool, by explicit CIDR or by netmask length. |
+| AllocateIpamPoolCidr | Allocates a CIDR from a pool, by explicit CIDR or by netmask length. An `ipam-pool-allocation` `TagSpecification` tags the allocation. |
 | ReleaseIpamPoolAllocation | Releases an allocation, returning its space to the pool. |
 | GetIpamPoolAllocations | Returns a pool's live allocations. |
 | AssociateIpamByoasn | Associates a BYOASN with a CIDR. |
@@ -1431,9 +1452,11 @@ This is what LZA needs end to end: the Organization stage delegates the IPAM adm
 
 Allocation is real rather than recorded. `AllocateIpamPoolCidr` by netmask length hands out the first free block that fits, skipping both live allocations and any space already provisioned onward to child pools, and reports `InsufficientCidrBlocks` when nothing fits. An explicit `Cidr` must fall inside a provisioned CIDR and must not overlap an existing allocation. `ProvisionIpamPoolCidr` on a pool with a source pool requires the CIDR to sit inside one of the parent's provisioned CIDRs. Releasing an allocation returns its space, so the next allocation of the same size reuses it.
 
+Pool and allocation tags are kept with the other EC2 tags, in the pool's own region even when an IPAM action is called from another region, so `CreateTags`, `DeleteTags` and `DescribeTags` in the pool's region work on them. `DescribeIpamPools` returns a pool's tags and its `tag:<key>` and `tag-key` filters match them; `AllocateIpamPoolCidr` and `GetIpamPoolAllocations` return an allocation's. Releasing an allocation removes its tags, and deleting a pool, directly or through `DeleteIpam`, removes the pool's tags and those of the allocations it still held. Tags are per account, as for every EC2 resource: the tags another account gives an allocation it makes from a shared pool stay in that account, so the owner's `GetIpamPoolAllocations` does not show them. The allocation records that account as its `resourceOwner`, and releasing the allocation or deleting its pool removes its tags both there and in the pool owner's account.
+
 `CreateIpam`, `CreateIpamPool`, `ProvisionIpamPoolCidr` and `AllocateIpamPoolCidr` honour `ClientToken` — the four IPAM operations that model it. A replay returns what the first call produced rather than creating a second resource: the same pool, the same provisioned CIDR, the same allocation id and CIDR, with pool consumption unchanged. This matters most on `AllocateIpamPoolCidr`, which LZA's `get-ipam-subnet-cidr` Lambda retries; without it each retry would burn another distinct CIDR out of the pool. Parameter differences on a replay are ignored rather than rejected as `IdempotentParameterMismatch`, and the token is not echoed in the response, matching the AWS output shapes. A token is scoped to the account that used it.
 
-Pool lookups deliberately fall back to an id-only scan across accounts, so a RAM-shared pool resolves from a workload account and region. That fallback covers reads and allocation only: `AllocateIpamPoolCidr` from an account that does not own the pool succeeds and writes the allocation back to the owner's partition rather than forking a copy into the caller's. Mutations of the pool itself — `ModifyIpamPool`, `DeleteIpamPool`, `ProvisionIpamPoolCidr` — are owner-only, as are `ModifyIpam` and `DeleteIpam`, and a non-owner gets `InvalidIpamPoolId.NotFound` or `InvalidIpamId.NotFound`, which is what AWS returns for a resource you cannot act on. `ReleaseIpamPoolAllocation` stays on the cross-account path, since no per-allocation caller is tracked to check ownership against.
+Pool lookups deliberately fall back to an id-only scan across accounts, so a RAM-shared pool resolves from a workload account and region. That fallback covers reads and allocation only: `AllocateIpamPoolCidr` from an account that does not own the pool succeeds and writes the allocation back to the owner's partition rather than forking a copy into the caller's. Mutations of the pool itself — `ModifyIpamPool`, `DeleteIpamPool`, `ProvisionIpamPoolCidr` — are owner-only, as are `ModifyIpam` and `DeleteIpam`, and a non-owner gets `InvalidIpamPoolId.NotFound` or `InvalidIpamId.NotFound`, which is what AWS returns for a resource you cannot act on. `ReleaseIpamPoolAllocation` stays on the cross-account path and does not check which account made the allocation.
 
 The delegated administrator is stored organization-wide rather than per account, so every member account reads the same value and delegating a second, different account conflicts with `InvalidParameterValue` no matter which account asks.
 

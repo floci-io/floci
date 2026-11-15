@@ -58,6 +58,8 @@ another.
 `interactiveConfiguration`, `identityCenterConfiguration` and `jobLevelCostAllocationConfiguration`
 among them, and `GetApplication` returns each as it was written.
 
+`UpdateApplication` answers with the updated application, as `GetApplication` reports it.
+
 `UpdateApplication` changes any setting of a `CREATED` or `STOPPED` application, and of a `STARTED` one its
 `maximumCapacity` and its custom images, `imageConfiguration` and `workerTypeSpecifications`, as the user guide's
 "Updating Running Applications" describes. For every other setting the API reference's "An application has to be in
@@ -95,7 +97,9 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   (HTTP 409) "Request did not match the original".
 * **Execution timeout**: `executionTimeoutMinutes` is 0 to 1,000,000, 0 meaning no timeout. From
   release `emr-7.11.0`, a `BATCH` run's timeout must be 1 to 10080 minutes (7 days), as the model and
-  the 7.11.0 release notes say; a run outside that is refused with `ValidationException`.
+  the 7.11.0 release notes say; a run outside that is refused with `ValidationException`. The AWS runtime for
+  Apache Spark's releases, `emr-spark-8.0.0` on, hold their `BATCH` runs to it too: the notes apply it "from this
+  release onwards", and the release list puts them after EMR Serverless 7.14.0.
 * **CancelJobRun** moves a run that has not finished to `CANCELLED`. A finished run answers
   `ValidationException` "Job run is not in a cancellable state".
 * **StopApplication** refuses an application with a run that has not finished, a `STREAMING` run or

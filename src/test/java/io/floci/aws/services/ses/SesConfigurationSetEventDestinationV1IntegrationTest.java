@@ -38,6 +38,8 @@ class SesConfigurationSetEventDestinationV1IntegrationTest {
             .formParam("ConfigurationSet.Name", CS)
         .when().post("/")
         .then().statusCode(200);
+        SnsTopicFixture.create("us-east-1", "topic-a");
+        SnsTopicFixture.create("us-east-1", "topic-b");
     }
 
     @Test
@@ -304,7 +306,28 @@ class SesConfigurationSetEventDestinationV1IntegrationTest {
         .when().post("/")
         .then()
             .statusCode(400)
-            .body(containsString("SnsDestination requires a non-blank TopicArn"));
+            .body(containsString("<Code>InvalidSNSDestination</Code>"))
+            .body(containsString("<Message>Invalid ARN provided: topic ARN = .</Message>"));
+    }
+
+    @Test
+    @Order(19)
+    void createConfigurationSetEventDestination_missingSnsTopic_rejected() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSetEventDestination")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("EventDestination.Name", "v1-ed-sns-missing")
+            .formParam("EventDestination.Enabled", "true")
+            .formParam("EventDestination.MatchingEventTypes.member.1", "send")
+            .formParam("EventDestination.SNSDestination.TopicARN", "arn:aws:sns:us-east-1:000000000000:never-created")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidSNSDestination</Code>"))
+            .body(containsString("<Message>SNS topic &lt;arn:aws:sns:us-east-1:000000000000:never-created&gt; "
+                    + "not found.</Message>"));
     }
 
     @Test

@@ -151,6 +151,8 @@ final class EmrServiceFixture {
         static final String IMAGE = "sha256:" + "3".repeat(64);
         // Each image asked for: its release, then the two it is made of, then whether it has Hive.
         final List<List<String>> asked = new ArrayList<>();
+        // Each image released, by id.
+        final List<String> released = new ArrayList<>();
         RuntimeException failure;
 
         @Override
@@ -160,6 +162,11 @@ final class EmrServiceFixture {
                 throw failure;
             }
             return IMAGE;
+        }
+
+        @Override
+        public void released(String imageId) {
+            released.add(imageId);
         }
     }
 
@@ -248,6 +255,11 @@ final class EmrServiceFixture {
         return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, releaseImages, iam, durations);
     }
 
+    /** A new service on the same storage and clock, as {@link #restart} builds, in the {@code immediate} mode. */
+    EmrServiceFixture restartImmediate() {
+        return new EmrServiceFixture(storage, clock, null, null, null, null, iam, durations);
+    }
+
     /**
      * A new service on the same storage and clock, as {@link #restart} builds, but with {@code runner},
      * its wakeups set on {@code wakeups}, and leftover drivers removed when it starts.
@@ -332,6 +344,11 @@ final class EmrServiceFixture {
                     ? detail.path("state").asText() + " " + detail.path("name").asText()
                     : detail.path("state").asText();
         }).toList();
+    }
+
+    /** Each step's state, in order. */
+    static List<String> stepStates(List<EmrStep> steps) {
+        return steps.stream().map(EmrStep::getState).toList();
     }
 
     static EmrCluster cluster(String name, boolean keepAlive, EmrStep... steps) {

@@ -157,6 +157,26 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "/usr/lib/spark/jars/hadoop-client-api-*.jar",
             "/usr/lib/spark/jars/hadoop-client-runtime-*.jar",
             "/usr/lib/spark/jars/emr-serverless-spark-goodies.jar");
+    /**
+     * The {@code sudo} a cluster's bootstrap actions and steps find first on their PATH, as EMR's nodes have one and
+     * the image none: its options are dropped, each with its value where it takes one, given apart or after an
+     * {@code =}, and its command, with any NAME=value before it, runs as it is, as whoever runs it, root in a bootstrap
+     * action and the {@code hadoop} user in a step.
+     */
+    public static final String SUDO = String.join("\n",
+            "#!/bin/bash",
+            "while [ $# -gt 0 ]; do",
+            "  case \"$1\" in",
+            "    -u|-g|-C|-D|-p|-r|-t|-T|-U|--user|--group|--close-from|--chdir|--prompt|--role|--type"
+                    + "|--command-timeout|--other-user) shift 2 ;;",
+            "    --) shift; break ;;",
+            "    -*) shift ;;",
+            "    *) break ;;",
+            "  esac",
+            "done",
+            "exec env \"$@\"");
+    /** Writes {@link #SUDO} to /tmp/floci-bin/sudo, a folder that is there already. */
+    public static final String SUDO_FILE = String.join("\n", "cat > /tmp/floci-bin/sudo <<'SUDO'", SUDO, "SUDO");
     // A Spark configuration of the container's own: a copy of the folder a spark-env export of SPARK_CONF_DIR names,
     // else of the image's, links followed, whose log4j2.properties ends with the job's lines, passed in
     // SPARK_LOG4J2_VARIABLE, a later line winning. What is added to a file starts on a line of its own, as the
@@ -180,7 +200,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // cluster sets keeps the LZO codec the image's core-site.xml names. The hadoop script runs only once its HDFS,
     // MapReduce and YARN homes name folders that are there, and the image has /usr/lib/hadoop alone, without
     // MapReduce, so the MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot run, so hdfs dfs
-    // runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs.
+    // runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs. A step's
+    // command can run sudo, as on EMR, which the image does not have, so it finds Floci's first (see SUDO).
     private static final List<String> HADOOP_CONF_SETUP = List.of(
             "if [ -n \"${" + HADOOP_SITE_VARIABLE + ":-}\" ]; then",
             "  hadoop_conf=/tmp/floci-hadoop-conf source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"",
@@ -218,7 +239,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     + " 'echo \"hdfs $1: only hdfs dfs runs here, as hadoop fs\" >&2' 'exit 1' > /tmp/floci-bin/hdfs",
             "  printf '%s\\n' '#!/bin/bash' 'exec hadoop jar /usr/lib/hadoop/hadoop-streaming.jar \"$@\"'"
                     + " > /tmp/floci-bin/hadoop-streaming",
-            "  chmod +x /tmp/floci-bin/hdfs /tmp/floci-bin/hadoop-streaming",
+            "  " + SUDO_FILE,
+            "  chmod +x /tmp/floci-bin/hdfs /tmp/floci-bin/hadoop-streaming /tmp/floci-bin/sudo",
             "  for jar in " + String.join(" ", MAPRED_JARS) + "; do",
             "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" " + MAPRED_HOME + "/;",
             "    else echo \"" + MISSING_JAR + "\" >&2; fi",
@@ -307,6 +329,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // output and error.
     private static final List<String> HIVE_ENVIRONMENT = List.of("LOGS_DIR=/tmp/floci-hive-logs");
     private static final String HIVE_SCRATCH_VARIABLE = "FLOCI_HIVE_SCRATCH";
+    // Set for a Hive step on a cluster, whose shell commands (Hive's "!") find the sudo a step has (see SUDO).
+    private static final String CLUSTER_STEP_VARIABLE = "FLOCI_CLUSTER_STEP";
     /**
      * Where an EMR cluster's image with Hive keeps its Hive image's Hadoop configuration, which puts Tez on the class
      * path, apart from the one its other steps' Hadoop reads; Hive runs with it where an image has it.
@@ -336,7 +360,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // the root of the container for one; so the container starts as root, makes that path its user's, then runs hive
     // as that user, in that user's home, as a Spark image's working directory is: Tez in local mode puts each task's
     // files in the working directory, and the Hive image names none, which leaves the root. In an EMR cluster's image
-    // with Hive, Hive reads its own Hadoop configuration (HIVE_HADOOP_CONF).
+    // with Hive, Hive reads its own Hadoop configuration (HIVE_HADOOP_CONF), and a step on a cluster finds SUDO first on
+    // its PATH, as a Spark step does.
     private static final String HIVE_WRAPPER = String.join("\n",
             "host=$(hostname)",
             "export CLIENT_AM_BIND_ADDRESS=0.0.0.0 TASK_AM_BIND_ADDRESS=0.0.0.0 SHUFFLE_BIND_ADDRESS=0.0.0.0",
@@ -346,6 +371,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     + HIVE_SCRATCH_VARIABLE + "\" || exit",
             "fi",
             "if [ -d " + HIVE_HADOOP_CONF + " ]; then export HADOOP_CONF_DIR=" + HIVE_HADOOP_CONF + "; fi",
+            "if [ -n \"${" + CLUSTER_STEP_VARIABLE + ":-}\" ]; then",
+            "  mkdir -p /tmp/floci-bin || exit",
+            "  " + SUDO_FILE,
+            "  chmod 755 /tmp/floci-bin/sudo",
+            "  export PATH=\"/tmp/floci-bin:$PATH\"",
+            "fi",
             HIVE_ONE_SDK,
             "export HOME=~" + IMAGE_USER,
             "cd \"$HOME\" || exit",
@@ -447,6 +478,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                         .withEntrypoint(entrypoint)
                         .withCmd(hive)
                         .withEnv(HIVE_ENVIRONMENT);
+                if (job.storage() != null) {
+                    container.withEnv(CLUSTER_STEP_VARIABLE, "1");
+                }
                 String scratch = hiveScratchMirror(hive);
                 if (scratch != null) {
                     container.withEnv(HIVE_SCRATCH_VARIABLE, scratch);
@@ -1379,8 +1413,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // Floci's settings, then the job's spark-defaults, in the order a later one wins. Spark's own Hadoop configuration
     // takes HDFS's client back from the core-site.xml's view, for Spark and its Hive client, which writes a Hive table
     // in HDFS only through it. On a cluster with Hive or HCatalog, Spark's Hive client uses the cluster's metastore
-    // too, as the Glue Data Catalog is the one to pick "when you require a persistent Hive metastore or a Hive
-    // metastore shared by different clusters"; a spark-hive-site naming its client factory still wins.
+    // too, as Spark's default catalog "always connects to a Hive metastore" (the Release Guide's "Use an Iceberg
+    // cluster with Spark") and its "Using HCatalog" has Spark SQL read a table the HCat CLI made; a spark-hive-site
+    // naming its client factory, the Glue Data Catalog's say, still wins.
     private static List<SparkSetting> sparkSettings(Job job, String flociEndpoint, List<String> executorEnvironment) {
         List<SparkSetting> hadoop = new ArrayList<>(hadoopSettings(job, flociEndpoint));
         List<SparkSetting> hdfs = hdfsSettings(job.storage());

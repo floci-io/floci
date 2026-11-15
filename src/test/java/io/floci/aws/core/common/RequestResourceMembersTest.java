@@ -29,6 +29,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -41,6 +42,35 @@ import static org.mockito.Mockito.when;
 class RequestResourceMembersTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Test
+    void modeledIntegerArnVariablesNormalizeOnlyTheirOwnValues() throws Exception {
+        ObjectNode document = (ObjectNode) MAPPER.readTree("""
+                {
+                  "namespaces": {"example": ["example"]},
+                  "arnFormats": {"example": {
+                    "version": "arn:${Partition}:example:${Region}:${Account}:item:${Name}:${Version}"
+                  }},
+                  "integerVariables": {"example": {"version": ["Version"]}},
+                  "operations": {"example:Read": {"resources": []}}
+                }
+                """);
+        ArnFormat format = parse(document.toString()).formats().get("example").get("version");
+        String prefix = "arn:aws-cn:example:cn-north-1:000000000001:item:001:";
+        assertEquals(prefix + "1", format.checked(prefix + "01"));
+        assertEquals(prefix + "1", format.checked(prefix + "+1"));
+        for (String invalid : List.of("latest", "*", "9223372036854775808")) {
+            assertEquals(prefix + invalid, format.checked(prefix + invalid));
+        }
+        for (String invalid : List.of("[]", "{\"unknown\":{\"version\":[\"Version\"]}}",
+                "{\"example\":{\"unknown\":[\"Version\"]}}", "{\"example\":{\"version\":[\"Account\"]}}",
+                "{\"example\":{\"version\":\"Version\"}}", "{\"example\":{\"version\":[1]}}")) {
+            ObjectNode changed = document.deepCopy();
+            changed.set("integerVariables", MAPPER.readTree(invalid));
+            IllegalStateException failure = assertThrows(IllegalStateException.class, () -> parse(changed.toString()));
+            assertTrue(failure.getMessage().contains("integerVariables"), failure.getMessage());
+        }
+    }
 
     @Test
     void generatedIdTargetsValidateTheirMemberWireNameAndDiscriminators() throws Exception {
@@ -69,6 +99,11 @@ class RequestResourceMembersTest {
     void generatedResourceTagKeysValidateTheirPrefixesAndResourceTypes() throws Exception {
         assertEquals(List.of("aws:ResourceTag/", "ec2:ResourceTag/"),
                 RequestResourceMembers.table().resourceTagKeys().get("ec2").get("instance"));
+        // Secrets Manager writes its key `secretsmanager:ResourceTag/tag-key`, SSM spells the word `resourceTag`.
+        assertEquals(List.of("aws:ResourceTag/", "secretsmanager:ResourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("secretsmanager").get("Secret"));
+        assertEquals(List.of("aws:ResourceTag/", "ssm:resourceTag/"),
+                RequestResourceMembers.table().resourceTagKeys().get("ssm").get("parameter"));
         ObjectNode document = (ObjectNode) MAPPER.readTree("""
                 {"namespaces":{"example":["example"]},"arnFormats":{"example":{
                 "thing":"arn:${Partition}:example:${Region}:${Account}:thing/${ThingId}"}},
@@ -124,7 +159,7 @@ class RequestResourceMembersTest {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
         assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertEquals(Set.of("dynamodb", "lambda", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
         Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
                 "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
@@ -133,6 +168,8 @@ class RequestResourceMembersTest {
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("logs:PutDestination");
+        expected.add("lambda:GetLayerVersion");
+        expected.add("lambda:GetLayerVersionByArn");
         // What AWS was measured to check where the Service Reference lists no resource type (MEASURED).
         expected.add("dynamodb:ListTables");
         assertEquals(expected, table.operations().keySet().stream()
@@ -175,6 +212,10 @@ class RequestResourceMembersTest {
         assertTrue(events.get("connection").minted());
         assertTrue(events.get("api-destination").minted());
         assertFalse(events.get("event-bus").minted());
+        // A secret is followed by the six characters botocore documents Secrets Manager adding after its name.
+        assertEquals("-??????",
+                RequestResourceMembers.table().formats().get("secretsmanager").get("Secret").mintedSuffix());
+        assertNull(events.get("event-bus").mintedSuffix());
     }
 
     @Test
@@ -192,8 +233,9 @@ class RequestResourceMembersTest {
         assertEquals(List.of(new Member("Namespace", false), new Member("Dimension", false)), parseUnchecked(document(
                 formats, "{\"type\":\"target\",\"fill\":{},\"find\":[\"Namespace\",\"Dimension\"]}"))
                 .operations().get("a:Op").getFirst().find());
-        // No members, a list, members beside one filling it, no list of them, or beside members reading it otherwise.
-        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\"]",
+        // No members, a list beside another, members beside one filling it, no list of them, or beside members
+        // reading it otherwise.
+        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\",\"Namespace\"]",
                 "\"fill\":{\"Id\":\"Id\"},\"find\":[\"Namespace\"]", "\"fill\":{},\"find\":\"Namespace\"",
                 "\"fill\":{},\"find\":{\"a\":\"Namespace\"}",
                 "\"fill\":{},\"find\":[\"Namespace\"],\"absent\":{\"Namespace\":\"ecs\"}")) {
@@ -395,6 +437,33 @@ class RequestResourceMembersTest {
     }
 
     /**
+     * A member filling the one variable of another type's format names that type's default for a request leaving it
+     * out ({@code defaults}: an ECS service on the default cluster), and a type its service finds may be found by each
+     * value of one list member; a default for a member filling no such variable, or none, and a list beside another
+     * member to find by, fail to load.
+     */
+    @Test
+    void aDefaultAMemberNamesWhenLeftOutAndAFindByOneListAreReadAsWritten() {
+        String formats = "\"arnFormats\":{\"a\":{"
+                + "\"cluster\":\"arn:${Partition}:a:${Region}:${Account}:cluster/${ClusterName}\","
+                + "\"service\":\"arn:${Partition}:a:${Region}:${Account}:service/${ClusterName}/${ServiceName}\"}}";
+        String fill = "\"fill\":{\"ClusterName\":\"cluster\",\"ServiceName\":\"services[]\"}";
+        assertEquals(Map.of("cluster", "cluster"), parseUnchecked(document(formats, "{\"type\":\"service\"," + fill
+                + ",\"defaults\":{\"cluster\":\"cluster\"}}")).operations().get("a:Op").getFirst().defaults());
+        assertEquals(Map.of(), parseUnchecked(document(formats, "{\"type\":\"service\"," + fill + "}"))
+                .operations().get("a:Op").getFirst().defaults());
+        for (String bad : List.of("{\"services[]\":\"cluster\"}", "{\"other\":\"cluster\"}", "{\"cluster\":\"service\"}",
+                "{\"cluster\":\"none\"}", "{}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"type\":\"service\"," + fill
+                    + ",\"defaults\":" + bad + "}")), bad);
+        }
+        assertEquals(List.of(new Member("names", true)), parseUnchecked(document(formats,
+                "{\"type\":\"service\",\"fill\":{},\"find\":[\"names[]\"]}")).operations().get("a:Op").getFirst().find());
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"type\":\"service\",\"fill\":{},\"find\":[\"names[]\",\"cluster\"]}")));
+    }
+
+    /**
      * Each resource alone, from a request naming it and nothing else, gives exactly its ARN, in the account its
      * account member names when it has one, with those sharing its explicit member selector, those the operation
      * always names, such as a create's new resource (Cloud Map's {@code CreateService}), those filled from the ARN
@@ -416,7 +485,9 @@ class RequestResourceMembersTest {
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
                     String expected = resource.arn() != null || resource.through() != null || resource.byDefault() ? arn
-                            : expected(format.format(), resource, account) + (format.minted() ? "/*" : "");
+                            : expected(format.format(), resource, account) + (format.minted() ? "/*"
+                                    : format.mintedSuffix() != null && resource.fill().size() == 1
+                                    ? format.mintedSuffix() : "");
                     ObjectNode body = MAPPER.createObjectNode();
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)

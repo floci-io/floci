@@ -8,6 +8,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SignedMarkers;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
 import io.floci.aws.services.lambda.zip.DeploymentPackage;
 import io.floci.aws.services.lambda.zip.ZipExtractor;
@@ -26,6 +27,7 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -33,7 +35,7 @@ import java.util.stream.Collectors;
  * Business logic for Lambda Layer management.
  */
 @ApplicationScoped
-public class LambdaLayerService {
+public class LambdaLayerService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(LambdaLayerService.class);
 
@@ -97,6 +99,26 @@ public class LambdaLayerService {
         this.config = config;
         this.regionResolver = regionResolver;
         this.s3Service = s3Service;
+    }
+
+    @Override
+    public String namespace() {
+        return "lambda";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        // Layer version selectors supply the complete identifier, so no generated suffix needs a lookup.
+        return Optional.empty();
+    }
+
+    @Override
+    public Optional<String> resolveStoredArn(String arn) {
+        if (!LAYER_VERSION_ARN.matcher(arn).matches()) {
+            return Optional.empty();
+        }
+        LambdaLayerVersion layer = resolveLayerByArn(arn);
+        return layer == null ? Optional.empty() : Optional.of(layer.getLayerVersionArn());
     }
 
     /**
@@ -211,6 +233,9 @@ public class LambdaLayerService {
      * Returns information about a specific layer version.
      */
     public LambdaLayerVersion getLayerVersion(String region, String layerName, long versionNumber) {
+        if (AwsArnUtils.looksLikeArn(layerName)) {
+            return getLayerVersionByArn(layerName + ":" + versionNumber);
+        }
         return layerStore.get(region, layerName, versionNumber)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Layer version " + versionNumber + " for layer " + layerName + " not found.", 404));

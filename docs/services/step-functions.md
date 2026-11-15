@@ -716,9 +716,9 @@ and resource type comes from the Service Authorization Reference:
 
 | Resource | Action | Resource evaluated | Refused with |
 |---|---|---|---|
-| `arn:aws:states:::ecs:runTask`, with `.sync` or `.waitForTaskToken` | `ecs:RunTask` | The task definition revision the task would run | `ECS.AccessDeniedException` |
-| `arn:aws:states:::aws-sdk:ecs:updateService` | `ecs:UpdateService` | The service it acts on | `Ecs.AccessDeniedException` |
-| `arn:aws:states:::aws-sdk:ecs:describeServices` | `ecs:DescribeServices` | Each service it answers for | `Ecs.AccessDeniedException` |
+| `arn:aws:states:::ecs:runTask`, with `.sync` or `.waitForTaskToken` | `ecs:RunTask` | The task definition revision ECS resolves `TaskDefinition` to | `ECS.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:ecs:updateService` | `ecs:UpdateService` | The service the request names | `Ecs.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:ecs:describeServices` | `ecs:DescribeServices` | Each service the request names | `Ecs.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:ecs:listServices` | `ecs:ListServices` | `*` | `Ecs.AccessDeniedException` |
 | `arn:aws:states:::elasticmapreduce:createCluster`, `.sync` | `elasticmapreduce:RunJobFlow` | `*` | `EMR.AccessDeniedException` |
 | `arn:aws:states:::elasticmapreduce:setClusterTerminationProtection` | `elasticmapreduce:SetTerminationProtection` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
@@ -736,9 +736,12 @@ A task definition is evaluated as the revision it resolves to, so a bare family,
 the ARN give the same resource: `task-definition/<family>:<revision>`. A role allowed only an older
 revision is refused a bare family whose latest revision is newer.
 
-The ECS services are resolved as ECS resolves them. `updateService` acts on the service of that name in
-the request's `Cluster`, or in `default` with none, whatever cluster a service ARN in the request
-names, and that is the service evaluated.
+The ECS APIs are checked as the same call made directly is, from the generated request resources: a
+service is the one of that name in the request's `Cluster`, given by name or ARN, or in `default` with
+none, which `updateService` acts on, and a service ARN is evaluated as given as well, so one of another
+cluster than the request's needs the action on both. A task definition ECS does not have is evaluated on any
+revision, `task-definition/*:*`, and a service or cluster it does not have on the ARN the request
+names, so a role allowed nothing is refused before ECS answers.
 
 A ByName API needs its `List` action as well as its `Modify` one, since it reads the cluster's fleets or
 groups to find the id. Nothing documents this for a task: it is inferred from what the integration
@@ -757,7 +760,7 @@ for the `Tags` they send, on the application a create makes or the one a job run
 tag as `aws:RequestTag/<key>` and the keys as `aws:TagKeys`, which the API's own action is checked with too.
 
 A request naming nothing it can reach has only the role checks, and its service answers it: no
-`TaskDefinition` or one ECS does not have, a service or cluster ECS does not have, no `ClusterId`, no
+`TaskDefinition`, no `ClusterId`, no
 `ApplicationId`, or a `cancelJobRun` without `JobRunId`. A form an integration does not serve keeps
 its answer: `.waitForTaskToken` on EMR and EMR Serverless and `.sync` on an EMR API with no wait are
 "Unsupported" whether or not enforcement is on, and so is any API Floci does not have.

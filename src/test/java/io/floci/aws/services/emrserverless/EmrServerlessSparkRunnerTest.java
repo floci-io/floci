@@ -1400,6 +1400,78 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aStepsCommandFindsASudoThatRunsItsCommandAsItIs(@TempDir Path folder) throws Exception {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "sudo -u hadoop spark-submit app.py"), Map.of(), STORAGE),
+                progress);
+
+        ArgumentCaptor<List<String>> entrypoint = ArgumentCaptor.captor();
+        verify(spec).withEntrypoint(entrypoint.capture());
+        String script = entrypoint.getValue().get(2);
+        // In the folder the wrapper puts first on the step's PATH.
+        assertTrue(script.contains("\n  export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"\n"),
+                script);
+        // The wrapper's lines that write it and make it runnable, in the block they run in, in a folder of the test's.
+        int start = script.indexOf("  cat > /tmp/floci-bin/sudo");
+        assertTrue(start >= 0, script);
+        int end = script.indexOf("\n", script.indexOf("  chmod +x ", start));
+        Path bin = Files.createDirectory(folder.resolve("bin"));
+        Files.writeString(bin.resolve("hdfs"), "");
+        Files.writeString(bin.resolve("hadoop-streaming"), "");
+        String lines = script.substring(start, end).replace("/tmp/floci-bin/", bin + "/");
+        BootstrapProcess.Result written = BootstrapProcess.run(new ProcessBuilder("bash", "-c",
+                "if true; then\n" + lines + "\nfi").directory(folder.toFile()));
+        assertEquals(0, written.exit(), written.output());
+
+        BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder(bin.resolve("sudo").toString(),
+                "-u", "hadoop", "-H", "GREETING=hello", "sh", "-c", "printf '%s %s|' \"$GREETING\" \"$1\"", "sh",
+                "two words"));
+
+        assertEquals(new BootstrapProcess.Result(0, "hello two words|"), ended);
+        // A long option takes its value apart or after an =, as sudo's own do.
+        BootstrapProcess.Result longOptions = BootstrapProcess.run(new ProcessBuilder(bin.resolve("sudo").toString(),
+                "--user", "hadoop", "--group=hadoop", "--chdir", "/tmp", "sh", "-c", "printf '%s|' \"$0\"", "ran"));
+        assertEquals(new BootstrapProcess.Result(0, "ran|"), longOptions);
+    }
+
+    @Test
+    void aHiveStepOnAClusterFindsTheSudoAStepHasButAnEmrServerlessHiveRunDoesNot(@TempDir Path folder)
+            throws Exception {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(hiveStep(List.of("-e", "!sudo id;")), progress);
+
+        verify(spec).withEnv("FLOCI_CLUSTER_STEP", "1");
+        ArgumentCaptor<List<String>> entrypoint = ArgumentCaptor.captor();
+        verify(spec).withEntrypoint(entrypoint.capture());
+        String script = entrypoint.getValue().get(2);
+        int start = script.indexOf("if [ -n \"${FLOCI_CLUSTER_STEP:-}\" ]; then");
+        assertTrue(start >= 0, script);
+        // Written as root, before hive runs as the image's user, whose shell commands then find it.
+        assertTrue(start < script.indexOf("exec setpriv"), script);
+        Path bin = folder.resolve("bin");
+        String block = script.substring(start, script.indexOf("\nfi\n", start) + 3)
+                .replace("/tmp/floci-bin", bin.toString());
+        ProcessBuilder shell = new ProcessBuilder("bash", "-c",
+                block + "\nsudo -u hadoop sh -c 'printf \"%s|\" \"$0\"' ran").directory(folder.toFile());
+        shell.environment().put("FLOCI_CLUSTER_STEP", "1");
+        assertEquals(new BootstrapProcess.Result(0, "ran|"), BootstrapProcess.run(shell));
+
+        ContainerBuilder serverlessBuilder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder serverless = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(serverlessBuilder.newContainer(anyString())).thenReturn(serverless);
+
+        runner(serverlessBuilder).run(hiveJob(List.of("-e", "select 1;")), progress);
+
+        verify(serverless, never()).withEnv(eq("FLOCI_CLUSTER_STEP"), anyString());
+    }
+
+    @Test
     void aStepsHadoopCommandLogsToStandardErrorWhenItsLog4jPropertiesIsEmpty() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);

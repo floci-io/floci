@@ -10,6 +10,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -36,8 +37,12 @@ import java.util.concurrent.ConcurrentHashMap;
  *   multi-asset copy.</li>
  *   <li><b>Transitive search, in priority order.</b> {@link
  *   CodeArtifactService#resolveUpstreamSearchOrder} walks {@code repository}'s own direct
- *   upstreams first, then theirs, breadth-first. The first candidate whose own version list names
- *   a version {@code filename} belongs to wins; it may be several hops deep.</li>
+ *   upstreams in their listed order, each one's own upstreams before the next one, depth-first.
+ *   The first candidate whose own version list names a version {@code filename} belongs to wins;
+ *   it may be several hops deep.</li>
+ *   <li><b>Through an upstream's external connection.</b> A file no upstream holds is fetched
+ *   through the first upstream, in the same order, with an external connection, and retained there
+ *   and then here, as the User Guide's chain example has it.</li>
  *   <li><b>Archived/Disposed propagation.</b> A candidate's own copy of the version must still be
  *   downloadable there (checked via {@link
  *   CodeArtifactService#requireContainerBackedVersionDownloadable}): the walk skips an Archived or
@@ -59,11 +64,14 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
     // since a repository has either an external connection or upstreams, never both.
     private final ConcurrentHashMap<String, Object> assetWriteLocks = new ConcurrentHashMap<>();
 
+    private final CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
+
     @Inject
     public CodeArtifactPypiUpstreamRepositoryImporter(CodeArtifactService service,
-            PypiserverSidecarClient pypiserver) {
+            PypiserverSidecarClient pypiserver, CodeArtifactPypiExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.pypiserver = pypiserver;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     /**
@@ -95,17 +103,10 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
             }
             try {
                 List<String> versions = packageVersionsAt(candidateRepoId, domain, candidate, packageName);
-                if (versions.isEmpty()) {
-                    continue;
-                }
                 List<CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile> additional = new ArrayList<>();
                 for (String version : versions) {
-                    try {
-                        service.requireContainerBackedVersionDownloadable(owner, region, domain, repository, "pypi",
-                                null, packageName, version, repoId);
-                        service.requireContainerBackedVersionDownloadable(owner, region, domain, candidate, "pypi",
-                                null, packageName, version, candidateRepoId);
-                    } catch (AwsException e) {
+                    if (!downloadable(owner, region, domain, repository, packageName, version, repoId)
+                            || !downloadable(owner, region, domain, candidate, packageName, version, candidateRepoId)) {
                         continue;
                     }
                     for (String filename : assetNamesAt(candidateRepoId, domain, candidate, packageName, version)) {
@@ -114,6 +115,15 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
                                     false, null));
                         }
                     }
+                }
+                // A candidate with an external connection offers what that connection has too, as a
+                // request to it would: a file it has not fetched yet is fetched there first.
+                if (externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate)) {
+                    Set<String> known = new HashSet<>(alreadyKnownFilenames);
+                    additional.forEach(file -> known.add(file.filename()));
+                    additional.addAll(externalConnectionImporter.additionalExternalFilenames(region, domain, owner,
+                            candidate, candidateRepoId, packageName, known,
+                            version -> downloadable(owner, region, domain, repository, packageName, version, repoId)));
                 }
                 if (!additional.isEmpty()) {
                     return additional;
@@ -148,6 +158,13 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
                 "INTERNAL_UPSTREAM")) {
             return false;
         }
+        // Snapshotted before the walk, not once a candidate is found, the same ordering
+        // CodeArtifactPypiExternalConnectionImporter#tryImportAsset relies on: the walk's last leg
+        // can fetch through an upstream's external connection, and a DeletePackage here during that
+        // fetch must still move the fence away from the snapshot. The version fence waits for the
+        // version, which only the walk resolves.
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
+                "pypi", null, packageName.get());
 
         String upstreamRepository = null;
         String upstreamRepoId = null;
@@ -166,12 +183,8 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
             // below are entirely done with it (see the try/finally right after this loop).
             boolean eligible = false;
             try {
-                Optional<String> matchedVersion = packageVersionsAt(candidateRepoId, domain, candidate,
-                        packageName.get()).stream()
-                        .filter(v -> PypiserverSidecarClient.filenameEmbedsVersion(filename, packageName.get(), v))
-                        .filter(v -> assetNamesAt(candidateRepoId, domain, candidate, packageName.get(), v)
-                                .contains(filename))
-                        .findFirst();
+                Optional<String> matchedVersion = versionHolding(candidateRepoId, domain, candidate,
+                        packageName.get(), filename);
                 if (matchedVersion.isEmpty()) {
                     continue;
                 }
@@ -195,12 +208,26 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
             }
         }
         if (upstreamRepository == null) {
+            Optional<UpstreamExternalConnectionFetch.Fetched> fetched = UpstreamExternalConnectionFetch.firstFetched(
+                    service, pypiserver, "pypi", region, domain, owner, repository, null, packageName.get(),
+                    candidate -> externalConnectionImporter.hasExternalConnection(region, domain, owner, candidate),
+                    (candidate, candidateRepoId) -> externalConnectionImporter.tryImportAsset(region, domain, owner,
+                            candidate, candidateRepoId, filename)
+                            ? versionHolding(candidateRepoId, domain, candidate, packageName.get(), filename)
+                            : Optional.empty());
+            if (fetched.isPresent()) {
+                upstreamRepository = fetched.get().repository();
+                upstreamRepoId = fetched.get().repoId();
+                version = fetched.get().version();
+            }
+        }
+        if (upstreamRepository == null) {
             return false;
         }
 
         try {
             return tryImportFromClaimedCandidate(region, domain, owner, repository, repoId, filename,
-                    packageName.get(), version, upstreamRepository, upstreamRepoId);
+                    packageName.get(), version, upstreamRepository, upstreamRepoId, packageFenceSnapshot);
         } finally {
             pypiserver.endUse(upstreamRepoId);
         }
@@ -208,9 +235,7 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
 
     private boolean tryImportFromClaimedCandidate(String region, String domain, String owner, String repository,
             String repoId, String filename, String packageName, String version, String upstreamRepository,
-            String upstreamRepoId) {
-        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
-                "pypi", null, packageName);
+            String upstreamRepoId, long packageFenceSnapshot) {
         long versionFenceSnapshot = service.currentContainerBackedVersionFence(region, domain, owner, repository,
                 "pypi", null, packageName, version);
         CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(region,
@@ -331,6 +356,27 @@ public class CodeArtifactPypiUpstreamRepositoryImporter {
             }
         } finally {
             service.deleteStagedAssetBody(staged);
+        }
+    }
+
+    /** The version of {@code packageName} at {@code repository} that holds {@code filename}, if one does. */
+    private Optional<String> versionHolding(String repoId, String domain, String repository, String packageName,
+            String filename) {
+        return packageVersionsAt(repoId, domain, repository, packageName).stream()
+                .filter(v -> PypiserverSidecarClient.filenameEmbedsVersion(filename, packageName, v))
+                .filter(v -> assetNamesAt(repoId, domain, repository, packageName, v).contains(filename))
+                .findFirst();
+    }
+
+    /** Whether {@code version} is neither Archived nor Disposed at {@code repository}. */
+    private boolean downloadable(String owner, String region, String domain, String repository, String packageName,
+            String version, String repoId) {
+        try {
+            service.requireContainerBackedVersionDownloadable(owner, region, domain, repository, "pypi", null,
+                    packageName, version, repoId);
+            return true;
+        } catch (AwsException e) {
+            return false;
         }
     }
 

@@ -980,6 +980,25 @@ class RedshiftServiceTest {
                 autoCopyConsumer);
     }
 
+    /**
+     * Work done outside a request on a cluster's behalf, Redshift Spectrum over JDBC, learns the cluster's Region: the
+     * one it was created in, and the default Region for a cluster stored before clusters kept one.
+     */
+    @Test
+    void aClustersRegionIsTheOneItWasCreatedIn() {
+        Cluster analytics = new Cluster();
+        analytics.setClusterIdentifier("analytics");
+        analytics.setSnapshotRegion("eu-west-1");
+        Cluster legacy = new Cluster();
+        legacy.setClusterIdentifier("legacy");
+        when(clusterBackend.getForAccount("111111111111", "analytics")).thenReturn(Optional.of(analytics));
+        when(clusterBackend.getForAccount("111111111111", "legacy")).thenReturn(Optional.of(legacy));
+
+        assertEquals(Optional.of("eu-west-1"), service.clusterRegion("111111111111", "analytics"));
+        assertEquals(Optional.of("us-east-1"), service.clusterRegion("111111111111", "legacy"));
+        assertEquals(Optional.empty(), service.clusterRegion("111111111111", "missing"));
+    }
+
     private static final String ORDERS_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111111111111:table/orders";
     private static final String NAMESPACE_ARN = "arn:aws:redshift-serverless:us-east-1:111111111111:namespace/"
             + "8f3e0b52-6c1a-4f0e-9d7b-2a4c5e6f7a8b";
@@ -2051,6 +2070,22 @@ class RedshiftServiceTest {
         assertEquals(404, ex.getHttpStatus());
         verify(clusterBackend, never()).put(eq("c1"), any());
         verifyNoInteractions(cm);
+    }
+
+    @Test
+    void tableRestoreSourceRefusesASnapshotOfAnotherRegion() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("c1");
+        cluster.setClusterStatus("available");
+        Snapshot snapshot = snapshotOf("snap-1", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotArn("arn:aws:redshift:eu-west-1:111111111111:snapshot:c1/snap-1");
+        when(clusterBackend.get("c1")).thenReturn(Optional.of(cluster));
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.tableRestoreSource("c1", "snap-1"));
+
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
     }
 
     @Test

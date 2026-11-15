@@ -9,6 +9,7 @@ import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
+import io.floci.aws.services.codeartifact.CodeArtifactService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
@@ -92,6 +93,7 @@ class EmulatorLifecycleTest {
     @Mock private EmulatorConfig.EcsServiceConfig ecsServiceConfig;
     @Mock private EmulatorConfig.EcsTaskRoleCredentialsConfig ecsTaskRoleCredentialsConfig;
     @Mock private EmulatorConfig.EksServiceConfig eksServiceConfig;
+    @Mock private EmulatorConfig.CodeArtifactServiceConfig codeArtifactServiceConfig;
     @Mock private EmulatorConfig.ElbV2ServiceConfig elbv2ServiceConfig;
     @Mock private EmulatorConfig.ElbServiceConfig elbServiceConfig;
     @Mock private IamService iamService;
@@ -119,6 +121,7 @@ class EmulatorLifecycleTest {
     @Mock private ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
     @Mock private EksService eksService;
+    @Mock private CodeArtifactService codeArtifactService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -161,6 +164,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(lambdaServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.eks()).thenReturn(eksServiceConfig);
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.codeartifact()).thenReturn(codeArtifactServiceConfig);
+        Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
         Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.iam()).thenReturn(iamServiceConfig);
@@ -182,7 +187,7 @@ class EmulatorLifecycleTest {
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,
                 persistentPathValidator,
-                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService);
+                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, codeArtifactService);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(Collections.emptyIterator());
     }
@@ -210,6 +215,19 @@ class EmulatorLifecycleTest {
         inOrder.verify(iamService).sweepOrphanedLambdaExecutionRoleSessions();
         inOrder.verify(iamService).sweepOrphanedEc2InstanceSessions();
         inOrder.verify(rdsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void givesStoredCodeArtifactDomainsTheirRootPackageGroupOnceStorageIsLoaded() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, codeArtifactService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(codeArtifactService).seedRootPackageGroups();
     }
 
     @Test

@@ -1085,8 +1085,7 @@ public class EmrServerlessJobRunService implements Resettable {
 
     // "EMR Serverless releases 7.1.0 and higher support retry attempts for streaming jobs and batch jobs."
     private static boolean retriesAttempts(String releaseLabel) {
-        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 1)
-                || SPARK_RUNTIME_RELEASE_LABEL.matcher(releaseLabel != null ? releaseLabel : "").matches();
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 1) || sparkRuntime(releaseLabel);
     }
 
     private static void addProperties(Map<String, String> properties, Map<?, ?> configuration, String classification) {
@@ -1277,9 +1276,10 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     /**
-     * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes; an earlier release, or
-     * a STREAMING run, keeps the model's 0 to 1,000,000, 0 meaning none. No source gives AWS's error, so
-     * the wording is Floci's.
+     * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes, on the AWS runtime for Apache
+     * Spark's releases too, as the 7.11.0 release notes' "from this release onwards" reads and the release list puts
+     * them after EMR Serverless 7.14.0; an earlier release, or a STREAMING run, keeps the model's 0 to 1,000,000, 0
+     * meaning none. No source gives AWS's error, so the wording is Floci's.
      */
     private static void checkBatchTimeout(Application app, StartJobRunRequest request) {
         Long minutes = request.getExecutionTimeoutMinutes();
@@ -1295,7 +1295,13 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     private static boolean boundsBatchTimeouts(String releaseLabel) {
-        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 11);
+        return releaseAtLeast(RELEASE_LABEL, releaseLabel, 7, 11) || sparkRuntime(releaseLabel);
+    }
+
+    // A release of the AWS runtime for Apache Spark, which starts at emr-spark-8.0-preview and comes after EMR
+    // Serverless 7.14.0 in the release list.
+    private static boolean sparkRuntime(String releaseLabel) {
+        return releaseAtLeast(SPARK_RUNTIME_RELEASE_LABEL, releaseLabel, 8, 0);
     }
 
     // Whether releaseLabel is of the family labelPattern matches, at major.minor or later.

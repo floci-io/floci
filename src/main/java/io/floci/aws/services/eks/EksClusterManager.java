@@ -93,6 +93,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -673,9 +674,7 @@ public class EksClusterManager
                 cluster.getName(), image);
 
         // Allocate host port for the k3s API server
-        int hostPort = retainedPort != null ? retainedPort : portAllocator.allocate(
-                config.services().eks().apiServerBasePort(),
-                config.services().eks().apiServerMaxPort());
+        int hostPort = retainedPort != null ? retainedPort : allocateApiServerPort(cluster);
 
         cluster.setHostPort(hostPort);
         try {
@@ -687,6 +686,41 @@ public class EksClusterManager
                 cluster.setHostPort(0);
             }
             throw e;
+        }
+    }
+
+    /**
+     * Allocates the k3s API server's host port. A cluster recreated on restore asks first for the
+     * port its persisted endpoint names, since an EKS endpoint never changes and every kubeconfig
+     * written for the cluster names that port. Only when that port is taken does the cluster get the
+     * first free one, which changes its endpoint, and a warning says so. A port outside the
+     * configured range is not asked for, and neither is the port of a network-mode endpoint: that
+     * endpoint names the container's own API server port, whatever host port the container gets.
+     */
+    private int allocateApiServerPort(Cluster cluster) {
+        int basePort = config.services().eks().apiServerBasePort();
+        int maxPort = config.services().eks().apiServerMaxPort();
+        int previousPort = networkEndpointMode() ? -1 : endpointPort(cluster.getEndpoint());
+        if (previousPort >= basePort && previousPort <= maxPort) {
+            OptionalInt kept = portAllocator.allocateIfFree(previousPort);
+            if (kept.isPresent()) {
+                return kept.getAsInt();
+            }
+            LOG.warnv("API server port {0} of EKS cluster {1} is taken; moving the cluster to another port "
+                    + "changes its endpoint", String.valueOf(previousPort), cluster.getName());
+        }
+        return portAllocator.allocate(basePort, maxPort);
+    }
+
+    /** The port an endpoint URL names, or -1 when it names none. */
+    private static int endpointPort(String endpoint) {
+        if (endpoint == null) {
+            return -1;
+        }
+        try {
+            return URI.create(endpoint).getPort();
+        } catch (IllegalArgumentException e) {
+            return -1;
         }
     }
 
@@ -986,7 +1020,8 @@ public class EksClusterManager
      * keeping its published API server port and data volume, so the cluster's workloads come back
      * as they were. A survivor whose node capacity changed, or that is not on the Docker network
      * Floci now uses, is replaced on the same volume. When the container is gone, the cluster is
-     * recreated via {@link #startCluster}; the named k3s data volume is reused if it survived.
+     * recreated via {@link #startCluster}, on the API server port its endpoint names if that port is
+     * still free; the named k3s data volume is reused if it survived.
      * Callers should put the cluster back into CREATING so the readiness poller re-verifies the API
      * server and re-extracts the certificate authority before marking it ACTIVE again.
      */
@@ -1024,6 +1059,9 @@ public class EksClusterManager
             LOG.infov("Adopting pre-upgrade EKS cluster {0} with local-storage enabled", cluster.getName());
         }
         if (!adoptSurvivingCluster(cluster, existing.get().getId(), certificateHost(existingLabels))) {
+            // The survivor is replaced, and it may still publish the port the endpoint names: it goes before a
+            // port is chosen, so the new container can take that port and the endpoint stays.
+            lifecycleManager.removeIfExistsStrict(containerName);
             startCluster(cluster);
             return;
         }
@@ -1856,11 +1894,16 @@ public class EksClusterManager
      * {@link EksStartupValidator} has already refused an invalid value at boot.
      */
     private String endpointHost() {
-        if (containerDetector.isRunningInContainer()
-                && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(config.services().eks().endpointMode())) {
+        if (networkEndpointMode()) {
             return "localhost";
         }
         return endpointHostFrom(config.services().eks().endpointHost());
+    }
+
+    /** Whether endpoints name the k3s container rather than a host port: network mode, with Floci in a container. */
+    private boolean networkEndpointMode() {
+        return containerDetector.isRunningInContainer()
+                && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(config.services().eks().endpointMode());
     }
 
     /**

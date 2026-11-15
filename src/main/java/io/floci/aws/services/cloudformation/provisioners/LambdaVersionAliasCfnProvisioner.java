@@ -56,9 +56,11 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
+        if ("AWS::Lambda::Version".equals(resourceType)) {
+            deleteVersion(physicalId, region);
+            return;
+        }
         if (!"AWS::Lambda::Alias".equals(resourceType)) {
-            // AWS::Lambda::Version has no backing delete: Lambda exposes no DeleteVersion, and
-            // deleting the function drops its versions with it.
             return;
         }
         // The physical id is the alias ARN (arn:…:function:<name>:<alias>), so the function name
@@ -75,6 +77,18 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
             // must stay idempotent.
             LOG.debugv("Alias {0} already absent: {1}", physicalId, e.getMessage());
         }
+    }
+
+    private void deleteVersion(String physicalId, String region) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithRegion(region, physicalId, null);
+        String version = ref.qualifier();
+        if (version == null || !version.chars().allMatch(value -> value >= '0' && value <= '9')) {
+            // Older stacks can carry a generic placeholder. Never turn that into a whole-function delete.
+            LOG.debugv("Not a published version ARN, nothing to delete: {0}", physicalId);
+            return;
+        }
+        CfnDeletes.safeDelete("Lambda version", physicalId,
+                () -> lambdaService.deleteFunction(region, physicalId, version), "ResourceNotFoundException");
     }
 
     private void provisionVersion(StackResource r, JsonNode props, ProvisionContext ctx) {

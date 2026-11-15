@@ -126,8 +126,9 @@ class SesExportJobServiceTest {
 
         tasks.forEach(Runnable::run);
 
-        assertEquals(ExportJob.STATUS_CANCELLED,
-                service.getExportJob(REGION, job.getJobId()).getJobStatus());
+        ExportJob stored = service.getExportJob(REGION, job.getJobId());
+        assertEquals(ExportJob.STATUS_CANCELLED, stored.getJobStatus());
+        assertNull(stored.getCompletedTimestamp(), "SES leaves a cancelled job without one");
         verify(s3Service, never()).putObject(anyString(), anyString(), any(), anyString(),
                 any(Map.class));
     }
@@ -353,5 +354,32 @@ class SesExportJobServiceTest {
 
         assertEquals("Cannot cancel an export job that has a <COMPLETED> status.",
                 thrown.getMessage());
+    }
+
+    @Test
+    void cancellingACancelledJobAgainSucceeds() {
+        ExportJob job = createJob();
+        service.cancelExportJob(REGION, job.getJobId());
+
+        service.cancelExportJob(REGION, job.getJobId());
+
+        assertEquals(ExportJob.STATUS_CANCELLED,
+                service.getExportJob(REGION, job.getJobId()).getJobStatus());
+    }
+
+    @Test
+    void anUnknownJobIsNotFoundOnlyWhenItsIdIsShapedLikeOne() {
+        String unknown = "7b9563a7-12fc-4129-ab8c-bd4783006c08";
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.cancelExportJob(REGION, unknown));
+        assertEquals("NotFoundException", notFound.getErrorCode());
+        assertEquals(404, notFound.getHttpStatus());
+        assertEquals("Job ID: <" + unknown + "> not found", notFound.getMessage());
+
+        AwsException malformed = assertThrows(AwsException.class,
+                () -> service.getExportJob(REGION, unknown + "0"));
+        assertEquals("BadRequestException", malformed.getErrorCode());
+        assertEquals("Invalid JobId", malformed.getMessage());
     }
 }
