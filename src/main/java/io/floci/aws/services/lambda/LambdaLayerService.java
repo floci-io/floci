@@ -8,7 +8,6 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SignedMarkers;
 import io.floci.aws.core.common.SmithyValidationErrors;
-import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
 import io.floci.aws.services.lambda.zip.DeploymentPackage;
 import io.floci.aws.services.lambda.zip.ZipExtractor;
@@ -35,7 +34,7 @@ import java.util.stream.Collectors;
  * Business logic for Lambda Layer management.
  */
 @ApplicationScoped
-public class LambdaLayerService implements StoredResourceArns {
+public class LambdaLayerService {
 
     private static final Logger LOG = Logger.getLogger(LambdaLayerService.class);
 
@@ -101,19 +100,8 @@ public class LambdaLayerService implements StoredResourceArns {
         this.s3Service = s3Service;
     }
 
-    @Override
-    public String namespace() {
-        return "lambda";
-    }
-
-    @Override
-    public Optional<String> find(String type, List<String> names, String region) {
-        // Layer version selectors supply the complete identifier, so no generated suffix needs a lookup.
-        return Optional.empty();
-    }
-
-    @Override
-    public Optional<String> resolveStoredArn(String arn) {
+    /** The caller's stored layer version a layer version ARN selects; empty for another ARN or no such version. */
+    public Optional<String> storedLayerVersionArn(String arn) {
         if (!LAYER_VERSION_ARN.matcher(arn).matches()) {
             return Optional.empty();
         }
@@ -340,11 +328,14 @@ public class LambdaLayerService implements StoredResourceArns {
      * Deletes a specific layer version.
      */
     public void deleteLayerVersion(String region, String layerName, long versionNumber) {
-        LambdaLayerVersion lv = layerStore.get(region, layerName, versionNumber).orElse(null);
+        LambdaLayerVersion lv = AwsArnUtils.looksLikeArn(layerName)
+                ? findLayerVersionByArn(layerName + ":" + versionNumber)
+                : layerStore.get(region, layerName, versionNumber).orElse(null);
         if (lv == null) {
             // AWS returns 204 even if the layer version doesn't exist
             return;
         }
+        String layerRegion = AwsArnUtils.parse(lv.getLayerVersionArn()).region();
 
         // Delete the extracted code from disk
         if (lv.getCodeLocalPath() != null) {
@@ -352,9 +343,9 @@ public class LambdaLayerService implements StoredResourceArns {
             deleteDirectory(codePath);
         }
 
-        layerStore.delete(region, layerName, versionNumber);
-        deleteLayerArchive(region, lv);
-        LOG.infov("Deleted layer version: {0} v{1} in region {2}", layerName, versionNumber, region);
+        layerStore.delete(layerRegion, lv.getLayerName(), versionNumber);
+        deleteLayerArchive(layerRegion, lv);
+        LOG.infov("Deleted layer version: {0} v{1} in region {2}", lv.getLayerName(), versionNumber, layerRegion);
     }
 
     private void deleteLayerArchive(String region, LambdaLayerVersion lv) {
@@ -377,6 +368,15 @@ public class LambdaLayerService implements StoredResourceArns {
      * answers them.
      */
     public LambdaLayerVersion getLayerVersionByArn(String layerVersionArn) {
+        LambdaLayerVersion lv = findLayerVersionByArn(layerVersionArn);
+        if (lv == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The resource you requested does not exist.", 404);
+        }
+        return lv;
+    }
+
+    private LambdaLayerVersion findLayerVersionByArn(String layerVersionArn) {
         if (layerVersionArn == null || layerVersionArn.isEmpty()) {
             throw SmithyValidationErrors.validationException(
                     SmithyValidationErrors.notNull("arn"));
@@ -397,12 +397,7 @@ public class LambdaLayerService implements StoredResourceArns {
         // A foreign account is a miss rather than a substitution: resolveLayerByArn scopes the
         // lookup to the caller's own account. This is where cross-account sharing would hook in
         // if layer permissions were ever implemented.
-        LambdaLayerVersion lv = resolveLayerByArn(layerVersionArn);
-        if (lv == null) {
-            throw new AwsException("ResourceNotFoundException",
-                    "The resource you requested does not exist.", 404);
-        }
-        return lv;
+        return resolveLayerByArn(layerVersionArn);
     }
 
     /**

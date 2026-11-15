@@ -184,6 +184,18 @@ cited and the action not one the reference lists for the operation, which a rule
 Redshift Serverless restore asks KMS to decrypt with the snapshot's key. `forwardedActions` records what the
 reference gives each such action, the type it acts on, that type's ARN format and the `ViaService` key, which
 `--verify` checks against AWS.
+A qualified type the reference gives an action, one whose format is another type's and one more `:${...}` (Lambda's
+`function alias` and `function version`), which no member fills alone, is named by that type's member and the
+request's one member documented as naming the qualified types ("The version number or alias name"): Lambda's
+`GetProvisionedConcurrencyConfig` acts on the function's alias or version its `Qualifier` names. A member whose botocore pattern spells a
+type's resource word and takes its ARN without the leading parts, `123456789012:function:my-function`, names the type
+by such a partial ARN too (`partialArn`), which the reader completes in the request's partition. An account id member
+beside an ARN member of the same name (`SourceAccount` beside `SourceArn`) is that ARN's resource's account. A record
+field named after the end of a type's name (a MicroVM's `imageArn`, of its `microvmImage`) reaches that type through
+the record's id, which a request may give as the thing's identifier (`microvmIdentifier` for `microvmId`), and an
+operation documented as acting on a thing "in a <type>" ("a callback operation in a durable execution") reaches that
+type through the thing's id. Clients of one namespace serving one endpoint keep every type an ARN member of theirs
+may name, each ARN read by its format, since a request cannot tell them apart.
 A type's ARN given with a qualifier, one more `:<name>` past its format, is checked without one where the
 metadata says the qualifier names nothing of its own (`unqualified`): the reference gives Step Functions'
 `statemachinealias` and `statemachineversion` formats as the state machine's and one more `:${...}`, and no action
@@ -260,10 +272,10 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
               "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty",
-              "secretsmanager", "scheduler")
+              "secretsmanager", "scheduler", "lambda")
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
+HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "logs", "pipes",
               "resource-groups", "s3", "sns", "sqs", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
@@ -279,10 +291,6 @@ READ_IN_HAND_BUILT: dict[str, str] = {
 READ_IN_HAND_BUILT["logs:PutDestination"] = (
     "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
     "reads from the generated request-resource table")
-for operation in ("GetLayerVersion", "GetLayerVersionByArn"):
-    READ_IN_HAND_BUILT[f"lambda:{operation}"] = (
-        "Lambda layer lookups name the version through modeled path and query members; "
-        "other Lambda resources retain their existing builders")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -471,6 +479,14 @@ UNIQUE_KEY_RE = re.compile(r"(?P<things>[A-Za-z][A-Za-z ]*?) (?:are|is) uniquely
                            r"(?P<parts>[A-Za-z ,]+?)(?:,? which\b|\.|$)")
 # One more `:${...}` past a format: what a type of the reference qualifies another's ARN by.
 QUALIFIER_RE = re.compile(r":\$\{\w+}")
+# A member documented as naming a version or an alias, the words a type's qualified types add to its name, and what
+# follows: Lambda's `Qualifier`, "Specify a version or alias to invoke a published version of the function", "The
+# version number or alias name", "The alias name", "The function version to filter executions by".
+DOC_QUALIFIER = (r"^(?:specify )?(?:a |an |the )?(?:[a-z]+ )?(?P<first>{words})(?: number| name)?"
+                 r"(?: or (?:a |an |the )?(?P<second>{words})(?: number| name)?)?(?P<rest>(?: .*)?)$")
+# An operation documented as acting on a thing of its service's own inside a resource of a type: "Sends a successful
+# completion response for a callback operation in a durable execution".
+DOC_THING_IN_RE = re.compile(r"\bfor an? (?P<thing>[a-z][a-z -]*?) in an? (?P<phrase>[a-z][a-z -]*?)(?:[.,;]|$)")
 # A string pattern that takes an alias, `alias/...`, as one of its alternatives.
 ALIAS_PATTERN_RE = re.compile(r"(?:^|[|(])\^?alias/")
 # A format's resource that is a word and one variable (`connection/${ConnectionName}`), and the two path segments of
@@ -1365,8 +1381,13 @@ def account_members(models: dict[str, dict], operation: str) -> list[str]:
                          if member.get("location") in BODY_LOCATIONS
                          and model["shapes"][member["shape"]].get("pattern") in ACCOUNT_ID_PATTERNS | {r"(\d{12})"}
                          and model["shapes"][member["shape"]]["type"] == "string"}
-        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+        request = model["shapes"][spec["input"]["shape"]].get("members", {})
+        for name, member in request.items():
             shape = model["shapes"][member["shape"]]
+            # An account id beside an ARN of the same name, Lambda's `SourceAccount` beside its `SourceArn`, is the
+            # account of the resource that ARN names, not of one the request acts on.
+            if name.endswith("Account") and name.removesuffix("Account") + "Arn" in request:
+                continue
             if member.get("location") in BODY_LOCATIONS and shape["type"] == "string" \
                     and (shape.get("pattern") in ACCOUNT_ID_PATTERNS
                          or (name in account_names and not CREATING_RE.match(operation))):
@@ -1386,6 +1407,11 @@ DOC_ARN_OR_NAME_RE = re.compile(r"^(?:the |a |an )?(?:full )?(?:arn|amazon resou
 # Or naming the type before them, anywhere in the documentation: "This can either be the cluster name or ARN".
 DOC_TYPE_NAME_OR_ARN_RE = re.compile(r"\bthe (?P<phrase>[a-z][a-z -]*?) name or (?:the )?(?:full )?"
                                      r"(?:arn|amazon resource name \(arn\))\b")
+# Or listing the two, the thing the member names leading its documentation: "The web function to retrieve. You can
+# specify either of the following: The function name, for example my-function. The function ARN."
+DOC_EITHER_NAME_OR_ARN_RE = re.compile(r"\byou can specify either of the following: (?:the )?[a-z][a-z -]*? name\b"
+                                       r".*\bthe [a-z][a-z -]*? arn\b")
+DOC_LEAD_THING_RE = re.compile(r"^(?:the |a |an )?(?P<phrase>[a-z][a-z -]*)")
 
 
 def name_or_arn_members(models: dict[str, dict], operation: str) -> dict[str, str]:
@@ -1423,22 +1449,29 @@ def documented_name_or_arn_members(models: dict[str, dict], operation: str) -> d
         if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
             continue
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
-            word = _documented_name_or_arn(member.get("documentation")) \
-                if member.get("location") in BODY_LOCATIONS and model["shapes"][member["shape"]]["type"] == "string" \
+            body = member.get("location") in BODY_LOCATIONS
+            word = _documented_name_or_arn(member.get("documentation"), located=not body) \
+                if (body or _located(member) is not None) and model["shapes"][member["shape"]]["type"] == "string" \
                 else None
             if word:
                 found.setdefault(name, word)
     return found
 
 
-def _documented_name_or_arn(documentation: str | None) -> str | None:
+def _documented_name_or_arn(documentation: str | None, located: bool = False) -> str | None:
     """The resource type word of the ARN a member's documentation says it holds instead of a name: `cluster` for "The
     short name or full Amazon Resource Name (ARN) of the cluster that hosts the service", or with its `of` left out
     ("(ARN)the cluster"), the two the other way round ("The Amazon Resource Name (ARN) or short name of the
-    cluster"), or the type before them ("This can either be the cluster name or ARN"); None for any other."""
+    cluster"), or the type before them ("This can either be the cluster name or ARN"); for a member a REST request
+    carries in its path or query, those, or the two listed after the thing the documentation leads with ("The web
+    function to retrieve. You can specify either of the following: The function name ... The function ARN" names a
+    `web-function`); None for any other."""
     lead = _lead(documentation)
-    match = DOC_NAME_OR_ARN_RE.match(lead) or DOC_ARN_OR_NAME_RE.match(lead) \
-        or DOC_TYPE_NAME_OR_ARN_RE.search(_lead_text(documentation))
+    if located and DOC_EITHER_NAME_OR_ARN_RE.search(_lead_text(documentation)):
+        match = DOC_LEAD_THING_RE.match(lead)
+    else:
+        match = DOC_NAME_OR_ARN_RE.match(lead) or DOC_ARN_OR_NAME_RE.match(lead) \
+            or DOC_TYPE_NAME_OR_ARN_RE.search(_lead_text(documentation))
     if not match:
         return None
     words = []
@@ -2209,6 +2242,8 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
     resources = with_subject_through(operation, resources, members, map_fields(models, name), optional, models)
     resources = with_documented_defaults(resources, formats, defaulted_members(models, name))
     resources = with_optional_qualifier(resources, optional)
+    resources = with_qualifier(resources, types, formats, members, models, name)
+    resources = with_partial_arns(resources, partial_arn_members(models, name, formats))
     # Two rules naming the same resource the same way name it once.
     return [resource for index, resource in enumerate(resources) if resource not in resources[:index]]
 
@@ -2420,10 +2455,14 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
     apart = {client: read({client: models[client]}) for client in clients}
     if all(apart[client] == apart[clients[0]] for client in clients):
         return merged
-    for client in clients:
-        apart[client] = narrowed(apart[client], client_words(models[client]), models[client], name, formats)
     prefixes = {client: models[client]["metadata"].get("endpointPrefix") for client in clients}
     shared = len(set(prefixes.values())) < len(clients)
+    # Clients serving one endpoint cannot be told apart by a request, so an ARN member of theirs keeps every type the
+    # action acts on, each ARN read by its format: Lambda's `lambda` and `lambda-microvms` both tag on
+    # `/2017-03-31/tags/{Resource}`.
+    for client in clients:
+        apart[client] = narrowed(apart[client], client_words(models[client]), models[client], name, formats,
+                                 arn_types=not shared)
     resources: list[dict] = []
     for client in clients:
         for resource in apart[client]:
@@ -2435,10 +2474,11 @@ def by_client(operation: str, models: dict[str, dict], read, formats: dict[str, 
 
 
 def narrowed(resources: list[dict], words: set[str], model: dict, operation: str,
-             formats: dict[str, str] | None = None) -> list[dict]:
-    """A client's resources, each ARN member's types narrowed to those its own pattern names, and a type its patterns
-    never name read as its versioned twin they do (`event-bus` as `event-busv2`, EventBridge V2's own), when that
-    twin's format has the variables it fills."""
+             formats: dict[str, str] | None = None, arn_types: bool = True) -> list[dict]:
+    """A client's resources, each ARN member's types narrowed to those its own pattern names, by the type's name or its
+    ARN's resource word (`event-source-mapping` for `eventSourceMapping`), unless `arn_types` is false, and a type its
+    patterns never name read as its versioned twin they do (`event-bus` as `event-busv2`, EventBridge V2's own), when
+    that twin's format has the variables it fills."""
     def word(kind: str) -> str:
         match = RESOURCE_PART_RE.match((formats or {}).get(kind, ""))
         return match.group(1) if match else ""
@@ -2452,12 +2492,12 @@ def narrowed(resources: list[dict], words: set[str], model: dict, operation: str
     root = model["shapes"][spec["input"]["shape"]] if "input" in spec else {"members": {}}
     found = []
     for resource in resources:
-        if "arn" in resource and "." not in resource["arn"]:
+        if arn_types and "arn" in resource and "." not in resource["arn"]:
             member = root.get("members", {}).get(resource["arn"].removesuffix("[]"))
             shape = model["shapes"][member["shape"]] if member else {}
             element = model["shapes"][shape["member"]["shape"]] if shape.get("type") == "list" else shape
             own = pattern_words(element.get("pattern") or "")
-            kinds = [kind for kind in resource["types"] if kind in own]
+            kinds = [kind for kind in resource["types"] if kind in own or (word(kind) and word(kind) in own)]
             found.append(dict(resource, types=kinds) if kinds and kinds != resource["types"] else resource)
         else:
             found.append(resource)
@@ -2574,6 +2614,105 @@ def with_optional_qualifier(resources: list[dict], optional: set[str]) -> list[d
     return found
 
 
+def qualified_kinds(formats: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Each type the reference gives qualified types of, by type: those whose format is the type's and one more
+    `:${<variable>}`, each by the word its name adds to the type's. Lambda's `function alias`,
+    `function:${FunctionName}:${Alias}`, adds `alias`, and `function version` adds `version`."""
+    found: dict[str, dict[str, str]] = {}
+    for kind, arn in formats.items():
+        for other, extended in formats.items():
+            if other != kind and extended.startswith(arn) and QUALIFIER_RE.fullmatch(extended[len(arn):]) \
+                    and other.lower().startswith(kind.lower()):
+                found.setdefault(kind, {})[other.lower()[len(kind):].strip()] = other
+    return found
+
+
+def qualifier_members(models: dict[str, dict], operation: str, words: set[str]) -> list[str]:
+    """The top-level members of the operation's request documented as naming one of a type's qualified types, by the
+    words those add to the type's name, each of them: Lambda's `Qualifier`, "The version number or alias name"."""
+    found: list[str] = []
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
+                continue
+            if model["shapes"][member["shape"]]["type"] != "string":
+                continue
+            lead = re.match(DOC_QUALIFIER.format(words="|".join(sorted(map(re.escape, words)))),
+                            _lead(member.get("documentation")))
+            if not lead or name in found:
+                continue
+            given = {word for word in (lead.group("first"), lead.group("second")) if word}
+            # One naming another of those words after its own names something else of that kind: `CreateAlias`'s
+            # `FunctionVersion`, "The function version that the alias invokes", is what the alias points to, and
+            # `ListAliases`'s, "Specify a function version to only list aliases that invoke that version", filters.
+            if not any(re.search(r"\b" + re.escape(word) + r"(?:e?s)?\b", lead.group("rest")) for word in words - given):
+                found.append(name)
+    return found
+
+
+def with_qualifier(resources: list[dict], types: list[str], formats: dict[str, str], members: dict[str, str],
+                   models: dict[str, dict], operation: str) -> list[dict]:
+    """The resources, and each qualified type the action acts on (`qualified_kinds`) that no resource names, named by
+    its type's variable and the request's one member documented as naming the qualified types (`qualifier_members`)
+    for its own, the type's member giving its name or its ARN: `GetProvisionedConcurrencyConfig` acts on the
+    function's alias or version its `Qualifier` names. An action acting on the type alone is checked on it as its
+    members name it."""
+    found = list(resources)
+    for kind, qualified in qualified_kinds(formats).items():
+        variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+        named = qualifier_members(models, operation, set(qualified))
+        if len(variables) != 1 or len(named) != 1 or members.get(variables[0]) != variables[0]:
+            continue
+        variable, qualifier = variables[0], named[0]
+        for other in qualified.values():
+            own = [v for v in VARIABLE_RE.findall(formats[other]) if v not in KNOWN_VARIABLES and v != variable]
+            if other in types and len(own) == 1 and not any(resource.get("type") == other for resource in found):
+                # The type's member may give the type's own ARN, whose name fills the variable.
+                found.append({"type": other, "fill": {variable: variable, own[0]: qualifier}, "arnOf": {variable: kind}})
+    return found
+
+
+def partial_arn_members(models: dict[str, dict], operation: str, formats: dict[str, str]) -> dict[str, set[str]]:
+    """The top-level members of the operation's request whose botocore pattern takes an ARN of a type with its leading
+    parts left out, its account and resource (`123456789012:function:my-function`), each with those types: the pattern
+    spells the type's resource word and takes such a tail. Lambda's `FunctionName` takes "Partial ARN -
+    123456789012:function:my-function"."""
+    found: dict[str, set[str]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
+                continue
+            pattern = model["shapes"][member["shape"]].get("pattern")
+            if not pattern:
+                continue
+            for kind, arn in formats.items():
+                word = RESOURCE_PART_RE.match(arn)
+                if not word or word.group(1) + ":" not in pattern:
+                    continue
+                tail = "123456789012:" + VARIABLE_RE.sub("x", arn.split(":", 5)[5])  # partition-literal: a sample
+                try:
+                    if re.fullmatch(pattern, tail):
+                        found.setdefault(name, set()).add(kind)
+                except re.error:
+                    continue
+    return found
+
+
+def with_partial_arns(resources: list[dict], partial: dict[str, set[str]]) -> list[dict]:
+    """The resources, each a type named by a member that may give its ARN with the leading parts left out
+    (`partial_arn_members`) marked so: the reader completes such a value in the request's partition, and in its
+    Region where the value leaves that out too."""
+    return [dict(resource, partialArn=True) if "type" in resource and any(
+        resource["type"] in partial.get(path, set()) for path in resource.get("fill", {}).values()) else resource
+        for resource in resources]
+
+
 def _named(value: object) -> set[str]:
     """The member names an operation's resources read: every key and string they hold, each up to its first `[` or
     `.`, a superset that keeps `located` to the members something reads."""
@@ -2654,8 +2793,13 @@ def with_through(resources: list[dict], types: list[str], members: dict[str, str
     through = []
     for member, kinds in sorted(reached.items()):
         on = [kind for kind in types if kind in kinds]
-        if on and members.get(member) == member:
-            through.append({"types": on, "through": member})
+        # The request may name the thing by its identifier where its record holds its id: a MicroVM's
+        # `microvmIdentifier` and the `microvmId` its record holds.
+        given = member if members.get(member) == member else next(
+            (other for other, path in sorted(members.items()) if path == other and stem(other) == stem(member)
+             and kind_of(other) in ("id", "identifier")), None)
+        if on and given and not any(resource.get("through") == given for resource in through):
+            through.append({"types": on, "through": given})
     return resources + through
 
 
@@ -2675,10 +2819,37 @@ def through_members(models: dict[str, dict], formats: dict[str, str]) -> dict[st
                 if not member.endswith("Id") or not thing or not shape_name.lower().startswith(thing) \
                         or any(related(thing, known) for known in stems):
                     continue
-                kinds = {stems[stem(field)] for field in fields if field != member and stem(field) in stems}
+                # A field named after a type, or after the end of one's name: a MicroVM's `imageArn` beside its
+                # `microvmId` names the `microvmImage` it runs.
+                kinds = {kind for field in fields if field != member and stem(field)
+                         for known, kind in stems.items() if related(stem(field), known)}
                 if kinds:
                     found.setdefault(member, set()).update(kinds)
+    for member, kinds in documented_through(models, formats).items():
+        found.setdefault(member, set()).update(kinds)
     return {member: sorted(kinds) for member, kinds in sorted(found.items())}
+
+
+def documented_through(models: dict[str, dict], formats: dict[str, str]) -> dict[str, set[str]]:
+    """The members naming a thing of their service's own the reference gives no type, each with the type an operation
+    taking it is documented as acting on it in: "Sends a successful completion response for a callback operation in a
+    durable execution" (`SendDurableExecutionCallbackSuccess`), whose request names the callback by its
+    `CallbackId`."""
+    found: dict[str, set[str]] = {}
+    for model in models.values():
+        for spec in model["operations"].values():
+            if "input" not in spec:
+                continue
+            documented = DOC_THING_IN_RE.search(_lead(spec.get("documentation")))
+            kinds = [kind for kind in formats if documented and kind.lower() == documented.group("phrase")]
+            if len(kinds) != 1:
+                continue
+            thing = re.sub(r"[^a-z0-9]", "", documented.group("thing"))
+            for member in model["shapes"][spec["input"]["shape"]].get("members", {}):
+                if kind_of(member) in ("id", "identifier") and stem(member) and thing.startswith(stem(member)) \
+                        and not any(related(stem(member), stem(kind)) for kind in formats):
+                    found.setdefault(member, set()).add(kinds[0])
+    return found
 
 
 def rest_operations(data: Path) -> dict[str, set[str]]:
@@ -3127,7 +3298,7 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "arnOf", "account",
                                                                                        "fixed", "made", "find", "endpoint",
                                                                                        "default", "whenDefault", "unlessDefault",
-                                                                                       "defaults"}):
+                                                                                       "defaults", "partialArn"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     for key in ("whenDefault", "unlessDefault"):
         pair = resource.get(key)
@@ -3194,6 +3365,9 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     if account is not None and (not isinstance(account, str) or not PATH_RE.match(account) or account.endswith("[]")
                                 or "${Account}" not in formats[kinds[0]]):
         return [f"{operation} takes {kinds[0]}'s account from {account!r}, which is no member or no account of its ARN"]
+    if resource.get("partialArn", True) is not True or ("partialArn" in resource and not fill):
+        return [f"{operation} reads {kinds[0]} from a partial ARN {resource.get('partialArn')!r}, which is not true for a "
+                f"type filled by its members"]
     return []
 
 

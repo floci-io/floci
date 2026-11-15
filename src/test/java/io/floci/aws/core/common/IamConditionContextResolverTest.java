@@ -36,6 +36,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -170,29 +171,33 @@ class IamConditionContextResolverTest {
         String resource = "lambda:Resource/WebFunctionAuthType";
 
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
-                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+                webRequest("PUT", "/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
         assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
-                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                "lambda:CreateWebFunctionEndpoint", webRequest("PUT", "/2025-03-07/web-functions/app/endpoints",
                         "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
                 resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
-                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+                        webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
         assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
-                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("PATCH", "/2025-03-07/web-functions/app/endpoints/dev",
                         "{\"description\":\"d\"}")), "an update without authType names none");
-        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
-            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
-                            "")));
-            assertNull(resolver.resolve("lambda", action,
-                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        // A function and an endpoint named by their ARNs, which a client sends encoded.
+        String encoded = function.replace("/", "%2F");
+        for (String[] action : new String[][] {{"lambda:GetWebFunctionEndpoint", "GET"},
+                {"lambda:DeleteWebFunctionEndpoint", "DELETE"}}) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/" + encoded + "/endpoints/" + encoded
+                            + "%2Fendpoint%2Fdev", "")));
+            assertNull(resolver.resolve("lambda", action[0],
+                    webRequest(action[1], "/2025-03-07/web-functions/app/endpoints/gone", "")),
+                    "a missing endpoint has none");
         }
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
-                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
+                webRequest("GET", "/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
-                webRequest("/2025-03-07/web-functions/app", "")));
+                webRequest("GET", "/2025-03-07/web-functions/app", "")));
         assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
-                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
+                webRequest("POST", "/2025-03-07/web-functions/app/list-endpoints", "{}")));
     }
 
     /**
@@ -309,11 +314,15 @@ class IamConditionContextResolverTest {
         }
     }
 
-    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+    private ContainerRequestContext webRequest(String method, String path, String body) throws Exception {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
         when(containerRequest.getUriInfo()).thenReturn(uriInfo);
-        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getMethod()).thenReturn(method);
+        when(uriInfo.getPath()).thenReturn(URI.create(path).getPath());
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566" + path));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(containerRequest.getProperty("floci.bufferedJsonBody"))
                 .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
         return containerRequest;

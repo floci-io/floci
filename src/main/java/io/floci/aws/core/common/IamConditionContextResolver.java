@@ -20,6 +20,7 @@ import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
+import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
@@ -609,25 +610,28 @@ public class IamConditionContextResolver {
                     .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
         }
         if (RequestConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
-            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
+            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(action, ctx));
         }
         return conditions.isEmpty() ? null : conditions;
     }
 
-    private String storedAuthType(ContainerRequestContext ctx) {
+    /** The authType of the web function endpoint the request names, as the request resources read it. */
+    private String storedAuthType(String action, ContainerRequestContext ctx) {
         if (!lambdaWebService.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
-        String endpointArn = ResourceArnBuilder.webFunctionArn(ctx.getUriInfo().getPath(), region,
-                requestContext.getAccountId());
+        String endpointArn = RequestResources.of(action, ctx, regionResolver.partitionForRegion(region), region,
+                        requestContext.getAccountId(), null, IamActionRegistry.pathLabels("lambda", ctx)).stream()
+                .filter(arn -> arn.contains("/endpoint/")).findFirst().orElse("");
         int child = endpointArn.lastIndexOf("/endpoint/");
         if (child < 0) {
             return null;
         }
         try {
-            return lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
-                    endpointArn.substring(child + "/endpoint/".length())).authType;
+            WebFunctionEndpoint endpoint = lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
+                    endpointArn.substring(child + "/endpoint/".length()));
+            return endpoint == null ? null : endpoint.authType;
         } catch (AwsException expected) {
             // The handler refuses the same names, so the key is only left out, as for a missing endpoint on AWS.
             return null;

@@ -67,6 +67,7 @@ MODELS: dict[str, str] = {
     "lambda": "lambda",
     "lambda-core": "lambda",
     "lambda-microvms": "lambda",
+    "lambda-web": "lambda",
     "macie2": "macie2",
     "oam": "oam",
     "opensearch": "es",

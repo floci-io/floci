@@ -1925,7 +1925,7 @@ requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which retur
 `AuthorizationError`, the error every SNS operation lists for a caller denied access, whichever
 action is denied. The routed protocol determines the status, not just the request's content type.
 
-A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
+A request is checked against the resources it names. Floci builds their ARNs itself for S3,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs and STS. For Secrets Manager, Elastic Load Balancing, ECR,
 Step Functions, EventBridge, EventBridge Scheduler, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
@@ -1935,7 +1935,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub and Amazon GuardDuty they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty and Lambda they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2127,21 +2127,23 @@ names one, as botocore documents ("If you omit this, the default schedule group 
 `schedule-group/<name>`, all from the generated table. Its tagging is checked on the group its modeled
 `/tags/{ResourceArn}` carries, the ARN encoded as an SDK sends it. A Pipes request is checked against `pipe/<name>`. A DSQL request
 is checked against `cluster/<id>`, `cluster/<id>/stream/<id>` for a stream, or the ARN a tagging
-route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A MicroVM image
-or network connector request is checked against `microvm-image:<name>` or `network-connector:<id>`
-in the request's account and Region, an identifier given as an ARN taken for its name, as the
-service looks it up. `RunMicrovm` is checked against the image its `imageIdentifier` names, an
-action on a running MicroVM against the image that MicroVM runs, and a managed image's versions
-against that image, which `aws` owns. A Lambda event source mapping, code signing config or layer
-version request is checked against `event-source-mapping:<uuid>`, `code-signing-config:<id>` or
-`layer:<name>:<version>` in the request's account and Region, where Lambda looks them up: a config
-by the id that ends its ARN, and a layer by its name as given, even a name given as an ARN or
-holding an encoded `/`, and its version as the number Lambda parses, so `01` is checked as `1`.
-`PublishLayerVersion` is checked against `layer:<name>`, and `GetLayerVersionByArn` against the
-layer version its `Arn` names, its number read the same way. A Lambda tagging request, at
-`/2017-03-31/tags/<arn>`, is checked against the caller's own function, MicroVM image or network
-connector of that ARN's Region and name, whatever account the ARN names, as Lambda looks it up, and
-an event source mapping's ARN as written.
+route names; `CreateCluster` and `ListClusters` against `cluster/*`, as DSQL checks them. A Lambda request
+is checked on what the table reads from it, as for the other services it reads. A function named by its
+name, its ARN, a partial ARN (`123456789012:function:my-function`, its Region optional) or its resource
+part (`function:my-function`) is the function of that name, an ARN keeping its account and Region beside
+the caller's function of that name. A version or alias written into the name is part of the function
+checked, `function:<name>:<qualifier>`. `Qualifier` names a version or alias only for the provisioned
+concurrency operations, which the Service Reference gives the function's version and alias; for an
+operation it gives the function alone, the function is checked as its name gives it. `AddPermission`'s
+`SourceAccount` is the account of its `SourceArn`, not the function's. An action on a running MicroVM is
+checked against the image Lambda says the caller's MicroVM runs, and a durable execution callback
+against the execution its callback belongs to ("Lambda authorizes callback requests against the ARN of
+the durable execution that created the callback"). A MicroVM image, network connector, event source
+mapping, code signing config, layer or Web Function is checked on the resource its member names, a
+layer version's number read as the number Lambda parses, so `01` is checked as `1`, and a tagging
+request on the ARN it names. A managed MicroVM image named by its name is checked in the caller's
+account, where the Service Reference puts the type; named by its ARN, in `aws`, the account that ARN
+names.
 
 An EKS request is checked in the caller's account, where EKS looks everything up. A cluster route is
 checked against the ARN EKS holds the cluster under, or `cluster/<name>` in the request's Region for

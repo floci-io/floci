@@ -61,7 +61,7 @@ final class RequestResourceMembers {
     private static final Set<String> ARN_KEYS = Set.of("types", "arn", "made", "endpoint");
     /** The keys of a resource whose format's variables members fill, or its service finds by them. */
     private static final Set<String> FILL_KEYS = Set.of("type", "fill", "when", "unless", "arnOf", "account", "fixed",
-            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults");
+            "made", "find", "endpoint", "default", "whenDefault", "unlessDefault", "defaults", "partialArn");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
@@ -221,13 +221,25 @@ final class RequestResourceMembers {
      * variable that is the one of another type's format names that type's default when the request leaves it out
      * ({@code defaults}, the member mapped to the type), which the service gives: an ECS service of a request with no
      * {@code cluster} is on the default cluster. One member of {@code find} may be a list, each of whose values the
-     * service finds (ECS's {@code taskDefinitions[]}).
+     * service finds (ECS's {@code taskDefinitions[]}). A
+     * {@code partialArn} type's members may give its ARN with the leading parts left out, its account and resource
+     * ({@code 123456789012:function:my-function}) or its Region too, which the reader completes in the request's
+     * partition, and Region where the value leaves that out.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
                     Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
                     boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
-                    Map<String, String> defaults) {
+                    Map<String, String> defaults, boolean partialArn) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
+                 Map<String, String> fixed, boolean made, List<Member> find, String endpoint, Member through,
+                 boolean byDefault, Map<String, String> whenDefault, Map<String, String> unlessDefault,
+                 Map<String, String> defaults) {
+            this(types, arn, fill, when, unless, arnOf, account, fixed, made, find, endpoint, through, byDefault,
+                    whenDefault, unlessDefault, defaults, false);
+        }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> arnOf, Member account,
@@ -684,9 +696,15 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " takes " + type + "'s account for " + operation
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
+        boolean partialArn = resource.has("partialArn");
+        if (partialArn && (!resource.path("partialArn").isBoolean() || !resource.path("partialArn").booleanValue()
+                || fill.isEmpty())) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + type + " for " + operation
+                    + " from a partial ARN " + resource.path("partialArn") + ", not true for a type its members fill");
+        }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(arnOf), account,
                 Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault, whenDefault, unlessDefault,
-                defaults(operation, type, resource.path("defaults"), fill, formats));
+                defaults(operation, type, resource.path("defaults"), fill, formats), partialArn);
     }
 
     /**
