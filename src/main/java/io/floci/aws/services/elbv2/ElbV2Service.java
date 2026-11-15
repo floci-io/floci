@@ -809,7 +809,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 return;
             }
             ListenerState expected = listenerState(listener);
-            LoadBalancer lb = loadBalancers.getOrDefault(region, Map.of()).get(listener.getLoadBalancerArn());
+            LoadBalancer lb = loadBalancerOf(region, listener);
             BooleanSupplier removal = () -> {
                 if (!isCurrentListener(region, expected)) {
                     return false;
@@ -827,14 +827,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                 unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
                 return true;
             };
-            boolean removed = dataPlane.removeListener(listenerArn, expected.port(), () -> {
-                if (lb == null) {
-                    return removal.getAsBoolean();
-                }
-                synchronized (lb) {
-                    return removal.getAsBoolean();
-                }
-            });
+            boolean removed = dataPlane.removeListener(listenerArn, expected.port(),
+                    () -> underLoadBalancerLock(lb, removal::getAsBoolean));
             if (removed) {
                 return;
             }
@@ -987,13 +981,15 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         rule.setActions(actions != null ? new ArrayList<>(actions) : new ArrayList<>());
         rule.setDefault(false);
 
-        regionRules.put(ruleArn, rule);
-        rules.put(region, regionRules);
-        listenerToRules.computeIfAbsent(listenerArn, k -> new CopyOnWriteArrayList<>()).add(ruleArn);
+        synchronized (lb) {
+            regionRules.put(ruleArn, rule);
+            rules.put(region, regionRules);
+            listenerToRules.computeIfAbsent(listenerArn, k -> new CopyOnWriteArrayList<>()).add(ruleArn);
 
-        // update TG → LB index for all target group actions
-        for (Action a : rule.getActions()) {
-            linkTgToLb(a, listener.getLoadBalancerArn());
+            // update TG → LB index for all target group actions
+            for (Action a : rule.getActions()) {
+                linkTgToLb(a, listener.getLoadBalancerArn());
+            }
         }
 
         if (!initialTags.isEmpty()) {
@@ -1032,25 +1028,63 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     "The default rule for a listener cannot be deleted.", 400);
         }
         String listenerArn = rule.getListenerArn();
-        regionRules.remove(ruleArn);
-        rules.put(region, regionRules);
-        removeFromIndex(listenerToRules, listenerArn, ruleArn);
-        tags.remove(ruleArn);
         Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
-        if (listener != null) {
-            unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
-        }
+        underLoadBalancerLock(loadBalancerOf(region, listener), () -> {
+            regionRules.remove(ruleArn);
+            rules.put(region, regionRules);
+            removeFromIndex(listenerToRules, listenerArn, ruleArn);
+            tags.remove(ruleArn);
+            if (listener != null) {
+                unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+            }
+            return rule;
+        });
         dataPlane.recompileRules(listenerArn, () -> getListenerRules(region, listenerArn));
     }
 
     public Rule modifyRule(String region, String ruleArn, List<RuleCondition> conditions, List<Action> actions) {
         Rule rule = requireRule(region, ruleArn);
         String listenerArn = rule.getListenerArn();
-        if (conditions != null) rule.setConditions(new ArrayList<>(conditions));
-        if (actions != null)    rule.setActions(new ArrayList<>(actions));
-        persistRegion(rules, region);
+        Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
+        underLoadBalancerLock(loadBalancerOf(region, listener), () -> {
+            if (conditions != null) {
+                rule.setConditions(new ArrayList<>(conditions));
+            }
+            if (actions != null) {
+                rule.setActions(new ArrayList<>(actions));
+                if (listener != null) {
+                    // As ModifyListener does for its default actions: a target group the rule now forwards to is in
+                    // use by the load balancer, and one nothing routes to any more is not, so it can be deleted.
+                    for (Action action : actions) {
+                        linkTgToLb(action, listener.getLoadBalancerArn());
+                    }
+                    unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+                }
+            }
+            persistRegion(rules, region);
+            return rule;
+        });
         dataPlane.recompileRules(listenerArn, () -> getListenerRules(region, listenerArn));
         return rule;
+    }
+
+    /** The load balancer {@code listener} belongs to; null when the listener or its load balancer is gone. */
+    private LoadBalancer loadBalancerOf(String region, Listener listener) {
+        return listener == null ? null : loadBalancers.getOrDefault(region, Map.of()).get(listener.getLoadBalancerArn());
+    }
+
+    /**
+     * Runs {@code change} holding {@code lb}'s monitor, as every change to the actions of the load balancer's
+     * listeners and rules does, so that unlinking the target groups nothing routes to any more sees each rule as
+     * the other changes left it; unlocked when there is no load balancer, as for a listener whose one is gone.
+     */
+    private <T> T underLoadBalancerLock(LoadBalancer lb, Supplier<T> change) {
+        if (lb == null) {
+            return change.get();
+        }
+        synchronized (lb) {
+            return change.get();
+        }
     }
 
     public void setRulePriorities(String region, Map<String, Integer> arnToPriority) {
@@ -1556,7 +1590,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             if (listener == null) {
                 return;
             }
-            LoadBalancer lb = loadBalancers.getOrDefault(region, Map.of()).get(listener.getLoadBalancerArn());
+            LoadBalancer lb = loadBalancerOf(region, listener);
             if (lb == null) {
                 return;
             }
