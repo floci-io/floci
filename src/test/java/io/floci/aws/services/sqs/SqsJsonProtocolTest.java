@@ -208,6 +208,52 @@ class SqsJsonProtocolTest {
 
     @Test
     @Order(6)
+    void sendMessageBatchOnSmallMaximumMessageSizeQueueUsesFixedBatchLimit() {
+        String smallQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-batch-small-max-queue\","
+                    + "\"Attributes\":{\"MaximumMessageSize\":\"1024\"}}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        String body1000 = "x".repeat(1000);
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + smallQueueUrl + "\",\"Entries\":["
+                    + "{\"Id\":\"a\",\"MessageBody\":\"" + body1000 + "\"},"
+                    + "{\"Id\":\"b\",\"MessageBody\":\"" + body1000 + "\"},"
+                    + "{\"Id\":\"c\",\"MessageBody\":\"" + body1000 + "\"}]}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Successful.Id", containsInAnyOrder("a", "b", "c"));
+
+        String bigBody = "x".repeat(1024);
+        StringBuilder entries = new StringBuilder();
+        for (int i = 0; i < 10; i++) {
+            if (i > 0) {
+                entries.append(',');
+            }
+            entries.append("{\"Id\":\"e").append(i).append("\",\"MessageBody\":\"").append(bigBody).append("\"}");
+        }
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + smallQueueUrl + "\",\"Entries\":[" + entries + "]}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Successful.size()", equalTo(10));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+            .body("{\"QueueUrl\":\"" + smallQueueUrl + "\"}")
+        .when().post("/");
+    }
+
+    @Test
+    @Order(6)
     void sendMessageBatchPersistsAwsTraceHeaderPerEntry() {
         String traceQueueName = "json-batch-trace-queue";
         String createBody = "{\"QueueName\":\"" + traceQueueName + "\"}";
