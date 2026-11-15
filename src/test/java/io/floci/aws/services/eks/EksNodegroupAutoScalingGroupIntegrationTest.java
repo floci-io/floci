@@ -2,7 +2,6 @@ package io.floci.aws.services.eks;
 
 import io.floci.aws.services.eks.model.Cluster;
 import io.floci.aws.testing.AlbFixtures;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.QueryRequests;
 import io.floci.aws.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
@@ -16,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.EksRequests.eks;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,14 +51,14 @@ class EksNodegroupAutoScalingGroupIntegrationTest {
         Cluster cluster = null;
         String targetGroupArn = null;
         try {
-            eks().body(Map.of("name", clusterName, "roleArn", "arn:aws:iam::" + account + ":role/cluster"))
+            eks(account, REGION).body(Map.of("name", clusterName, "roleArn", "arn:aws:iam::" + account + ":role/cluster"))
                     .post("/clusters").then().statusCode(200);
             cluster = eksService.findAuthenticationCluster(account, REGION, clusterName).orElseThrow();
             // EKS runs in mock mode here, so the node is registered as the k3s container's start registers it.
             clusterManager.registerClusterNodeInstance(cluster, "mock-container-id");
             String nodeId = clusterManager.getRegisteredClusterNodeInstance(cluster).getInstanceId();
 
-            String groupName = eks().body(Map.of(
+            String groupName = eks(account, REGION).body(Map.of(
                             "nodegroupName", "workers",
                             "nodeRole", "arn:aws:iam::" + account + ":role/node",
                             "subnets", List.of(SUBNET),
@@ -68,7 +67,7 @@ class EksNodegroupAutoScalingGroupIntegrationTest {
                     // Floci's record that it created the group is not part of the node group AWS describes.
                     .body("nodegroup", not(hasKey("autoScalingGroupCreated")))
                     .extract().path("nodegroup.resources.autoScalingGroups[0].name");
-            eks().get("/clusters/" + clusterName + "/node-groups/workers").then().statusCode(200)
+            eks(account, REGION).get("/clusters/" + clusterName + "/node-groups/workers").then().statusCode(200)
                     .body("nodegroup", not(hasKey("autoScalingGroupCreated")));
 
             XmlPath described = describeGroup(groupName);
@@ -93,23 +92,18 @@ class EksNodegroupAutoScalingGroupIntegrationTest {
 
             assertEquals(List.of(nodeId), targetIds(targetGroupArn));
 
-            eks().delete("/clusters/" + clusterName + "/node-groups/workers").then().statusCode(200);
+            eks(account, REGION).delete("/clusters/" + clusterName + "/node-groups/workers").then().statusCode(200);
 
             assertEquals(List.of(), describeGroup(groupName).getList(GROUP + ".AutoScalingGroupName", String.class));
             assertEquals(List.of(), targetIds(targetGroupArn));
         } finally {
-            eks().delete("/clusters/" + clusterName + "/node-groups/workers");
-            eks().delete("/clusters/" + clusterName);
+            eks(account, REGION).delete("/clusters/" + clusterName + "/node-groups/workers");
+            eks(account, REGION).delete("/clusters/" + clusterName);
             AlbFixtures.deleteTargetGroup(account, targetGroupArn);
             if (cluster != null) {
                 clusterManager.unregisterMetadataEndpoint(cluster);
             }
         }
-    }
-
-    private RequestSpecification eks() {
-        return given().header("Authorization", EnforcementFixtures.auth(account, REGION, "eks"))
-                .contentType("application/json");
     }
 
     private RequestSpecification query(String service, String action, String... params) {

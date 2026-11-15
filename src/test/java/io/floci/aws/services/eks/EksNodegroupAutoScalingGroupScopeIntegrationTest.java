@@ -4,11 +4,9 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.eks.model.Cluster;
-import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.TestAccounts;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +16,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.EksRequests.eks;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -64,7 +62,7 @@ class EksNodegroupAutoScalingGroupScopeIntegrationTest {
                 .when(autoScaling).deleteEksManagedGroup(any(), any());
         Cluster cluster = null;
         try {
-            eks(account).body(Map.of("name", clusterName, "roleArn", "arn:aws:iam::" + account + ":role/cluster"))
+            eks(account, REGION).body(Map.of("name", clusterName, "roleArn", "arn:aws:iam::" + account + ":role/cluster"))
                     .post("/clusters").then().statusCode(200);
             cluster = eksService.findAuthenticationCluster(account, REGION, clusterName).orElseThrow();
             String first = createNodeGroup(account, clusterName, "first");
@@ -119,16 +117,11 @@ class EksNodegroupAutoScalingGroupScopeIntegrationTest {
     }
 
     private static String createNodeGroup(String account, String clusterName, String nodegroupName) {
-        return eks(account).body(Map.of(
+        return eks(account, REGION).body(Map.of(
                         "nodegroupName", nodegroupName,
                         "nodeRole", "arn:aws:iam::" + account + ":role/node",
                         "subnets", List.of("subnet-0123456789abcdef0")))
                 .post("/clusters/" + clusterName + "/node-groups").then().statusCode(200)
                 .extract().path("nodegroup.resources.autoScalingGroups[0].name");
-    }
-
-    private static RequestSpecification eks(String account) {
-        return given().header("Authorization", EnforcementFixtures.auth(account, REGION, "eks"))
-                .contentType("application/json");
     }
 }
