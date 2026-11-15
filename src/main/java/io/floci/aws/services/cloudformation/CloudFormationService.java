@@ -1644,9 +1644,9 @@ public class CloudFormationService implements ResourceProvider {
                 String accountId = ownerAccount(stack);
                 return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
                         engineOver(accountId, oldParams, physicalIds, attributes, oldConditions, oldTemplate)
-                                .resolveNode(oldProps),
+                                .resolveNodeOmittingNoValue(oldProps),
                         engineOver(accountId, newParams, physicalIds, attributes, newConditions, newTemplate)
-                                .resolveNode(newProps));
+                                .resolveNodeOmittingNoValue(newProps));
             } catch (RuntimeException e) {
                 if (warned.add(logicalId)) {
                     LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
@@ -1692,7 +1692,8 @@ public class CloudFormationService implements ResourceProvider {
         }
         try {
             return CfnCreateOnlyProperties.createOnlyValueChanged(resourceType,
-                    previous.resolveNode(priorProps), current.resolveNode(props));
+                    previous.resolveNodeOmittingNoValue(priorProps),
+                    current.resolveNodeOmittingNoValue(props));
         } catch (RuntimeException e) {
             LOG.warnv("Resolved create-only values of {0} ({1}) could not be compared; the update adds no "
                     + "replacement beyond the engine's own decision: {2}", logicalId, resourceType, e.getMessage());
