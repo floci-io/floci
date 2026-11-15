@@ -53,6 +53,10 @@ public class EmrCluster {
     private String bootstrapImage;
     // Whether that image holds what a node needs to run YARN, which an image from an earlier Floci may not; Floci's own.
     private boolean bootstrapImageRunsYarn;
+    // The image each core or task node's own bootstrap left, which it runs from, by node id, and those of the nodes the
+    // cluster no longer has, which one being decommissioned may still run from, until the cluster ends; Floci's own.
+    private Map<String, String> nodeBootstrapImages = new LinkedHashMap<>();
+    private List<String> retiredBootstrapImages = new ArrayList<>();
     // Whether the docker runner mode has made the cluster's storage, which goes once the cluster has ended; Floci's
     // own, as the API has none.
     private boolean storageCreated;
@@ -186,6 +190,16 @@ public class EmrCluster {
 
     public String getBootstrapImage() { return bootstrapImage; }
     public void setBootstrapImage(String bootstrapImage) { this.bootstrapImage = bootstrapImage; }
+
+    public Map<String, String> getNodeBootstrapImages() { return nodeBootstrapImages; }
+    public void setNodeBootstrapImages(Map<String, String> nodeBootstrapImages) {
+        this.nodeBootstrapImages = nodeBootstrapImages != null ? nodeBootstrapImages : new LinkedHashMap<>();
+    }
+
+    public List<String> getRetiredBootstrapImages() { return retiredBootstrapImages; }
+    public void setRetiredBootstrapImages(List<String> retiredBootstrapImages) {
+        this.retiredBootstrapImages = retiredBootstrapImages != null ? retiredBootstrapImages : new ArrayList<>();
+    }
 
     public boolean isBootstrapImageRunsYarn() { return bootstrapImageRunsYarn; }
     public void setBootstrapImageRunsYarn(boolean bootstrapImageRunsYarn) {

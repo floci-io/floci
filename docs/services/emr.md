@@ -272,10 +272,11 @@ holding the driver and its executors, or a command or a script. The cluster itse
   containers on the cluster's nodes; in cluster mode the driver runs on one of them too, its output in the application's
   container logs (see **Output**) and only the client's in the step's.
   A node needs Spark, Python and what the bootstrap actions installed, as an EMR cluster's nodes hold every
-  application it installs, so each runs from the image the steps run in: the bootstrap's, else the release's EMR
-  Serverless image with the HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with
-  Hive, which Floci makes the first time one of the release's clusters needs it (see **Hive steps**), and in which the
-  cluster's bootstrap actions run. An `emr-spark-*` release has no EMR Serverless Hive image, and `emr-7.5.0`'s HDFS and
+  application it installs, so each runs from the image the steps run in, the release's EMR Serverless image with the
+  HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with Hive, which Floci makes the
+  first time one of the release's clusters needs it (see **Hive steps**), or, on a cluster with bootstrap actions, from
+  the image its own bootstrap left on that image (see **Bootstrap actions**). An `emr-spark-*` release has no EMR
+  Serverless Hive image, and `emr-7.5.0`'s HDFS and
   YARN do not run on its newer Hadoop, so its image holds the whole of `emr-7.5.0`'s Hadoop in `/opt`, which only the
   node's daemons run from (see **Known limitations**). EMR sizes a NodeManager, and the executors' memory and cores ("determined by the
   core and task instance types"), by the instance type; Floci's node shares the machine it runs on, so its NodeManager
@@ -452,9 +453,23 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `INTERNAL_ERROR`. `TerminateJobFlows` stops the actions at once, and a cluster Floci was bootstrapping
   when it stopped ends with `INTERNAL_ERROR` once Floci is back. With a `LogUri`, each action's output
   goes to `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/node/<instance-id>/bootstrap-actions/<n>/`,
-  as the Management Guide's bootstrap failure pages give the folder. The actions run once, as on the
-  master, and every node of the cluster runs from the image they leave, so each holds what they installed. Shutdown
-  actions do not run. A cluster a failed action ended has a `Status.ErrorDetails` entry in `DescribeCluster` and
+  as the Management Guide's bootstrap failure pages give the folder. Bootstrap actions "run on cluster after
+  Amazon EMR launches the instance", on each node: where a cluster's core and task nodes run in containers of their
+  own (see **YARN**), each runs them too, in a container of its own beside the primary node's, as that node, its files
+  saying so (see **Node files**), its instance metadata its own (see **Instance metadata**), its output under its own
+  instance id, and is kept as the image that node runs from, so it holds what its own actions installed. A node a
+  resize adds runs them before it starts, as "If you add nodes to a running cluster, bootstrap actions also run on
+  those nodes in the same way", and one that leaves keeps its image only until the cluster ends, so one added again
+  runs them again; a bootstrap that cannot run for the nodes a resize adds ends the cluster with `INTERNAL_ERROR`, as
+  at its start. The nodes' bootstraps stop as the cluster ends, or as the primary node's actions fail. AWS
+  terminates a node whose action fails, and "If too many instances fail their bootstrap actions, then Amazon EMR
+  terminates the cluster. If just a few instances fail, Amazon EMR attempts to reallocate the failed instances and
+  continue", with no number given: Floci runs a node's actions again once, in a fresh container, and a second failure
+  ends the cluster with `BOOTSTRAP_FAILURE` and, as no source gives AWS's words or an error code for a core or task
+  node, a message of Floci's after the primary node's, "On the core instance (i-00000000000000002), bootstrap action 1
+  returned a non-zero return code", with no `ErrorDetails`. Elsewhere the actions run once, as on the primary node, and
+  every node runs from the image they leave. Shutdown actions do not run. A cluster a failed action ended has a
+  `Status.ErrorDetails` entry in `DescribeCluster` and
   `ListClusters`, with the code and `ErrorData` keys of the Management Guide's error code pages:
   `BOOTSTRAP_FAILURE_PRIMARY_WITH_NON_ZERO_CODE` with `primary-instance-id`, `bootstrap-action`, `return-code`,
   `amazon-s3-path` and `public-doc` for an action that exits with another code than 0, and
@@ -469,8 +484,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `task`. AWS documents nothing else in either file, so Floci writes those two fields alone: `{"isMaster": true}` and
   `{"instanceRole": "MASTER"}` in the bootstrap actions' container and each step's, which run as on the primary node,
   and in the primary node's own, and `false` with `CORE` or `TASK` in each core or task node's, the roles as the API's
-  `InstanceRoleType` names them. The actions run once, as on the primary node, so an action's branch for the other
-  nodes does not run. Files that cannot be written fail the bootstrap, the step or the node they are for.
+  `InstanceRoleType` names them, and in each core or task node's bootstrap container its own (see **Bootstrap
+  actions**). Files that cannot be written fail the bootstrap, the step or the node they are for.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then
