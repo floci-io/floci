@@ -73,9 +73,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "4566:4566"
+      - "8700-8799:8700-8799"
     environment:
       FLOCI_SERVICES_MWAA_DOCKER_NETWORK: my_project_default
 ```
+
+Publishing the proxy range, as above, makes each environment's `WebserverUrl` reachable from the host. Floci still hands out ports from a range its own container publishes, since each proxy listens inside Floci's container, and skips a port in it another container publishes. Floci finds its own container by its hostname, so leave `hostname:` unset or set it to the container's name.
 
 ## Configuration
 

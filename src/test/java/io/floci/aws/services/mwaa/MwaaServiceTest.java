@@ -648,7 +648,7 @@ class MwaaServiceTest {
             environmentManager = Mockito.mock(MwaaEnvironmentManager.class);
             proxyManager = Mockito.mock(MwaaProxyManager.class);
             portAllocator = Mockito.mock(PortAllocator.class);
-            when(portAllocator.allocate(8700, 8799)).thenReturn(8701);
+            when(portAllocator.allocateForInProcessListener(8700, 8799)).thenReturn(8701);
 
             realModeService = new MwaaService(storageFactory, config, regionResolver,
                     environmentManager, proxyManager, portAllocator, s3Service, queuedInstalls::add, Clock.systemUTC());
