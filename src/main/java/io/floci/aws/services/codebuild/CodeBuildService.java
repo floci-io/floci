@@ -586,6 +586,7 @@ public class CodeBuildService {
         build.setTimeoutInMinutes(timeoutOverride != null ? timeoutOverride : project.getTimeoutInMinutes());
         build.setQueuedTimeoutInMinutes(project.getQueuedTimeoutInMinutes());
         build.setEncryptionKey(project.getEncryptionKey());
+        build.setVpcConfig(project.getVpcConfig());
 
         ProjectEnvironment env = environmentOverride != null ? environmentOverride : project.getEnvironment();
         if (imageOverride != null || computeTypeOverride != null) {
@@ -775,6 +776,7 @@ public class CodeBuildService {
         copy.setTimeoutInMinutes(source.getTimeoutInMinutes());
         copy.setQueuedTimeoutInMinutes(source.getQueuedTimeoutInMinutes());
         copy.setEncryptionKey(source.getEncryptionKey());
+        copy.setVpcConfig(source.getVpcConfig());
         return copy;
     }
 }
