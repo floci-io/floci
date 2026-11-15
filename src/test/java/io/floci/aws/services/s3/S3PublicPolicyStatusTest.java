@@ -109,6 +109,50 @@ class S3PublicPolicyStatusTest {
         }
     }
 
+    /**
+     * A PrincipalArn whose wildcard sits in the role name inside a fixed account keeps the
+     * statement out of Block Public Access's definition of public: the account is the fixed part,
+     * the same reasoning the S3 User Guide applies to s3:DataAccessPointArn ("can contain a
+     * wildcard for the access point name without rendering the policy public, as long as the
+     * account ID is fixed"), and IAM Access Analyzer's check-no-public-access returns PASS for
+     * exactly this shape.
+     */
+    @Test
+    void principalArnWildcardRoleNameWithFixedAccountIsNotPublic() {
+        for (String operator : new String[] {"ArnLike", "ArnEquals"}) {
+            assertFalse(isPublic("""
+                    {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
+                    "Condition":{"%s":{"aws:PrincipalArn":"arn:aws:iam::111122223333:role/app-*"}}}]}
+                    """.formatted(operator)));
+        }
+    }
+
+    @Test
+    void principalArnEveryValueOfAnArrayPinsAFixedAccount() {
+        assertFalse(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
+                "Condition":{"ArnLike":{"aws:PrincipalArn":
+                ["arn:aws:iam::111122223333:role/reader-*", "arn:aws:iam::111122223333:role/writer-*"]}}}]}
+                """));
+    }
+
+    @Test
+    void principalArnWildcardAccountIsPublic() {
+        assertTrue(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
+                "Condition":{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::*:role/app-*"}}}]}
+                """));
+    }
+
+    @Test
+    void principalArnWildcardAccountInOneValueOfAnArrayIsPublic() {
+        assertTrue(isPublic("""
+                {"Statement":[{"Principal":"*","Resource":"*","Action":"s3:GetObject","Effect":"Allow",
+                "Condition":{"ArnLike":{"aws:PrincipalArn":
+                ["arn:aws:iam::111122223333:role/reader-*", "arn:aws:iam::*:role/app-*"]}}}]}
+                """));
+    }
+
     @Test
     void accessPointNameWildcardWithFixedAccountIsNotPublic() {
         assertFalse(isPublic("""

@@ -70,6 +70,38 @@ class S3BlockPublicAccessIntegrationTest {
     }
 
     @Test
+    void blockPublicPolicyAcceptsAPrincipalArnWildcardInsideAFixedAccount() {
+        String bucket = createBucket();
+        putBucketPublicAccessBlock(bucket, false, false, true, false);
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"AWS":"*"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*",
+                "Condition":{"ArnLike":{"aws:PrincipalArn":
+                "arn:aws:iam::111122223333:role/app-*"}}}]}
+                """.formatted(bucket);
+
+        given().body(policy)
+                .when().put("/" + bucket + "?policy")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void blockPublicPolicyRefusesAPrincipalArnWildcardOutsideAFixedAccount() {
+        String bucket = createBucket();
+        putBucketPublicAccessBlock(bucket, false, false, true, false);
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"AWS":"*"},"Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*",
+                "Condition":{"ArnLike":{"aws:PrincipalArn":"arn:aws:iam::*:role/app-*"}}}]}
+                """.formatted(bucket);
+
+        given().body(policy)
+                .when().put("/" + bucket + "?policy")
+                .then().statusCode(403)
+                .body(containsString("AccessDenied"));
+    }
+
+    @Test
     void blockPublicPolicyAcceptsForAnyValueWithFixedPrincipalOrgPath() {
         String bucket = createBucket();
         putBucketPublicAccessBlock(bucket, false, false, true, false);

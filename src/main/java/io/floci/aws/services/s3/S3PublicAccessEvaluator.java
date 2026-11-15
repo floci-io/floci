@@ -40,6 +40,7 @@ final class S3PublicAccessEvaluator {
 
     /** Recognised like the keys above, but the value additionally has to be a narrow range. */
     private static final String SOURCE_IP_CONDITION_KEY = "aws:sourceip";
+    private static final String PRINCIPAL_ARN_CONDITION_KEY = "aws:principalarn";
     private static final String DATA_ACCESS_POINT_ARN_CONDITION_KEY = "s3:dataaccesspointarn";
     private static final Pattern BUCKET_POLICY_ACCESS_POINT_ARN = Pattern.compile(
             "arn:[a-z0-9-]+:s3:[a-z0-9-]+:[0-9]{12}:accesspoint/[a-zA-Z0-9*?._-]+");
@@ -259,6 +260,12 @@ final class S3PublicAccessEvaluator {
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
                 String key = entry.getKey().toLowerCase(Locale.ROOT);
+                if (PRINCIPAL_ARN_CONDITION_KEY.equals(key)
+                        && (operatorName.equalsIgnoreCase("ArnLike")
+                        || operatorName.equalsIgnoreCase("ArnEquals"))
+                        && allValuesFixed(entry.getValue(), PublicAccessConditions::pinsAccount)) {
+                    return true;
+                }
                 if (DATA_ACCESS_POINT_ARN_CONDITION_KEY.equals(key)
                         && allValuesFixed(entry.getValue(), S3PublicAccessEvaluator::isFixedAccountAccessPointArn)) {
                     return true;
