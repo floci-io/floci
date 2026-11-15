@@ -1702,10 +1702,9 @@ public class CloudFormationService implements ResourceProvider {
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
                                         Set<String> changedParams, Set<String> changedConditions) {
-        if (oldProps == null || oldProps.isMissingNode()) {
-            return false;
-        }
-        if (newProps == null || newProps.isMissingNode()) {
+        // The caller reads a dropped or an added Properties block as an empty one, so only a resource
+        // without a block on either side reaches here with a missing node.
+        if (oldProps == null || oldProps.isMissingNode() || newProps == null || newProps.isMissingNode()) {
             return false;
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
@@ -1728,7 +1727,7 @@ public class CloudFormationService implements ResourceProvider {
                 if (!newVal.equals(oldVal)) {
                     return true;
                 }
-                if (newVal != null && (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions))) {
+                if (referencesAnyParameter(newVal, changedParams) || referencesAnyCondition(newVal, changedConditions)) {
                     return true;
                 }
             }
