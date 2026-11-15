@@ -174,7 +174,7 @@ public class MwaaService implements TagHandler {
                 proxyManager.startProxy(environmentIdentity(environment), proxyPort,
                         environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
                         this::isValidCliToken,
-                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, cliCommand));
+                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, version, cliCommand));
                 provisioned = true;
             } catch (Exception e) {
                 LOG.errorv(e, "Failed to start MWAA environment {0}", name);

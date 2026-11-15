@@ -4010,8 +4010,9 @@ public interface EmulatorConfig {
         /** Airflow versions environments may request. Combined with the image tag
          *  {@code apache/airflow:<version>-<pythonTag>}, where the Python tag matches the
          *  version real Amazon MWAA runs for that Airflow version: see
-         *  {@code MwaaEnvironmentManager.pythonTagFor}. */
-        @WithDefault("2.10.5,2.9.3,2.8.4")
+         *  {@code MwaaEnvironmentManager.pythonTagFor}. The default is every Airflow 2.x version
+         *  Amazon MWAA offers, plus 2.10.5, 2.9.3 and 2.8.4, which Floci offered first. */
+        @WithDefault("2.11.2,2.11.0,2.10.5,2.10.3,2.10.1,2.9.3,2.9.2,2.8.4,2.8.1,2.7.2")
         List<String> supportedVersions();
 
         /** Airflow version used when {@code CreateEnvironment} omits {@code AirflowVersion}. */

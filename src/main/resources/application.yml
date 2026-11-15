@@ -891,7 +891,7 @@ floci:
       enabled: true
       mock: false
       default-postgres-image: "postgres:16-alpine"
-      supported-versions: "2.10.5,2.9.3,2.8.4"
+      supported-versions: "2.11.2,2.11.0,2.10.5,2.10.3,2.10.1,2.9.3,2.9.2,2.8.4,2.8.1,2.7.2"
       default-version: "2.10.5"
       proxy-base-port: 8700
       proxy-max-port: 8799
