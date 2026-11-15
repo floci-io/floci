@@ -958,8 +958,7 @@ class PaymentCryptographyKeyExchangeTest {
         String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(
                 HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F1011121314151617"),
                 0x00, PaymentCryptographyKeyAlgorithm.TDES_3KEY,
-                PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()),
-                PaymentCryptographyKeyAlgorithm.TDES_2KEY);
+                PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()));
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "As2805KeyCryptogram",
@@ -967,6 +966,43 @@ class PaymentCryptographyKeyExchangeTest {
                                 "TR31_K0_KEY_ENCRYPTION_KEY"), "", true, Map.of()));
 
         assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void anExportUnderAnAesWrappingKeyIsRefused() {
+        // AS2805's cryptography is all TDES, so a key encryption key that is AES cannot
+        // wrap a key cryptogram even though it is a key encryption key.
+        PaymentCryptographyKey kek = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", PIN_VARIANT,
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TDES"), refused.getMessage());
+        assertTrue(refused.getMessage().contains("AES_128"), refused.getMessage());
+    }
+
+    @Test
+    void anImportUnderAnAesWrappingKeyIsRefused() {
+        // The export and the import refuse the same wrapping key, so a cryptogram the
+        // export would not write does not open here either.
+        PaymentCryptographyKey tdesKek = createKey("TDES_3KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("TDES_3KEY", "TR31_P0_PIN_ENCRYPTION_KEY");
+        String cryptogram = (String) as2805Export(key, tdesKek, PIN_VARIANT).get("KeyMaterial");
+        PaymentCryptographyKey kek = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram",
+                        as2805Import(PIN_VARIANT, kek.getKeyId(), cryptogram, "TDES_3KEY",
+                                "TR31_P0_PIN_ENCRYPTION_KEY"), "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TDES"), refused.getMessage());
+        assertTrue(refused.getMessage().contains("AES_128"), refused.getMessage());
     }
 
     @Test

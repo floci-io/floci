@@ -721,9 +721,4 @@ public final class Tr34 {
                     + e.getMessage(), e);
         }
     }
-
-    /** The given byte arrays, one after the other. */
-    private static byte[] concat(byte[]... parts) {
-        return Bytes.concat(parts);
-    }
 }

@@ -34,8 +34,8 @@ class PaymentCryptographyAs2805CryptogramTest {
     /** The length of the marker, in bytes. */
     private static final int MARKER_BYTES = 4;
 
-    /** The length of the initialization vector, in bytes. */
-    private static final int IV_BYTES = 16;
+    /** The length of the initialization vector, in bytes: the Triple DES block size. */
+    private static final int IV_BYTES = 8;
 
     /** The length of the tag, in bytes. */
     private static final int TAG_BYTES = 32;
@@ -169,8 +169,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     /**
      * The cryptogram of a key under a wrapping key.
      *
-     * <p>The wrapping key has the algorithm of the key it carries, so the cryptogram is
-     * written under the cipher of that algorithm.
+     * <p>The cryptogram is written under Triple DES, the cipher AS2805 uses.
      *
      * @param key the key that is carried, in hexadecimal
      * @param variant the variant the key is bound to
@@ -182,7 +181,7 @@ class PaymentCryptographyAs2805CryptogramTest {
                                String wrappingKey) {
         return PaymentCryptographyAs2805Cryptogram.wrap(
                 PaymentCryptographyCrypto.fromHex(key), variant, algorithm,
-                PaymentCryptographyCrypto.fromHex(wrappingKey), algorithm);
+                PaymentCryptographyCrypto.fromHex(wrappingKey));
     }
 
     /**
@@ -197,7 +196,7 @@ class PaymentCryptographyAs2805CryptogramTest {
     private static byte[] unwrap(String cryptogram, int variant,
                                  PaymentCryptographyKeyAlgorithm algorithm, String wrappingKey) {
         return PaymentCryptographyAs2805Cryptogram.unwrap(cryptogram, variant, algorithm,
-                PaymentCryptographyCrypto.fromHex(wrappingKey), algorithm);
+                PaymentCryptographyCrypto.fromHex(wrappingKey));
     }
 
     /**

@@ -42,19 +42,18 @@ import java.util.HexFormat;
  * ciphertext, so a cryptogram wrapped for one variant does not open under
  * another, and one that names another algorithm does not open either.
  *
- * <p>The cipher is the one the wrapping key's own algorithm is, and the vector
- * is a fresh one for every cryptogram, so two cryptograms of the same key
- * under the same wrapping key are not the same bytes.
+ * <p>The cipher is Triple DES, and the vector is a fresh one for every
+ * cryptogram, so two cryptograms of the same key under the same wrapping key
+ * are not the same bytes.
  *
  * <p>The two keys the cryptogram uses, the one that encrypts and the one that
  * authenticates, are derived from the wrapping key, each from a label of its
  * own, so neither of them is the wrapping key itself.
  *
  * <p>The check value inside the cryptogram is the key's own check value: the
- * ANSI X9.24 one for a Triple DES key and the CMAC one for an AES key, the same
- * one the service reports as the key's {@code KeyCheckValue}, so the value
- * carried inside the cryptogram and the value in the import response are the
- * same.
+ * ANSI X9.24 one for a Triple DES key, the same one the service reports as the
+ * key's {@code KeyCheckValue}, so the value carried inside the cryptogram and
+ * the value in the import response are the same.
  *
  * <p><b>The byte layout of the AS2805 key cryptogram is in the standard and
  * is not published.</b> What the service publishes is the shape - the fields,
@@ -69,6 +68,9 @@ public final class PaymentCryptographyAs2805Cryptogram {
 
     /** The length of the check value, in bytes. */
     private static final int KCV_BYTES = 3;
+
+    /** The Triple DES block size, in bytes, which the vector and the padding use. */
+    private static final int BLOCK_BYTES = 8;
 
     /** The length of the tag, in bytes: an HMAC-SHA-256 is thirty-two of them. */
     private static final int TAG_BYTES = 32;
@@ -99,12 +101,10 @@ public final class PaymentCryptographyAs2805Cryptogram {
      * @param algorithm the clear key's algorithm, which fixes its length and
      *     how its check value is computed
      * @param wrappingKey the key that protects the cryptogram
-     * @param wrappingAlgorithm the wrapping key's algorithm, which picks the
-     *     cipher
      * @return the cryptogram, in hex
      */
     public static String wrap(byte[] clearKey, int variantByte, PaymentCryptographyKeyAlgorithm algorithm,
-                              byte[] wrappingKey, PaymentCryptographyKeyAlgorithm wrappingAlgorithm) {
+                              byte[] wrappingKey) {
         int expected = expectedBytes(algorithm);
         if (clearKey.length != expected) {
             throw new IllegalArgumentException("the key is " + clearKey.length
@@ -112,17 +112,15 @@ public final class PaymentCryptographyAs2805Cryptogram {
         }
         byte[] bound = bind(clearKey, variantByte);
         byte[] check = checkValue(clearKey, algorithm);
-        byte[] plain = Bytes.pkcs7Pad(Bytes.concat(bound, check), blockSize(wrappingAlgorithm));
+        byte[] plain = Bytes.pkcs7Pad(Bytes.concat(bound, check), BLOCK_BYTES);
         byte[] encryptionKey = derive(wrappingKey, ENCRYPTION_LABEL, wrappingKey.length);
         byte[] authenticationKey = derive(wrappingKey, AUTHENTICATION_LABEL, TAG_BYTES);
         // The vector is fresh for every cryptogram, so the same key under the same wrapping
         // key does not give the same bytes twice.
-        byte[] iv = new byte[blockSize(wrappingAlgorithm)];
+        byte[] iv = new byte[BLOCK_BYTES];
         SecureRandom random = new SecureRandom();
         random.nextBytes(iv);
-        byte[] body = wrappingAlgorithm.isAes()
-                ? Ciphers.aesCbcEncrypt(plain, encryptionKey, iv)
-                : Ciphers.tdesCbcEncrypt(plain, Ciphers.widenTdesKey(encryptionKey), iv);
+        byte[] body = Ciphers.tdesCbcEncrypt(plain, Ciphers.widenTdesKey(encryptionKey), iv);
         byte[] tag = tag(authenticationKey, algorithm, variantByte, iv, body);
         // The model's pattern for the cryptogram is upper-case hexadecimal, so that is the
         // case it is written in.
@@ -137,20 +135,18 @@ public final class PaymentCryptographyAs2805Cryptogram {
      * @param algorithm the clear key's algorithm, which fixes its length and
      *     how its check value is computed
      * @param wrappingKey the key that protects the cryptogram
-     * @param wrappingAlgorithm the wrapping key's algorithm, which picks the
-     *     cipher
      * @return the clear key
      * @throws IllegalArgumentException when the cryptogram is malformed, does
      *     not decrypt under the wrapping key, or does not carry the check
      *     value of the key it claims to carry
      */
-    public static byte[] unwrap(String cryptogram, int variantByte, PaymentCryptographyKeyAlgorithm algorithm,
-                                byte[] wrappingKey, PaymentCryptographyKeyAlgorithm wrappingAlgorithm) {
+    public static byte[] unwrap(String cryptogram, int variantByte,
+                                PaymentCryptographyKeyAlgorithm algorithm, byte[] wrappingKey) {
         if (cryptogram == null || !Bytes.isHex(cryptogram)) {
             throw new IllegalArgumentException("the cryptogram is not hexadecimal");
         }
         byte[] payload = HEX.parseHex(cryptogram);
-        int blockSize = blockSize(wrappingAlgorithm);
+        int blockSize = BLOCK_BYTES;
         if (payload.length <= MARKER.length + blockSize + TAG_BYTES) {
             throw new IllegalArgumentException("the cryptogram is too short to carry a key");
         }
@@ -183,9 +179,7 @@ public final class PaymentCryptographyAs2805Cryptogram {
                 throw new IllegalArgumentException("the cryptogram was changed");
             }
             byte[] encryptionKey = derive(wrappingKey, ENCRYPTION_LABEL, wrappingKey.length);
-            byte[] plain = wrappingAlgorithm.isAes()
-                    ? Ciphers.aesCbcDecrypt(body, encryptionKey, iv)
-                    : Ciphers.tdesCbcDecrypt(body, Ciphers.widenTdesKey(encryptionKey), iv);
+            byte[] plain = Ciphers.tdesCbcDecrypt(body, Ciphers.widenTdesKey(encryptionKey), iv);
             plain = Bytes.pkcs7Unpad(plain, blockSize);
 
             int expected = expectedBytes(algorithm);
@@ -285,10 +279,5 @@ public final class PaymentCryptographyAs2805Cryptogram {
                     "the key algorithm " + algorithm + " is not a symmetric algorithm");
         }
         return algorithm.bytes();
-    }
-
-    /** The cipher's block size, which the padding works to. */
-    private static int blockSize(PaymentCryptographyKeyAlgorithm algorithm) {
-        return algorithm.isAes() ? 16 : 8;
     }
 }
