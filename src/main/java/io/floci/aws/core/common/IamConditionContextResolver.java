@@ -51,6 +51,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Function;
@@ -343,6 +344,17 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
+    /** The condition key whose value a delegation can decide rather than the request. */
+    private static final String PERMISSIONS_BOUNDARY_KEY = "iam:PermissionsBoundary";
+
+    /** The boundary the caller's delegation registered, or empty for any other caller. */
+    private Optional<String> delegatedBoundary() {
+        if (iamService.isUnsatisfied() || requestContext == null) {
+            return Optional.empty();
+        }
+        return iamService.get().delegatedRoleBoundaryArn(requestContext.getAccessKeyId());
+    }
+
     private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
         Map<String, String> targets = IamConditionKeys.targets(action);
@@ -358,6 +370,13 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        // iam:PermissionsBoundary names the boundary the request will leave on the principal, so a
+        // role created under a delegation publishes the cap that delegation registered rather than
+        // whatever the call asked for: the write applies the cap, and a policy conditioned on the
+        // boundary has to be told the same value the role ends up with.
+        if (members.containsKey(PERMISSIONS_BOUNDARY_KEY) && "iam:CreateRole".equals(action)) {
+            delegatedBoundary().ifPresent(arn -> conditions.put(PERMISSIONS_BOUNDARY_KEY, List.of(arn)));
+        }
         targets.forEach((key, target) -> {
             if (key.contains("${TagKey}")) {
                 Map<String, String> tags = storedTargetValue(target, form.get(target), IamRole::getTags, IamUser::getTags);

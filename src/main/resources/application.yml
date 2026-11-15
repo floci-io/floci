@@ -511,6 +511,11 @@ floci:
       # account-alias: ""  # When set, seeds the account alias at startup so callers can read one
                            # without creating it first. Unset means the account has no alias,
                            # matching AWS. Example: FLOCI_SERVICES_IAM_ACCOUNT_ALIAS=my-account
+      partner-permission-boundaries-path: ${FLOCI_SERVICES_IAM_PARTNER_PERMISSION_BOUNDARIES_PATH:}
+                           # A JSON object of partner account id to an object of boundary ARN to
+                           # policy document, standing in for the permissions boundaries AWS
+                           # registers for a delegation partner by email. Unset registers nothing:
+                           # a request reports no restriction and a delegated role is uncapped.
     msk:
       enabled: true
       mock: false
