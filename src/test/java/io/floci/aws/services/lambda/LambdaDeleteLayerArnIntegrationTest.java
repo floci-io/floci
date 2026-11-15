@@ -8,7 +8,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.LambdaException;
@@ -18,7 +17,7 @@ import software.amazon.awssdk.services.lambda.model.ResourceNotFoundException;
 import java.net.URI;
 import java.util.UUID;
 
-import static io.floci.aws.services.lambda.LambdaLayerFixtures.layerArchive;
+import static io.floci.aws.services.lambda.LambdaLayerFixtures.publishLayerVersion;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -40,8 +39,10 @@ class LambdaDeleteLayerArnIntegrationTest {
     void deletesOnlyTheSelectedVersionAndItsArchive(String region, boolean arnSelector) throws Exception {
         try (LambdaClient client = client(ACCOUNT, Region.of(region))) {
             String name = "layer-delete-" + UUID.randomUUID();
-            PublishLayerVersionResponse first = publish(client, name, ACCOUNT, Region.of(region));
-            PublishLayerVersionResponse second = publish(client, name, ACCOUNT, Region.of(region));
+            PublishLayerVersionResponse first = publishLayerVersion(
+                    client, name, ACCOUNT, Region.of(region), endpoint, cleanup);
+            PublishLayerVersionResponse second = publishLayerVersion(
+                    client, name, ACCOUNT, Region.of(region), endpoint, cleanup);
             String location = client.getLayerVersion(request -> request.layerName(name)
                     .versionNumber(first.version())).content().location();
             String selector = arnSelector ? first.layerArn() : name;
@@ -63,8 +64,10 @@ class LambdaDeleteLayerArnIntegrationTest {
         try (LambdaClient owner = client(ACCOUNT, Region.US_WEST_2);
              LambdaClient caller = client(ACCOUNT, Region.US_EAST_1)) {
             String name = "layer-regional-delete-" + UUID.randomUUID();
-            PublishLayerVersionResponse stored = publish(owner, name, ACCOUNT, Region.US_WEST_2);
-            PublishLayerVersionResponse local = publish(caller, name, ACCOUNT, Region.US_EAST_1);
+            PublishLayerVersionResponse stored = publishLayerVersion(
+                    owner, name, ACCOUNT, Region.US_WEST_2, endpoint, cleanup);
+            PublishLayerVersionResponse local = publishLayerVersion(
+                    caller, name, ACCOUNT, Region.US_EAST_1, endpoint, cleanup);
             String location = owner.getLayerVersion(request -> request.layerName(name)
                     .versionNumber(stored.version())).content().location();
 
@@ -84,8 +87,10 @@ class LambdaDeleteLayerArnIntegrationTest {
         try (LambdaClient client = client(ACCOUNT, Region.US_EAST_1);
              LambdaClient other = client(otherAccount, Region.US_EAST_1)) {
             String name = "layer-isolated-delete-" + UUID.randomUUID();
-            PublishLayerVersionResponse owned = publish(client, name, ACCOUNT, Region.US_EAST_1);
-            PublishLayerVersionResponse foreign = publish(other, name, otherAccount, Region.US_EAST_1);
+            PublishLayerVersionResponse owned = publishLayerVersion(
+                    client, name, ACCOUNT, Region.US_EAST_1, endpoint, cleanup);
+            PublishLayerVersionResponse foreign = publishLayerVersion(
+                    other, name, otherAccount, Region.US_EAST_1, endpoint, cleanup);
             client.deleteLayerVersion(request -> request.layerName(foreign.layerArn()).versionNumber(foreign.version()));
             for (String invalid : new String[] {owned.layerVersionArn(),
                     owned.layerArn().replace("arn:aws:", "arn:aws-cn:")}) {
@@ -102,18 +107,5 @@ class LambdaDeleteLayerArnIntegrationTest {
 
     private LambdaClient client(String account, Region region) {
         return AwsTestClients.create(LambdaClient.builder(), account, region, endpoint);
-    }
-
-    private PublishLayerVersionResponse publish(LambdaClient client, String name, String account, Region region)
-            throws Exception {
-        byte[] archive = layerArchive();
-        PublishLayerVersionResponse published = client.publishLayerVersion(request -> request.layerName(name)
-                .content(content -> content.zipFile(SdkBytes.fromByteArray(archive))));
-        cleanup.register(() -> {
-            try (LambdaClient owner = client(account, region)) {
-                owner.deleteLayerVersion(request -> request.layerName(name).versionNumber(published.version()));
-            }
-        });
-        return published;
     }
 }

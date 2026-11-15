@@ -11,7 +11,6 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.LambdaException;
@@ -21,7 +20,7 @@ import software.amazon.awssdk.services.lambda.model.ResourceNotFoundException;
 import java.net.URI;
 import java.util.UUID;
 
-import static io.floci.aws.services.lambda.LambdaLayerFixtures.layerArchive;
+import static io.floci.aws.services.lambda.LambdaLayerFixtures.publishLayerVersion;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -44,16 +43,9 @@ class LambdaDeleteLayerArnIamIntegrationTest {
     void deletionChecksTheVersionNamedByTheSelector(String layerRegion, String requestRegion, boolean arnSelector)
             throws Exception {
         String name = "layer-delete-iam-" + UUID.randomUUID();
-        byte[] archive = layerArchive();
         try (LambdaClient owner = AwsTestClients.create(LambdaClient.builder(), ACCOUNT, Region.of(layerRegion), endpoint)) {
-            PublishLayerVersionResponse published = owner.publishLayerVersion(request -> request.layerName(name)
-                    .content(content -> content.zipFile(SdkBytes.fromByteArray(archive))));
-            cleanup.register(() -> {
-                try (LambdaClient cleaner = AwsTestClients.create(
-                        LambdaClient.builder(), ACCOUNT, Region.of(layerRegion), endpoint)) {
-                    cleaner.deleteLayerVersion(request -> request.layerName(name).versionNumber(published.version()));
-                }
-            });
+            PublishLayerVersionResponse published = publishLayerVersion(
+                    owner, name, ACCOUNT, Region.of(layerRegion), endpoint, cleanup);
             String user = "layer-deleter-" + UUID.randomUUID();
             String authorization = auth(ACCOUNT, requestRegion, "iam");
             UserCredentials credentials = EnforcementFixtures.createUser(cleanup, endpoint.getPort(), authorization, user);
