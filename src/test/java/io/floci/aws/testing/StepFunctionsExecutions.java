@@ -3,6 +3,7 @@ package io.floci.aws.testing;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -25,7 +26,11 @@ public final class StepFunctionsExecutions {
     private StepFunctionsExecutions() {}
 
     public static Response describeExecution(String executionArn) {
-        Response response = given()
+        return describeExecution(executionArn, given());
+    }
+
+    private static Response describeExecution(String executionArn, RequestSpecification request) {
+        Response response = request
                 .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
                 .contentType(SFN_CONTENT_TYPE)
                 .body("""
@@ -65,10 +70,8 @@ public final class StepFunctionsExecutions {
         String executionArn = callInRegion(region, "StartExecution", MAPPER.createObjectNode()
                 .put("stateMachineArn", stateMachineArn).put("input", "{}").toString())
                 .then().statusCode(200).extract().path("executionArn");
-        return waitForTerminalState(executionArn, () ->
-                callInRegion(region, "DescribeExecution", MAPPER.createObjectNode()
-                        .put("executionArn", executionArn).toString())
-                        .then().statusCode(200).extract().response());
+        return waitForTerminalState(executionArn,
+                () -> describeExecution(executionArn, requestInRegion(region)));
     }
 
     /** The history events of an execution that {@link #runInRegion} ran in {@code region}. */
@@ -82,12 +85,16 @@ public final class StepFunctionsExecutions {
     }
 
     private static Response callInRegion(String region, String action, String body) {
-        return given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region
-                        + "/states/aws4_request, SignedHeaders=host, Signature=abc")
+        return requestInRegion(region)
                 .header("X-Amz-Target", "AWSStepFunctions." + action)
                 .contentType(SFN_CONTENT_TYPE)
                 .body(body)
                 .when().post("/");
+    }
+
+    private static RequestSpecification requestInRegion(String region) {
+        return given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260215/" + region
+                        + "/states/aws4_request, SignedHeaders=host, Signature=abc");
     }
 }

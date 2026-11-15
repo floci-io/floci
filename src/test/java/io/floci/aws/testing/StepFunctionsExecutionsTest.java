@@ -17,12 +17,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StepFunctionsExecutionsTest {
 
     private static final String EXECUTION_ARN = "arn:aws:states:eu-west-3:000000000000:execution:machine:run";
     private final List<String> requests = new CopyOnWriteArrayList<>();
+    private final List<String> authorizationHeaders = new CopyOnWriteArrayList<>();
     private final AtomicInteger descriptions = new AtomicInteger();
     private HttpServer server;
     private String previousBaseUri;
@@ -42,6 +44,7 @@ class StepFunctionsExecutionsTest {
             String action = exchange.getRequestHeaders().getFirst("X-Amz-Target");
             String authorization = exchange.getRequestHeaders().getFirst("Authorization");
             requests.add(action);
+            authorizationHeaders.add(authorization);
             String request = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             int status = 200;
             String body;
@@ -101,6 +104,7 @@ class StepFunctionsExecutionsTest {
         Response response = StepFunctionsExecutions.describeExecution(EXECUTION_ARN);
         assertEquals("RUNNING", response.jsonPath().getString("status"));
         assertTrue(requests.contains("AWSStepFunctions.DescribeExecution"));
+        assertNull(authorizationHeaders.getFirst());
     }
 
     @Test
@@ -111,5 +115,7 @@ class StepFunctionsExecutionsTest {
         assertEquals("FAILED", response.jsonPath().getString("status"));
         assertEquals(2, descriptions.get());
         assertEquals(List.of("AWSStepFunctions.DescribeExecution", "AWSStepFunctions.DescribeExecution"), requests);
+        assertNull(authorizationHeaders.get(0));
+        assertNull(authorizationHeaders.get(1));
     }
 }
