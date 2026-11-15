@@ -33,8 +33,9 @@ import static org.mockito.Mockito.mock;
 
 /**
  * Cluster parameter groups, subnet groups, snapshot schedules and snapshot copy grants were stored under their name
- * alone and seen from every Region. At startup each moves to the default Region, and is copied to every other
- * Region where one of its account's clusters uses it: a cluster's parameter group, subnet group and schedule in the
+ * alone and seen from every Region. At startup each moves to the Region it shows it was made in (a subnet group's
+ * subnets' Region, a copy grant's KMS key's), or else to the default Region, and is copied to every other Region
+ * where one of its account's clusters uses it: a cluster's parameter group, subnet group and schedule in the
  * cluster's Region, its copy grant in the copy's destination Region.
  */
 class RedshiftRegionalRecordsMigrationTest {
@@ -72,8 +73,7 @@ class RedshiftRegionalRecordsMigrationTest {
             east.setSnapshotCopyGrantName("copies");
             clusters.putForAccount(ACCOUNT, "east", east);
 
-            // A service built without CDI, so no @PostConstruct ran: its startup observer moves the records.
-            service(factory, config, "us-east-1").onStart(null);
+            service(factory, config, "us-east-1").migrateRegionalRecords();
 
             assertEquals(Set.of(regionalKey("us-east-1", "analytics"), regionalKey("eu-west-1", "analytics")),
                     groups.keysForAccount(ACCOUNT));
@@ -181,11 +181,11 @@ class RedshiftRegionalRecordsMigrationTest {
     }
 
     /**
-     * A grant created in another Region, so holding that Region's default key, is moved to the default Region with
-     * the default Region's key, and the copy made for the Region that created it keeps that Region's.
+     * A grant created in another Region holds that Region's key, so it moves there with its key, and not to the
+     * default Region. A grant whose key is no ARN moves to the default Region.
      */
     @Test
-    void aGrantMovedToTheDefaultRegionTakesItsDefaultKeyToo() {
+    void aGrantMovesToTheRegionOfItsKey() {
         EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
         StorageFactory factory = StorageFactories.open(config, "persistent");
         try {
@@ -195,6 +195,7 @@ class RedshiftRegionalRecordsMigrationTest {
                     new TypeReference<Map<String, Cluster>>() { });
             String westDefault = "arn:aws:kms:us-west-2:" + ACCOUNT + ":alias/aws/redshift";
             grants.putForAccount(ACCOUNT, "copies", new SnapshotCopyGrant("copies", westDefault));
+            grants.putForAccount(ACCOUNT, "keyless", new SnapshotCopyGrant("keyless", "1234abcd"));
             Cluster east = pausedCluster("east", null);
             east.setSnapshotCopyDestinationRegion("us-west-2");
             east.setSnapshotCopyGrantName("copies");
@@ -202,10 +203,48 @@ class RedshiftRegionalRecordsMigrationTest {
 
             service(factory, config, "us-east-1").migrateRegionalRecords();
 
-            assertEquals("arn:aws:kms:us-east-1:" + ACCOUNT + ":alias/aws/redshift",
-                    grants.getForAccount(ACCOUNT, regionalKey("us-east-1", "copies")).orElseThrow().getKmsKeyId());
+            assertEquals(Set.of(regionalKey("us-west-2", "copies"), regionalKey("us-east-1", "keyless")),
+                    grants.keysForAccount(ACCOUNT));
             assertEquals(westDefault,
                     grants.getForAccount(ACCOUNT, regionalKey("us-west-2", "copies")).orElseThrow().getKmsKeyId());
+        } finally {
+            factory.shutdownAll();
+        }
+    }
+
+    /**
+     * A subnet group whose subnets EC2 placed in one Region moves to that Region, and not to the default Region,
+     * unless a cluster there uses it: then the default Region gets a copy. One whose subnets span Regions, or that EC2
+     * never placed, moves to the default Region.
+     */
+    @Test
+    void aSubnetGroupMovesToTheRegionOfItsSubnets() {
+        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
+        StorageFactory factory = StorageFactories.open(config, "persistent");
+        try {
+            AccountAwareStorageBackend<ClusterSubnetGroup> subnets = factory.create("redshift", "redshift-subnet-groups.json",
+                    new TypeReference<Map<String, ClusterSubnetGroup>>() { });
+            ClusterSubnetGroup west = new ClusterSubnetGroup("west", "d", "vpc-1", List.of("subnet-a", "subnet-b"));
+            west.setSubnetZones(Map.of("subnet-a", "eu-west-1a", "subnet-b", "eu-west-1b"));
+            subnets.putForAccount(ACCOUNT, "west", west);
+            ClusterSubnetGroup spread = new ClusterSubnetGroup("spread", "d", "vpc-2", List.of("subnet-c", "subnet-d"));
+            spread.setSubnetZones(Map.of("subnet-c", "eu-west-1a", "subnet-d", "us-west-2a"));
+            subnets.putForAccount(ACCOUNT, "spread", spread);
+            subnets.putForAccount(ACCOUNT, "unplaced", new ClusterSubnetGroup("unplaced", "d", null, List.of("subnet-e")));
+            ClusterSubnetGroup shared = new ClusterSubnetGroup("shared", "d", "vpc-3", List.of("subnet-f"));
+            shared.setSubnetZones(Map.of("subnet-f", "eu-west-1c"));
+            subnets.putForAccount(ACCOUNT, "shared", shared);
+            AccountAwareStorageBackend<Cluster> clusters = factory.create("redshift", "redshift-clusters.json",
+                    new TypeReference<Map<String, Cluster>>() { });
+            Cluster east = pausedCluster("east", null);
+            east.setClusterSubnetGroupName("shared");
+            clusters.putForAccount(ACCOUNT, "east", east);
+
+            service(factory, config, "us-east-1").migrateRegionalRecords();
+
+            assertEquals(Set.of(regionalKey("eu-west-1", "west"), regionalKey("us-east-1", "spread"),
+                    regionalKey("us-east-1", "unplaced"), regionalKey("eu-west-1", "shared"),
+                    regionalKey("us-east-1", "shared")), subnets.keysForAccount(ACCOUNT));
         } finally {
             factory.shutdownAll();
         }

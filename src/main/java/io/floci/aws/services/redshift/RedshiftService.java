@@ -2,6 +2,8 @@ package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -121,8 +123,6 @@ public class RedshiftService implements ManagedSecretRotator {
     private final RedshiftCredentialBroker credentialBroker;
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper objectMapper;
-    // The injected mapper with the Java modules every stored record needs (its Instants), for copying records.
-    private final ObjectMapper recordCopies;
     private final DynamoDbStreamReader streamReader;
     private final RedshiftAuditLogPublisher auditLogPublisher;
     private final RedshiftEventService events;
@@ -242,7 +242,6 @@ public class RedshiftService implements ManagedSecretRotator {
         this.credentialBroker = credentialBroker;
         this.secretsManagerService = secretsManagerService;
         this.objectMapper = objectMapper;
-        this.recordCopies = objectMapper.copy().findAndRegisterModules();
         this.streamReader = streamReader;
         this.auditLogPublisher = auditLogPublisher;
         this.events = events;
@@ -355,7 +354,7 @@ public class RedshiftService implements ManagedSecretRotator {
                     RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                     RedshiftCredentialBroker credentialBroker) {
         this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
-                credentialBroker, null, new ObjectMapper().findAndRegisterModules(), null);
+                credentialBroker, null, new ObjectMapper(), null);
     }
 
     /**
@@ -365,21 +364,22 @@ public class RedshiftService implements ManagedSecretRotator {
      */
     @PostConstruct
     void migrateRegionalRecords() {
-        List<AccountAwareStorageBackend.AccountEntry<Cluster>> persisted = new ArrayList<>();
-        // Read only when a store has records to move, so that a second call, from onStart, costs a key scan.
-        Supplier<List<AccountAwareStorageBackend.AccountEntry<Cluster>>> persistedClusters = () -> {
-            if (persisted.isEmpty()) {
-                persisted.addAll(clusters.scanAllAccountEntries(k -> true));
+        // The clusters are read once, and only when a store has records to move.
+        migrateLegacyRegionalRecords(new Supplier<>() {
+            private List<AccountAwareStorageBackend.AccountEntry<Cluster>> read;
+
+            @Override
+            public List<AccountAwareStorageBackend.AccountEntry<Cluster>> get() {
+                if (read == null) {
+                    read = clusters.scanAllAccountEntries(k -> true);
+                }
+                return read;
             }
-            return persisted;
-        };
-        migrateLegacyRegionalRecords(persistedClusters);
+        });
     }
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
     void onStart(@Observes StartupEvent event) {
-        // A service built without CDI moves its records here; one CDI built has moved them already.
-        migrateRegionalRecords();
         List<AccountAwareStorageBackend.AccountEntry<Cluster>> persistedClusters =
                 clusters.scanAllAccountEntries(k -> true);
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : persistedClusters) {
@@ -2180,38 +2180,68 @@ public class RedshiftService implements ManagedSecretRotator {
     /** Separates the Region from the name in a {@link #regionalKey}. */
     private static final String KEY_SEPARATOR = "::";
 
+    /** Copies records through their JSON form, with the settings the file storages read and write them with. */
+    private static final ObjectMapper RECORD_COPIES = new ObjectMapper().registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
     /**
      * A copy of a stored record, through its JSON form as the storage keeps it, so a record copied to a second Region
      * is a record of its own there, as it would be read back from disk.
      */
     @SuppressWarnings("unchecked")
-    private <V> V copyOf(V record) {
-        return recordCopies.convertValue(record, (Class<V>) record.getClass());
+    private static <V> V copyOf(V record) {
+        return RECORD_COPIES.convertValue(record, (Class<V>) record.getClass());
     }
 
     /**
      * Moves the cluster parameter groups, subnet groups, snapshot schedules and snapshot copy grants stored before
      * they became Regional from their bare name onto {@link #regionalKey} keys. They recorded no Region, and every
-     * Region saw them: each moves to the default Region, and every other Region where one of its account's clusters
-     * uses it gets a copy of its own, so those clusters keep finding it.
+     * Region saw them. Each moves to the Region it shows it was made in, when it shows one: a subnet group to its
+     * subnets' Region, a copy grant to its KMS key's. Any other moves to the default Region. Every other Region where
+     * one of its account's clusters uses it gets a copy of its own, so those clusters keep finding it.
      */
     private void migrateLegacyRegionalRecords(
             Supplier<List<AccountAwareStorageBackend.AccountEntry<Cluster>>> persistedClusters) {
-        migrateLegacyRegionalRecords(parameterGroups, ClusterParameterGroup::getParameterGroupName, persistedClusters,
-                Cluster::getClusterParameterGroupName, this::clusterRegion, (copy, region) -> { });
-        migrateLegacyRegionalRecords(subnetGroups, ClusterSubnetGroup::getClusterSubnetGroupName, persistedClusters,
-                Cluster::getClusterSubnetGroupName, this::clusterRegion, (copy, region) -> { });
-        migrateLegacyRegionalRecords(snapshotSchedules, SnapshotSchedule::getScheduleIdentifier, persistedClusters,
-                Cluster::getSnapshotScheduleIdentifier, this::clusterRegion, (copy, region) -> { });
-        migrateLegacyRegionalRecords(snapshotCopyGrants, SnapshotCopyGrant::getSnapshotCopyGrantName, persistedClusters,
-                Cluster::getSnapshotCopyGrantName, Cluster::getSnapshotCopyDestinationRegion,
-                this::useTheDefaultKeyOfItsRegion);
+        migrateLegacyRegionalRecords(parameterGroups, ClusterParameterGroup::getParameterGroupName, group -> null,
+                persistedClusters, Cluster::getClusterParameterGroupName, this::clusterRegion, (copy, region) -> { });
+        migrateLegacyRegionalRecords(subnetGroups, ClusterSubnetGroup::getClusterSubnetGroupName,
+                RedshiftService::regionOfSubnets, persistedClusters, Cluster::getClusterSubnetGroupName,
+                this::clusterRegion, (copy, region) -> { });
+        migrateLegacyRegionalRecords(snapshotSchedules, SnapshotSchedule::getScheduleIdentifier, schedule -> null,
+                persistedClusters, Cluster::getSnapshotScheduleIdentifier, this::clusterRegion, (copy, region) -> { });
+        migrateLegacyRegionalRecords(snapshotCopyGrants, SnapshotCopyGrant::getSnapshotCopyGrantName,
+                RedshiftService::regionOfKey, persistedClusters, Cluster::getSnapshotCopyGrantName,
+                Cluster::getSnapshotCopyDestinationRegion, this::useTheDefaultKeyOfItsRegion);
+    }
+
+    /** The Region of the zones EC2 placed a subnet group's subnets in, when they are all in one. */
+    private static String regionOfSubnets(ClusterSubnetGroup group) {
+        Map<String, String> zones = group.getSubnetZones();
+        if (zones == null || zones.isEmpty()) {
+            return null;
+        }
+        Set<String> regions = new LinkedHashSet<>();
+        for (String zone : zones.values()) {
+            String region = zone == null || zone.isEmpty() ? null : zone.substring(0, zone.length() - 1);
+            regions.add(region != null && Ec2Service.isModelledAvailabilityZone(region, zone) ? region : null);
+        }
+        return regions.size() == 1 ? regions.iterator().next() : null;
+    }
+
+    /** The Region of a copy grant's KMS key, when its key is a KMS ARN: a key is of one Region, the grant's. */
+    private static String regionOfKey(SnapshotCopyGrant grant) {
+        String key = grant.getKmsKeyId();
+        if (!AwsArnUtils.isArnFor(key, "kms")) {
+            return null;
+        }
+        String region = AwsArnUtils.parse(key).region();
+        return region.isEmpty() ? null : region;
     }
 
     /**
-     * A grant placed in {@code region} that holds another Region's AWS-managed Redshift key, the one a grant created
+     * A grant copied to {@code region} that holds another Region's AWS-managed Redshift key, the one a grant created
      * without {@code KmsKeyId} gets, holds {@code region}'s instead, as a grant created there would. A stored grant
-     * records no difference between that key given and defaulted, so both are moved; any other key is kept.
+     * records no difference between that key given and defaulted, so both are changed; any other key is kept.
      */
     private void useTheDefaultKeyOfItsRegion(SnapshotCopyGrant grant, String region) {
         String key = grant.getKmsKeyId();
@@ -2226,10 +2256,12 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     /**
-     * Moves {@code store}'s records without a Region in their key: the clusters that use one name it through
-     * {@code nameUsed}, in the Region {@code regionOfUse} gives, and {@code forRegion} fits a copy to its Region.
+     * Moves {@code store}'s records without a Region in their key to the Region {@code regionMadeIn} gives, or to the
+     * default Region. The clusters that use one name it through {@code nameUsed}, in the Region {@code regionOfUse}
+     * gives, and each of those Regions gets a copy, which {@code forRegion} fits to it.
      */
     private <V> void migrateLegacyRegionalRecords(AccountAwareStorageBackend<V> store, Function<V, String> name,
+                                                  Function<V, String> regionMadeIn,
                                                   Supplier<List<AccountAwareStorageBackend.AccountEntry<Cluster>>> persistedClusters,
                                                   Function<Cluster, String> nameUsed,
                                                   Function<Cluster, String> regionOfUse,
@@ -2240,11 +2272,13 @@ public class RedshiftService implements ManagedSecretRotator {
             return;
         }
         String defaultRegion = regionResolver.getDefaultRegion();
+        Function<V, String> home = value -> Optional.ofNullable(regionMadeIn.apply(value)).orElse(defaultRegion);
         for (AccountAwareStorageBackend.AccountEntry<V> entry : entries) {
             String recordName = name.apply(entry.value());
+            String recordHome = home.apply(entry.value());
             for (AccountAwareStorageBackend.AccountEntry<Cluster> cluster : persistedClusters.get()) {
                 String region = regionOfUse.apply(cluster.value());
-                if (recordName == null || region == null || region.equals(defaultRegion)
+                if (recordName == null || region == null || region.equals(recordHome)
                         || !cluster.accountId().equals(entry.accountId())
                         || !recordName.equals(nameUsed.apply(cluster.value()))) {
                     continue;
@@ -2257,19 +2291,7 @@ public class RedshiftService implements ManagedSecretRotator {
             }
         }
         store.migrateLegacyEntriesInAllAccounts(legacy,
-                value -> name.apply(value) == null ? null : regionalKey(defaultRegion, name.apply(value)));
-        // The record moved to the default Region is fitted to it too, as each copy is to its own.
-        for (AccountAwareStorageBackend.AccountEntry<V> entry : entries) {
-            String recordName = name.apply(entry.value());
-            if (recordName == null) {
-                continue;
-            }
-            String key = regionalKey(defaultRegion, recordName);
-            store.getForAccount(entry.accountId(), key).ifPresent(moved -> {
-                forRegion.accept(moved, defaultRegion);
-                store.putForAccount(entry.accountId(), key, moved);
-            });
-        }
+                value -> name.apply(value) == null ? null : regionalKey(home.apply(value), name.apply(value)));
         store.flush();
     }
 
