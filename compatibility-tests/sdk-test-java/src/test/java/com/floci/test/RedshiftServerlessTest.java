@@ -102,6 +102,49 @@ class RedshiftServerlessTest {
     }
 
     @Test
+    void rotatingTheManagedNamespaceSecretKeepsTheDataApiAuthenticated() throws Exception {
+        assumeFalse(TestFixtures.isRealAws(), "Creates local resources and rotates a local managed secret");
+
+        try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient();
+             SecretsManagerClient secrets = TestFixtures.secretsManagerClient();
+             RedshiftDataClient data = TestFixtures.redshiftDataClient()) {
+            String suffix = UUID.randomUUID().toString().substring(0, 8);
+            String namespaceName = "floci-rotate-ns-" + suffix;
+            String workgroupName = "floci-rotate-wg-" + suffix;
+            ObjectMapper mapper = new ObjectMapper();
+            try {
+                String secretArn = client.createNamespace(request -> request.namespaceName(namespaceName)
+                        .adminUsername("admin").dbName("analytics").manageAdminPassword(true))
+                        .namespace().adminPasswordSecretArn();
+                client.createWorkgroup(request -> request.workgroupName(workgroupName).namespaceName(namespaceName));
+                String before = mapper.readTree(secrets.getSecretValue(request -> request.secretId(secretArn))
+                        .secretString()).path("password").asText();
+
+                secrets.rotateSecret(request -> request.secretId(secretArn));
+
+                String after = before;
+                for (int attempt = 0; attempt < 50 && after.equals(before); attempt++) {
+                    Thread.sleep(200);
+                    after = mapper.readTree(secrets.getSecretValue(request -> request.secretId(secretArn))
+                            .secretString()).path("password").asText();
+                }
+                assertThat(after).isNotEqualTo(before);
+                assertThat(mapper.readTree(secrets.getSecretValue(request -> request.secretId(secretArn)
+                        .versionStage("AWSPREVIOUS")).secretString()).path("password").asText()).isEqualTo(before);
+
+                ExecuteStatementResponse executed = data.executeStatement(request -> request
+                        .workgroupName(workgroupName).secretArn(secretArn).database("analytics")
+                        .sql("SELECT 1").waitTimeSeconds(30));
+                DescribeStatementResponse described = data.describeStatement(request -> request.id(executed.id()));
+                assertThat(described.status()).as(described.error()).isEqualTo(StatusString.FINISHED);
+            } finally {
+                deleteWorkgroupBestEffort(client, workgroupName);
+                deleteBestEffort(client, namespaceName);
+            }
+        }
+    }
+
+    @Test
     void namespaceLifecycleUsesAwsSdk() {
         assumeFalse(TestFixtures.isRealAws(), "Creates a namespace and asserts emulator-local defaults");
 
