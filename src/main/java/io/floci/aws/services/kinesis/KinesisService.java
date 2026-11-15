@@ -833,9 +833,11 @@ public class KinesisService implements ResourceProvider {
      * Reshards a stream to {@code targetShardCount} open shards using uniform scaling: the only
      * scaling type AWS documents. The asynchronous status window begins before potentially
      * blocking normalization so callers observe the same lifecycle as the individual reshard
-     * APIs; the first persistence write records that status and rolling-window marker before
-     * topology staging. The topology changes are staged on a separate shard list and published
-     * with one final storage write after every split or merge validates. The staged
+     * APIs; after normalization, the first persistence write records that status and rolling-window
+     * marker before topology staging. The topology changes are staged on a separate shard list and
+     * published with one final storage write after every split or merge validates. The staged list
+     * reuses existing shard instances, so this protects persisted writes and rollback rather than
+     * providing a lock-free snapshot to readers of mutable shard objects. The staged
      * operations use the same lineage rules as {@link #splitShard} and {@link #mergeShards}, so
      * parent and adjacent-parent relationships remain identical to calling those APIs by hand;
      * a failed commit restores the original shard state and rolling-window history.
