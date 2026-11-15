@@ -1969,7 +1969,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty and Lambda they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda and AWS Glue they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2229,6 +2229,18 @@ from their path, and a publishing destination on
 operations act on no resource type and are checked on `*`. An `EnableSecurityHub` or a GuardDuty
 create carrying tags also needs `securityhub:TagResource` on the hub or `guardduty:TagResource` on the
 resource it creates, with the id GuardDuty mints open (`detector/*`, `detector/<DetectorId>/ipset/*`).
+AWS Glue's table operations are checked on the account's Data Catalog, `catalog`, the database and the
+table they name, `database/<DatabaseName>` and `table/<DatabaseName>/<Name>`, all three the types the
+Service Reference gives `glue:GetTable` and its kin, and a database operation on `catalog` and
+`database/<Name>`; jobs, crawlers, triggers, workflows and connections on `job/<Name>` and the like. The
+table reads no member for the catalog a `CatalogId` names, so a request naming another account's catalog
+or a federated one is checked on the caller's account's ARNs, and a catalog's own update or deletion on
+`catalog/*`. A schema named by its registry and name is checked on `schema/<SchemaName>`, the Service
+Reference's format, which leaves out the registry Glue's schema ARN carries; one named by its ARN is
+checked on that ARN. A batch delete is checked on each table its `TablesToDelete` lists, a
+`BatchDeleteTableNameList`, and each connection its `ConnectionNameList` lists; `CreateDatabase` on the catalog
+and the database its `DatabaseInput.Name` names, and its tags on that database; `GetWorkflowRun` on the workflow
+its `Name` names, "the workflow being run".
 
 A route no rule maps is the operation whose route it matches in botocore's model of its service,
 vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
@@ -2555,7 +2567,9 @@ whose action acts on no resource type is checked on `*`, and its tags on the res
 type it is named after with the ids its service mints open, where its tagging action acts on that type:
 Resource Explorer's `CreateView` on `view/<ViewName>/*`, OAM's `CreateSink` on `sink/*`, ACM's
 `RequestCertificate` on `certificate/*`; a Cloud Map namespace's tags, whose `TagResource` acts on no
-type, stay on `*`. Where the
+type, stay on `*`. So are the tags of a create whose action acts on other types alone, when its request
+names every variable of the resource it makes, a field of a structure included: Glue's `CreateConnection` is
+checked on its connection type and the catalog, and its tags on `connection/<ConnectionInput.Name>`. Where the
 tagging action takes
 its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, CloudFormation's
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:

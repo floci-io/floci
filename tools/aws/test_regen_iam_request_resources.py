@@ -2368,3 +2368,62 @@ def test_clients_sharing_an_endpoint_keep_every_type_an_arn_member_may_name_and_
     assert r.narrowed(resources, set(), tags, "TagResource", formats) == [
         {"types": ["eventSourceMapping", "function"], "arn": "Resource"}]
     assert r.narrowed(resources, set(), tags, "TagResource", formats, arn_types=False) == resources
+
+
+def test_input_and_list_suffixes_stem_away_like_the_others():
+    # Glue names what a create makes in a `<Type>Input` structure, and a batch's names in a `<Type>NameList`.
+    assert r.stem("DatabaseInput") == "database"
+    assert r.stem("ConnectionNameList") == "connection"
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingNameList[]")) == [
+        {"type": "thing", "fill": {"ThingName": "ThingNameList[]"}}]
+
+
+def test_a_list_whose_botocore_shape_is_named_after_the_type_fills_it():
+    # Glue's BatchDeleteTable names its tables by TablesToDelete, a BatchDeleteTableNameList.
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingsToDelete[]"),
+                           shapes={"ThingsToDelete": "BatchDeleteThingNameList"}) == [
+        {"type": "thing", "fill": {"ThingName": "ThingsToDelete[]"}}]
+    # A list whose shape is named after nothing the action acts on names nothing.
+    assert r.resources_for("svc:BatchDeleteThing", ["thing"], FORMATS, members("ThingsToDelete[]"),
+                           shapes={"ThingsToDelete": "BatchDeleteNameList"}) == []
+
+
+def test_a_type_of_no_variables_stays_beside_a_creates_own_unnamed_type():
+    # Glue's CreateDatabase names its database only in a field the documented rule reads; the account's catalog,
+    # of no variables, is checked all the same rather than dropped as its alternative.
+    assert r.resources_for("svc:CreatePool", ["catalog", "pool"], FORMATS, members("Description")) == [
+        {"type": "catalog", "fill": {}}]
+
+
+def test_being_ends_a_types_name_in_documentation():
+    # "Name of the workflow being run", Glue's GetWorkflowRun's Name.
+    formats = {"workflow": "arn:${Partition}:svc:${Region}:${Account}:workflow/${WorkflowName}"}
+    assert r.doc_names("name of the workflow being run", "workflow", formats)
+    assert not r.doc_names("name of the workflowrun being run", "workflow", formats)
+
+
+def widget_model(tags: bool) -> dict:
+    """A create whose action acts on the widget's kind alone, naming the widget it makes in `WidgetInput.Name`, and
+    carrying tags when asked, as Glue's CreateConnection does."""
+    service = model({"CreateWidget": {"KindName": "String"}})
+    service["shapes"]["WidgetInput"] = {"type": "structure", "members": {
+        "Name": {"shape": "String", "documentation": "<p>The name of the widget.</p>"},
+        "Description": {"shape": "String", "documentation": "<p>The description of the widget.</p>"}}}
+    service["shapes"]["Tags"] = {"type": "map", "key": {"shape": "String"}, "value": {"shape": "String"}}
+    service["shapes"]["CreateWidgetIn"]["members"]["WidgetInput"] = {"shape": "WidgetInput"}
+    if tags:
+        service["shapes"]["CreateWidgetIn"]["members"]["Tags"] = {"shape": "Tags"}
+    return {"svc": service}
+
+
+def test_a_create_acting_on_other_types_alone_tags_what_it_makes_when_it_names_it_in_full():
+    formats = {"widget": "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}",
+               "kind": "arn:${Partition}:svc:${Region}:${Account}:kind/${KindName}"}
+    made = r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True))
+    assert made == [{"type": "widget", "fill": {"WidgetName": "WidgetInput.Name"}}]
+    # Without tags, what it makes is not needed; and a create acting on the type it makes is checked on it.
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(False)) == []
+    assert r.makes_for("svc:CreateWidget", ["widget"], formats, members("KindName"), models=widget_model(True)) == []
+    # One whose request does not name every variable of what it makes leaves it to the action's own resources.
+    formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}/${WidgetId}"
+    assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []
