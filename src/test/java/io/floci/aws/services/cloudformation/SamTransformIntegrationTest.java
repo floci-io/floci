@@ -34,6 +34,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 class SamTransformIntegrationTest {
 
+    private static final String HANDLER_SOURCE = "exports.handler=async(e)=>({statusCode:200})";
+
     private final List<String> stacksToDelete = new ArrayList<>();
 
     @BeforeAll
@@ -235,10 +237,10 @@ class SamTransformIntegrationTest {
             .header("X-Amz-Executed-Version", equalTo("1"))
             .body("ok", equalTo(true));
 
-        byte[] changedCode = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ ok: false });");
+        String changedCode = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ ok: false });");
         given()
             .contentType("application/json")
-            .body("{\"ZipFile\":\"" + Base64.getEncoder().encodeToString(changedCode) + "\"}")
+            .body("{\"ZipFile\":\"" + changedCode + "\"}")
         .when()
             .put("/2015-03-31/functions/sam-alias-func/code")
         .then()
@@ -1645,7 +1647,7 @@ class SamTransformIntegrationTest {
         .then()
             .statusCode(200);
 
-        byte[] zipBytes = buildHandlerZip();
+        byte[] zipBytes = LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE);
         given()
             .contentType("application/zip")
             .body(zipBytes)
@@ -2269,7 +2271,7 @@ class SamTransformIntegrationTest {
         String bucket = "sam-layer-code";
         stacksToDelete.add(stack);
         given().when().put("/" + bucket).then().statusCode(200);
-        given().contentType("application/zip").body(buildHandlerZip())
+        given().contentType("application/zip").body(LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE))
                 .when().put("/" + bucket + "/layer.zip").then().statusCode(200);
         String template = """
                 Transform: AWS::Serverless-2016-10-31
@@ -2329,11 +2331,11 @@ class SamTransformIntegrationTest {
                     .body("CompatibleRuntimes", hasItems("nodejs22.x", "python3.14"))
                     .body("CompatibleArchitectures", hasItem("arm64"))
                     .body("LicenseInfo", equalTo("MIT"))
-                    .body("Content.CodeSize", equalTo(buildHandlerZip().length));
+                    .body("Content.CodeSize", equalTo(LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE).length));
             given().when().get("/2015-03-31/functions/sam-layer-consumer")
                     .then().statusCode(200).body("Configuration.Layers[0].Arn", equalTo(arn))
                     .body("Configuration.Environment.Variables.DependsOn", equalTo("Layer"));
-            given().contentType("application/zip").body(buildHandlerZip())
+            given().contentType("application/zip").body(LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE))
                     .when().put("/" + bucket + "/updated.zip").then().statusCode(200);
             given().contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "UpdateStack").formParam("StackName", stack)
@@ -2371,14 +2373,6 @@ class SamTransformIntegrationTest {
                 .split("<OutputKey>" + outputKey + "</OutputKey>")[1]
                 .split("<OutputValue>")[1]
                 .split("</OutputValue>")[0];
-    }
-
-    private static byte[] buildHandlerZip() {
-        try {
-            return LambdaCodeFixtures.nodeJsZip("exports.handler=async(e)=>({statusCode:200})");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     private static void waitForStackStatus(String stackName, String status) {

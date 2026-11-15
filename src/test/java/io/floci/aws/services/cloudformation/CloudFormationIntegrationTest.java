@@ -19,7 +19,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -47,6 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class CloudFormationIntegrationTest {
 
+    private static final String HANDLER_SOURCE = "exports.handler=async(e)=>({statusCode:200})";
+
     private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
@@ -68,14 +69,6 @@ class CloudFormationIntegrationTest {
     @BeforeEach
     void resetClock() {
         clock.reset();
-    }
-
-    private static byte[] buildHandlerZip() {
-        try {
-            return LambdaCodeFixtures.nodeJsZip("exports.handler=async(e)=>({statusCode:200})");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     /**
@@ -710,7 +703,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_lambdaWithS3Code() {
-        byte[] zipBytes = buildHandlerZip();
+        byte[] zipBytes = LambdaCodeFixtures.nodeJsZip(HANDLER_SOURCE);
 
         // Create S3 bucket
         given()
@@ -1872,7 +1865,7 @@ class CloudFormationIntegrationTest {
 
     @Test
     void createStack_lambdaWithZipFile() {
-        String base64Zip = Base64.getEncoder().encodeToString(buildHandlerZip());
+        String base64Zip = LambdaCodeFixtures.nodeJsZipBase64(HANDLER_SOURCE);
 
         String template = """
             {

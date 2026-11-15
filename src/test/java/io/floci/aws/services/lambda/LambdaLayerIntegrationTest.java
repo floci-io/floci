@@ -43,8 +43,7 @@ class LambdaLayerIntegrationTest {
     }
 
     private static String functionZipBase64() throws Exception {
-        byte[] archive = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ statusCode: 200 });");
-        return Base64.getEncoder().encodeToString(archive);
+        return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 200 });");
     }
 
     // ── PublishLayerVersion ───────────────────────────────────────────────────

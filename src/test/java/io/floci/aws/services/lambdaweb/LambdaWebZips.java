@@ -1,9 +1,5 @@
 package io.floci.aws.services.lambdaweb;
 
-import io.floci.aws.testing.LambdaCodeFixtures;
-
-import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -13,14 +9,6 @@ import java.util.Arrays;
 public final class LambdaWebZips {
 
     private LambdaWebZips() {
-    }
-
-    public static byte[] indexJs(String source) {
-        try {
-            return LambdaCodeFixtures.nodeJsZip(source);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
     }
 
     /** Files whose ZIP64 fields declare these sizes over empty data. */

@@ -11,7 +11,6 @@ import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
-import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
 
@@ -132,8 +131,7 @@ class LambdaExecutionRoleIamEnforcementIntegrationTest {
     }
 
     private static String handlerZipBase64() throws Exception {
-        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({});\n");
-        return Base64.getEncoder().encodeToString(bytes);
+        return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({});\n");
     }
 
     private static String auth(String accessKeyId, String service) {

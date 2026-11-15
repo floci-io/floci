@@ -2865,8 +2865,7 @@ class LambdaServiceTest {
     }
 
     private static String zipWithBody(String body) throws Exception {
-        byte[] archive = LambdaCodeFixtures.nodeJsZip(body + "\n");
-        return Base64.getEncoder().encodeToString(archive);
+        return LambdaCodeFixtures.nodeJsZipBase64(body + "\n");
     }
 
     @Test

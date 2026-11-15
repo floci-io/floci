@@ -7,8 +7,6 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.util.Base64;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -299,14 +297,13 @@ class LambdaVersionIntegrationTest {
     }
 
     private void createInvocableFunction(String fnName) throws Exception {
-        byte[] archive = LambdaCodeFixtures.nodeJsZip("""
+        String base64Zip = LambdaCodeFixtures.nodeJsZipBase64("""
                 exports.handler = async (event, context) => ({
                     ok: true,
                     envVersion: process.env.AWS_LAMBDA_FUNCTION_VERSION,
                     contextVersion: context.functionVersion
                 });
                 """);
-        String base64Zip = Base64.getEncoder().encodeToString(archive);
 
         given()
             .contentType("application/json")

@@ -586,8 +586,7 @@ class LambdaIntegrationTest {
     @Order(40)
     void getFunction_codeLocation_isDownloadableAndByteExact() throws Exception {
         // Build a real zip with a nodejs handler file (extractZipCode verifies it).
-        byte[] archive = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ statusCode: 200 });\n");
-        String zipB64 = Base64.getEncoder().encodeToString(archive);
+        String zipB64 = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 200 });\n");
 
         given()
             .contentType("application/json")
@@ -643,10 +642,10 @@ class LambdaIntegrationTest {
                 "downloaded package must be byte-identical to the uploaded zip");
 
         // Redeploy overwrites in place (stable key), no stale package accumulates.
-        byte[] replacementArchive = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ statusCode: 201 });\n");
+        String replacementArchive = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ statusCode: 201 });\n");
         given()
             .contentType("application/json")
-            .body("{ \"ZipFile\": \"%s\" }".formatted(Base64.getEncoder().encodeToString(replacementArchive)))
+            .body("{ \"ZipFile\": \"%s\" }".formatted(replacementArchive))
         .when()
             .put(BASE_PATH + "/functions/code-dl-fn/code")
         .then()

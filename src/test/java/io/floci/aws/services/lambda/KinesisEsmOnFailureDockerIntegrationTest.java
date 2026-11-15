@@ -16,7 +16,6 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
 
@@ -148,7 +147,7 @@ class KinesisEsmOnFailureDockerIntegrationTest {
     }
 
     private static String poisonRaisingZipBase64() throws Exception {
-        byte[] bytes = LambdaCodeFixtures.nodeJsZip("""
+        return LambdaCodeFixtures.nodeJsZipBase64("""
                 exports.handler = async (event) => {
                   for (const record of event.Records) {
                     if (Buffer.from(record.kinesis.data, 'base64').toString() === 'poison') {
@@ -157,6 +156,5 @@ class KinesisEsmOnFailureDockerIntegrationTest {
                   }
                 };
                 """);
-        return Base64.getEncoder().encodeToString(bytes);
     }
 }

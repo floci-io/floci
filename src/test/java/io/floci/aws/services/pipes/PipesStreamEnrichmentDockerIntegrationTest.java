@@ -17,7 +17,6 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 
@@ -175,7 +174,7 @@ class PipesStreamEnrichmentDockerIntegrationTest {
     }
 
     private static String enrichmentZipBase64() throws Exception {
-        byte[] bytes = LambdaCodeFixtures.nodeJsZip("""
+        return LambdaCodeFixtures.nodeJsZipBase64("""
                 exports.handler = async (records) => records.flatMap((record) => {
                   const rowId = record.dynamodb.Keys.sk.S.split('#')[1];
                   return [1, 2].map((part) => ({
@@ -185,7 +184,6 @@ class PipesStreamEnrichmentDockerIntegrationTest {
                   }));
                 });
                 """);
-        return Base64.getEncoder().encodeToString(bytes);
     }
 
     private static void putItem(String table, String sortKey) {

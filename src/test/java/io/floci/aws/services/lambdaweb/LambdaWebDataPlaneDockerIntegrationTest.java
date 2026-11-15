@@ -546,7 +546,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
     @Timeout(180)
     void anEnvironmentRunsTheCodeTheRevisionWasCreatedFrom() throws Exception {
         String domain = createFunction(30);
-        s3Service.putObject(BUCKET, functionName + ".zip", zip("process.exit(1);"), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, functionName + ".zip", LambdaCodeFixtures.nodeJsZip("process.exit(1);"),
+                "application/zip", Map.of());
 
         given().header("Host", domain).when().get("/status/200").then().statusCode(200).body(equalTo("status body"));
     }
@@ -670,7 +671,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         functionName = "dp-docker-" + Long.toString(System.nanoTime(), 36);
         LambdaWebRoles.trustLambda(iamService, ROLE);
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, functionName + ".zip", zip(APP), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, functionName + ".zip", LambdaCodeFixtures.nodeJsZip(APP), "application/zip", Map.of());
         return given().contentType("application/json")
                 .body("""
                         {"functionName": "%s",
@@ -938,10 +939,6 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         String prefix = name + ":";
         return List.of(head.split("\r\n")).stream()
                 .filter(line -> line.regionMatches(true, 0, prefix, 0, prefix.length())).toList();
-    }
-
-    private static byte[] zip(String indexJs) throws IOException {
-        return LambdaCodeFixtures.nodeJsZip(indexJs);
     }
 
     private boolean isDockerAvailable() {

@@ -5,6 +5,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.EnforcementFixtures.Session;
 import io.floci.aws.testing.IamEnforcementProfile;
+import io.floci.aws.testing.LambdaCodeFixtures;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -62,7 +63,7 @@ class LambdaWebAuthTypeConditionKeysIntegrationTest {
         String name = "auth-type-" + Long.toString(System.nanoTime(), 36);
         LambdaWebRoles.trustLambda(iamService, ROLE);
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, "app.zip", LambdaCodeFixtures.nodeJsZip(""), "application/zip", Map.of());
         cleanup.register(() -> given().header("Authorization", auth(ACCOUNT, "lambda"))
                 .when().delete(BASE + "/" + name));
         given().header("Authorization", auth(ACCOUNT, "lambda")).contentType("application/json")

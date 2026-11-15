@@ -34,8 +34,7 @@ public final class WebSocketTestSupport {
      * Used to create Lambda function deployment packages in tests.
      */
     public static String createLambdaZip(String handlerCode) throws Exception {
-        byte[] archive = LambdaCodeFixtures.nodeJsZip(handlerCode);
-        return Base64.getEncoder().encodeToString(archive);
+        return LambdaCodeFixtures.nodeJsZipBase64(handlerCode);
     }
 
     // ──────────────────────────── Lambda cleanup ────────────────────────────

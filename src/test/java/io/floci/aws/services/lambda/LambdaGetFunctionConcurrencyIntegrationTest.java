@@ -4,8 +4,6 @@ import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.util.Base64;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -116,13 +114,13 @@ class LambdaGetFunctionConcurrencyIntegrationTest {
     }
 
     private static void createFunction(String account, String region, String name) throws Exception {
-        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({});");
+        String code = LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({});");
         given().header("Authorization", auth(account, region)).contentType("application/json")
                 .body("""
                     {"FunctionName":"%s","Runtime":"nodejs20.x",
                      "Role":"arn:aws:iam::%s:role/lambda-role","Handler":"index.handler",
                      "Code":{"ZipFile":"%s"}}
-                    """.formatted(name, account, Base64.getEncoder().encodeToString(bytes)))
+                    """.formatted(name, account, code))
                 .when().post(FUNCTIONS).then().statusCode(201);
     }
 

@@ -4,10 +4,6 @@ import io.floci.aws.testing.LambdaCodeFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-import java.io.UncheckedIOException;
-import java.util.Base64;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -53,7 +49,7 @@ class LambdaAccountSettingsIntegrationTest {
                         "Handler": "index.handler",
                         "Code": {"ZipFile": "%s"}
                     }
-                    """.formatted(zipBase64()))
+                    """.formatted(LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => ({ ok: true });")))
                 .when()
                 .post("/2015-03-31/functions")
                 .then()
@@ -83,14 +79,5 @@ class LambdaAccountSettingsIntegrationTest {
 
     private static String auth(String accountId) {
         return "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260101/us-east-1/lambda/aws4_request";
-    }
-
-    private static String zipBase64() {
-        try {
-            byte[] archive = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => ({ ok: true });");
-            return Base64.getEncoder().encodeToString(archive);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
     }
 }

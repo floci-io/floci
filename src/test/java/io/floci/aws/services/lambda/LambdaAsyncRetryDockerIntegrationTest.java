@@ -12,7 +12,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.util.Base64;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -165,8 +164,7 @@ class LambdaAsyncRetryDockerIntegrationTest {
     }
 
     private static String failingZipBase64() throws Exception {
-        byte[] bytes = LambdaCodeFixtures.nodeJsZip("exports.handler = async () => { throw new Error('boom'); };\n");
-        return Base64.getEncoder().encodeToString(bytes);
+        return LambdaCodeFixtures.nodeJsZipBase64("exports.handler = async () => { throw new Error('boom'); };\n");
     }
 
     private boolean isDockerAvailable() {
