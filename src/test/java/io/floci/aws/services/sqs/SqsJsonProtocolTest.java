@@ -1132,6 +1132,40 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void fifoQueueRejectsPerMessageDelaySecondsAsAPerEntryBatchFailure() {
+        String fifoUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-fifo-delay.fifo\",\"Attributes\":{\"FifoQueue\":\"true\","
+                    + "\"ContentBasedDeduplication\":\"true\"}}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"MessageBody\":\"x\",\"MessageGroupId\":\"g\","
+                    + "\"DelaySeconds\":5}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"Entries\":["
+                    + "{\"Id\":\"delayed\",\"MessageBody\":\"a\",\"MessageGroupId\":\"g\",\"DelaySeconds\":5},"
+                    + "{\"Id\":\"zero\",\"MessageBody\":\"b\",\"MessageGroupId\":\"g\",\"DelaySeconds\":0},"
+                    + "{\"Id\":\"plain\",\"MessageBody\":\"c\",\"MessageGroupId\":\"g\"}]}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Failed.Id", contains("delayed"))
+            .body("Failed[0].Code", equalTo("InvalidParameterValue"))
+            .body("Failed[0].SenderFault", equalTo(true))
+            .body("Successful.Id", contains("zero", "plain"));
+    }
+
+    @Test
     void malformedMessageAttributeValuesAreRejected() {
         String attributeQueueUrl = given()
             .contentType(CONTENT_TYPE)

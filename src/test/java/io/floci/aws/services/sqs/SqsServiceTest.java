@@ -1531,19 +1531,30 @@ class SqsServiceTest {
     }
 
     @Test
-    void fifoQueueIgnoresPerMessageDelaySeconds() {
-        // AWS SQS FIFO queues only support queue-level DelaySeconds; any
-        // per-message value is ignored. Here the queue default is 0 and the
-        // caller passes a positive per-message delay -- the message must be
-        // immediately visible.
+    void fifoQueueRejectsNonZeroPerMessageDelaySeconds() {
         String region = "eu-west-1";
-        Queue queue = sqsService.createQueue("fifo-ignores-per-msg.fifo",
+        Queue queue = sqsService.createQueue("fifo-rejects-per-msg.fifo",
                 Map.of("ContentBasedDeduplication", "true"), region);
-        sqsService.sendMessage(queue.getQueueUrl(), "msg", 60, "group1", null, region);
 
-        List<Message> immediate = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region);
-        assertEquals(1, immediate.size(),
-                "FIFO queues must ignore per-message DelaySeconds");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "msg", 60, "group1", null, region));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Value 60 for parameter DelaySeconds is invalid. "
+                + "Reason: The request include parameter that is not valid for this queue type.", ex.getMessage());
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region).isEmpty(),
+                "A rejected send must not enqueue the message");
+    }
+
+    @Test
+    void fifoQueueAcceptsZeroOrAbsentPerMessageDelaySeconds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("fifo-accepts-zero-delay.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+
+        sqsService.sendMessage(queue.getQueueUrl(), "zero", 0, "group1", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "absent", null, "group2", null, region);
+
+        assertEquals(2, sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, region).size());
     }
 
     // --- Queue-level DelaySeconds for standard queues ---

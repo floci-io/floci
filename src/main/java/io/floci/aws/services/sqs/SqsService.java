@@ -1047,16 +1047,16 @@ public class SqsService implements Resettable, ResourceProvider {
                             + "Reason: Must be >= 0 and <= " + MAX_DELAY_SECONDS + ".", 400);
         }
 
+        if (queue.isFifo() && delaySeconds != null && delaySeconds != 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + delaySeconds + " for parameter DelaySeconds is invalid. "
+                            + "Reason: The request include parameter that is not valid for this queue type.", 400);
+        }
+
         int queueDelaySeconds = parseNonNegativeSecondsAttribute(queue.getAttributes().get("DelaySeconds"));
         String effectiveSenderId = senderId != null ? senderId : senderIdFor(queueUrl);
 
-        // Resolve the effective delay:
-        //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
-        //     so any per-message value is ignored and we always use the
-        //     queue attribute.
-        //   - Standard queues honor per-message DelaySeconds when explicitly
-        //     provided (non-null). When omitted (null), the queue-level
-        //     default applies.
+        // FIFO queues use the queue-level delay; standard queues honor a per-message value.
         int effectiveDelaySeconds;
         if (queue.isFifo()) {
             effectiveDelaySeconds = queueDelaySeconds;
