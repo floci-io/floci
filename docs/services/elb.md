@@ -264,7 +264,7 @@ aws elbv2 create-load-balancer \
   --name my-alb \
   --type application \
   --scheme internet-facing \
-  --subnets subnet-013f16799e920587a subnet-00af8362367af5f99
+  --subnets subnet-8068005281bb3dc6a subnet-c8ba5d8ce63635cea
 
 # Create a target group
 aws elbv2 create-target-group \

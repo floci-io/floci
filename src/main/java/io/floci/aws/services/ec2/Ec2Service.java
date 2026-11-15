@@ -4115,10 +4115,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         } else if (availabilityZone != null && !availabilityZone.isBlank()) {
             subnet = resolveSubnetForAvailabilityZone(region, availabilityZone);
         } else {
-            // Pick first default subnet
+            // Pick the default subnet of the region's first availability zone. Storage order is
+            // not the creation order, so a scan's findFirst is whichever entry the map hashes
+            // first; the choice has to stay us-east-1a whatever the ids are.
             subnet = subnets.scan(k -> true).stream()
                     .filter(s -> s.getRegion().equals(region) && s.isDefaultForAz())
-                    .findFirst()
+                    .min(Comparator.comparing(Subnet::getAvailabilityZone))
                     .orElse(null);
         }
 
@@ -7390,7 +7392,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Split out so that everything reporting an endpoint's interfaces -- the ids on
      * the wire, the objects flow-log attribution reads -- comes from one place and
      * cannot disagree. The alternative, deriving ids independently from the same
-     * {@link #eniIdFromSeed}, looks equivalent and is not: this method skips a subnet
+     * {@link Ec2Ids#eniIdFromSeed}, looks equivalent and is not: this method skips a subnet
      * whose record has gone, and a second derivation that forgot to would report an
      * interface the first one denies exists. Congruence by construction beats congruence
      * by inspection, and the two had in fact already diverged.
@@ -7496,7 +7498,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Mapped over {@link #endpointNetworkInterfacesOf(VpcEndpoint)} rather than derived
      * separately, so the ids on the wire come BY CONSTRUCTION from the same derivation
      * flow-log attribution uses, and no endpoint can be described two ways. An earlier
-     * version of this method called {@link #eniIdFromSeed} itself and looked equivalent;
+     * version of this method called {@link Ec2Ids#eniIdFromSeed} itself and looked equivalent;
      * it was not, because it lacked that method's skip of a subnet whose record has gone,
      * and the two were measured reporting different sets after a subnet was deleted out
      * from under a live endpoint.

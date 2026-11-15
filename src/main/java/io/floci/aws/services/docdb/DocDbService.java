@@ -389,7 +389,8 @@ public class DocDbService {
                 backup, maintenance, settings.deletionProtection());
     }
 
-    /** The family of the group a cluster is on; a group deleted since is judged by nothing. */
+    /** The security group a cluster's VPC security group ids fall back to: the service's
+     *  resolved default when it is up, the region's computed default otherwise. */
     private static String resolveDefaultSecurityGroupId(Ec2Service ec2Service, String region) {
         if (ec2Service == null) {
             return Ec2Service.defaultSecurityGroupId(region);
@@ -398,6 +399,7 @@ public class DocDbService {
         return resolved != null ? resolved : Ec2Service.defaultSecurityGroupId(region);
     }
 
+    /** The family of the group a cluster is on; a group deleted since is judged by nothing. */
     private String currentParameterGroupFamily(String name, String region) {
         try {
             return rdsService.getDbClusterParameterGroup(name, region).getDbParameterGroupFamily();
