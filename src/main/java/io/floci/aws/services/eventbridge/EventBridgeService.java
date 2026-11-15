@@ -65,6 +65,9 @@ import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
+
 @ApplicationScoped
 public class EventBridgeService implements ResourceProvider, StoredResourceArns {
 
@@ -1149,7 +1152,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
             if ("default".equals(effectiveBus)) {
                 getOrCreateDefaultBus(region);
-            } else if (accountGet(busStore, accountId, busStoreKey).isEmpty()) {
+            } else if (getInAccount(busStore, accountId, busStoreKey).isEmpty()) {
                 if (dropForMissingBus) {
                     LOG.infov("PutEvents dropped an event for event bus {0}, which does not exist in {1}",
                             effectiveBus, region);
@@ -1178,11 +1181,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 }
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
-                    List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
+                    List<Target> targets = getInAccount(targetStore, accountId, ruleKey).orElse(List.of());
                     String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region, accountId);
                     for (Target target : targets) {
                         dispatcher.dispatch(rule.getArn(), target, eventJson, region,
-                                () -> accountGet(targetStore, accountId, ruleKey).orElse(List.of()));
+                                () -> getInAccount(targetStore, accountId, ruleKey).orElse(List.of()));
                     }
                 }
             }
@@ -1643,7 +1646,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Optional<String> findBusPolicy(String busArn) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(busArn);
         String name = arn.resource().substring("event-bus/".length());
-        return accountGet(busStore, arn.accountId(), busKey(arn.region(), name))
+        return getInAccount(busStore, arn.accountId(), busKey(arn.region(), name))
                 .map(EventBus::getPolicy)
                 .filter(policy -> !policy.isBlank());
     }
@@ -2289,7 +2292,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private void captureToArchives(Map<String, Object> entry, String busStoreKey,
                                    String eventId, String region, String accountId) {
-        EventBus bus = accountGet(busStore, accountId, busStoreKey).orElse(null);
+        EventBus bus = getInAccount(busStore, accountId, busStoreKey).orElse(null);
         if (bus == null) {
             return;
         }
@@ -2297,7 +2300,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String archivePrefix = "archive:" + region + ":";
         List<Archive> candidates = accountScan(archiveStore, accountId, k ->
                 k.startsWith(archivePrefix)
-                        && accountGet(archiveStore, accountId, k).map(a ->
+                        && getInAccount(archiveStore, accountId, k).map(a ->
                         a.getState() == ArchiveState.ENABLED
                                 && busArn.equals(a.getEventSourceArn())).orElse(false));
 
@@ -2305,7 +2308,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             if (matchesPattern(entry, archive.getEventPattern())) {
                 String evKey = archivedEventKey(region, archive.getArchiveName());
                 List<ArchivedEvent> stored = new ArrayList<>(
-                        accountGet(archivedEventStore, accountId, evKey).orElse(new ArrayList<>()));
+                        getInAccount(archivedEventStore, accountId, evKey).orElse(new ArrayList<>()));
                 ArchivedEvent ae = new ArchivedEvent(
                         eventId,
                         Instant.now(),
@@ -2315,9 +2318,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                         busArn
                 );
                 stored.add(ae);
-                accountPut(archivedEventStore, accountId, evKey, stored);
+                putInAccount(archivedEventStore, accountId, evKey, stored);
                 archive.setEventCount(archive.getEventCount() + 1);
-                accountPut(archiveStore, accountId, archiveKey(region, archive.getArchiveName()), archive);
+                putInAccount(archiveStore, accountId, archiveKey(region, archive.getArchiveName()), archive);
             }
         }
     }
@@ -2429,13 +2432,13 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private void updateReplayStateForAccount(String accountId, String replayName,
                                              ReplayState state, String region) {
         String key = replayKey(region, replayName);
-        accountGet(replayStore, accountId, key).ifPresent(r -> {
+        getInAccount(replayStore, accountId, key).ifPresent(r -> {
             r.setState(state);
             if (state == ReplayState.COMPLETED || state == ReplayState.CANCELLED
                     || state == ReplayState.FAILED) {
                 r.setReplayEndTime(Instant.now());
             }
-            accountPut(replayStore, accountId, key, r);
+            putInAccount(replayStore, accountId, key, r);
             LOG.debugv("Replay {0} transitioned to {1}", replayName, state);
         });
     }
@@ -2447,9 +2450,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private void updateReplayLastReplayedForAccount(String accountId, String replayName,
                                                     Instant eventTime, String region) {
         String key = replayKey(region, replayName);
-        accountGet(replayStore, accountId, key).ifPresent(r -> {
+        getInAccount(replayStore, accountId, key).ifPresent(r -> {
             r.setEventLastReplayedTime(eventTime);
-            accountPut(replayStore, accountId, key, r);
+            putInAccount(replayStore, accountId, key, r);
         });
     }
 
@@ -2493,19 +2496,12 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 rule.getArn(),
                 rule.getScheduleExpression(),
                 () -> {
-                    Rule r = accountGet(ruleStore, accountId, key).orElse(null);
-                    List<Target> t = accountGet(targetStore, accountId, key).orElse(List.of());
+                    Rule r = getInAccount(ruleStore, accountId, key).orElse(null);
+                    List<Target> t = getInAccount(targetStore, accountId, key).orElse(List.of());
                     return new RuleScheduler.ScheduleData(r, t);
                 }
             );
         }
-    }
-
-    private <V> Optional<V> accountGet(StorageBackend<String, V> store, String accountId, String key) {
-        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
-            return aware.getForAccount(accountId, key);
-        }
-        return store.get(key);
     }
 
     private <V> List<V> accountScan(StorageBackend<String, V> store, String accountId,
@@ -2514,14 +2510,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return aware.scanForAccount(accountId, filter);
         }
         return store.scan(filter);
-    }
-
-    private <V> void accountPut(StorageBackend<String, V> store, String accountId, String key, V value) {
-        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
-            aware.putForAccount(accountId, key, value);
-        } else {
-            store.put(key, value);
-        }
     }
 
     // ─── Resource Explorer 2 ───────────────────────────────────────────────────
