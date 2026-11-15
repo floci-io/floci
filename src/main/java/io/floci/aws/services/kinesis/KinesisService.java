@@ -1298,6 +1298,11 @@ public class KinesisService implements ResourceProvider {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         if (!"LATEST".equals(type)) {
+            boolean sequenceType = "AT_SEQUENCE_NUMBER".equals(type) || "AFTER_SEQUENCE_NUMBER".equals(type);
+            if (sequenceType && (sequenceNumber == null || sequenceNumber.isEmpty())) {
+                throw new AwsException("InvalidArgumentException",
+                        "ShardIteratorType " + type + " requires a StartingSequenceNumber", 400);
+            }
             return sequenceNumber != null ? sequenceNumber : "";
         }
         List<KinesisRecord> records = shard.getRecords();

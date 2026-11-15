@@ -342,6 +342,21 @@ class KinesisServiceTest {
     }
 
     @Test
+    void getShardIteratorSequenceTypesWithoutStartingSequenceNumberThrow() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        String shardId = kinesisService.describeStream("my-stream", REGION).getShards().getFirst().getShardId();
+        kinesisService.putRecord("my-stream", "msg".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        for (String type : List.of("AT_SEQUENCE_NUMBER", "AFTER_SEQUENCE_NUMBER")) {
+            for (String missing : new String[] {null, ""}) {
+                AwsException ex = assertThrows(AwsException.class, () ->
+                        kinesisService.getShardIterator("my-stream", shardId, type, missing, REGION));
+                assertEquals("InvalidArgumentException", ex.getErrorCode(), type);
+                assertEquals(400, ex.getHttpStatus(), type);
+            }
+        }
+    }
+
+    @Test
     void millisBehindLatestIsZeroOnEmptyShard() {
         kinesisService.createStream("empty", 1, REGION);
         String shardId = kinesisService.describeStream("empty", REGION).getShards().getFirst().getShardId();

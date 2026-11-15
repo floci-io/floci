@@ -227,6 +227,25 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void getShardIteratorSequenceTypesWithoutStartingSequenceNumberReturnInvalidArgument() {
+        createStream("test-stream");
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        String shardId = responseEntity(handler.handle("DescribeStream", descReq, REGION))
+                .get("StreamDescription").get("Shards").get(0).get("ShardId").asText();
+        for (String type : new String[] {"AT_SEQUENCE_NUMBER", "AFTER_SEQUENCE_NUMBER"}) {
+            ObjectNode iterReq = MAPPER.createObjectNode();
+            iterReq.put("StreamName", "test-stream");
+            iterReq.put("ShardId", shardId);
+            iterReq.put("ShardIteratorType", type);
+            AwsException ex = assertThrows(AwsException.class,
+                    () -> handler.handle("GetShardIterator", iterReq, REGION));
+            assertEquals("InvalidArgumentException", ex.getErrorCode(), type);
+            assertEquals(400, ex.getHttpStatus(), type);
+        }
+    }
+
+    @Test
     void resourceTagsRejectForeignAndMissingResources() {
         createStream("test-stream");
         String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
