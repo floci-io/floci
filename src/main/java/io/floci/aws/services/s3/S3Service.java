@@ -551,18 +551,27 @@ public class S3Service implements Resettable, ResourceProvider {
                                String cannedAcl, String grantRead, String grantWrite,
                                String grantFullControl, String grantReadAcp, String grantWriteAcp) {
         return createBucket(bucketName, region, requestedOwnership, cannedAcl, grantRead, grantWrite,
-                grantFullControl, grantReadAcp, grantWriteAcp, false);
+                grantFullControl, grantReadAcp, grantWriteAcp, false, false);
     }
 
     /** Creates an account-scoped Floci staging bucket, independently of the public bucket namespace. */
     public Bucket createInternalBucket(String bucketName, String region) {
-        return createBucket(bucketName, region, null, null, null, null, null, null, null, true);
+        return createBucket(bucketName, region, null, null, null, null, null, null, null, true, false);
+    }
+
+    /** Creates service-owned S3 state without adding a bucket to the customer's ListBuckets result. */
+    public Bucket createServiceOwnedBucket(String bucketName, String region) {
+        return createBucket(bucketName, region, null, null, null, null, null, null, null, true, true);
+    }
+
+    public boolean isServiceOwnedBucket(String bucketName) {
+        return bucketStore.get(bucketName).map(Bucket::isServiceOwned).orElse(false);
     }
 
     private Bucket createBucket(String bucketName, String region, String requestedOwnership,
                                 String cannedAcl, String grantRead, String grantWrite,
                                 String grantFullControl, String grantReadAcp, String grantWriteAcp,
-                                boolean internal) {
+                                boolean internal, boolean serviceOwned) {
         requirePathSafeBucketName(bucketName);
         String ownership = requestedOwnership == null ? "BucketOwnerEnforced" : requestedOwnership;
         if (!OBJECT_OWNERSHIP_VALUES.contains(ownership)) {
@@ -584,11 +593,11 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         // Share deletion's name lock so checking availability and publishing an owner are atomic.
         return withLock(multipartBucketLock(bucketName).writeLock(),
-                () -> createBucketLocked(bucketName, region, ownership, requestedAcl, internal));
+                () -> createBucketLocked(bucketName, region, ownership, requestedAcl, internal, serviceOwned));
     }
 
     private Bucket createBucketLocked(String bucketName, String region, String ownership, String requestedAcl,
-                                      boolean internal) {
+                                      boolean internal, boolean serviceOwned) {
         Optional<Bucket> existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
             Bucket bucket = existing.get();
@@ -608,6 +617,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
         Bucket bucket = new Bucket(bucketName);
         bucket.setRegion(region);
+        bucket.setServiceOwned(serviceOwned);
         bucket.setOwnershipControlsConfiguration(ownershipControlsXml(ownership));
         bucket.setAcl(requestedAcl);
         bucketStore.put(bucketName, bucket);
@@ -675,7 +685,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
-                .filter(bucket -> !isScratchBucket(bucket))
+                .filter(bucket -> !bucket.isServiceOwned() && !isScratchBucket(bucket))
                 .filter(bucket -> !bucket.getName().endsWith(TABLE_WAREHOUSE_BUCKET_SUFFIX))
                 .toList();
     }

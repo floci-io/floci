@@ -21,6 +21,7 @@ import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
 import io.floci.aws.testing.LambdaCodeFixtures;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -2492,6 +2493,43 @@ class LambdaServiceTest {
         assertEquals("InvalidParameterValueException", e.getErrorCode());
         assertEquals("Failed to extract deployment package: ZIP archive exceeds the 262144000 byte compressed limit: "
                 + size, e.getMessage());
+    }
+
+    @Test
+    void lambdaPackagesStayReadableWithoutLeavingCustomerBuckets(@TempDir Path directory) throws Exception {
+        StorageFactory s3Storage = mock(StorageFactory.class);
+        when(s3Storage.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(s3Storage.create(anyString(), anyString(), any(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        EmulatorConfig s3Config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(s3Config.storage().persistentPath()).thenReturn(directory.toString());
+        when(s3Config.storage().services().s3().mode()).thenReturn(Optional.of("memory"));
+        S3Service s3 = new S3Service(s3Storage, s3Config, null, null, null, null, null,
+                new RegionResolver(REGION, "000000000000"), new ObjectMapper(), null);
+        s3.createBucket("customer-code", REGION);
+        LambdaService backed = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor());
+        String zip = createZipBase64("index.js");
+        Map<String, Object> firstRequest = baseRequest("tasks-first-" + UUID.randomUUID());
+        firstRequest.put("Code", Map.of("ZipFile", zip));
+        Map<String, Object> secondRequest = baseRequest("tasks-second-" + UUID.randomUUID());
+        secondRequest.put("Code", Map.of("ZipFile", zip));
+
+        LambdaFunction first = backed.createFunction(REGION, firstRequest);
+        LambdaFunction second = backed.createFunction(REGION, secondRequest);
+        String bucket = LambdaService.tasksBucketName(REGION);
+        assertTrue(s3.isServiceOwnedBucket(bucket));
+        assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
+        assertArrayEquals(Base64.getDecoder().decode(zip),
+                s3.getObject(bucket, LambdaService.codeObjectKey(first)).getData());
+
+        backed.deleteFunction(REGION, first.getFunctionName());
+        assertArrayEquals(Base64.getDecoder().decode(zip),
+                s3.getObject(bucket, LambdaService.codeObjectKey(second)).getData());
+        backed.deleteFunction(REGION, second.getFunctionName());
+        assertTrue(s3.listObjects(bucket, "", null, 100).isEmpty());
+        assertTrue(s3.isServiceOwnedBucket(bucket));
+        assertEquals(List.of("customer-code"), s3.listBuckets().stream().map(b -> b.getName()).toList());
     }
 
     private static LambdaService s3BackedService(S3Service s3, WarmPool warmPool, ZipExtractor extractor) {

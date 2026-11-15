@@ -207,6 +207,20 @@ class S3ServiceTest {
     }
 
     @Test
+    void serviceOwnedBucketsStayHiddenWithoutHidingCustomerNames() throws Exception {
+        s3Service.createBucket("awslambda-eu-west-1-tasks", "eu-west-1");
+        Bucket internal = s3Service.createServiceOwnedBucket("awslambda-us-east-1-tasks", "us-east-1");
+        assertTrue(s3Service.isServiceOwnedBucket(internal.getName()));
+        assertEquals(List.of("awslambda-eu-west-1-tasks"),
+                s3Service.listBuckets().stream().map(Bucket::getName).toList());
+
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        Bucket restored = mapper.readValue(mapper.writeValueAsBytes(internal), Bucket.class);
+        assertTrue(restored.isServiceOwned());
+        assertFalse(mapper.readValue("{\"name\":\"legacy-customer\"}", Bucket.class).isServiceOwned());
+    }
+
+    @Test
     void listBucketsHidesScratchBucketsButKeepsOtherInternalPrefixBuckets() {
         s3Service.createBucket("bucket-a", "us-east-1");
         s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
