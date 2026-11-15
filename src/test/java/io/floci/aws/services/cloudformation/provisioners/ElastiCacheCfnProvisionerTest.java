@@ -17,9 +17,11 @@ import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
 import io.floci.aws.services.elasticache.model.ReplicationGroup;
 import io.floci.aws.services.elasticache.model.ReplicationGroupStatus;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.text.MessageFormat;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -186,20 +188,57 @@ class ElastiCacheCfnProvisionerTest {
         verify(cache, never()).createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class));
     }
 
+    private List<String> ignoredChangeWarnings(StackResource r, String props, String priorProps) {
+        return LogCapture.capture(ElastiCacheCfnProvisioner.class, () -> {
+            try {
+                provisioner.provision(r, props(props), ctx("app-redis", priorProps));
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        }).stream()
+                .map(record -> MessageFormat.format(record.getMessage(), record.getParameters()))
+                .filter(message -> message.contains("in-place modification is not supported"))
+                .toList();
+    }
+
     @Test
-    void replicationGroupUpdateWithSameIdDoesNotCreateAgain() throws Exception {
-        when(cache.getReplicationGroup("app-redis")).thenReturn(replicationGroup("app-redis", 1));
+    void replicationGroupUpdateWithSameIdNamesTheChangesItIgnores() throws Exception {
+        ReplicationGroup existing = replicationGroup("app-redis", 1);
+        existing.setCacheNodeType("cache.t3.micro");
+        when(cache.getReplicationGroup("app-redis")).thenReturn(existing);
         StackResource r = resource("AWS::ElastiCache::ReplicationGroup", "Redis");
 
-        provisioner.provision(r, props("""
-                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"changed","CacheNodeType":"cache.t3.small"}
-                """), ctx("app-redis", """
-                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","CacheNodeType":"cache.t3.micro"}
-                """));
+        List<String> warnings = ignoredChangeWarnings(r, """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"changed","CacheNodeType":"cache.t3.small",
+                 "NumCacheClusters":"1"}
+                """, """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","CacheNodeType":"cache.t3.micro",
+                 "NumCacheClusters":"1"}
+                """);
 
         verify(cache, never()).createReplicationGroup(any(ElastiCacheService.CreateReplicationGroupRequest.class));
         assertEquals("app-redis", r.getPhysicalId());
         assertEquals("6420", r.getAttributes().get("PrimaryEndPoint.Port"));
+        assertEquals(List.of("ElastiCache replication group app-redis: in-place modification is not supported, "
+                + "changes to ReplicationGroupDescription, CacheNodeType are ignored"), warnings);
+    }
+
+    @Test
+    void replicationGroupUpdateWithoutChangesWarnsNothing() throws Exception {
+        ReplicationGroup existing = replicationGroup("app-redis", 1);
+        existing.setCacheNodeType("cache.t3.micro");
+        existing.setEngineVersion("7.1");
+        existing.getUserGroupIds().add("users");
+        when(cache.getReplicationGroup("app-redis")).thenReturn(existing);
+        String template = """
+                {"ReplicationGroupId":"app-redis","ReplicationGroupDescription":"d","CacheNodeType":"cache.t3.micro",
+                 "EngineVersion":7.1,"NumCacheClusters":"1","UserGroupIds":["Users"],"Tags":[{"Key":"a","Value":"b"}]}
+                """;
+
+        List<String> warnings = ignoredChangeWarnings(resource("AWS::ElastiCache::ReplicationGroup", "Redis"),
+                template, template);
+
+        assertEquals(List.of(), warnings);
     }
 
     @Test

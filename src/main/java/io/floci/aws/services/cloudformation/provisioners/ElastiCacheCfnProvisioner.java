@@ -21,6 +21,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -227,10 +228,10 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         putEndpointAttributes(r, cluster);
     }
 
-    private void warnUnsupportedClusterProperties(String id, JsonNode props) {
-        for (String name : UNSUPPORTED_CLUSTER_PROPERTIES) {
+    private static void warnUnsupportedProperties(String kind, String id, JsonNode props, List<String> names) {
+        for (String name : names) {
             if (props.hasNonNull(name)) {
-                LOG.warnv("ElastiCache cache cluster {0}: {1} is accepted and ignored", id, name);
+                LOG.warnv("ElastiCache {0} {1}: {2} is accepted and ignored", kind, id, name);
             }
         }
     }
@@ -249,7 +250,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
 
     private CacheCluster createCluster(String id, String engine, Integer port, JsonNode props,
                                        ProvisionContext ctx) {
-        warnUnsupportedClusterProperties(id, props);
+        warnUnsupportedProperties("cache cluster", id, props, UNSUPPORTED_CLUSTER_PROPERTIES);
         List<String> securityGroupIds = ctx.resolveStringList(props, "VpcSecurityGroupIds");
         ElastiCacheService.CreateCacheClusterRequest request = new ElastiCacheService.CreateCacheClusterRequest(
                 id,
@@ -341,8 +342,7 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
                 LOG.warnv("ElastiCache replication group {0} was deleted outside the stack, recreating it", id);
                 group = createReplicationGroup(id, description, props, ctx);
             } else {
-                LOG.warnv("ElastiCache replication group {0}: in-place modification is not supported, "
-                        + "property changes are ignored", id);
+                warnIgnoredReplicationGroupChanges(id, group, description, props, ctx);
             }
         } else {
             group = createReplicationGroup(id, description, props, ctx);
@@ -352,13 +352,39 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         putReplicationGroupEndpointAttributes(r, group);
     }
 
+    private static void warnIgnoredReplicationGroupChanges(String id, ReplicationGroup group, String description,
+                                                           JsonNode props, ProvisionContext ctx) {
+        List<String> changed = new ArrayList<>();
+        if (!description.equals(group.getDescription())) {
+            changed.add("ReplicationGroupDescription");
+        }
+        String nodeType = ctx.resolveOptional(props, "CacheNodeType");
+        if (nodeType != null && !nodeType.equals(group.getCacheNodeType())) {
+            changed.add("CacheNodeType");
+        }
+        String version = ctx.resolveOptional(props, "EngineVersion");
+        if (version != null && !version.equals(group.getEngineVersion())) {
+            changed.add("EngineVersion");
+        }
+        Integer clusters = ctx.resolveOptionalInt(props, "NumCacheClusters");
+        if (clusters != null && clusters != group.getNumCacheClusters()) {
+            changed.add("NumCacheClusters");
+        }
+        // the service stores user group ids in lowercase
+        Set<String> userGroupIds = new HashSet<>();
+        ctx.resolveStringList(props, "UserGroupIds").forEach(g -> userGroupIds.add(g.toLowerCase(Locale.ROOT)));
+        if (!userGroupIds.equals(group.getUserGroupIds())) {
+            changed.add("UserGroupIds");
+        }
+        if (!changed.isEmpty()) {
+            LOG.warnv("ElastiCache replication group {0}: in-place modification is not supported, changes to {1} "
+                    + "are ignored", id, String.join(", ", changed));
+        }
+    }
+
     private ReplicationGroup createReplicationGroup(String id, String description, JsonNode props,
                                                     ProvisionContext ctx) {
-        for (String name : UNSUPPORTED_REPLICATION_GROUP_PROPERTIES) {
-            if (props.hasNonNull(name)) {
-                LOG.warnv("ElastiCache replication group {0}: {1} is accepted and ignored", id, name);
-            }
-        }
+        warnUnsupportedProperties("replication group", id, props, UNSUPPORTED_REPLICATION_GROUP_PROPERTIES);
         String authToken = ctx.resolveOptional(props, "AuthToken");
         boolean hasAuthToken = authToken != null && !authToken.isBlank();
         List<String> userGroupIds = ctx.resolveStringList(props, "UserGroupIds");
