@@ -1007,6 +1007,36 @@ Glue and PostgreSQL updates do not form a distributed transaction: an infrastruc
 one store changes can require retrying the command. The legacy Phase 1 catalog does not gain these
 lifecycle operations.
 
+### External schemas over Kinesis Data Streams
+
+Streaming ingestion from Kinesis Data Streams starts with an external schema that maps to the streaming
+source. This part adds that schema; the streaming materialized view and `REFRESH` that read from it are
+not implemented yet.
+
+```sql
+CREATE EXTERNAL SCHEMA [IF NOT EXISTS] kds
+FROM KINESIS
+[REGION 'us-west-2']
+IAM_ROLE 'arn:aws:iam::123456789012:role/StreamRole';
+```
+
+`CREATE EXTERNAL SCHEMA` creates a local PostgreSQL schema, remembers the role and the optional Region, and
+lists the schema in `svv_external_schemas` with `eskind` 9 and the role in `esoptions`. Without `REGION` the
+schema uses the cluster's own Region. `DROP SCHEMA [IF EXISTS] kds [CASCADE | RESTRICT]` removes the local
+schema, its metadata row and its registration; `RESTRICT` is the default, so a schema that holds objects is
+kept, as in Redshift.
+
+- `IAM_ROLE DEFAULT` is not supported. Name the role ARN in a single-quoted literal.
+- The role is not checked when the schema is created. Nothing reads the stream yet, so no Kinesis permission
+  is evaluated.
+- A statement that names a relation of the schema as a source (`SELECT * FROM kds.my_stream`,
+  `INSERT INTO kds.t`, `UPDATE kds.t`) is refused with SQLSTATE `0A000`. Redshift reads a stream through a
+  streaming materialized view, and keeps no user tables in such a schema.
+- `CREATE EXTERNAL SCHEMA` inside an explicit transaction fails with SQLSTATE `0A000`, and `DROP SCHEMA`
+  with `25001`, because the schema registration is not part of the PostgreSQL transaction.
+- `DROP EXTERNAL DATABASE` and dropping several schemas in one statement are outside this implementation.
+- Schemas over Amazon MSK or Kafka are not supported.
+
 ### COPY from S3
 
 `COPY <table> [(<columns>)] FROM 's3://<bucket>/<keyOrPrefix>' [options]` sent over the Simple

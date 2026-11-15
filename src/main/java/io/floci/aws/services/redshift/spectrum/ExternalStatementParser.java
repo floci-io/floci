@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class ExternalStatementParser {
     private static final Pattern CREATE_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s+FROM\\s+DATA\\s+CATALOG\\s+DATABASE\\s+'((?:''|[^'])*)'(?:\\s+REGION\\s+'(?:''|[^'])*')?\\s+IAM_ROLE\\s+(.+?)(\\s+CREATE\\s+EXTERNAL\\s+DATABASE\\s+IF\\s+NOT\\s+EXISTS)?\\s*;?\\s*$");
+    private static final Pattern CREATE_KINESIS_SCHEMA = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+SCHEMA\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(.+?)\\s+FROM\\s+KINESIS(?:\\s+REGION\\s+'((?:''|[^'])*)')?\\s+IAM_ROLE\\s+(.+?)\\s*;?\\s*$");
     private static final Pattern CREATE_EXTERNAL_TABLE = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\s+TABLE\\b.*");
     private static final Pattern CREATE_EXTERNAL = Pattern.compile("(?is)^\\s*CREATE\\s+EXTERNAL\\b.*");
     private static final Pattern SERDE_PROPERTIES = Pattern.compile("(?is)WITH\\s+SERDEPROPERTIES\\s*\\(");
@@ -41,16 +42,16 @@ public class ExternalStatementParser {
         String text = stripLeadingComments(sql);
         Matcher schema = CREATE_SCHEMA.matcher(text);
         if (schema.matches()) {
-            String role = schema.group(4).trim();
-            if (role.equalsIgnoreCase("default")) {
-                throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
-            }
-            if (!QUOTED_LITERAL.matcher(role).matches()) {
-                throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
-            }
             return Optional.of(new ExternalStatement.CreateSchema(identifier(schema.group(2)),
-                    schema.group(3).replace("''", "'"), unquote(role), schema.group(5) != null,
+                    schema.group(3).replace("''", "'"), roleArn(schema.group(4)), schema.group(5) != null,
                     schema.group(1) != null));
+        }
+        Matcher kinesis = CREATE_KINESIS_SCHEMA.matcher(text);
+        if (kinesis.matches()) {
+            String region = kinesis.group(3);
+            return Optional.of(new ExternalStatement.CreateKinesisSchema(identifier(kinesis.group(2)),
+                    region == null ? null : region.replace("''", "'"), roleArn(kinesis.group(4)),
+                    kinesis.group(1) != null));
         }
         if (CREATE_EXTERNAL_TABLE.matcher(text).matches()) {
             return Optional.of(parseTable(text));
@@ -121,6 +122,17 @@ public class ExternalStatementParser {
         Map<String, String> properties = properties(tail);
         return new ExternalStatement.CreateTable(identifier(matcher.group(1)), identifier(matcher.group(2)), columns, partitions,
                 format, location, delimiter, serde, properties, serdeProperties(tail));
+    }
+
+    private static String roleArn(String clause) {
+        String role = clause.trim();
+        if (role.equalsIgnoreCase("default")) {
+            throw new SpectrumSqlException("0A000", "IAM_ROLE DEFAULT is not supported");
+        }
+        if (!QUOTED_LITERAL.matcher(role).matches()) {
+            throw new SpectrumSqlException("42601", "IAM_ROLE must be a single quoted role ARN");
+        }
+        return unquote(role);
     }
 
     private static String stripLeadingComments(String sql) {

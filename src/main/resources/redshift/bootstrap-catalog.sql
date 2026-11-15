@@ -396,7 +396,7 @@ RETURNS void LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, pg_temp
 $$;
 
 CREATE OR REPLACE VIEW pg_catalog.svv_external_schemas AS
-SELECT n.oid AS esoid, 1::smallint AS eskind, n.nspname AS schemaname,
+SELECT n.oid AS esoid, COALESCE((c.payload->>'eskind')::smallint, 1::smallint) AS eskind, n.nspname AS schemaname,
        n.nspowner::integer AS esowner, c.payload->>'databasename' AS databasename,
        c.payload->>'esoptions' AS esoptions
 FROM floci_internal.external_catalog c

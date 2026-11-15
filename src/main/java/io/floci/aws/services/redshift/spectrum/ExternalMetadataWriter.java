@@ -21,6 +21,8 @@ import java.util.Map;
 @ApplicationScoped
 public class ExternalMetadataWriter {
     private static final Logger LOG = Logger.getLogger(ExternalMetadataWriter.class);
+    /** The {@code eskind} that SVV_EXTERNAL_SCHEMAS gives a schema over an Amazon Kinesis data stream. */
+    private static final int KINESIS_SCHEMA_KIND = 9;
     private final GlueService glueService;
     private final ObjectMapper objectMapper;
 
@@ -37,6 +39,10 @@ public class ExternalMetadataWriter {
                     () -> glueService.getPartitions(binding.glueDatabase(), table.getName())));
         }
         run(backend, refreshSql(binding, tables, partitions), false);
+    }
+
+    public void refreshKinesis(BackendSql backend, KinesisSchemaBinding binding) {
+        run(backend, refreshKinesisSql(binding), false);
     }
 
     public void purge(BackendSql backend, String schemaName) {
@@ -57,6 +63,22 @@ public class ExternalMetadataWriter {
 
     String purgeSql(String schemaName) {
         return "SELECT floci_internal.purge_external_schema(" + literal(schemaName) + ")";
+    }
+
+    /**
+     * A schema over a Kinesis stream lists as kind 9 with no tables. Its stream is read only through a
+     * materialized view, and Redshift documents no external database name for it, so that column stays empty.
+     */
+    String refreshKinesisSql(KinesisSchemaBinding binding) {
+        Map<String, Object> payload = row(
+                "eskind", KINESIS_SCHEMA_KIND,
+                "databasename", "",
+                "esoptions", json(Map.of("IAM_ROLE", binding.iamRoleArn())),
+                "tables", List.of(),
+                "columns", List.of(),
+                "partitions", List.of());
+        return "SELECT floci_internal.refresh_external_catalog(" + literal(binding.schemaName()) + ", "
+                + literal(json(payload)) + "::jsonb)";
     }
 
     String refreshSql(ExternalSchemaBinding binding, List<Table> tables,

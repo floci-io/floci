@@ -1,0 +1,84 @@
+package io.floci.aws.services.redshift.spectrum;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Optional;
+
+@ApplicationScoped
+public class KinesisSchemaRegistry implements Resettable {
+    private static final char SEPARATOR = '|';
+    private final AccountAwareStorageBackend<KinesisSchemaBinding> bindings;
+
+    @Inject
+    public KinesisSchemaRegistry(StorageFactory storageFactory) {
+        this(storageFactory.<KinesisSchemaBinding>create("redshift", "redshift-kinesis-schemas.json",
+                new TypeReference<>() { }));
+    }
+
+    KinesisSchemaRegistry(AccountAwareStorageBackend<KinesisSchemaBinding> bindings) {
+        this.bindings = bindings;
+    }
+
+    public synchronized void bind(KinesisSchemaBinding binding) {
+        String key = key(binding.clusterKey(), binding.databaseName(), binding.schemaName());
+        if (bindings.getForAccount(binding.accountId(), key).isPresent()) {
+            throw new SpectrumSqlException("42P06", "schema \"" + binding.schemaName() + "\" already exists");
+        }
+        bindings.putForAccount(binding.accountId(), key, binding);
+        bindings.flush();
+    }
+
+    public Optional<KinesisSchemaBinding> find(String accountId, String clusterKey, String databaseName,
+                                               String schemaName) {
+        return bindings.getForAccount(accountId, key(clusterKey, databaseName, schemaName));
+    }
+
+    public List<KinesisSchemaBinding> list(String accountId, String clusterKey, String databaseName) {
+        String prefix = prefix(clusterKey, databaseName);
+        return bindings.scanForAccount(accountId, key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(KinesisSchemaBinding::schemaName)).toList();
+    }
+
+    public synchronized void unbind(String accountId, String clusterKey, String databaseName, String schemaName) {
+        bindings.deleteForAccount(accountId, key(clusterKey, databaseName, schemaName));
+        bindings.flush();
+    }
+
+    public synchronized void removeCluster(String accountId, String clusterKey) {
+        String prefix = encode(clusterKey) + SEPARATOR;
+        for (String key : bindings.keysForAccount(accountId)) {
+            if (key.startsWith(prefix)) {
+                bindings.deleteForAccount(accountId, key);
+            }
+        }
+        bindings.flush();
+    }
+
+    @Override
+    public synchronized void clear() {
+        bindings.clear();
+        bindings.flush();
+    }
+
+    private static String key(String clusterKey, String databaseName, String schemaName) {
+        return prefix(clusterKey, databaseName) + encode(schemaName);
+    }
+
+    private static String prefix(String clusterKey, String databaseName) {
+        return encode(clusterKey) + SEPARATOR + encode(databaseName) + SEPARATOR;
+    }
+
+    /** Percent-encodes a component so a quoted identifier containing the separator cannot collide with another key. */
+    private static String encode(String component) {
+        return URLEncoder.encode(component, StandardCharsets.UTF_8);
+    }
+}
