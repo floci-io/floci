@@ -506,6 +506,8 @@ returns HTTP 404.
 | `PutCompositeAlarm` | Create or update a composite alarm rule |
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
+| `DisableAlarmActions` | Disable actions for named metric and composite alarms |
+| `EnableAlarmActions` | Re-enable actions for named metric and composite alarms |
 | `SetAlarmState` | Manually set alarm state |
 | `DescribeAlarmHistory` | List alarm state transitions and configuration changes (see [Alarm history](#alarm-history)) |
 | `PutMetricStream` | Create or update a metric stream definition |
@@ -582,7 +584,15 @@ alarms before their children. Names that match no alarm are ignored.
 
 State transitions publish to same-account standard SNS topics in `AlarmActions`, `OKActions`, or
 `InsufficientDataActions`, including transitions from `SetAlarmState`. Unchanged states and
-`ActionsEnabled=false` suppress notifications. Scaling action retries remain independent.
+`ActionsEnabled=false` suppress notifications. `DisableAlarmActions` and `EnableAlarmActions`
+update this setting through the Query and current JSON APIs, preserving the alarm's state,
+actions, tags, and other configuration. They accept up to 100 names, ignore nonexistent
+alarms, and validate the whole request before updating any alarm. Enabling actions does not
+replay notifications for transitions that occurred while disabled.
+Query requests validate all supplied numeric member indexes, including names after a gap.
+The metric evaluator checks current stored action settings before dispatch; disabling does
+not cancel actions that have already passed that check.
+Scaling action retries remain independent.
 Failures are logged per target without blocking other targets. Notifications include a
 single-metric `Trigger`; durable retries, FIFO topics, and metric-math payloads are not covered.
 
@@ -622,8 +632,9 @@ empty or over-long `ActionPrefix`, and an empty or over-long alarm name in eithe
   evaluator or a composite alarm's rule. Setting an alarm to the state it already has records
   nothing. `HistoryData` carries the old and new state with their reasons and reason data.
 - `ConfigurationUpdate` when `PutMetricAlarm` or `PutCompositeAlarm` creates or updates an alarm,
-  and when `DeleteAlarms` deletes one. An update lists the previous value of each changed field
-  under `originalUpdatedFields`.
+  when `EnableAlarmActions` or `DisableAlarmActions` changes its action setting, and when
+  `DeleteAlarms` deletes one. An update lists the previous value of each changed field under
+  `originalUpdatedFields`.
 
 History survives the deletion of its alarm and is kept for 30 days. Without `AlarmTypes` only
 metric alarm history is listed; request `CompositeAlarm` to include composite alarms. `Action`,

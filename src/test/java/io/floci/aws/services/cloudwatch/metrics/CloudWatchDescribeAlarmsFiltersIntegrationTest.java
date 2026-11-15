@@ -1,7 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -19,14 +18,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** DescribeAlarms' StateValue, ActionPrefix, ChildrenOfAlarmName and ParentsOfAlarmName over Query and JSON. */
 @QuarkusTest
 class CloudWatchDescribeAlarmsFiltersIntegrationTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SCOPE =
             "AWS4-HMAC-SHA256 Credential=test/20261027/us-east-1/monitoring/aws4_request";
     private static final List<String> BOTH_KINDS = List.of("MetricAlarm", "CompositeAlarm");
@@ -271,24 +268,6 @@ class CloudWatchDescribeAlarmsFiltersIntegrationTest {
     }
 
     private Response call(boolean json, String operation, Map<String, ?> body) throws JsonProcessingException {
-        if (json) {
-            return given().port(baseUri.getPort()).contentType("application/x-amz-json-1.0")
-                    .header("Authorization", SCOPE)
-                    .header("X-Amz-Target", "GraniteServiceVersion20100801." + operation)
-                    .body(MAPPER.writeValueAsString(body)).post("/");
-        }
-        Map<String, Object> form = new LinkedHashMap<>();
-        form.put("Action", operation);
-        body.forEach((key, value) -> {
-            if (value instanceof List<?> values) {
-                for (int index = 0; index < values.size(); index++) {
-                    form.put(key + ".member." + (index + 1), values.get(index));
-                }
-            } else {
-                form.put(key, value);
-            }
-        });
-        return given().port(baseUri.getPort()).contentType("application/x-www-form-urlencoded")
-                .header("Authorization", SCOPE).formParams(form).post("/");
+        return CloudWatchTestRequests.call(baseUri, SCOPE, json, operation, body);
     }
 }
