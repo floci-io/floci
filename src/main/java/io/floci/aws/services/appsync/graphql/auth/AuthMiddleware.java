@@ -1,12 +1,10 @@
 package io.floci.aws.services.appsync.graphql.auth;
 
-import io.floci.aws.services.appsync.graphql.AppSyncTransportException;
 import io.floci.aws.services.appsync.model.AdditionalAuthenticationProvider;
 import io.floci.aws.services.appsync.model.AuthenticationType;
 import io.floci.aws.services.appsync.model.GraphqlApi;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -16,8 +14,6 @@ import java.util.Set;
 
 @ApplicationScoped
 public class AuthMiddleware {
-
-    private static final Logger LOG = Logger.getLogger(AuthMiddleware.class);
 
     private final ApiKeyAuthValidator apiKeyAuthValidator;
     private final IamAuthValidator iamAuthValidator;
@@ -55,25 +51,17 @@ public class AuthMiddleware {
 
     /**
      * AppSync takes the JWT itself as the {@code Authorization} value for Cognito and OIDC APIs, the
-     * {@code Bearer } scheme being optional. A bare JWT is tried against those providers first; when
-     * a Lambda authorizer is configured too and no provider accepts the token, it goes to Lambda.
+     * {@code Bearer } scheme being optional. A bare JWT on such an API is handled like {@code Bearer <jwt>},
+     * since AppSync does not accept an OIDC token as the Lambda authorization token.
      */
     private AppSyncAuthContext authenticateBareJwtOrLambda(
             Map<String, String> headers, GraphqlApi api, Set<AuthenticationType> configured, AuthRequestInfo info) {
         boolean bearerModes = configured.contains(AuthenticationType.AMAZON_COGNITO_USER_POOLS)
                 || configured.contains(AuthenticationType.OPENID_CONNECT);
-        if (!bearerModes || !CredentialClassifier.isBareJwt(CredentialClassifier.header(headers, "authorization"))) {
-            return authenticateLambda(headers, api, configured, info);
-        }
-        if (!configured.contains(AuthenticationType.AWS_LAMBDA)) {
+        if (bearerModes && CredentialClassifier.isBareJwt(CredentialClassifier.header(headers, "authorization"))) {
             return authenticateBearer(headers, api, configured, info);
         }
-        try {
-            return authenticateBearer(headers, api, configured, info);
-        } catch (AppSyncTransportException e) {
-            LOG.debugv("Bare JWT not accepted by Cognito or OIDC, trying the Lambda authorizer: {0}", e.getMessage());
-            return authenticateLambda(headers, api, configured, info);
-        }
+        return authenticateLambda(headers, api, configured, info);
     }
 
     private AppSyncAuthContext authenticateApiKey(
