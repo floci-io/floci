@@ -16428,7 +16428,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 boolean attachedElsewhere = vol.getAttachments().stream()
                         .anyMatch(other -> !inst.getInstanceId().equals(other.getInstanceId()));
                 if (att.isDeleteOnTermination() && !attachedElsewhere) {
-                    deleteVolumeRecord(region, storeKey, vol);
+                    deleteVolumeRecord(region, storeKey, vol, root);
                     return;
                 }
                 vol.getAttachments().remove(att);
@@ -16443,7 +16443,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Deletes a volume, its block device and its tags. Called under the volume's lock. */
     private void deleteVolumeRecord(String region, String storeKey, Volume vol) {
-        if (volumeBlockDeviceManager != null) {
+        deleteVolumeRecord(region, storeKey, vol, false);
+    }
+
+    private void deleteVolumeRecord(String region, String storeKey, Volume vol, boolean logicalRoot) {
+        if (!logicalRoot && volumeBlockDeviceManager != null) {
             volumeBlockDeviceManager.deleteVolume(vol.getVolumeId());
         }
         volumes.delete(storeKey);

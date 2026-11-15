@@ -539,6 +539,33 @@ class Ec2ServiceTest {
                         .collect(Collectors.toSet()));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"terminate", "settle", "rollback"})
+    void logicalRootDeletionDoesNotRequireABlockDeviceHelper(String operation) {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        when(devices.isAvailable()).thenReturn(true);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(),
+                null, null, devices);
+        Reservation launch = service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1,
+                null, List.of(), null, null, List.of(), null, null);
+        Instance instance = launch.getInstances().getFirst();
+        String rootId = instance.getRootVolumeId();
+        service.createTags("us-east-1", List.of(rootId), List.of(new Tag("Owner", "root")));
+
+        switch (operation) {
+            case "terminate" -> service.terminateInstances("us-east-1", List.of(instance.getInstanceId()));
+            case "rollback" -> service.rollBackLaunch("us-east-1", launch);
+            case "settle" -> instance.setState(InstanceState.terminated());
+            default -> throw new IllegalArgumentException(operation);
+        }
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+        assertTrue(service.describeTags("us-east-1", Map.of("resource-id", List.of(rootId))).isEmpty());
+        verify(devices, never()).deleteVolume(anyString());
+    }
+
     private static Reservation launchKeepingADataVolume(Ec2Service service) {
         LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
         ebs.setVolumeSize(5);
