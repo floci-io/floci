@@ -665,8 +665,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             return;
         }
-        aware.migrateLegacyEntriesInEveryAccount(key -> !key.contains(KEY_SEPARATOR), destinationKey,
-                (accountId, value) -> true);
+        aware.migrateLegacyEntriesInAllAccounts(key -> !key.contains(KEY_SEPARATOR), destinationKey);
     }
 
     private static String randomHex(int len) {

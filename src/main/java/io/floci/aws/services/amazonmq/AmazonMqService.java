@@ -298,8 +298,7 @@ public class AmazonMqService implements ResourceProvider {
      * account partition that stored it.
      */
     private void migrateLegacyKeys() {
-        storage.migrateLegacyEntriesInEveryAccount(key -> !key.contains(KEY_SEPARATOR), this::brokerKey,
-                (accountId, broker) -> true);
+        storage.migrateLegacyEntriesInAllAccounts(key -> !key.contains(KEY_SEPARATOR), this::brokerKey);
     }
 
     // --- Users ---

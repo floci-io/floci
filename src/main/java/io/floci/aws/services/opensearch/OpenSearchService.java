@@ -626,7 +626,7 @@ public class OpenSearchService implements ResourceProvider {
      * own region; a record whose ARN cannot be parsed is left where it is.
      */
     private void migrateLegacyDomainKeys() {
-        domainStore.migrateLegacyEntriesInEveryAccount(key -> !key.contains("::"),
+        domainStore.migrateLegacyEntriesInAllAccounts(key -> !key.contains("::"),
                 this::legacyDomainDestinationKey, (accountId, domain) -> ownsAccount(domain, accountId));
     }
 
