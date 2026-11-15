@@ -59,16 +59,8 @@ public class S3TablesService {
 
     public synchronized TableBucket getTableBucket(String tableBucketArn, String region) {
         String name = resourceName(tableBucketArn, BUCKET_PREFIX);
-        String key = storageKey(region, name);
-        Optional<TableBucket> result;
-        if (store instanceof AccountAwareStorageBackend<TableBucket> aware) {
-            String accountId = regionResolver.getAccountId();
-            result = aware.getForAccountMigratingLegacy(accountId, key,
-                    legacy -> accountId.equals(aware.defaultAccountId()) && tableBucketArn.equals(legacy.getArn()));
-        } else {
-            result = store.get(key);
-        }
-        TableBucket bucket = result.orElseThrow(() -> notFound("The table bucket does not exist."));
+        TableBucket bucket = store.get(storageKey(region, name))
+                .orElseThrow(() -> notFound("The table bucket does not exist."));
         if (!bucket.getArn().equals(tableBucketArn)) {
             throw notFound("The table bucket does not exist.");
         }
