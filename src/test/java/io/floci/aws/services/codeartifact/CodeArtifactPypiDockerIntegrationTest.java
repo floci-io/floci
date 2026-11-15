@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -27,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -920,6 +922,61 @@ class CodeArtifactPypiDockerIntegrationTest {
         String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         process.waitFor();
         return output.isBlank() ? 0 : (int) output.lines().count();
+    }
+
+    /**
+     * A real gzipped tarball holding one {@code <name>-<version>/PKG-INFO} entry with real
+     * {@code Requires-Dist} headers, the exact shape {@code PypiVersionMetadata.extractSdistMetadata}
+     * expects: classic 512-byte TAR header blocks, no long-name or PAX extensions.
+     */
+    private static byte[] buildSdistWithRequiresDist(String packageDirectoryName, String metadataText)
+            throws IOException {
+        byte[] metadataBytes = metadataText.getBytes(StandardCharsets.UTF_8);
+        byte[] header = new byte[512];
+        byte[] nameBytes = (packageDirectoryName + "/PKG-INFO").getBytes(StandardCharsets.UTF_8);
+        System.arraycopy(nameBytes, 0, header, 0, nameBytes.length);
+        byte[] sizeOctal = String.format("%011o", metadataBytes.length).getBytes(StandardCharsets.US_ASCII);
+        System.arraycopy(sizeOctal, 0, header, 124, sizeOctal.length);
+        header[156] = '0';
+        int padding = (512 - metadataBytes.length % 512) % 512;
+
+        ByteArrayOutputStream tar = new ByteArrayOutputStream();
+        tar.write(header);
+        tar.write(metadataBytes);
+        tar.write(new byte[padding]);
+        tar.write(new byte[1024]);
+
+        ByteArrayOutputStream gzipped = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(gzipped)) {
+            gzip.write(tar.toByteArray());
+        }
+        return gzipped.toByteArray();
+    }
+
+    @Test
+    @Order(23)
+    void listPackageVersionDependenciesParsesRequiresDistFromARealSdistAtTheRealPypiserverSidecar()
+            throws IOException {
+        String packageName = "listdeps-pypi-pkg";
+        String filename = "listdeps_pypi_pkg-1.0.0.tar.gz";
+        byte[] sdist = buildSdistWithRequiresDist("listdeps_pypi_pkg-1.0.0",
+                "Metadata-Version: 2.1\nName: listdeps-pypi-pkg\nVersion: 1.0.0\n"
+                        + "Requires-Dist: requests (>=2.0.0)\n");
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, sdist))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/package/version/dependencies?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi"
+                        + "&package=" + packageName + "&version=1.0.0")
+                .then().statusCode(200)
+                .body("package", equalTo(packageName))
+                .body("dependencies.size()", equalTo(1))
+                .body("dependencies[0].package", equalTo("requests"))
+                .body("dependencies[0].dependencyType", equalTo("Requires-Dist"))
+                .body("dependencies[0].versionRequirement", equalTo("(>=2.0.0)"));
     }
 
     /**
