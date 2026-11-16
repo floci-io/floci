@@ -4,12 +4,17 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 
+import java.util.Arrays;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /** A table's {@code s3://bucket/prefix/} location split into its bucket and its key prefix, ending in a slash. */
 record TableLocation(String bucket, String prefix) {
 
     private static final int LIST_PAGE_SIZE = 1000;
+    /** The glob characters DuckDB reads in a path besides {@code *}. */
+    private static final Pattern UNMODELED_GLOB = Pattern.compile("[?\\[\\]{}\\\\]");
 
     /** The location {@code location} names, or null when it is not an {@code s3://} location. */
     static TableLocation of(String location) {
@@ -31,6 +36,34 @@ record TableLocation(String bucket, String prefix) {
     boolean ownedBy(S3Service s3, String accountId) {
         try {
             return accountId.equals(s3.getBucketOwnerAccountId(bucket));
+        } catch (AwsException e) {
+            if ("NoSuchBucket".equals(e.getErrorCode())) {
+                return false;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Whether no object the read of {@code <location>/**} reaches holds data: there is none, or only the zero-byte
+     * folder markers (keys ending in a slash) the S3 console creates. A location with {@code *} in it, a projected
+     * table's read path, is listed from the literal prefix before its first {@code *}, an object counting when its
+     * key matches, each {@code *} taking part or all of one folder name. False when the location holds a glob
+     * character this does not model ({@code ?}, a bracket or brace expression, an escape), which the read keeps, and
+     * when the bucket does not exist, which reading the location reports as it did. The location is listed in one
+     * scan, as every page of a listing scans the whole prefix.
+     */
+    boolean holdsNoData(S3Service s3) {
+        if (UNMODELED_GLOB.matcher(prefix).find()) {
+            return false;
+        }
+        int wildcard = prefix.indexOf('*');
+        String listed = wildcard < 0 ? prefix : prefix.substring(0, prefix.lastIndexOf('/', wildcard) + 1);
+        Pattern reached = wildcard < 0 ? null : Pattern.compile(Arrays.stream(prefix.split("\\*", -1))
+                .map(Pattern::quote).collect(Collectors.joining("[^/]*")) + ".+");
+        try {
+            return s3.listObjects(bucket, listed, null, Integer.MAX_VALUE).stream().map(S3Object::getKey)
+                    .noneMatch(key -> !key.endsWith("/") && (reached == null || reached.matcher(key).matches()));
         } catch (AwsException e) {
             if ("NoSuchBucket".equals(e.getErrorCode())) {
                 return false;

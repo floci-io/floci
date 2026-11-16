@@ -267,7 +267,7 @@ class AthenaPartitionTemplateSidecarIntegrationTest {
         database.setName(schema);
         when(glue.getDatabases()).thenReturn(List.of(database));
         when(glue.getTables(schema)).thenReturn(tables);
-        String views = new GlueViewDdlBuilder(glue).build(null);
+        String views = new GlueViewDdlBuilder(glue, s3Service).build(null);
 
         List<Map<String, String>> rows = new ArrayList<>();
         for (Map<String, Object> row : duck.query(sql, views)) {

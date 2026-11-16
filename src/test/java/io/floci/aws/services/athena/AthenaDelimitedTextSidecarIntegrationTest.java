@@ -127,6 +127,30 @@ class AthenaDelimitedTextSidecarIntegrationTest {
                 Map.of("id", "4", "name", "dave", "name_null", "false", "note", "n")), rows);
     }
 
+    /**
+     * A table whose location holds no data, or only a folder marker, answers no rows with its declared columns as
+     * their types, as Athena does, where reading the empty location fails to bind.
+     */
+    @Test
+    void aTableWhoseLocationHoldsNoDataAnswersNoRows() {
+        put("marked/", new byte[0]);
+        tables.add(tsvTable("nothing", "nothing"));
+        tables.add(tsvTable("marked", "marked"));
+
+        for (String table : List.of("nothing", "marked")) {
+            assertEquals(List.of(Map.of("n", "0", "id_type", "BIGINT", "name_type", "VARCHAR")), query(
+                    "SELECT count(*) AS n, typeof(max(id)) AS id_type, typeof(max(name)) AS name_type FROM "
+                            + view(table)), table);
+        }
+        Table nested = tsvTable("nested", "nested");
+        nested.getStorageDescriptor().setColumns(List.of(column("tags", "array<string>"),
+                column("who", "struct<name:string,age:int>")));
+        tables.add(nested);
+        assertEquals(List.of(Map.of("tags_type", "VARCHAR[]", "age_type", "INTEGER")),
+                query("SELECT typeof(any_value(tags)) AS tags_type, typeof(any_value(who).age) AS age_type FROM "
+                        + view("nested")));
+    }
+
     // ---- helpers ----
 
     private void put(String key, byte[] content) {
@@ -156,7 +180,7 @@ class AthenaDelimitedTextSidecarIntegrationTest {
         database.setName(schema);
         when(glue.getDatabases()).thenReturn(List.of(database));
         when(glue.getTables(schema)).thenReturn(tables);
-        return new GlueViewDdlBuilder(glue);
+        return new GlueViewDdlBuilder(glue, s3Service);
     }
 
     private List<Map<String, String>> query(String sql) {
