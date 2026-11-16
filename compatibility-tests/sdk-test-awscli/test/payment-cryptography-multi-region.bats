@@ -5,11 +5,17 @@
 # created in the region of the request and is the Primary Region key there, and every
 # other region holds a Replica Region key with the same identifier and its own ARN. The
 # tests drive the operations with the AWS CLI, which is such a client.
+#
+# The default replication regions are the ones of the region they are read in, so the
+# test that changes them does it in a region of its own. The other tests of the suite
+# create their keys in the region the command line names, and a key that is replicated
+# has to be exportable, so the settings of one region must not reach the keys of another.
 
 setup() {
     load 'test_helper/common-setup'
     KEY_ARN=""
     DEFAULT_REGIONS=""
+    SETTINGS_REGION="us-west-2"
 }
 
 teardown() {
@@ -17,14 +23,22 @@ teardown() {
         aws_cmd payment-cryptography delete-key --key-identifier "$KEY_ARN" \
             --delete-key-in-days 7 >/dev/null 2>&1 || true
     fi
-    # The account's own default regions are put back, so a run against an account that
-    # already had one does not take it away.
-    aws_cmd payment-cryptography disable-default-key-replication-regions \
-        --replication-regions us-west-2 >/dev/null 2>&1 || true
+    # The default regions of the region the test changed are put back, so a run against an
+    # account that already had one does not take it away.
+    aws_cmd_in "$SETTINGS_REGION" payment-cryptography disable-default-key-replication-regions \
+        --replication-regions us-east-2 >/dev/null 2>&1 || true
     if [ -n "$DEFAULT_REGIONS" ] && [ "$DEFAULT_REGIONS" != "None" ]; then
-        aws_cmd payment-cryptography enable-default-key-replication-regions \
+        aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
             --replication-regions $DEFAULT_REGIONS >/dev/null 2>&1 || true
     fi
+}
+
+# The command in a region of its own, for the operations whose settings are the ones of
+# that region.
+aws_cmd_in() {
+    local region="$1"
+    shift
+    aws --endpoint-url "$FLOCI_ENDPOINT" --region "$region" --output json "$@" 2>&1
 }
 
 # The key that leaves the service, replicated to the regions named.
@@ -37,28 +51,41 @@ create_replicated_key() {
 }
 
 @test "Payment Cryptography multi-region: the default replication regions are read and set" {
-    # The account's own default regions are read before the test changes them, so the
+    # The default regions of the region are read before the test changes them, so the
     # teardown can put them back.
-    DEFAULT_REGIONS=$(aws_cmd payment-cryptography get-default-key-replication-regions \
-        --query 'EnabledReplicationRegions' --output text 2>/dev/null || true)
+    DEFAULT_REGIONS=$(aws_cmd_in "$SETTINGS_REGION" payment-cryptography \
+        get-default-key-replication-regions --query 'EnabledReplicationRegions' \
+        --output text 2>/dev/null || true)
 
-    run aws_cmd payment-cryptography get-default-key-replication-regions
+    run aws_cmd_in "$SETTINGS_REGION" payment-cryptography get-default-key-replication-regions
     assert_success
     [ -n "$(json_get "$output" '.EnabledReplicationRegions')" ]
 
-    run aws_cmd payment-cryptography enable-default-key-replication-regions \
-        --replication-regions us-west-2
+    run aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
+        --replication-regions us-east-2
     assert_success
-    [[ "$(json_get "$output" '.EnabledReplicationRegions')" == *"us-west-2"* ]]
+    [[ "$(json_get "$output" '.EnabledReplicationRegions')" == *"us-east-2"* ]]
+
+    run aws_cmd_in "$SETTINGS_REGION" payment-cryptography get-default-key-replication-regions
+    assert_success
+    [[ "$(json_get "$output" '.EnabledReplicationRegions')" == *"us-east-2"* ]]
+
+    run aws_cmd_in "$SETTINGS_REGION" payment-cryptography disable-default-key-replication-regions \
+        --replication-regions us-east-2
+    assert_success
+    [[ "$(json_get "$output" '.EnabledReplicationRegions')" != *"us-east-2"* ]]
+}
+
+@test "Payment Cryptography multi-region: the default replication regions are the ones of the region" {
+    # The settings are the ones of the region they are read in, so the region the command
+    # line names keeps the settings it had.
+    run aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
+        --replication-regions us-east-2
+    assert_success
 
     run aws_cmd payment-cryptography get-default-key-replication-regions
     assert_success
-    [[ "$(json_get "$output" '.EnabledReplicationRegions')" == *"us-west-2"* ]]
-
-    run aws_cmd payment-cryptography disable-default-key-replication-regions \
-        --replication-regions us-west-2
-    assert_success
-    [[ "$(json_get "$output" '.EnabledReplicationRegions')" != *"us-west-2"* ]]
+    [[ "$(json_get "$output" '.EnabledReplicationRegions')" != *"us-east-2"* ]]
 }
 
 @test "Payment Cryptography multi-region: a key is replicated to the regions it names" {
@@ -101,7 +128,7 @@ create_replicated_key() {
 }
 
 @test "Payment Cryptography multi-region: a region the service does not serve is refused" {
-    run aws_cmd payment-cryptography enable-default-key-replication-regions \
+    run aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
         --replication-regions moon-west-1
     assert_failure
     [[ "$output" == *"moon-west-1"* ]]
