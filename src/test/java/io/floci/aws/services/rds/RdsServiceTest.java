@@ -19,6 +19,7 @@ import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.ec2.model.Vpc;
 import io.floci.aws.services.ec2.model.VpcIpv6CidrBlockAssociation;
+import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.rds.container.AutoPauseListener;
@@ -164,6 +165,8 @@ class RdsServiceTest {
             "docdb8.0");
 
     private RdsService rdsService;
+    private EventBridgeService eventBridgeService;
+    private RdsEventPublisher eventPublisher;
     private RdsContainerManager containerManager;
     private RdsProxyManager proxyManager;
     private Ec2Service ec2Service;
@@ -176,6 +179,8 @@ class RdsServiceTest {
 
     @BeforeEach
     void setUp() {
+        eventBridgeService = mock(EventBridgeService.class);
+        eventPublisher = new RdsEventPublisher(eventBridgeService, new ObjectMapper());
         containerManager = mock(RdsContainerManager.class);
         proxyManager = mock(RdsProxyManager.class);
         ec2Service = mock(Ec2Service.class);
@@ -6110,6 +6115,71 @@ class RdsServiceTest {
         assertNotEquals(a.getEndpoint().port(), b.getEndpoint().port());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedStopsDoNotPublishSuccessfulLifecycleEvents(boolean cluster) {
+        String id = "failed-stop";
+        createLifecycleResource(id, cluster);
+        doThrow(new IllegalStateException("backend stop failed")).when(containerManager).stop(any());
+        assertThrows(IllegalStateException.class, () -> stopLifecycleResource(id, cluster));
+        verifyNoInteractions(eventBridgeService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedStartsDoNotPublishSuccessfulLifecycleEvents(boolean cluster) {
+        String id = "failed-start";
+        createLifecycleResource(id, cluster);
+        stopLifecycleResource(id, cluster);
+        clearInvocations(eventBridgeService);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("backend start failed"));
+        assertThrows(IllegalStateException.class, () -> {
+            if (cluster) {
+                rdsService.startDbCluster(id, "us-east-1");
+            } else {
+                rdsService.startDbInstance(id);
+            }
+        });
+        verifyNoInteractions(eventBridgeService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void lifecycleDeliveryRunsAfterReleasingResourceAndServiceLocks(boolean cluster) {
+        String id = "unlocked-delivery";
+        createLifecycleResource(id, cluster);
+        Object resource = cluster ? rdsService.getDbCluster(id, "us-east-1") : rdsService.getDbInstance(id);
+        doAnswer(invocation -> {
+            assertFalse(Thread.holdsLock(rdsService));
+            assertFalse(Thread.holdsLock(resource));
+            return null;
+        }).when(eventBridgeService).publishServiceEvent(anyString(), anyString(), anyString(), anyString(), anyString());
+        stopLifecycleResource(id, cluster);
+        verify(eventBridgeService, times(cluster ? 2 : 1))
+                .publishServiceEvent(eq("aws.rds"), anyString(), anyString(), anyString(), eq("us-east-1"));
+    }
+
+    private void createLifecycleResource(String id, boolean cluster) {
+        if (cluster) {
+            rdsService.createDbCluster(id, "aurora-postgresql", "16.3",
+                    "admin", "password", "dbname", false, null);
+            rdsService.createDbInstance(id + "-member", "aurora-postgresql", "16.3",
+                    null, null, null, "db.r6g.large", 20, false, null, null, id);
+        } else {
+            rdsService.createDbInstance(id, "postgres", "16", "admin", "password", "dbname",
+                    "db.t3.micro", 20, false, null, null, null);
+        }
+    }
+
+    private void stopLifecycleResource(String id, boolean cluster) {
+        if (cluster) {
+            rdsService.stopDbCluster(id, "us-east-1");
+        } else {
+            rdsService.stopDbInstance(id, null);
+        }
+    }
+
     @Test
     void stopAndStartDbInstanceReleaseAndRestoreTheContainerOnTheSameVolume() {
         DbInstance created = rdsService.createDbInstance("standalone", "postgres", "16",
@@ -11343,7 +11413,7 @@ class RdsServiceTest {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
                 null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), null, kmsService);
+                new InMemoryStorage<>(), null, kmsService, eventPublisher);
     }
 
     private RdsService newService(RdsContainerManager containerManager,
@@ -11356,7 +11426,7 @@ class RdsServiceTest {
         return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(),
                 secretsManager, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), null, kmsService);
+                new InMemoryStorage<>(), null, kmsService, eventPublisher);
     }
 
     private RdsService proxyStoreService(

@@ -216,6 +216,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private final ResourceGroupsTaggingService taggingService;
     // Null when a test constructs the service without CloudWatch; auto-pause then reports no metrics.
     private final CloudWatchMetricsService metricsService;
+    private final RdsEventPublisher eventPublisher;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> reportedMemberRelayFailures = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
@@ -242,7 +243,6 @@ public class RdsService implements Resettable, ResourceProvider {
             "MYSQL_NATIVE_PASSWORD", "MYSQL_CACHING_SHA2_PASSWORD",
             "POSTGRES_SCRAM_SHA_256", "POSTGRES_MD5", "SQL_SERVER_AUTHENTICATION");
 
-    @Inject
     public RdsService(RdsContainerManager containerManager,
                       RdsProxyManager proxyManager,
                       Ec2Service ec2Service,
@@ -255,6 +255,25 @@ public class RdsService implements Resettable, ResourceProvider {
                       ResourceGroupsTaggingService taggingService,
                       KmsService kmsService,
                       CloudWatchMetricsService metricsService) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config, storageFactory,
+                secretsManagerService, dockerHostResolver, currentContainerNetworkResolver, taggingService,
+                kmsService, metricsService, null);
+    }
+
+    @Inject
+    public RdsService(RdsContainerManager containerManager,
+                      RdsProxyManager proxyManager,
+                      Ec2Service ec2Service,
+                      RegionResolver regionResolver,
+                      EmulatorConfig config,
+                      StorageFactory storageFactory,
+                      SecretsManagerService secretsManagerService,
+                      DockerHostResolver dockerHostResolver,
+                      CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                      ResourceGroupsTaggingService taggingService,
+                      KmsService kmsService,
+                      CloudWatchMetricsService metricsService,
+                      RdsEventPublisher eventPublisher) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -266,6 +285,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.taggingService = taggingService;
         this.metricsService = metricsService;
+        this.eventPublisher = eventPublisher;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.eventSubscriptions = storageFactory.create("rds", "rds-event-subscriptions.json",
@@ -419,6 +439,31 @@ public class RdsService implements Resettable, ResourceProvider {
                StorageBackend<String, OptionGroup> optionGroups,
                ResourceGroupsTaggingService taggingService,
                KmsService kmsService) {
+        this(containerManager, proxyManager, ec2Service, regionResolver, config, instances, clusters,
+                parameterGroups, clusterParameterGroups, subnetGroups, secretsManagerService, dockerHostResolver,
+                currentContainerNetworkResolver, proxies, proxyTargetGroups, optionGroups, taggingService,
+                kmsService, null);
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService,
+               DockerHostResolver dockerHostResolver,
+               CurrentContainerNetworkResolver currentContainerNetworkResolver,
+               StorageBackend<String, DbProxy> proxies,
+               StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups,
+               StorageBackend<String, OptionGroup> optionGroups,
+               ResourceGroupsTaggingService taggingService,
+               KmsService kmsService,
+               RdsEventPublisher eventPublisher) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -438,6 +483,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.proxyTargetGroups = proxyTargetGroups;
         this.taggingService = taggingService;
         this.metricsService = null;
+        this.eventPublisher = eventPublisher;
         this.globalClusters = new InMemoryStorage<>();
         this.snapshots = new InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
@@ -4589,7 +4635,17 @@ public class RdsService implements Resettable, ResourceProvider {
         return stopDbInstance(id, snapshotId, regionResolver.getDefaultRegion());
     }
 
-    public synchronized DbInstance stopDbInstance(String id, String snapshotId, String region) {
+    public DbInstance stopDbInstance(String id, String snapshotId, String region) {
+        try {
+            synchronized (this) {
+                return doStopDbInstance(id, snapshotId, region);
+            }
+        } finally {
+            publishLifecycleEvents();
+        }
+    }
+
+    private DbInstance doStopDbInstance(String id, String snapshotId, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -4629,6 +4685,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         instance.setStatus(DbInstanceStatus.STOPPED);
         putInstanceForScope(accountId, effectiveRegion, id, instance);
+        queueLifecycleEvent(instance.getDbInstanceArn(), id, false, false);
         LOG.infov("DB instance {0} stopped", id);
         return response;
     }
@@ -4638,7 +4695,17 @@ public class RdsService implements Resettable, ResourceProvider {
         return startDbInstance(id, regionResolver.getDefaultRegion());
     }
 
-    public synchronized DbInstance startDbInstance(String id, String region) {
+    public DbInstance startDbInstance(String id, String region) {
+        try {
+            synchronized (this) {
+                return doStartDbInstance(id, region);
+            }
+        } finally {
+            publishLifecycleEvents();
+        }
+    }
+
+    private DbInstance doStartDbInstance(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         DbInstance instance = getDbInstance(id, effectiveRegion);
@@ -4659,6 +4726,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         putInstanceForScope(accountId, effectiveRegion, id, instance);
+        queueLifecycleEvent(instance.getDbInstanceArn(), id, false, true);
         LOG.infov("DB instance {0} started", id);
         return response;
     }
@@ -4716,7 +4784,11 @@ public class RdsService implements Resettable, ResourceProvider {
      * every member's proxy with them, and all of them report "stopped" until StartDBCluster.
      */
     public DbCluster stopDbCluster(String id, String region) {
-        return withClusterPublication(id, region, () -> doStopDbCluster(id, region));
+        try {
+            return withClusterPublication(id, region, () -> doStopDbCluster(id, region));
+        } finally {
+            publishLifecycleEvents();
+        }
     }
 
     private DbCluster doStopDbCluster(String id, String region) {
@@ -4762,13 +4834,18 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         cluster.setStatus(DbInstanceStatus.STOPPED);
         putClusterForScope(accountId, effectiveRegion, id, cluster);
+        queueClusterLifecycleEvents(cluster, effectiveRegion, false);
         LOG.infov("DB cluster {0} stopped", id);
         return response;
     }
 
     /** Starts a stopped cluster and its members on the cluster's kept volume. */
     public DbCluster startDbCluster(String id, String region) {
-        return withClusterPublication(id, region, () -> doStartDbCluster(id, region));
+        try {
+            return withClusterPublication(id, region, () -> doStartDbCluster(id, region));
+        } finally {
+            publishLifecycleEvents();
+        }
     }
 
     private DbCluster doStartDbCluster(String id, String region) {
@@ -4789,8 +4866,33 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setStatus(DbInstanceStatus.AVAILABLE);
         putClusterForScope(accountId, effectiveRegion, id, cluster);
         restoreClusterMemberBackends(cluster, effectiveRegion, true);
+        queueClusterLifecycleEvents(cluster, effectiveRegion, true);
         LOG.infov("DB cluster {0} started", id);
         return response;
+    }
+
+    private void queueClusterLifecycleEvents(DbCluster cluster, String region, boolean started) {
+        String accountId = accountIdFromArn(cluster.getDbClusterArn());
+        DbInstanceStatus completed = started ? DbInstanceStatus.AVAILABLE : DbInstanceStatus.STOPPED;
+        for (String memberId : cluster.getDbClusterMembers()) {
+            DbInstance member = findInstanceForScope(accountId, region, memberId);
+            if (member != null && member.getStatus() == completed) {
+                queueLifecycleEvent(member.getDbInstanceArn(), memberId, false, started);
+            }
+        }
+        queueLifecycleEvent(cluster.getDbClusterArn(), cluster.getDbClusterIdentifier(), true, started);
+    }
+
+    private void queueLifecycleEvent(String arn, String id, boolean cluster, boolean started) {
+        if (eventPublisher != null) {
+            eventPublisher.queue(arn, id, cluster, started);
+        }
+    }
+
+    private void publishLifecycleEvents() {
+        if (eventPublisher != null) {
+            eventPublisher.publishQueued();
+        }
     }
 
     /** Reboots a cluster: its container and proxies go down and come back on the same volume. */
