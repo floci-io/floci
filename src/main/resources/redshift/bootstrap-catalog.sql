@@ -633,3 +633,127 @@ GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
 REVOKE EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) FROM PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;
+
+-- 18. VARBYTE and SUPER: Redshift's binary and semi-structured types, as domains over bytea and jsonb,
+-- with the functions that read and write them. A SUPER value keeps the jsonb order of an object's keys,
+-- not the order they were written in.
+DO $floci$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'pg_catalog' AND t.typname = 'varbyte') THEN
+        CREATE DOMAIN pg_catalog.varbyte AS bytea;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                   WHERE n.nspname = 'pg_catalog' AND t.typname = 'super') THEN
+        CREATE DOMAIN pg_catalog.super AS jsonb;
+    END IF;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.from_varbyte(value pg_catalog.varbyte, format text)
+RETURNS text LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+BEGIN
+    CASE lower(format)
+        WHEN 'hex' THEN
+            RETURN encode(value, 'hex');
+        WHEN 'binary' THEN
+            RETURN COALESCE((SELECT string_agg((('x' || lpad(to_hex(get_byte(value, i)), 2, '0'))::bit(8))::text, '' ORDER BY i)
+                             FROM generate_series(0, length(value) - 1) AS i), '');
+        WHEN 'utf8', 'utf-8', 'utf_8' THEN
+            RETURN convert_from(value, 'UTF8');
+        WHEN 'base64' THEN
+            RETURN replace(encode(value, 'base64'), E'\n', '');
+        ELSE
+            RAISE EXCEPTION 'invalid format "%" for FROM_VARBYTE', format USING ERRCODE = '22023';
+    END CASE;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.to_varbyte(value text, format text)
+RETURNS pg_catalog.varbyte LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+DECLARE
+    padded text;
+    result bytea := ''::bytea;
+    i integer;
+BEGIN
+    CASE lower(format)
+        WHEN 'hex' THEN
+            -- An odd number of digits gets a leading 0.
+            RETURN decode(CASE WHEN length(value) % 2 = 1 THEN '0' || value ELSE value END, 'hex');
+        WHEN 'binary' THEN
+            IF value !~ '^[01]*$' THEN
+                RAISE EXCEPTION 'invalid binary digit in "%"', value USING ERRCODE = '22023';
+            END IF;
+            padded := lpad(value, ((length(value) + 7) / 8) * 8, '0');
+            FOR i IN 0 .. length(padded) / 8 - 1 LOOP
+                result := result || set_byte('\x00'::bytea, 0, (('b' || substr(padded, i * 8 + 1, 8))::bit(8))::integer);
+            END LOOP;
+            RETURN result;
+        WHEN 'utf8', 'utf-8', 'utf_8' THEN
+            RETURN convert_to(value, 'UTF8');
+        WHEN 'base64' THEN
+            RETURN decode(value, 'base64');
+        ELSE
+            RAISE EXCEPTION 'invalid format "%" for TO_VARBYTE', format USING ERRCODE = '22023';
+    END CASE;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.json_parse(value text)
+RETURNS pg_catalog.super LANGUAGE sql IMMUTABLE STRICT AS $floci$
+    SELECT value::jsonb::pg_catalog.super
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.json_parse(value pg_catalog.varbyte)
+RETURNS pg_catalog.super LANGUAGE sql IMMUTABLE STRICT AS $floci$
+    SELECT convert_from(value, 'UTF8')::jsonb::pg_catalog.super
+$floci$;
+
+-- False, not an error, for what JSON_PARSE would refuse, an empty string among it.
+CREATE OR REPLACE FUNCTION pg_catalog.can_json_parse(value text)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+BEGIN
+    PERFORM value::jsonb;
+    RETURN true;
+EXCEPTION WHEN OTHERS THEN
+    RETURN false;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.can_json_parse(value pg_catalog.varbyte)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE STRICT AS $floci$
+BEGIN
+    PERFORM convert_from(value, 'UTF8')::jsonb;
+    RETURN true;
+EXCEPTION WHEN OTHERS THEN
+    RETURN false;
+END
+$floci$;
+
+-- Compact text, as RFC 8259 allows and Redshift writes it; a null is the JSON string 'null'.
+CREATE OR REPLACE FUNCTION pg_catalog.json_serialize(value pg_catalog.super)
+RETURNS text LANGUAGE plpgsql IMMUTABLE AS $floci$
+DECLARE
+    doc jsonb := value;
+BEGIN
+    IF doc IS NULL THEN
+        RETURN 'null';
+    END IF;
+    CASE jsonb_typeof(doc)
+        WHEN 'object' THEN
+            RETURN '{' || COALESCE((SELECT string_agg(to_jsonb(e.key)::text || ':'
+                                                       || pg_catalog.json_serialize(e.value::pg_catalog.super), ',')
+                                    FROM jsonb_each(doc) AS e), '') || '}';
+        WHEN 'array' THEN
+            RETURN '[' || COALESCE((SELECT string_agg(pg_catalog.json_serialize(e.value::pg_catalog.super), ',' ORDER BY e.ord)
+                                    FROM jsonb_array_elements(doc) WITH ORDINALITY AS e(value, ord)), '') || ']';
+        ELSE
+            RETURN doc::text;
+    END CASE;
+END
+$floci$;
+
+CREATE OR REPLACE FUNCTION pg_catalog.json_typeof(value pg_catalog.super)
+RETURNS text LANGUAGE sql IMMUTABLE STRICT AS $floci$
+    SELECT jsonb_typeof(value)
+$floci$;

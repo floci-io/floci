@@ -68,6 +68,13 @@ public final class RedshiftSqlInterceptor {
     /** {@code ENCODE <codec>} where {@code <codec>} is an actual Redshift column encoding or {@code AUTO}. */
     private static final Pattern ENCODE_PATTERN = Pattern.compile(
             "(?i)\\bENCODE\\s+(RAW|AZ64|BYTEDICT|DELTA32K|DELTA|LZO|MOSTLY8|MOSTLY16|MOSTLY32|RUNLENGTH|TEXT255|TEXT32K|ZSTD|AUTO)\\b");
+    /**
+     * {@code VARBYTE(n)}, {@code VARBINARY(n)} and {@code BINARY VARYING(n)}, and the two aliases without a length: the
+     * {@code varbyte} domain takes no length, and PostgreSQL has no type of the other names. Only after a column's
+     * name, so a column called {@code varbinary} is left alone, and also at the end of a statement.
+     */
+    private static final Pattern VARBYTE_TYPE_PATTERN = Pattern.compile(
+            "(?i)(?<=[\\w\"]\\s{1,200})(?:VARBYTE|VARBINARY|BINARY\\s+VARYING)(?:\\s*\\(\\s*\\d+\\s*\\))?(?=[\\s,)]|$)");
     private static final Pattern DOUBLE_COMMA_PATTERN = Pattern.compile(",(?:\\s*,)+");
     private static final Pattern COMMA_CLOSE_PAREN_PATTERN = Pattern.compile(",\\s*\\)");
 
@@ -113,6 +120,7 @@ public final class RedshiftSqlInterceptor {
         s = KEY_COLUMN_CONSTRAINT_PATTERN.matcher(s).replaceAll("");
         s = TABLE_LEVEL_KEY_IDENT_PATTERN.matcher(s).replaceAll("");
         s = ENCODE_PATTERN.matcher(s).replaceAll("");
+        s = VARBYTE_TYPE_PATTERN.matcher(s).replaceAll("varbyte");
         s = DOUBLE_COMMA_PATTERN.matcher(s).replaceAll(",");
         s = COMMA_CLOSE_PAREN_PATTERN.matcher(s).replaceAll(")");
         return s;

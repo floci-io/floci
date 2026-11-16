@@ -271,4 +271,56 @@ class RedshiftSqlInterceptorTest {
         assertTrue(!rewritten.contains("INTERLEAVED"), "Should not contain INTERLEAVED: " + rewritten);
         assertTrue(!rewritten.contains(",\n)"), "Should not contain trailing comma before parenthesis: " + rewritten);
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"VARBYTE(64)", "varbyte (1024)", "VARBINARY(10)", "BINARY VARYING(16)", "binary  varying (16)"})
+    void shouldTurnASizedBinaryTypeIntoTheVarbyteDomain(String type) {
+        String rewritten = RedshiftSqlInterceptor.rewrite("CREATE TABLE t (id INT, payload " + type + " NOT NULL);");
+
+        assertEquals("CREATE TABLE t (id INT, payload varbyte NOT NULL);", rewritten);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"VARBYTE(10)", "VARBYTE", "VARBINARY(10)", "BINARY VARYING(10)"})
+    void shouldTurnABinaryTypeThatEndsTheStatementIntoTheVarbyteDomain(String type) {
+        assertEquals("ALTER TABLE t ADD COLUMN x varbyte;",
+                RedshiftSqlInterceptor.rewrite("ALTER TABLE t ADD COLUMN x " + type + ";"));
+        assertEquals("ALTER TABLE t ADD COLUMN x varbyte",
+                RedshiftSqlInterceptor.rewrite("ALTER TABLE t ADD COLUMN x " + type));
+    }
+
+    @Test
+    void shouldTurnABinaryTypeAfterWideAlignmentIntoTheVarbyteDomain() {
+        String padding = " ".repeat(40);
+
+        assertEquals("CREATE TABLE t (\n    payload" + padding + "varbyte\n);",
+                RedshiftSqlInterceptor.rewrite("CREATE TABLE t (\n    payload" + padding + "VARBYTE(64)\n);"));
+    }
+
+    @Test
+    void shouldTurnAnUnsizedBinaryAliasIntoTheVarbyteDomain() {
+        assertEquals("CREATE TABLE t (a varbyte, b varbyte);",
+                RedshiftSqlInterceptor.rewrite("CREATE TABLE t (a VARBINARY, b BINARY VARYING);"));
+    }
+
+    @Test
+    void shouldLeaveAColumnNamedLikeABinaryTypeAlone() {
+        String sql = "CREATE TABLE t (id INT, varbinary INT, binary_data INT);";
+
+        assertSame(sql, RedshiftSqlInterceptor.rewrite(sql));
+    }
+
+    @Test
+    void shouldLeaveASuperColumnAndABinaryTypeInAStringLiteralAlone() {
+        String sql = "CREATE TABLE t (doc SUPER, note VARCHAR(20) DEFAULT 'a VARBYTE(5) b');";
+
+        assertSame(sql, RedshiftSqlInterceptor.rewrite(sql));
+    }
+
+    @Test
+    void shouldNotTouchABinaryTypeOutsideTableDdl() {
+        String sql = "SELECT CAST(x AS VARBYTE(10)) FROM t";
+
+        assertSame(sql, RedshiftSqlInterceptor.rewrite(sql));
+    }
 }
