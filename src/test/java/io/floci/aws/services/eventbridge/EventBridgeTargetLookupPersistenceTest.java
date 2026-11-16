@@ -68,11 +68,11 @@ class EventBridgeTargetLookupPersistenceTest {
                 String before = MAPPER.writeValueAsString(List.of(buses.scanAllAccountsWithRawKeys(),
                         rules.scanAllAccountsWithRawKeys(), targets.scanAllAccountsWithRawKeys()));
                 Map<String, String> files = fileDigests();
-                EventBridgeTargetLookup lookup = new EventBridgeTargetLookup(buses, rules, targets,
+                EventBridgeService lookup = EventBridgeTargetLookupFixtures.service(buses, rules, targets,
                         new RegionResolver(REGION, ACCOUNT));
-                assertEquals(List.of("owned"), lookup.list(TARGET, "custom", 100, null, REGION).items());
-                assertEquals(List.of("owned"), lookup.list(TARGET, bus.getArn(), 100, null, REGION).items());
-                assertEquals(List.of(), lookup.list(TARGET, null, 100, null, REGION).items());
+                assertEquals(List.of("owned"), lookup.listRuleNamesByTarget(TARGET, "custom", 100, null, REGION).items());
+                assertEquals(List.of("owned"), lookup.listRuleNamesByTarget(TARGET, bus.getArn(), 100, null, REGION).items());
+                assertEquals(List.of(), lookup.listRuleNamesByTarget(TARGET, null, 100, null, REGION).items());
                 assertEquals(before, MAPPER.writeValueAsString(List.of(buses.scanAllAccountsWithRawKeys(),
                         rules.scanAllAccountsWithRawKeys(), targets.scanAllAccountsWithRawKeys())));
                 assertEquals(Set.of(busKey), buses.scanAllAccountsWithRawKeys().keySet());

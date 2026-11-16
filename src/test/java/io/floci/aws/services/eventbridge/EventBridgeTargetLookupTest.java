@@ -11,6 +11,7 @@ import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.Target;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -20,6 +21,10 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 class EventBridgeTargetLookupTest {
     private static final String ACCOUNT = "000000000000";
@@ -33,18 +38,47 @@ class EventBridgeTargetLookupTest {
         Rule legacy = fixture.rule(ACCOUNT, REGION, "default", "owned", true);
         fixture.target(ACCOUNT, REGION, "default", "owned", true);
         String key = "rule:" + REGION + ":default/owned";
-        assertEquals(List.of("owned"), fixture.lookup(ACCOUNT).list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of("owned"), fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
         assertSame(legacy, fixture.rawRules.get(key).orElseThrow());
         assertEquals(Set.of(key), fixture.rawRules.keys());
         assertEquals(Set.of(key), fixture.rawTargets.keys());
-        assertEquals(List.of(), fixture.lookup(OTHER).list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of(), fixture.lookup(OTHER).listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
 
         Rule explicit = fixture.rule(ACCOUNT, REGION, "default", "owned", false);
         fixture.targets.putForAccount(ACCOUNT, key, List.of(new Target("other", "other-target", null, null)));
-        assertEquals(List.of(), fixture.lookup(ACCOUNT).list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of(), fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
         assertSame(explicit, fixture.rules.getForAccount(ACCOUNT, key).orElseThrow());
         assertSame(legacy, fixture.rawRules.get(key).orElseThrow());
         assertEquals(Set.of(key, ACCOUNT + "/" + key), fixture.rawRules.keys());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"old/name,true", "overlong,true", "old/name,false", "overlong,false"})
+    void persistedNamesRemainDiscoverableWithoutApplyingCreationConstraints(String storedName, boolean legacy) {
+        Fixture fixture = new Fixture();
+        String name = "overlong".equals(storedName) ? "x".repeat(65) : storedName;
+        Rule rule = fixture.rule(ACCOUNT, REGION, "default", name, legacy);
+        fixture.target(ACCOUNT, REGION, "default", name, legacy);
+        Map<String, Rule> before = fixture.rules.scanAllAccountsWithRawKeys();
+
+        EventBridgeService service = fixture.lookup(ACCOUNT);
+        assertEquals(List.of(name), service.listRuleNamesByTarget(TARGET, null, 100, null, REGION).items());
+        assertEquals(List.of(rule), service.listRules(null, null, REGION));
+        assertEquals(before, fixture.rules.scanAllAccountsWithRawKeys());
+    }
+
+    @Test
+    void lookupDoesNotFetchForeignAccountRuleValues() {
+        Fixture fixture = new Fixture();
+        fixture.rule(ACCOUNT, REGION, "default", "owned", false);
+        fixture.target(ACCOUNT, REGION, "default", "owned", false);
+        fixture.rule(OTHER, REGION, "default", "foreign", false);
+        fixture.target(OTHER, REGION, "default", "foreign", false);
+        clearInvocations(fixture.rawRules);
+
+        assertEquals(List.of("owned"), fixture.lookup(ACCOUNT)
+                .listRuleNamesByTarget(TARGET, null, 100, null, REGION).items());
+        verify(fixture.rawRules, never()).get(OTHER + "/rule:" + REGION + ":default/foreign");
     }
 
     @ParameterizedTest
@@ -63,7 +97,7 @@ class EventBridgeTargetLookupTest {
             default -> throw new IllegalArgumentException(mismatch);
         }
         Map<String, Rule> before = fixture.rules.scanAllAccountsWithRawKeys();
-        assertEquals(List.of(), fixture.lookup(ACCOUNT).list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of(), fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
         assertEquals(before, fixture.rules.scanAllAccountsWithRawKeys());
         assertSame(rule, fixture.rawRules.get("rule:" + REGION + ":default/owned").orElseThrow());
     }
@@ -74,10 +108,10 @@ class EventBridgeTargetLookupTest {
         fixture.rule(OTHER, REGION, "default", "foreign", false);
         fixture.target(OTHER, REGION, "default", "foreign", false);
         Map<String, Rule> before = fixture.rules.scanAllAccountsWithRawKeys();
-        assertEquals(List.of(), fixture.lookup(ACCOUNT).list(TARGET, null, null, null, REGION).items());
-        assertEquals(List.of("foreign"), fixture.lookup(OTHER).list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of(), fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of("foreign"), fixture.lookup(OTHER).listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
         assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
-                () -> fixture.lookup(ACCOUNT).list(TARGET, OTHER + "/default", null, null, REGION)).getErrorCode());
+                () -> fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, OTHER + "/default", null, null, REGION)).getErrorCode());
         assertEquals(before, fixture.rules.scanAllAccountsWithRawKeys());
     }
 
@@ -95,7 +129,7 @@ class EventBridgeTargetLookupTest {
         }
         fixture.rawBuses.put("bus:" + REGION + ":custom", bus);
         assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
-                () -> fixture.lookup(ACCOUNT).list(TARGET, "custom", null, null, REGION)).getErrorCode());
+                () -> fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, "custom", null, null, REGION)).getErrorCode());
         assertEquals(Set.of("bus:" + REGION + ":custom"), fixture.rawBuses.keys());
         assertSame(bus, fixture.rawBuses.get("bus:" + REGION + ":custom").orElseThrow());
     }
@@ -111,21 +145,21 @@ class EventBridgeTargetLookupTest {
                 }
             }
         }
-        EventBridgeTargetLookup lookup = fixture.lookup(ACCOUNT);
-        PaginatedResult<String> first = lookup.list(TARGET, null, 1, null, REGION);
+        EventBridgeService lookup = fixture.lookup(ACCOUNT);
+        PaginatedResult<String> first = lookup.listRuleNamesByTarget(TARGET, null, 1, null, REGION);
         String token = first.nextToken();
         assertNotNull(token);
         assertEquals(List.of("alpha"), first.items(), "lexical order is Floci's pagination policy");
-        assertEquals(List.of("omega"), lookup.list(TARGET, null, 1, token, REGION).items());
-        assertNull(lookup.list(TARGET, null, 1, token, REGION).nextToken());
-        assertInvalid(() -> lookup.list("different-target", null, 1, token, REGION));
-        assertInvalid(() -> lookup.list(TARGET, "default", 1, token, REGION));
-        assertInvalid(() -> lookup.list(TARGET, arn(ACCOUNT, REGION, "event-bus/default"), 1, token, REGION));
-        assertInvalid(() -> lookup.list(TARGET, null, 2, token, REGION));
-        assertInvalid(() -> lookup.list(TARGET, null, null, token, REGION));
-        assertInvalid(() -> lookup.list(TARGET, null, 1, token, "us-west-2"));
-        assertInvalid(() -> fixture.lookup(OTHER).list(TARGET, null, 1, token, REGION));
-        assertInvalid(() -> lookup.list(TARGET, null, 1, "not-a-cursor", REGION));
+        assertEquals(List.of("omega"), lookup.listRuleNamesByTarget(TARGET, null, 1, token, REGION).items());
+        assertNull(lookup.listRuleNamesByTarget(TARGET, null, 1, token, REGION).nextToken());
+        assertInvalid(() -> lookup.listRuleNamesByTarget("different-target", null, 1, token, REGION));
+        assertInvalid(() -> lookup.listRuleNamesByTarget(TARGET, "default", 1, token, REGION));
+        assertInvalid(() -> lookup.listRuleNamesByTarget(TARGET, arn(ACCOUNT, REGION, "event-bus/default"), 1, token, REGION));
+        assertInvalid(() -> lookup.listRuleNamesByTarget(TARGET, null, 2, token, REGION));
+        assertInvalid(() -> lookup.listRuleNamesByTarget(TARGET, null, null, token, REGION));
+        assertInvalid(() -> lookup.listRuleNamesByTarget(TARGET, null, 1, token, "us-west-2"));
+        assertInvalid(() -> fixture.lookup(OTHER).listRuleNamesByTarget(TARGET, null, 1, token, REGION));
+        assertInvalid(() -> lookup.listRuleNamesByTarget(TARGET, null, 1, "not-a-cursor", REGION));
     }
 
     @Test
@@ -137,10 +171,10 @@ class EventBridgeTargetLookupTest {
             fixture.targets.putForAccount(ACCOUNT, "rule:" + REGION + ":default/" + name,
                     List.of(new Target("one", filter, null, null)));
         }
-        PaginatedResult<String> first = fixture.lookup(ACCOUNT).list(filter, null, 1, null, REGION);
+        PaginatedResult<String> first = fixture.lookup(ACCOUNT).listRuleNamesByTarget(filter, null, 1, null, REGION);
         assertNotNull(first.nextToken());
         assertTrue(first.nextToken().length() <= 2048);
-        assertEquals(List.of("omega"), fixture.lookup(ACCOUNT).list(filter, null, 1, first.nextToken(), REGION).items());
+        assertEquals(List.of("omega"), fixture.lookup(ACCOUNT).listRuleNamesByTarget(filter, null, 1, first.nextToken(), REGION).items());
     }
 
     @Test
@@ -159,11 +193,11 @@ class EventBridgeTargetLookupTest {
             }
         };
         changingTargets.put(ACCOUNT + "/" + key, List.of(new Target("one", TARGET, null, null)));
-        EventBridgeTargetLookup lookup = new EventBridgeTargetLookup(fixture.buses, fixture.rules,
+        EventBridgeService lookup = EventBridgeTargetLookupFixtures.service(fixture.buses, fixture.rules,
                 new AccountAwareStorageBackend<>(changingTargets, null, ACCOUNT), new RegionResolver(REGION, ACCOUNT));
-        assertEquals(List.of(), lookup.list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of(), lookup.listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
         assertTrue(replaced.get());
-        assertEquals(List.of("owned"), lookup.list(TARGET, null, null, null, REGION).items());
+        assertEquals(List.of("owned"), lookup.listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
     }
 
     private static void assertInvalid(Runnable call) {
@@ -176,14 +210,14 @@ class EventBridgeTargetLookupTest {
 
     private static final class Fixture {
         private final InMemoryStorage<String, EventBus> rawBuses = new InMemoryStorage<>();
-        private final InMemoryStorage<String, Rule> rawRules = new InMemoryStorage<>();
+        private final InMemoryStorage<String, Rule> rawRules = spy(new InMemoryStorage<>());
         private final InMemoryStorage<String, List<Target>> rawTargets = new InMemoryStorage<>();
         private final AccountAwareStorageBackend<EventBus> buses = new AccountAwareStorageBackend<>(rawBuses, null, ACCOUNT);
         private final AccountAwareStorageBackend<Rule> rules = new AccountAwareStorageBackend<>(rawRules, null, ACCOUNT);
         private final AccountAwareStorageBackend<List<Target>> targets = new AccountAwareStorageBackend<>(rawTargets, null, ACCOUNT);
 
-        private EventBridgeTargetLookup lookup(String account) {
-            return new EventBridgeTargetLookup(buses, rules, targets, new RegionResolver(REGION, account));
+        private EventBridgeService lookup(String account) {
+            return EventBridgeTargetLookupFixtures.service(buses, rules, targets, new RegionResolver(REGION, account));
         }
 
         private Rule rule(String account, String region, String bus, String name, boolean legacy) {

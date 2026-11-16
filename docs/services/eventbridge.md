@@ -60,7 +60,8 @@ cursors within those bounds return `InvalidToken`.
 `ListRuleNamesByTarget` returns each matching rule name once when a target has the
 exact supplied `TargetArn`. Select an event bus by name or ARN; omitting
 `EventBusName` selects the default bus. The bus and rules belong to the caller's
-account, Region and partition. A target ARN is a filter and can name a resource
+account, Region and partition. As with `ListRules`, Floci resolves a supplied bus
+ARN to its name in the caller's account and Region. A target ARN is a filter and can name a resource
 in another account or Region.
 
 `Limit` accepts 1 to 100 names and defaults to 100. Keep every other request
@@ -78,7 +79,8 @@ permission boundaries and explicit denies still apply.
 The lookup reads existing bus, rule and target stores without writing rows or
 creating the logical default bus. Unprefixed legacy records are read in place
 only for the configured default account after checking the stored bus and rule
-identity. Explicit account records take precedence. The lookup does not provide
+identity. Explicit account records take precedence. Persisted legacy rule names
+remain discoverable even if they no longer pass creation-time validation. The lookup does not provide
 an atomic snapshot across concurrent rule and target updates.
 
 ## Numeric event patterns

@@ -62,6 +62,7 @@ class EventBridgeTargetLookupHandlerTest {
                 "{\"TargetArn\":\"" + "x".repeat(1601) + "\"}",
                 "{\"TargetArn\":\"filter\",\"EventBusName\":\"\"}",
                 "{\"TargetArn\":\"filter\",\"EventBusName\":\"bad name\"}",
+                "{\"TargetArn\":\"filter\",\"EventBusName\":\"   \"}",
                 "{\"TargetArn\":\"filter\",\"EventBusName\":\"" + "x".repeat(1601) + "\"}",
                 "{\"TargetArn\":\"filter\",\"NextToken\":\"\"}",
                 "{\"TargetArn\":\"filter\",\"NextToken\":\"" + "x".repeat(2049) + "\"}",
@@ -98,9 +99,7 @@ class EventBridgeTargetLookupHandlerTest {
     }
 
     private static EventBridgeService service() {
-        return new EventBridgeService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"), MAPPER,
-                null, null, null, null, null);
+        return EventBridgeTargetLookupFixtures.service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
     }
 }

@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsArnShapes;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsPartitions;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -68,6 +69,7 @@ import java.util.regex.Pattern;
 
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.readInAccount;
 
 @ApplicationScoped
 public class EventBridgeService implements ResourceProvider, StoredResourceArns {
@@ -92,7 +94,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
     private final ReplayDispatcher replayDispatcher;
     private final AppSyncTargetValidator appSyncTargetValidator;
-    private final EventBridgeTargetLookup targetLookup;
 
     @Inject
     public EventBridgeService(StorageFactory storageFactory,
@@ -156,7 +157,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         this.replayDispatcher = replayDispatcher;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
         this.appSyncTargetValidator = appSyncTargetValidator;
-        this.targetLookup = new EventBridgeTargetLookup(busStore, ruleStore, targetStore, regionResolver);
     }
 
     @PostConstruct
@@ -274,8 +274,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return getOrCreateDefaultBus(region);
         }
         return busStore.get(busKey(region, effectiveName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + name, 400));
+                .orElseThrow(() -> eventBusNotFound(name));
     }
 
     public EventBus updateEventBus(String name,
@@ -524,12 +523,24 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public List<Rule> listRules(String busName, String namePrefix, String region) {
         String effectiveBus = resolvedBusName(busName);
         String prefix = ruleKeyPrefix(region, effectiveBus);
-        return ruleStore.scan(k -> {
-            if (!isRuleKeyOfBus(k, prefix)) return false;
-            if (namePrefix == null || namePrefix.isBlank()) return true;
-            String ruleName = k.substring(prefix.length());
-            return ruleName.startsWith(namePrefix);
-        }).stream().filter(rule -> effectiveBus.equals(rule.getEventBusName())).toList();
+        String account = regionResolver.getAccountId();
+        Set<String> keys = ruleStore instanceof AccountAwareStorageBackend<Rule> aware
+                ? aware.keysIncludingLegacyForAccount(account, key -> key.startsWith(prefix))
+                : ruleStore.keys();
+        List<Rule> rules = new ArrayList<>();
+        for (String key : keys) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            String name = key.substring(prefix.length());
+            if (namePrefix != null && !namePrefix.isBlank() && !name.startsWith(namePrefix)) {
+                continue;
+            }
+            readInAccount(ruleStore, account, key)
+                    .filter(rule -> name.equals(rule.getName()) && effectiveBus.equals(rule.getEventBusName()))
+                    .ifPresent(rules::add);
+        }
+        return rules;
     }
 
     /**
@@ -748,7 +759,61 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public PaginatedResult<String> listRuleNamesByTarget(String targetArn, String busName, Integer limit,
                                                         String nextToken, String region) {
-        return targetLookup.list(targetArn, busName, limit, nextToken, region);
+        if (targetArn == null || targetArn.isEmpty() || targetArn.length() > 1600) {
+            throw new AwsException("ValidationException", "TargetArn must contain 1 to 1600 characters.", 400);
+        }
+        if (busName != null && (busName.isBlank() || busName.length() > 1600)) {
+            throw new AwsException("ValidationException", "EventBusName must contain 1 to 1600 characters.", 400);
+        }
+        String effectiveBus = resolvedBusName(busName);
+        if (!effectiveBus.matches("[/\\.\\-_A-Za-z0-9]+")) {
+            throw new AwsException("ValidationException", "Invalid EventBridge event bus name.", 400);
+        }
+        requireBusForRead(effectiveBus, region);
+        List<String> names = listRules(effectiveBus, null, region).stream()
+                .filter(rule -> ruleTargetsArn(rule, effectiveBus, targetArn, region))
+                .map(Rule::getName).toList();
+        String scope = targetRuleCursorScope(targetArn, busName, effectiveBus, limit, region);
+        return paginate(names, Function.identity(), limit, nextToken, scope);
+    }
+
+    private void requireBusForRead(String busName, String region) {
+        Optional<EventBus> bus = readInAccount(busStore, regionResolver.getAccountId(), busKey(region, busName));
+        if (bus.isEmpty() && "default".equals(busName)) {
+            return;
+        }
+        bus.filter(value -> busName.equals(value.getName())
+                        && regionResolver.buildArn("events", region, "event-bus/" + busName).equals(value.getArn()))
+                .orElseThrow(() -> eventBusNotFound(busName));
+    }
+
+    private boolean ruleTargetsArn(Rule rule, String busName, String targetArn, String region) {
+        String account = regionResolver.getAccountId();
+        if (rule.getAccountId() != null && !account.equals(rule.getAccountId())) {
+            return false;
+        }
+        String expectedArn = buildRuleArn(region, busName, rule.getName());
+        if (!expectedArn.equals(rule.getArn())) {
+            return false;
+        }
+        String key = ruleKey(region, busName, rule.getName());
+        List<Target> targets = new ArrayList<>(readInAccount(targetStore, account, key).orElse(List.of()));
+        boolean matches = targets.stream().anyMatch(target -> target != null && targetArn.equals(target.getArn()));
+        return matches && readInAccount(ruleStore, account, key).orElse(null) == rule
+                && key.equals(ruleKey(region, busName, rule.getName()))
+                && busName.equals(rule.getEventBusName()) && expectedArn.equals(rule.getArn())
+                && (rule.getAccountId() == null || account.equals(rule.getAccountId()));
+    }
+
+    private String targetRuleCursorScope(String targetArn, String suppliedBus, String effectiveBus,
+                                         Integer limit, String region) {
+        StringBuilder scope = new StringBuilder();
+        for (String value : List.of(regionResolver.getAccountId(), regionResolver.partitionForRegion(region),
+                region, effectiveBus, targetArn, limit == null ? "omitted" : limit.toString(),
+                suppliedBus == null ? "" : suppliedBus)) {
+            scope.append(value.length()).append(':').append(value);
+        }
+        return "target-rules:" + Digests.sha256Hex(scope.toString());
     }
 
     public List<Target> listTargetsByRule(String ruleName, String busName, String region) {
@@ -1584,8 +1649,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return;
         }
         busStore.get(busKey(region, busName))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + busName, 400));
+                .orElseThrow(() -> eventBusNotFound(busName));
+    }
+
+    private static AwsException eventBusNotFound(String busName) {
+        return new AwsException("ResourceNotFoundException", "EventBus not found: " + busName, 400);
     }
 
     private static boolean isBlank(Object value) {

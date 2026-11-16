@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.floci.aws.testing.EnforcementFixtures.statement;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -123,10 +124,6 @@ class EventBridgeTargetLookupIamIntegrationTest {
                 "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}");
         return AwsTestClients.create(EventBridgeClient.builder(), credentials.accessKeyId(),
                 credentials.secretAccessKey(), Region.US_EAST_1);
-    }
-
-    private static String statement(String effect, String action, String resource) {
-        return "{\"Effect\":\"" + effect + "\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private static <T> void unchanged(StorageBackend<String, T> store, String key, T value, String account) {

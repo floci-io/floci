@@ -14,6 +14,7 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridge.model.EventBridgeException;
 import software.amazon.awssdk.services.eventbridge.model.ListRuleNamesByTargetResponse;
+import software.amazon.awssdk.services.eventbridge.model.Rule;
 import software.amazon.awssdk.services.eventbridge.model.Target;
 
 import java.util.ArrayList;
@@ -23,6 +24,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -86,36 +88,15 @@ class EventBridgeTargetLookupIntegrationTest {
         String account = Long.toString(ACCOUNTS.incrementAndGet());
         try (Scenario owner = new Scenario(account, Region.US_EAST_1);
              Scenario other = new Scenario(account, Region.of(otherRegion))) {
-            String bus = owner.bus("scope");
-            other.createBus(bus);
-            String target = owner.target("one");
-            owner.rule(bus, "owned", target);
-            other.rule(bus, "other", target);
-            assertEquals(Set.of("owned"), names(owner.client, bus, target, 100));
-            assertEquals(Set.of("other"), names(other.client, bus, target, 100));
-            String arn = owner.client.describeEventBus(request -> request.name(bus)).arn();
-            EventBridgeException denied = assertThrows(EventBridgeException.class,
-                    () -> names(other.client, arn, target, 100));
-            assertEquals("ResourceNotFoundException", denied.awsErrorDetails().errorCode());
-            assertEquals(Set.of("owned"), names(owner.client, bus, target, 100));
+            assertScopedIsolation(owner, other);
         }
     }
 
     @Test
-    void sameBusNamesRemainScopedByAccountAndForeignBusArnsAreRefused() {
+    void sameBusNamesAndArnAliasesRemainScopedByAccount() {
         try (Scenario owner = scenario(Region.US_EAST_1);
              Scenario other = scenario(Region.US_EAST_1)) {
-            String bus = owner.bus("account");
-            other.createBus(bus);
-            String target = owner.target("one");
-            owner.rule(bus, "owned", target);
-            other.rule(bus, "other", target);
-            assertEquals(Set.of("owned"), names(owner.client, bus, target, 100));
-            assertEquals(Set.of("other"), names(other.client, bus, target, 100));
-            String arn = owner.client.describeEventBus(request -> request.name(bus)).arn();
-            EventBridgeException denied = assertThrows(EventBridgeException.class,
-                    () -> names(other.client, arn, target, 100));
-            assertEquals("ResourceNotFoundException", denied.awsErrorDetails().errorCode());
+            assertScopedIsolation(owner, other);
         }
     }
 
@@ -182,6 +163,21 @@ class EventBridgeTargetLookupIntegrationTest {
             assertEquals("InvalidToken", error.awsErrorDetails().errorCode());
             assertEquals(Set.of("alpha", "omega"), names(fixture.client, bus, target, 1));
         }
+    }
+
+    private static void assertScopedIsolation(Scenario owner, Scenario other) {
+        String bus = owner.bus("scope");
+        other.createBus(bus);
+        String target = owner.target("one");
+        owner.rule(bus, "owned", target);
+        other.rule(bus, "other", target);
+        assertEquals(Set.of("owned"), names(owner.client, bus, target, 100));
+        assertEquals(Set.of("other"), names(other.client, bus, target, 100));
+        String arn = owner.client.describeEventBus(request -> request.name(bus)).arn();
+        assertEquals(Set.of("other"), names(other.client, arn, target, 100));
+        assertEquals(Set.of("other"), other.client.listRules(request -> request.eventBusName(arn)).rules().stream()
+                .map(Rule::name).collect(Collectors.toSet()));
+        assertEquals(Set.of("owned"), names(owner.client, bus, target, 100));
     }
 
     private static Set<String> names(EventBridgeClient client, String bus, String target, int limit) {

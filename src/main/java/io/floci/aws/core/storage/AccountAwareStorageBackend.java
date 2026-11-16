@@ -624,6 +624,24 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 .toList();
     }
 
+    /**
+     * Account-relative keys, including unmigrated keys only for the configured default account.
+     * Filters ownership before collecting keys and never fetches or migrates a stored value.
+     */
+    public Set<String> keysIncludingLegacyForAccount(String accountId, Predicate<String> keyFilter) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (String rawKey : delegate.keys()) {
+            if (!accountId.equals(ownerOf(rawKey))) {
+                continue;
+            }
+            String key = hasAccountPrefix(rawKey) ? rawKey.substring(13) : rawKey;
+            if (keyFilter.test(key)) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
     public Set<String> keysForAccount(String accountId) {
         String prefix = accountId + "/";
         return delegate.keys().stream()
