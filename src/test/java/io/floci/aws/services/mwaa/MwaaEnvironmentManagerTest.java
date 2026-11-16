@@ -154,13 +154,13 @@ class MwaaEnvironmentManagerTest {
     void anEnvironmentInAVpcJoinsItsNetworkBeforeAirflowStartsAndGivesTheAddressBackOnDelete() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.20"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.20"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         Environment environment = environmentInSubnets("subnet-a", "subnet-b");
 
         manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
         assertTrue(manager.holdsVpc("000000000000", "us-east-1", "vpc-1"));
         assertFalse(manager.holdsSubnet("111111111111", "us-east-1", "subnet-a"));
@@ -170,25 +170,25 @@ class MwaaEnvironmentManagerTest {
 
         InOrder order = Mockito.inOrder(lifecycleManager, ec2Service);
         order.verify(lifecycleManager).create(any());
-        order.verify(ec2Service).attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id",
+        order.verify(ec2Service).attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id",
                 "172.31.0.20");
         order.verify(lifecycleManager).startCreated(eq("airflow-container-id"), any());
         order.verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.20");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.20");
     }
 
     @Test
     void anAddressTheVpcNetworkRefusesIsGivenBackAndAirflowStillStarts() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.21"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.21"))
                 .thenReturn(Optional.empty());
 
         manager.startAirflowContainer(environmentInSubnets("subnet-a"), "2.10.5", "172.18.0.9", "db-secret-pw",
                 null, null);
 
-        verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.21");
+        verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.21");
         verify(lifecycleManager).startCreated(eq("airflow-container-id"), any());
     }
 
@@ -196,8 +196,8 @@ class MwaaEnvironmentManagerTest {
     void aFailedStartGivesTheVpcAddressBackAfterRemovingTheContainer() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.22"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.22"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         when(lifecycleManager.startCreated(eq("airflow-container-id"), any()))
                 .thenThrow(new RuntimeException("start failed"));
@@ -208,15 +208,15 @@ class MwaaEnvironmentManagerTest {
 
         InOrder order = Mockito.inOrder(lifecycleManager, ec2Service);
         order.verify(lifecycleManager).removeIfExists("airflow-container-id");
-        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.22");
+        order.verify(ec2Service).releaseVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.22");
     }
 
     @Test
     void aContainerDockerFailedToRemoveKeepsItsVpcAddress() {
         airflowContainerStarts();
         subnetInVpc("subnet-a", "vpc-1");
-        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
-        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.24"))
+        when(ec2Service.allocateVpcPrivateIp("000000000000", "us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
+        when(ec2Service.attachContainerToVpc("000000000000", "us-east-1", "vpc-1", "subnet-a", "airflow-container-id", "172.31.0.24"))
                 .thenReturn(Optional.of("floci-vpc-1"));
         Environment environment = environmentInSubnets("subnet-a");
         manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
@@ -224,7 +224,7 @@ class MwaaEnvironmentManagerTest {
 
         manager.stopEnvironment(environment);
 
-        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any(), any());
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
     }
 
@@ -246,12 +246,12 @@ class MwaaEnvironmentManagerTest {
         when(settings.getNetworks()).thenReturn(Map.of(
                 "floci-mwaa", new ContainerNetwork().withIpv4Address("172.18.0.5"),
                 "floci-vpc-1", new ContainerNetwork().withIpv4Address("172.31.0.30")));
-        when(ec2Service.reserveVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.30")).thenReturn(true);
+        when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.30")).thenReturn(true);
 
         manager.reclaimVpcAddress(environment);
 
-        verify(ec2Service).reserveVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.30");
-        verify(ec2Service, never()).reserveVpcPrivateIp("us-east-1", "subnet-a", "172.18.0.5");
+        verify(ec2Service).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.30");
+        verify(ec2Service, never()).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.18.0.5");
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
     }
 
@@ -266,8 +266,8 @@ class MwaaEnvironmentManagerTest {
         withoutNetwork.setName("no-vpc-env");
         manager.startAirflowContainer(withoutNetwork, "2.10.5", "172.18.0.9", "db-secret-pw", null, null);
 
-        verify(ec2Service, never()).allocateVpcPrivateIp(any(), any());
-        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any());
+        verify(ec2Service, never()).allocateVpcPrivateIp(any(), any(), any());
+        verify(ec2Service, never()).attachContainerToVpc(any(), any(), any(), any(), any(), any());
     }
 
     @SuppressWarnings("unchecked")

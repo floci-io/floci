@@ -117,8 +117,8 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE` | `floci/network-helper:local` | Linux helper image containing nftables; Floci builds the default image locally when missing |
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket path or TCP address |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |
-| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's Docker client. Each live Lambda container holds one connection (its exit watcher) plus one per extension; log streams use the streaming pool. See [Docker Configuration](docker.md#connection-pool) |
-| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `512` | Connection pool size for container log-follow streams, kept apart from the main pool so they never starve create, start, stop and remove. See [Docker Configuration](docker.md#connection-pool) |
+| `FLOCI_DOCKER_MAX_CONNECTIONS` | `1024` | Connection pool size for Floci's short Docker calls, plus CodeBuild phase commands, EKS audit log followers and ECS Exec sessions. See [Docker Configuration](docker.md#connection-pool) |
+| `FLOCI_DOCKER_STREAMING_MAX_CONNECTIONS` | `2048` | Connection pool size for streams that last a container's lifetime, kept apart from the main pool so they never starve create, start, stop and remove. Each live Lambda container holds two (log stream and exit watcher) plus one per extension. See [Docker Configuration](docker.md#connection-pool) |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04`. An image in a registry on `localhost` or a loopback address, Floci's own ECR among them, is launched as it is |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
@@ -151,6 +151,8 @@ Floci's embedded DNS server always resolves the following wildcard suffixes to F
 |---|---|---|
 | `FLOCI_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to Floci's container IP. Use this for custom domains beyond the built-in ones above (e.g. a private internal suffix). |
 | `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` | `false` | Resolve every AWS partition's DNS and dual-stack suffix (`amazonaws.com`, `api.aws`, `amazonaws.eu`, and more) and every subdomain to Floci's container IP inside spawned containers (transparent endpoint injection). See below. |
+| `FLOCI_DNS_HOST_PORT` | _(none)_ | When Floci runs natively, the UDP port of a resolver on `127.0.0.1` that answers the same names, for the host's own resolver. See [Floci running natively](#floci-running-natively). |
+| `FLOCI_DNS_BRIDGE_LISTENER_ENABLED` | `true` | When Floci runs natively on a host with a `docker0` bridge, listen on that bridge's address, port 53, and give it to the containers Floci launches as their resolver. See [Floci running natively](#floci-running-natively). |
 
 ### Transparent endpoints
 
@@ -172,6 +174,30 @@ Combine it with `FLOCI_TLS_ENABLED=true` so hardcoded `https://` endpoints work 
 - the generated self-signed certificate additionally covers each of those suffixes and `*.<region>.<suffix>` for every published region, plus the multi-label and S3 endpoint forms (flipping the flag regenerates the certificate).
 
 With TLS, set `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` as an environment variable (or `-Dfloci.dns.spoof-aws-endpoints=true`), because the certificate generator does not read `application.yml`; Floci logs a warning at startup if the flag is only set there.
+
+### Floci running natively
+
+The embedded DNS server answers the names above, Cloud Map `<service>.<namespace>` names and Route 53 private zone records. When Floci runs in Docker it listens on its own container address, and publishing the container's port 53/udp (for example `-p 127.0.0.1:53:53/udp`) lets the host reach it as well.
+
+When Floci runs natively, it starts up to two listeners:
+
+- **For the containers it launches**, on the address of the host's `docker0` bridge, port 53, the address Docker's `host-gateway` points at. Those containers get it as their resolver, as they do when Floci runs in Docker. Binding port 53 needs root or `CAP_NET_BIND_SERVICE` (or `net.ipv4.ip_unprivileged_port_start=53`); without either, Floci logs how to grant it and the containers resolve through Docker as before. There is no such bridge on Docker Desktop or with rootless Docker, so there the containers keep resolving through Docker. `FLOCI_DNS_BRIDGE_LISTENER_ENABLED=false` turns this listener off.
+- **For the host**, on `127.0.0.1` at `FLOCI_DNS_HOST_PORT`, when it is set. Floci's own names resolve to `127.0.0.1` there. It answers only the names Floci holds and refuses every other one rather than forwarding it, so it cannot send a lookup back to the host's resolver.
+
+Point the host's resolver at the host listener for the domains you use and nothing else. For a Cloud Map namespace `demo.local` on port 5354:
+
+- macOS: a file `/etc/resolver/demo.local` with `nameserver 127.0.0.1` and `port 5354`.
+- dnsmasq: `server=/demo.local/127.0.0.1#5354`.
+- systemd-resolved: give the domain a link of its own that is not a default route, so no other name is sent there. A global `DNS=` in `resolved.conf` will not do: global servers also receive every name no routing domain matches, and Floci refuses those.
+
+```bash
+sudo ip link add floci-dns type dummy && sudo ip link set floci-dns up
+sudo resolvectl dns floci-dns 127.0.0.1:5354
+sudo resolvectl domain floci-dns '~demo.local'
+sudo resolvectl default-route floci-dns false
+```
+
+The settings go away with the link, which `ip link add` does not keep across a restart. `dig @127.0.0.1 -p 5354 api.demo.local` checks the listener directly. An instance registered with a container's Docker network address is reachable from a Linux host, not from Docker Desktop's.
 
 ---
 
@@ -618,6 +644,7 @@ See [Web Console](../ui/index.md) for running the console and swapping in a thir
 | `FLOCI_SERVICES_ROUTE53_ENABLED` | `true` | Enable the Route 53 service |
 | `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Simulated processing window for Route 53 VPC association/auth mutations; positive values make documented overlap errors (`PriorRequestNotComplete` / `ConcurrentModification`) reproducible for retry tests |
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable the ELBv2 (ALB/NLB) service |
+| `FLOCI_SERVICES_ELBV2_ALB_ZONE_RULE` | `aws` | ALB minimum-zone policy: `aws` requires two distinct ordinary Availability Zones in every region; `allow-single-zone` explicitly permits one. Per-region YAML overrides take precedence. |
 | `FLOCI_SERVICES_ELBV2_MOCK` | `false` | When `true`, load balancers are registered but no containers are spawned |
 | `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE` | `true` | Reuse backend HTTP/1.x connections for ordinary HTTP forwarding. Set to `false` for fresh connections per request; WebSocket and TCP transports are unaffected. See [backend connection reuse](../services/elb.md#backend-connection-reuse) |
 | `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE_TIMEOUT_SECONDS` | `60` | Default idle-pool timeout for backend HTTP/1.x connections, in non-negative seconds; `0` disables expiry. A target's advertised `Keep-Alive` timeout overrides it. Does not time out active responses or WebSockets |

@@ -55,7 +55,7 @@ class LambdaFunctionUrlResponseStreamTest {
         return functionUrl.substring(scheme + 3, functionUrl.indexOf('.', scheme + 3));
     }
 
-    private byte[] lambdaZip() throws Exception {
+    private byte[] lambdaZip() {
         return LambdaCodeFixtures.nodeJsZip("""
                 exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
                   responseStream = awslambda.HttpResponseStream.from(responseStream, {

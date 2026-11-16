@@ -25,8 +25,15 @@ import java.util.Optional;
  * the key an alias names; EMR, for the clusters of its instance groups; IAM Identity Center, for the accounts its
  * permission sets are provisioned to; Resource Explorer, for its default view; OAM and RAM, for the sinks,
  * invitations and shares of other accounts they act on; Secrets Manager, for the secret a name or an ARN names,
- * random suffix included, and its tags; EventBridge Scheduler, for its default schedule group; CloudFormation, for
- * the stack or the stack set a name names, whose id it minted); looked up lazily by {@code ResourceArnBuilder} and
+ * random suffix included, and its tags; EventBridge Scheduler, for its default schedule group and its groups' tags;
+ * CloudFormation, for the stack or the stack set a name names, whose id it minted, and the tags of a stack, a stack set
+ * or a change set; S3 Tables, for the table a request names by its table bucket, namespace and name, and the tags of a
+ * table bucket or a table; Lambda, for the layer version a layer version ARN selects, the image of a MicroVM and the
+ * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
+ * network connector; Glue, for the tags of a resource it tags; Step Functions, for the tags of a state machine, its
+ * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
+ * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
+ * workgroup or a data catalog); looked up lazily by {@code ResourceArnBuilder} and
  * {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for the namespace a request or an
  * ARN is of, so IAM never depends on that service directly.</p>
  *

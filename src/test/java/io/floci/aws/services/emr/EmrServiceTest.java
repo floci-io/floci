@@ -16,10 +16,13 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static io.floci.aws.services.emr.EmrServiceFixture.REGION;
 import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
@@ -160,6 +163,105 @@ class EmrServiceTest {
     }
 
     @Test
+    void aStepConcurrencyLevelBelowOneOrAbove256IsRefused() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster wide = cluster("wide", true);
+        wide.setStepConcurrencyLevel(257);
+
+        // "You can specify a minimum of 1 step and a maximum of 256 steps", in each operation's own code.
+        AwsException created = assertThrows(AwsException.class, () -> service.runJobFlow(wide, REGION));
+        assertEquals("ValidationException", created.getErrorCode());
+        assertEquals("The StepConcurrencyLevel 257 is not valid: it must be from 1 to 256.", created.getMessage());
+        String id = service.runJobFlow(cluster("narrow", true), REGION).getId();
+        AwsException modified = assertThrows(AwsException.class, () -> service.modifyCluster(id, 0));
+        assertEquals("InvalidRequestException", modified.getErrorCode());
+        assertEquals("The StepConcurrencyLevel 0 is not valid: it must be from 1 to 256.", modified.getMessage());
+        assertEquals(1, service.describeCluster(id).getStepConcurrencyLevel());
+        assertEquals(256, service.modifyCluster(id, 256));
+    }
+
+    @Test
+    void onlyContinueMayBeAddedToAClusterThatRunsStepsInParallel() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster parallel = cluster("parallel", true);
+        parallel.setStepConcurrencyLevel(2);
+        String id = service.runJobFlow(parallel, REGION).getId();
+        EmrStep terminating = step("terminating");
+        terminating.setActionOnFailure("TERMINATE_CLUSTER");
+
+        // "The step is not submitted and the action fails with a message that the ActionOnFailure setting is not
+        // valid."
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.addJobFlowSteps(id, List.of(step("fine"), terminating)));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("The ActionOnFailure setting TERMINATE_CLUSTER is not valid for a step added to a cluster whose"
+                + " StepConcurrencyLevel is greater than 1: only CONTINUE is.", refused.getMessage());
+        assertEquals(List.of(), service.listSteps(id, null, null));
+        // One that names none takes TERMINATE_CLUSTER, so it is refused too.
+        EmrStep unnamed = step("unnamed");
+        unnamed.setActionOnFailure(null);
+        assertThrows(AwsException.class, () -> service.addJobFlowSteps(id, List.of(unnamed)));
+        assertEquals(List.of(), service.listSteps(id, null, null));
+        // At a level of 1 both are fine.
+        service.modifyCluster(id, 1);
+        assertEquals(2, service.addJobFlowSteps(id, List.of(terminating, unnamed)).size());
+        assertEquals("TERMINATE_CLUSTER", service.describeStep(id, unnamed.getId()).getActionOnFailure());
+    }
+
+    @Test
+    void onlyTwoHundredFiftySixStepsMayBePendingOrRunningAtOnce() {
+        EmrService service = new EmrServiceFixture(0, 3600, 0).service;
+        List<EmrStep> many = new ArrayList<>();
+        for (int n = 0; n < 257; n++) {
+            many.add(step("step-" + n));
+        }
+        EmrCluster crowded = cluster("crowded", true);
+        crowded.getSteps().addAll(many);
+
+        AwsException created = assertThrows(AwsException.class, () -> service.runJobFlow(crowded, REGION));
+        assertEquals("ValidationException", created.getErrorCode());
+        assertEquals("Only 256 steps can be PENDING or RUNNING at any given time, and this would make 257.",
+                created.getMessage());
+        EmrCluster full = cluster("full", true);
+        full.getSteps().addAll(many.subList(0, 256));
+        String id = service.runJobFlow(full, REGION).getId();
+        AwsException added = assertThrows(AwsException.class,
+                () -> service.addJobFlowSteps(id, List.of(step("one-more"))));
+        assertEquals("Only 256 steps can be PENDING or RUNNING at any given time, and this would make 257.",
+                added.getMessage());
+        // One ended makes room again.
+        service.cancelSteps(id, List.of(service.listSteps(id, List.of("PENDING"), null).get(0).getId()));
+        assertEquals(1, service.addJobFlowSteps(id, List.of(step("one-more"))).size());
+    }
+
+    @Test
+    void cancelStepsTakesReleasesFrom480ButNot500AndAtMost256Steps() {
+        EmrService service = new EmrServiceFixture(0, 60, 0).service;
+        EmrCluster old = cluster("old", true);
+        old.setReleaseLabel("emr-4.7.2");
+        String oldId = service.runJobFlow(old, REGION).getId();
+        EmrCluster first = cluster("first", true);
+        first.setReleaseLabel("emr-5.0.0");
+        String firstId = service.runJobFlow(first, REGION).getId();
+        EmrCluster patched = cluster("patched", true);
+        patched.setReleaseLabel("emr-5.0.3");
+        String patchedId = service.runJobFlow(patched, REGION).getId();
+
+        // "Available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0."
+        AwsException older = assertThrows(AwsException.class, () -> service.cancelSteps(oldId, List.of("s-1")));
+        assertEquals("InvalidRequestException", older.getErrorCode());
+        assertEquals("CancelSteps is available only in Amazon EMR versions 4.8.0 and later, excluding version 5.0.0,"
+                + " and cluster " + oldId + " runs emr-4.7.2.", older.getMessage());
+        assertThrows(AwsException.class, () -> service.cancelSteps(firstId, List.of("s-1")));
+        assertEquals(1, service.cancelSteps(patchedId, List.of("s-1")).size());
+        // "A maximum of 256 steps are allowed in each CancelSteps request."
+        List<String> ids = Collections.nCopies(257, "s-1");
+        AwsException tooMany = assertThrows(AwsException.class, () -> service.cancelSteps(patchedId, ids));
+        assertEquals("A CancelSteps request can cancel at most 256 steps, and this one names 257.",
+                tooMany.getMessage());
+    }
+
+    @Test
     void stepsAddedWhileAClusterStartsRunOnceItIsReady() {
         EmrServiceFixture fixture = new EmrServiceFixture(10, 60, 0);
         EmrService service = fixture.service;
@@ -269,6 +371,120 @@ class EmrServiceTest {
     }
 
     @Test
+    void aClustersInstanceGroupsAndFleetsFollowItsStateAndRunNothingWhileTheyAreProvisioned() {
+        EmrServiceFixture fixture = new EmrServiceFixture(10, 0, 30);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("states", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 2)));
+        String id = service.runJobFlow(requested, REGION).getId();
+        EmrCluster fleets = cluster("fleets", true);
+        fleets.getInstanceFleets().add(fleet("CORE", 3));
+        String fleetsId = service.runJobFlow(fleets, REGION).getId();
+
+        assertEquals(List.of("PROVISIONING", "PROVISIONING"), groupStates(service, id));
+        assertEquals(0, service.listInstanceGroups(id).get(1).getRunningInstanceCount());
+        assertEquals("PROVISIONING", service.listInstanceFleets(fleetsId).get(0).getState());
+        assertEquals(0, service.listInstanceFleets(fleetsId).get(0).getProvisionedOnDemandCapacity());
+        // One added while it starts is as its others are.
+        service.addInstanceGroups(id, List.of(group("TASK", 1)));
+        assertEquals(List.of("PROVISIONING", "PROVISIONING", "PROVISIONING"), groupStates(service, id));
+
+        fixture.clock.advance(Duration.ofSeconds(5));
+        assertEquals("BOOTSTRAPPING", service.describeCluster(id).getState());
+        assertEquals(List.of("BOOTSTRAPPING", "BOOTSTRAPPING", "BOOTSTRAPPING"), groupStates(service, id));
+        assertEquals(2, service.listInstanceGroups(id).get(1).getRunningInstanceCount());
+        assertEquals(3, service.listInstanceFleets(fleetsId).get(0).getProvisionedOnDemandCapacity());
+
+        fixture.clock.advance(Duration.ofSeconds(5));
+        assertEquals("WAITING", service.describeCluster(id).getState());
+        assertEquals(List.of("RUNNING", "RUNNING", "RUNNING"), groupStates(service, id));
+        assertEquals("RUNNING", service.listInstanceFleets(fleetsId).get(0).getState());
+
+        service.terminateJobFlows(List.of(id));
+        assertEquals(List.of("TERMINATING", "TERMINATING", "TERMINATING"), groupStates(service, id));
+        fixture.clock.advance(Duration.ofSeconds(30));
+        assertEquals(List.of("TERMINATED", "TERMINATED", "TERMINATED"), groupStates(service, id));
+        assertEquals(0, service.listInstanceGroups(id).get(1).getRunningInstanceCount());
+    }
+
+    @Test
+    void aGroupThatEndsWhileItIsProvisionedListsTheInstancesItAskedForAsEnded() {
+        EmrServiceFixture fixture = new EmrServiceFixture(10, 0, 30);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("ends-early", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 2)));
+        String id = service.runJobFlow(requested, REGION).getId();
+        assertEquals(Map.of("PROVISIONING", 3L), listedByState(service.describeCluster(id), false));
+
+        service.terminateJobFlows(List.of(id));
+
+        // The same instances while it ends, still being provisioned, with none of them running.
+        EmrCluster ending = service.describeCluster(id);
+        assertEquals("TERMINATING", ending.getState());
+        assertEquals(List.of(0, 0), service.listInstanceGroups(id).stream()
+                .map(EmrInstanceGroup::getRunningInstanceCount).toList());
+        assertEquals(Map.of("PROVISIONING", 3L), listedByState(ending, false));
+        fixture.clock.advance(Duration.ofSeconds(30));
+
+        // Listed as provisioned, then as ended, as an ended fleet's are.
+        EmrCluster ended = service.describeCluster(id);
+        assertEquals("TERMINATED", ended.getState());
+        assertEquals(2, service.listInstanceGroups(id).get(1).getTerminatedInstanceCount());
+        assertEquals(0, service.listInstanceGroups(id).get(1).getRunningInstanceCount());
+        assertEquals(Map.of("TERMINATED", 3L), listedByState(ended, true));
+    }
+
+    @Test
+    void aFleetThatEndsWhileItIsProvisionedKeepsItsInstancesListedUntilTheyEnd() {
+        EmrServiceFixture fixture = new EmrServiceFixture(10, 0, 30);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("fleet-ends-early", true);
+        requested.getInstanceFleets().addAll(List.of(fleet("MASTER", 1), fleet("CORE", 2)));
+        String id = service.runJobFlow(requested, REGION).getId();
+        assertEquals(Map.of("PROVISIONING", 3L), listedByState(service.describeCluster(id), false));
+
+        service.terminateJobFlows(List.of(id));
+
+        EmrCluster ending = service.describeCluster(id);
+        assertEquals("TERMINATING", ending.getState());
+        assertEquals(List.of(0, 0), ending.getInstanceFleets().stream()
+                .map(EmrInstanceFleet::getProvisionedOnDemandCapacity).toList());
+        assertEquals(Map.of("PROVISIONING", 3L), listedByState(ending, false));
+        fixture.clock.advance(Duration.ofSeconds(30));
+
+        EmrCluster ended = service.describeCluster(id);
+        assertEquals("TERMINATED", ended.getState());
+        assertEquals(Map.of("TERMINATED", 3L), listedByState(ended, true));
+    }
+
+    @Test
+    void aGroupThatRanIsListedRunningWhileItsClusterEnds() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 30);
+        EmrService service = fixture.service;
+        EmrCluster requested = cluster("ends-late", true);
+        requested.getInstanceGroups().addAll(List.of(group("MASTER", 1), group("CORE", 2)));
+        String id = service.runJobFlow(requested, REGION).getId();
+        assertEquals(Map.of("RUNNING", 3L), listedByState(service.describeCluster(id), false));
+
+        service.terminateJobFlows(List.of(id));
+
+        assertEquals("TERMINATING", service.describeCluster(id).getState());
+        assertEquals(Map.of("RUNNING", 3L), listedByState(service.describeCluster(id), false));
+    }
+
+    /** How many instances ListInstances lists in each state, as its InstanceStates filter keeps them. */
+    private static Map<String, Long> listedByState(EmrCluster cluster, boolean terminated) {
+        return EmrHandler.listedInstances(cluster, terminated).stream()
+                .filter(set -> set.count() > 0)
+                .collect(Collectors.groupingBy(EmrHandler.ListedInstances::state,
+                        Collectors.summingLong(EmrHandler.ListedInstances::count)));
+    }
+
+    private static List<String> groupStates(EmrService service, String clusterId) {
+        return service.listInstanceGroups(clusterId).stream().map(EmrInstanceGroup::getState).toList();
+    }
+
+    @Test
     void terminatingCancelsTheStepsNotYetCompletedAndEndsAfterTheDelay() {
         EmrServiceFixture fixture = new EmrServiceFixture(0, 60, 30);
         EmrService service = fixture.service;
@@ -286,7 +502,9 @@ class EmrServiceTest {
         assertEquals("USER_REQUEST", terminating.getStateChangeReasonCode());
         assertNull(terminating.getEndDateTime());
         assertEquals(List.of("CANCELLED", "CANCELLED"), stepStates(service.listSteps(id, null, null)));
-        assertEquals("RUNNING", service.listInstanceGroups(id).get(0).getState());
+        // Its instances run until they are gone.
+        assertEquals("TERMINATING", service.listInstanceGroups(id).get(0).getState());
+        assertEquals(2, service.listInstanceGroups(id).get(0).getRunningInstanceCount());
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.addJobFlowSteps(id, List.of(step("late"))));
         assertEquals(SHUT_DOWN, refused.getMessage());

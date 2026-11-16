@@ -4,9 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.HybridStorage;
 import io.floci.aws.core.storage.InMemoryStorage;
-import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.WalStorage;
 import io.floci.aws.services.sqs.GuardedMessageQueue.ClaimResult;
@@ -14,6 +12,7 @@ import io.floci.aws.services.sqs.GuardedMessageQueue.HandleResult;
 import io.floci.aws.services.sqs.GuardedMessageQueue.MessageCounts;
 import io.floci.aws.services.sqs.model.Message;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
+import io.floci.aws.testing.StorageTestBackends;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -923,18 +922,13 @@ class GuardedMessageQueueTest {
         assertEquals(deadline, message.getVisibleAt());
     }
 
-    enum SnapshotBackend { PERSISTENT, HYBRID, WAL }
-
     @ParameterizedTest
-    @EnumSource(SnapshotBackend.class)
-    void serializingBackendsKeepLoadedAndSavedMessagesDetached(SnapshotBackend mode) throws Exception {
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void serializingBackendsKeepLoadedAndSavedMessagesDetached(String mode) throws Exception {
         Path snapshot = directory.resolve("messages.json");
         TypeReference<Map<String, List<Message>>> type = new TypeReference<>() {};
-        StorageBackend<String, List<Message>> raw = switch (mode) {
-            case PERSISTENT -> new PersistentStorage<>(snapshot, type);
-            case HYBRID -> new HybridStorage<>(snapshot, type, Long.MAX_VALUE);
-            case WAL -> new WalStorage<>(snapshot, directory.resolve("messages.wal"), type, Long.MAX_VALUE);
-        };
+        StorageBackend<String, List<Message>> raw = StorageTestBackends.create(
+                mode, snapshot, directory.resolve("messages.wal"), type, Long.MAX_VALUE);
         raw.load();
         try {
             for (boolean accountAware : List.of(false, true)) {
@@ -968,11 +962,7 @@ class GuardedMessageQueueTest {
                         .path(rawKey).get(0).path("messageAttributes").path("binary").path("dataType").asText());
             }
         } finally {
-            if (raw instanceof HybridStorage<?, ?> hybrid) {
-                hybrid.shutdown();
-            } else if (raw instanceof WalStorage<?, ?> wal) {
-                wal.shutdown();
-            }
+            StorageTestBackends.close(raw);
         }
     }
 

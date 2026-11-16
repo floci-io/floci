@@ -38,7 +38,7 @@ public class EventSourceMapping {
     private Map<String, Object> selfManagedEventSource;
     private List<String> topics = new ArrayList<>();
     private List<Map<String, Object>> sourceAccessConfigurations = new ArrayList<>();
-    private Map<String, String> tags = new HashMap<>();
+    private volatile Map<String, String> tags = new HashMap<>();
 
     public EventSourceMapping() {
     }

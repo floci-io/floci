@@ -65,6 +65,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 /** The image a release's clusters with Hive run in, made of its EMR Serverless and EMR Serverless Hive images. */
 class EmrReleaseImagesTest {
@@ -253,7 +254,7 @@ class EmrReleaseImagesTest {
             when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
             return from;
         });
-        when(docker.copyArchiveToContainerCmd(any())).thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+        when(docker.copyArchiveToContainerCmd(any())).thenReturn(copyCommand());
         when(docker.removeContainerCmd(any())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
         when(docker.removeImageCmd(anyString())).thenReturn(mock(RemoveImageCmd.class, RETURNS_SELF));
         when(listImages.exec()).thenAnswer(invocation -> List.copyOf(listed));
@@ -324,7 +325,7 @@ class EmrReleaseImagesTest {
             when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
             return from;
         });
-        when(docker.copyArchiveToContainerCmd(any())).thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+        when(docker.copyArchiveToContainerCmd(any())).thenReturn(copyCommand());
         when(docker.removeContainerCmd(any())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
         when(listImages.exec()).thenAnswer(invocation -> listed);
         when(docker.listImagesCmd()).thenReturn(listImages);
@@ -474,7 +475,7 @@ class EmrReleaseImagesTest {
             return from;
         });
         when(docker.copyArchiveToContainerCmd("target"))
-                .thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+                .thenReturn(copyCommand());
         when(lifecycle.commit(eq("target"), eq(repository), anyString(), eq("hadoop:hadoop"), any()))
                 .thenReturn("sha256:made");
         when(docker.removeContainerCmd(anyString())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
@@ -483,6 +484,16 @@ class EmrReleaseImagesTest {
 
         assertEquals("sha256:made", images.image(release, SPARK, HIVE, withHive));
         return copied;
+    }
+
+    /**
+     * A stub-only command: Mockito verification on it is unsupported. Tests that verify copy calls
+     * must create a recording mock and account for the tar streams retained by its invocation history.
+     */
+    private static CopyArchiveToContainerCmd copyCommand() {
+        // These fixtures verify source paths, not copy-command calls. Recording every call
+        // would retain each closed tar pipe's 16 MiB buffer for the lifetime of this mock.
+        return mock(CopyArchiveToContainerCmd.class, withSettings().defaultAnswer(RETURNS_SELF).stubOnly());
     }
 
     private void resolves(String image, String id) {

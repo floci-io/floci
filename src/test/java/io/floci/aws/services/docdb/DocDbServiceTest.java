@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
@@ -13,7 +14,6 @@ import io.floci.aws.services.docdb.model.DocDbClusterSettings;
 import io.floci.aws.services.docdb.model.DocDbInstance;
 import io.floci.aws.services.docdb.model.DocDbInstanceSettings;
 import io.floci.aws.services.ec2.Ec2Service;
-import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.rds.RdsService;
@@ -26,7 +26,9 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
+import static io.floci.aws.testing.Ec2ServiceFixtures.securityGroup;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -66,12 +68,38 @@ class DocDbServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
         rdsService = Mockito.mock(RdsService.class);
         ec2Service = Mockito.mock(Ec2Service.class);
+        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0)));
         kmsService = Mockito.mock(KmsService.class);
         when(kmsService.describeKey(any(), any())).thenThrow(new AwsException("NotFoundException", "Key not found", 404));
         when(rdsService.isManagedClusterParameterGroup(any())).thenAnswer(inv ->
                 List.of("default.docdb3.6", "default.docdb4.0", "default.docdb5.0", "default.docdb8.0").contains(inv.<String>getArgument(0)));
         docDbService = new DocDbService(config, regionResolver, containerManager, storageFactory,
                 rdsService, ec2Service, kmsService);
+    }
+
+    @Test
+    void storedTagsReadLegacyKeysWithoutScanningOrMigrating() {
+        String account = "000000000000";
+        String arn = "arn:aws:rds:us-east-1:" + account + ":cluster:legacy";
+        DocDbCluster cluster = new DocDbCluster();
+        cluster.setDbClusterIdentifier("legacy");
+        cluster.setDbClusterArn(arn);
+        cluster.setTags(Map.of("Owner", "team-a"));
+        InMemoryStorage<String, DocDbCluster> raw = new InMemoryStorage<>();
+        raw.put("legacy", cluster);
+        AccountAwareStorageBackend<DocDbCluster> scoped = Mockito.spy(new AccountAwareStorageBackend<>(raw, null, account));
+        StorageFactory factory = Mockito.mock(StorageFactory.class);
+        when(factory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                "docdb-clusters.json".equals(inv.getArgument(1)) ? scoped : AccountAwareStorageBackend.inMemory(account));
+        DocDbService service = new DocDbService(Mockito.mock(EmulatorConfig.class), new RegionResolver("us-east-1", account),
+                containerManager, factory, rdsService, ec2Service, kmsService);
+        assertEquals(Optional.of(Map.of("Owner", "team-a")), service.storedResourceTags(arn));
+        assertEquals(Optional.empty(), service.storedResourceTags(arn.replace(":legacy", ":missing")));
+        assertEquals(Optional.empty(), service.storedResourceTags(arn.replace(account, "111111111111")));
+        assertEquals(Optional.empty(), service.storedResourceTags(arn.replace("us-east-1", "us-west-2")));
+        assertEquals(Set.of("legacy"), raw.keys());
+        verify(scoped, never()).scanAllAccountEntries(any());
+        verify(scoped, never()).scanForAccount(anyString(), any());
     }
 
     @Test
@@ -265,9 +293,8 @@ class DocDbServiceTest {
         when(rdsService.getDbSubnetGroup(eq("nope"), any())).thenThrow(new AwsException("DBSubnetGroupNotFoundFault", "x", 404));
         when(rdsService.getDbClusterParameterGroup(eq("pg"), any())).thenReturn(new DbClusterParameterGroup("pg", "docdb5.0", "d"));
         when(rdsService.getDbClusterParameterGroup(eq("nope"), any())).thenThrow(new AwsException("DBClusterParameterGroupNotFound", "x", 404));
-        SecurityGroup sg = new SecurityGroup();
-        sg.setGroupId("sg-1");
-        when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any())).thenReturn(List.of(sg));
+        when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any()))
+                .thenReturn(List.of(securityGroup("sg-1", "app", "vpc-1")));
         when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-nope")), any(), any())).thenReturn(List.of());
         KmsKey key = new KmsKey();
         key.setKeyId("k1");

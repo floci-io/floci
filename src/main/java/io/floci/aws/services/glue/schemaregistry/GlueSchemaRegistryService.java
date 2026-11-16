@@ -1,9 +1,11 @@
 package io.floci.aws.services.glue.schemaregistry;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -626,6 +628,33 @@ public class GlueSchemaRegistryService {
         }
         resource.setTags(updated.isEmpty() ? null : updated);
         resource.persist();
+    }
+
+    /**
+     * A copy of the tags of the registry or the schema stored under {@code arn} in the account it names, matched on the
+     * whole ARN and read in place; empty for an ARN naming nothing stored, or any other resource.
+     */
+    public Map<String, String> storedTags(String arn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        Map<String, String> tags = null;
+        if (resource.startsWith("registry/")) {
+            tags = AccountAwareStorageBackend.readInAccount(registryStore, parsed.accountId(),
+                            resource.substring("registry/".length()))
+                    .filter(registry -> arn.equals(registry.getRegistryArn()))
+                    .map(Registry::getTags)
+                    .orElse(null);
+        } else if (resource.startsWith("schema/")) {
+            String[] names = resource.substring("schema/".length()).split("/", 2);
+            if (names.length == 2) {
+                tags = AccountAwareStorageBackend.readInAccount(schemaStore, parsed.accountId(),
+                                schemaKey(names[0], names[1]))
+                        .filter(schema -> arn.equals(schema.getSchemaArn()))
+                        .map(Schema::getTags)
+                        .orElse(null);
+            }
+        }
+        return tags == null ? Map.of() : new LinkedHashMap<>(tags);
     }
 
     public Map<String, String> getTags(String resourceArn) {

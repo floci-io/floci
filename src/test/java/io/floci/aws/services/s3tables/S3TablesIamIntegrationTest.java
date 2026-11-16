@@ -1,26 +1,32 @@
 package io.floci.aws.services.s3tables;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
+import io.floci.aws.testing.SignedRestRequests;
 import io.floci.aws.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3tables.S3TablesClient;
+import software.amazon.awssdk.services.s3tables.model.S3TablesException;
 
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.SignedRestRequests.denied;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * S3 Tables requests are checked against the caller's policies through its generated routes: a table bucket call on
@@ -166,6 +172,90 @@ class S3TablesIamIntegrationTest {
         }
     }
 
+    /** A resource-tag condition reads the tags S3 Tables holds on the bucket or the table a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheBucketAndTheTable() throws Exception {
+        String tagged = send(admin, "PUT", "/buckets", "{\"name\":\"iam-" + UUID.randomUUID().toString().substring(0, 8)
+                + "\",\"tags\":{\"team\":\"data\"}}").then().statusCode(200).extract().path("arn");
+        String untagged = createBucket();
+        String path = "/tables/" + encoded(tagged) + "/analytics/";
+        send(admin, "PUT", "/namespaces/" + encoded(tagged), "{\"namespace\":[\"analytics\"]}").then().statusCode(200);
+        send(admin, "PUT", path, "{\"name\":\"events\",\"format\":\"ICEBERG\",\"tags\":{\"team\":\"data\"}}")
+                .then().statusCode(200);
+        send(admin, "PUT", path, "{\"name\":\"orders\",\"format\":\"ICEBERG\"}").then().statusCode(200);
+        String onTeamData = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":"
+                + "[\"s3tables:GetTableBucket\",\"s3tables:GetTable\"],\"Resource\":\"*\",\"Condition\":"
+                + "{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}";
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-iam-", "tags", onTeamData)) {
+            send(user.signer("s3tables"), "GET", "/buckets/" + encoded(tagged), null).then().statusCode(200);
+            denied(send(user.signer("s3tables"), "GET", "/buckets/" + encoded(untagged), null),
+                    "s3tables:GetTableBucket");
+            String query = "/get-table?tableBucketARN=" + encoded(tagged) + "&namespace=analytics&name=";
+            send(user.signer("s3tables"), "GET", query + "events", null).then().statusCode(200);
+            denied(send(user.signer("s3tables"), "GET", query + "orders", null), "s3tables:GetTable");
+        } finally {
+            deleteBucket(tagged, "analytics");
+            send(admin, "DELETE", "/buckets/" + encoded(untagged), null).then().statusCode(204);
+        }
+    }
+
+    @Test
+    void encryptionReadbackRequiresPermissionOnTheRequestedBucket() throws Exception {
+        String bucket = createBucket();
+        try {
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-enc-");
+                    S3TablesClient client = encryptionClient(user)) {
+                encryptionDenied(client, bucket);
+            }
+            String other = createBucket();
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-enc-", "read",
+                    allow("\"s3tables:GetTableBucketEncryption\"", bucket));
+                    S3TablesClient client = encryptionClient(user)) {
+                assertEquals("AES256", client.getTableBucketEncryption(request -> request.tableBucketARN(bucket))
+                        .encryptionConfiguration().sseAlgorithmAsString());
+                encryptionDenied(client, other);
+            } finally {
+                send(admin, "DELETE", "/buckets/" + encoded(other), null).then().statusCode(204);
+            }
+            String policy = """
+                    {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                          "Effect": "Allow",
+                          "Action": "s3tables:GetTableBucketEncryption",
+                          "Resource": "*"
+                        },
+                        {
+                          "Effect": "Deny",
+                          "Action": "s3tables:GetTableBucketEncryption",
+                          "Resource": "%s"
+                        }
+                      ]
+                    }
+                    """.formatted(bucket);
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-enc-", "deny", policy);
+                    S3TablesClient client = encryptionClient(user)) {
+                encryptionDenied(client, bucket);
+            }
+        } finally {
+            send(admin, "DELETE", "/buckets/" + encoded(bucket), null).then().statusCode(204);
+        }
+    }
+
+    private S3TablesClient encryptionClient(SignedIamUsers.User user) {
+        return AwsTestClients.create(S3TablesClient.builder(), user.accessKeyId(), user.secretAccessKey(),
+                Region.US_EAST_1, endpoint);
+    }
+
+    private static void encryptionDenied(S3TablesClient client, String bucket) {
+        S3TablesException error = assertThrows(S3TablesException.class,
+                () -> client.getTableBucketEncryption(request -> request.tableBucketARN(bucket)));
+        assertEquals(403, error.statusCode());
+        assertTrue(error.getMessage().contains("not authorized to perform: s3tables:GetTableBucketEncryption"),
+                error.getMessage());
+    }
+
     private String createTable(String bucket, String namespace, String name) throws Exception {
         send(admin, "PUT", "/namespaces/" + encoded(bucket), "{\"namespace\":[\"" + namespace + "\"]}");
         return send(admin, "PUT", "/tables/" + encoded(bucket) + "/" + namespace + "/",
@@ -203,17 +293,6 @@ class S3TablesIamIntegrationTest {
     }
 
     private Response send(AwsRequestSigner signer, String method, String path, String body) throws Exception {
-        URI uri = endpoint.resolve(path);
-        byte[] bytes = body == null ? new byte[0] : body.getBytes(StandardCharsets.UTF_8);
-        RequestSpecification request = given().urlEncodingEnabled(false)
-                .headers(signer.headersFor(method, uri, Map.of(), bytes));
-        if (body != null) {
-            request = request.contentType("application/json").body(bytes);
-        }
-        return request.request(method, uri);
-    }
-
-    private static void denied(Response response, String action) {
-        response.then().statusCode(403).body(containsString("not authorized to perform: " + action));
+        return SignedRestRequests.send(endpoint, signer, method, path, body, "application/json");
     }
 }

@@ -1,6 +1,7 @@
 package io.floci.aws.services.athena;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageFactory;
@@ -9,11 +10,16 @@ import io.floci.aws.services.athena.model.QueryExecutionContext;
 import io.floci.aws.services.athena.model.QueryExecutionState;
 import io.floci.aws.services.athena.model.ResultConfiguration;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
+import io.floci.aws.services.glue.GlueCatalogService;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.iceberg.GlueIcebergCatalog;
 import io.floci.aws.services.glue.model.Database;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3tables.S3TablesService;
+import io.floci.aws.services.s3tables.model.Namespace;
+import io.floci.aws.services.s3tables.model.S3Table;
+import io.floci.aws.services.s3tables.model.TableBucket;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -24,6 +30,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -75,6 +82,12 @@ class AthenaIcebergSidecarIntegrationTest {
 
     @Inject
     GlueIcebergCatalog catalog;
+
+    @Inject
+    S3TablesService s3Tables;
+
+    @Inject
+    GlueCatalogService catalogs;
 
     private AthenaService athena;
     private String bucket;
@@ -174,28 +187,109 @@ class AthenaIcebergSidecarIntegrationTest {
                 rows("SELECT id FROM events ORDER BY id"));
     }
 
+    @Test
+    void anS3TablesCatalogIsCreatedWrittenAndReadInItsOwnNameAndAsTheContext() throws Exception {
+        String tableBucket = "athena-s3t-" + System.nanoTime();
+        String catalogName = "s3tablescatalog/" + tableBucket;
+        TableBucket created = RequestScopes.callAs(ACCOUNT, REGION, () -> {
+            TableBucket made = s3Tables.createTableBucket(tableBucket, null, null, Map.of(), REGION);
+            try {
+                catalogs.createCatalog("s3tablescatalog", new ObjectMapper().readTree(
+                        "{\"FederatedCatalog\":{\"Identifier\":\"" + made.getArn()
+                                + "\",\"ConnectionName\":\"aws:s3tables\"}}"), Map.of(), REGION);
+            } catch (IOException e) {
+                throw new IllegalStateException(e);
+            }
+            return made;
+        });
+        try {
+            run(catalogName, null, "CREATE DATABASE sales");
+            run(catalogName, "sales", "CREATE TABLE orders (id bigint, name string) "
+                    + "TBLPROPERTIES ('table_type'='iceberg')");
+            run(catalogName, "sales", "INSERT INTO orders VALUES (1, 'a'), (2, 'b')");
+            run(null, database, "INSERT INTO \"" + catalogName + "\".sales.orders VALUES (3, 'c')");
+            run(catalogName, "sales", "DELETE FROM orders WHERE id = 1");
+
+            assertEquals(List.of(row("id", "2", "name", "b"), row("id", "3", "name", "c")),
+                    s3TablesRows(catalogName, "sales", "SELECT id, name FROM orders ORDER BY id"));
+            assertTrue(RequestScopes.callAs(ACCOUNT, REGION, () -> s3Tables.getTable(created.getArn(), "sales",
+                    "orders", REGION)).getMetadataLocation().contains("/metadata/"));
+            // With no Database, Athena's context database is "default", which the bucket does not have.
+            run(catalogName, null, "SELECT count(*) FROM \"" + catalogName + "\".sales.orders");
+            for (String maintenance : List.of("VACUUM orders", "OPTIMIZE orders REWRITE DATA USING BIN_PACK")) {
+                QueryExecution refused = execute(catalogName, "sales", maintenance);
+                assertEquals(QueryExecutionState.FAILED, refused.getStatus().getState(), maintenance);
+                assertTrue(refused.getStatus().getStateChangeReason().contains("not supported on S3 Tables"),
+                        refused.getStatus().getStateChangeReason());
+            }
+
+            run(catalogName, "sales", "DROP TABLE orders");
+            assertTrue(RequestScopes.callAs(ACCOUNT, REGION,
+                    () -> s3Tables.listTables(created.getArn(), "sales", null, REGION)).isEmpty());
+        } finally {
+            RequestScopes.runAs(ACCOUNT, REGION, () -> {
+                catalogs.deleteCatalog("s3tablescatalog", REGION);
+                for (Namespace namespace : s3Tables.listNamespaces(created.getArn(), null, REGION)) {
+                    for (S3Table table : s3Tables.listTables(created.getArn(), namespace.getName(), null, REGION)) {
+                        s3Tables.deleteTable(created.getArn(), namespace.getName(), table.getName(), REGION);
+                    }
+                    s3Tables.deleteNamespace(created.getArn(), namespace.getName(), REGION);
+                }
+                s3Tables.deleteTableBucket(created.getArn(), REGION);
+            });
+        }
+    }
+
     private void run(String sql) {
-        QueryExecutionContext context = new QueryExecutionContext();
-        context.setDatabase(database);
-        String id = RequestScopes.callAs(ACCOUNT, REGION, () -> athena.startQueryExecution(sql, "primary", context,
-                new ResultConfiguration("s3://" + bucket + "/results/")));
-        QueryExecution execution = await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(100))
-                .until(() -> RequestScopes.callAs(ACCOUNT, REGION, () -> athena.getQueryExecution(id)),
-                        found -> found.getStatus().getState() != QueryExecutionState.RUNNING
-                                && found.getStatus().getState() != QueryExecutionState.QUEUED);
+        run(null, database, sql);
+    }
+
+    /** Runs {@code sql} in the context catalog and database, failing the test unless it succeeds. */
+    private void run(String catalogName, String contextDatabase, String sql) {
+        QueryExecution execution = execute(catalogName, contextDatabase, sql);
         if (execution.getStatus().getState() != QueryExecutionState.SUCCEEDED) {
             fail(sql + " -> " + execution.getStatus().getState() + ": " + execution.getStatus().getStateChangeReason());
         }
     }
 
+    private QueryExecution execute(String catalogName, String contextDatabase, String sql) {
+        QueryExecutionContext context = new QueryExecutionContext();
+        context.setCatalog(catalogName);
+        context.setDatabase(contextDatabase);
+        String id = RequestScopes.callAs(ACCOUNT, REGION, () -> athena.startQueryExecution(sql, "primary", context,
+                new ResultConfiguration("s3://" + bucket + "/results/")));
+        return await().atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofMillis(100))
+                .until(() -> RequestScopes.callAs(ACCOUNT, REGION, () -> athena.getQueryExecution(id)),
+                        found -> found.getStatus().getState() != QueryExecutionState.RUNNING
+                                && found.getStatus().getState() != QueryExecutionState.QUEUED);
+    }
+
+    /** The rows of {@code sql} read in an S3 Tables context catalog, through the attachment Athena gives a query. */
+    private List<Map<String, String>> s3TablesRows(String catalogName, String contextDatabase, String sql) {
+        return rowsOf(RequestScopes.callAs(ACCOUNT, REGION, () -> {
+            AthenaIcebergStatements.S3TablesAttachment attachment = icebergStatements.s3TablesAttachment(sql,
+                    catalogName, contextDatabase);
+            try {
+                return duck.query(TrinoSqlCompatibility.translate(sql), attachment.attachSql()
+                        + TrinoSqlCompatibility.FUNCTION_MACROS + attachment.searchPathSql(), ACCOUNT);
+            } finally {
+                icebergStatements.finished(attachment);
+            }
+        }));
+    }
+
     private List<Map<String, String>> rows(String sql) {
-        return RequestScopes.callAs(ACCOUNT, REGION, () -> duck.query(TrinoSqlCompatibility.translate(sql),
-                TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, sql), ACCOUNT)).stream()
-                .map(found -> {
-                    Map<String, String> row = new TreeMap<>();
-                    found.forEach((column, value) -> row.put(column, String.valueOf(value)));
-                    return row;
-                }).toList();
+        return rowsOf(RequestScopes.callAs(ACCOUNT, REGION, () -> duck.query(TrinoSqlCompatibility.translate(sql),
+                TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, sql), ACCOUNT)));
+    }
+
+    /** The engine's rows, each column's value as its text, columns in name order. */
+    private static List<Map<String, String>> rowsOf(List<Map<String, Object>> found) {
+        return found.stream().map(columns -> {
+            Map<String, String> row = new TreeMap<>();
+            columns.forEach((column, value) -> row.put(column, String.valueOf(value)));
+            return row;
+        }).toList();
     }
 
     private static Map<String, String> row(String... columnsAndValues) {

@@ -11,8 +11,9 @@ import java.util.Map;
 public class ResourceTagMapping {
 
     private String resourceArn;
-    // Preserves insertion order for deterministic responses
-    private final Map<String, String> tags = new LinkedHashMap<>();
+    // Preserves insertion order for deterministic responses. A stored mapping's tags are replaced, never changed in
+    // place, so a reader copying them sees one whole set.
+    private volatile Map<String, String> tags = new LinkedHashMap<>();
 
     public ResourceTagMapping() {}
 
@@ -24,4 +25,5 @@ public class ResourceTagMapping {
     public void setResourceArn(String resourceArn) { this.resourceArn = resourceArn; }
 
     public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags == null ? new LinkedHashMap<>() : tags; }
 }

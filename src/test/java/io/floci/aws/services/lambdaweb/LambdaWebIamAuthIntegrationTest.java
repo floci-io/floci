@@ -19,7 +19,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import java.io.IOException;
 import java.net.URI;
 import java.util.Map;
 
@@ -64,11 +63,12 @@ class LambdaWebIamAuthIntegrationTest {
     private String domain;
 
     @BeforeEach
-    void createFunction() throws IOException {
+    void createFunction() {
         functionName = "iam-auth-" + Long.toString(System.nanoTime(), 36);
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
-        s3Service.putObject(BUCKET, functionName + ".zip", zip(), "application/zip", Map.of());
+        s3Service.putObject(BUCKET, functionName + ".zip", LambdaCodeFixtures.nodeJsZip(APP),
+                "application/zip", Map.of());
         int port = baseUri.getPort();
         String name = functionName;
         cleanup.register(() -> {
@@ -141,10 +141,6 @@ class LambdaWebIamAuthIntegrationTest {
                 .credentials(credentials.accessKeyId(), credentials.secretAccessKey(), null)
                 .sign("GET", domain, "/");
         return given().header("Host", domain).headers(signed.headers()).when().get("/").then();
-    }
-
-    private static byte[] zip() throws IOException {
-        return LambdaCodeFixtures.nodeJsZip(APP);
     }
 
     private boolean isDockerAvailable() {

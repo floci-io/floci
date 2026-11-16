@@ -412,6 +412,12 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kinesis</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridgev2</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -581,6 +587,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudfront</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3tables</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>

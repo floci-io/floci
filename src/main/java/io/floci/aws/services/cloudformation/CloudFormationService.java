@@ -398,32 +398,6 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
-    /** The id of the stack a stack name or id names, as a request describing it finds it, reading only. */
-    public Optional<String> stackId(String stackNameOrId, String region) {
-        return Optional.ofNullable(resolveStackForDescribe(stackNameOrId, region)).map(Stack::getStackId);
-    }
-
-    /** The id of the stack holding the change set {@code changeSetArn} names, reading only. */
-    public Optional<String> stackIdOfChangeSet(String changeSetArn, String region) {
-        try {
-            return Optional.ofNullable(findStackForChangeSetArn(changeSetArn, region, currentAccount()))
-                    .map(Stack::getStackId);
-        } catch (AwsException expected) {
-            LOG.debugv("The change set ARN {0} names no change set: {1}", changeSetArn, expected.getMessage());
-            return Optional.empty();
-        }
-    }
-
-    /** The id of the stack that owns the resource {@code physicalResourceId} names, reading only. */
-    public Optional<String> stackIdOfResource(String physicalResourceId, String region) {
-        try {
-            return Optional.of(stackContaining(physicalResourceId, region).getStackId());
-        } catch (AwsException expected) {
-            LOG.debugv("No stack owns the resource {0}: {1}", physicalResourceId, expected.getMessage());
-            return Optional.empty();
-        }
-    }
-
     public List<Stack> describeStacks(String stackName, String region) {
         return describeStacks(stackName, region, currentAccount());
     }
@@ -449,6 +423,34 @@ public class CloudFormationService implements ResourceProvider {
      */
     public Optional<String> stackArn(String stackNameOrArn, String region) {
         return Optional.ofNullable(resolveStack(stackNameOrArn, region, currentAccount())).map(Stack::getStackId);
+    }
+
+    /**
+     * The tags of the live stack, or of the change set, stored under {@code arn} in the account and Region the ARN
+     * names, by key, which IAM gives a resource-tag condition; empty when there is none. Reads only, matching the
+     * stack's id or the change set's on the whole ARN.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "cloudformation")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (resource.startsWith("stack/")) {
+            Stack stack = resolveStack(arn, parsed.region(), parsed.accountId());
+            return stack != null && arn.equals(stack.getStackId()) ? stack.tagsSnapshot() : Map.of();
+        }
+        if (!resource.startsWith("changeSet/")) {
+            return Map.of();
+        }
+        try {
+            Stack stack = findStackForChangeSetArn(arn, parsed.region(), parsed.accountId());
+            ChangeSet changeSet = stack == null ? null
+                    : stack.getChangeSets().get(resolveChangeSetName(arn, parsed.region(), parsed.accountId()));
+            return changeSet == null || changeSet.getTags() == null ? Map.of() : Map.copyOf(changeSet.getTags());
+        } catch (AwsException expected) {
+            return Map.of();
+        }
     }
 
     /**
@@ -1770,6 +1772,24 @@ public class CloudFormationService implements ResourceProvider {
      * The execute {@code CreateStack} and {@code UpdateStack} run, as
      * {@link #executeChangeSet(String, String, String)}, for a request that carries a token.
      */
+    /**
+     * Records the permissions boundary a delegation registered for the caller asking for this
+     * deployment, so a role the stack provisions carries it. Provisioning runs after the request
+     * returns, so the cap cannot be read from the caller then and travels with the stack instead.
+     * Null leaves the stack as it was, which is every stack an ordinary caller deploys.
+     */
+    public void recordDelegatedRoleBoundary(String stackNameOrId, String region, String boundaryArn) {
+        if (boundaryArn == null) {
+            return;
+        }
+        Stack stack = resolveStackForDescribe(stackNameOrId, region);
+        if (stack == null) {
+            return;
+        }
+        stack.setDelegatedRoleBoundaryArn(boundaryArn);
+        persistStack(stack);
+    }
+
     public Future<?> executeChangeSetWithToken(String stackName, String changeSetName, String region,
                                                String clientRequestToken) {
         return claimAndSubmitExecution(stackName, changeSetName, region, regionResolver.getAccountId(), false,
@@ -2897,7 +2917,7 @@ public class CloudFormationService implements ResourceProvider {
                                 resource.getPhysicalId(), resource.getAttributes(),
                                 event -> addEvent(stack, logicalId, event.getPhysicalResourceId(), type,
                                         event.getResourceStatus(), event.getResourceStatusReason()),
-                                priorProps, changes);
+                                priorProps, changes, stack.getDelegatedRoleBoundaryArn());
                     }
                     resource.setUpdateReplacePolicy(
                             resDef.path("UpdateReplacePolicy").asText(null));

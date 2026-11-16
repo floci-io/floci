@@ -147,9 +147,14 @@ public interface ClusterStorage {
 
     /**
      * A core or task node of a cluster: {@code id} tells its container from its cluster's others, {@code host} is its
-     * private DNS name, and a {@code core} node holds a DataNode beside its NodeManager.
+     * private DNS name, a {@code core} node holds a DataNode beside its NodeManager, and {@code image} is the image its
+     * own bootstrap left, which it runs from, null where it has none and runs from the steps' image.
      */
-    record Node(String id, String host, boolean core) {
+    record Node(String id, String host, boolean core, String image) {
+
+        Node(String id, String host, boolean core) {
+            this(id, host, core, null);
+        }
     }
 
     /**

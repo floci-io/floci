@@ -64,7 +64,8 @@ class ContainerLauncherCodeVolumeReuseTest {
         RuntimeException populateFailure;
 
         RecordingLauncher(ContainerLifecycleManager lifecycleManager, EmulatorConfig config) {
-            super(mock(ContainerBuilder.class), lifecycleManager, mock(ContainerLogStreamer.class),
+            super(mock(ContainerBuilder.class), lifecycleManager, mock(DockerClient.class),
+                    mock(ContainerLogStreamer.class),
                     mock(ImageResolver.class), mock(RuntimeApiServerFactory.class),
                     mock(DockerHostResolver.class), config, mock(EcrRegistryManager.class),
                     mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class),
@@ -280,7 +281,7 @@ class ContainerLauncherCodeVolumeReuseTest {
         when(containerBuilder.newContainer("img")).thenReturn(builder);
         when(builder.build()).thenThrow(new IllegalStateException("stop before Docker"));
         ContainerLauncher real = new ContainerLauncher(containerBuilder, lifecycleManager,
-                mock(ContainerLogStreamer.class), mock(ImageResolver.class),
+                mock(DockerClient.class), mock(ContainerLogStreamer.class), mock(ImageResolver.class),
                 mock(RuntimeApiServerFactory.class), mock(DockerHostResolver.class), config,
                 mock(EcrRegistryManager.class), mock(LambdaLayerService.class),
                 mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), null);

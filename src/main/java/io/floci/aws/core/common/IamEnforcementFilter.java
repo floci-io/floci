@@ -399,6 +399,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         ResolvedAuthorization resolvedAuthorization = resolveAuthorization(auth, claimedScope, ctx);
         String credentialScope = resolvedAuthorization.credentialScope();
         String action = resolvedAuthorization.action();
+        if (IamActionRegistry.takenByDocumentedRoute(credentialScope, ctx)) {
+            // Another API's request (Glue's Iceberg REST endpoint takes Apache Iceberg's) carries none of the
+            // operation's members, so none is read from it: not its resources, condition keys, tags or roles.
+            IamConditionContextResolver.readNoMembers(ctx);
+        }
         if (action == null) {
             if (!"OPTIONS".equalsIgnoreCase(ctx.getMethod())
                     && iamService.presignedScope(akid).isPresent()) {

@@ -531,7 +531,7 @@ class ElbV2CfnProvisionerTest {
         assertEquals(LB_ARN, lb.getPhysicalId());
 
         assertTrue(provisioner.rollbackUpdate(lb));
-        verify(elb).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+        verify(elb).restoreSubnetSnapshot(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
     }
 
     /** The subnets a load balancer is on, as its hidden uses attributes record them. */
@@ -597,7 +597,7 @@ class ElbV2CfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(lb));
 
-        verify(elb).setSubnets(REGION, LB_ARN, List.of());
+        verify(elb).restoreSubnetSnapshot(REGION, LB_ARN, List.of());
         assertEquals(Set.of(), usedSubnets(lb));
     }
 
@@ -620,7 +620,7 @@ class ElbV2CfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(lb));
         verify(elb).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-3"));
-        verify(elb, never()).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+        verify(elb, never()).restoreSubnetSnapshot(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
     }
 
     @Test
@@ -628,12 +628,12 @@ class ElbV2CfnProvisionerTest {
         StackResource lb = keptLoadBalancerUpdatedTo(loadBalancerOn("web", "subnet-1", "subnet-2"),
                 "subnet-1", "subnet-3");
         doThrow(new AwsException("SubnetNotFound", "The subnet ID 'subnet-2' does not exist", 400)).doNothing()
-                .when(elb).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+                .when(elb).restoreSubnetSnapshot(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
 
         AwsException failure = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(lb));
         assertEquals("SubnetNotFound", failure.getErrorCode());
         assertTrue(provisioner.rollbackUpdate(lb));
-        verify(elb, times(2)).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+        verify(elb, times(2)).restoreSubnetSnapshot(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
     }
 
     @Test
@@ -644,7 +644,7 @@ class ElbV2CfnProvisionerTest {
         provisioner.clearUpdate(lb);
 
         assertTrue(provisioner.rollbackUpdate(lb));
-        verify(elb, never()).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+        verify(elb, never()).restoreSubnetSnapshot(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
     }
 
     @Test
@@ -657,7 +657,7 @@ class ElbV2CfnProvisionerTest {
         provisioner.provision(lb, props, ctx(LB_ARN));
 
         assertTrue(provisioner.rollbackUpdate(lb));
-        verify(elb, never()).setSubnets(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
+        verify(elb, never()).restoreSubnetSnapshot(REGION, LB_ARN, List.of("subnet-1", "subnet-2"));
     }
 
     @Test

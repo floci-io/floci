@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -65,7 +66,7 @@ class CloudFormationEcsDeleteAfterRestoreIntegrationTest {
         // in-memory RUNNING with no container behind it.
         ecs("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"" + family + "\",\"count\":1,"
                 + "\"networkConfiguration\":{\"awsvpcConfiguration\":"
-                + "{\"subnets\":[\"subnet-default-us-east-1-a\"]}}}");
+                + "{\"subnets\":[\"" + Ec2Service.defaultSubnetId("us-east-1", "a") + "\"]}}}");
 
         deleteStack(stack);
 

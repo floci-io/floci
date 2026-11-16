@@ -70,8 +70,11 @@ updates on running applications are not supported on applications with pre-initi
 already going keeps the image and the maximum capacity it was launched with, and a new run, or a new attempt of a
 run, takes the application's current ones: "New workloads submitted after the update automatically will use the new
 image, while existing workloads continue with the original image". On a release up to 7.13 whose
-`applicationLevelDigestResolution` is left true, AWS keeps the image it resolved at the application's start until the
-application restarts; Floci resolves each run's image (see the custom images limitation) and runs the new one.
+`applicationLevelDigestResolution` is left true, or any whose image configuration sets it true, "Custom images are
+resolved to a digest at application start; that digest is used for all jobs until the application restarts": a new
+run keeps the image the application resolved as it started (see **Image** under job runs) until it starts again,
+unless the update turns that image configuration's `applicationLevelDigestResolution` to false, after which each run
+resolves the image it is given.
 
 `DeleteApplication` leaves the application in `TERMINATED` state. `GetApplication` continues to
 report that state so lifecycle waiters can observe it, while an unfiltered `ListApplications`
@@ -247,7 +250,8 @@ worker of its own on EMR Serverless (see **Executors** below).
   `image-template` names another image than the release's, such as a mirror or a dated tag of it:
   `registry.internal/emr-serverless/spark/%s:20250425`. `GetJobRun` reports the image configurations each attempt
   applies, as its application had them when the attempt was made: its `imageConfiguration`, and its worker types'
-  in `workerTypeSpecifications`, as AWS's do when digests are resolved for each run ("To identify which image
+  in `workerTypeSpecifications` (those the application resolved as it started, with that digest), as AWS's do when
+  digests are resolved for each run ("To identify which image
   version each job is running, the GetJobRun API response returns the resolvedImageDigest for that specific job").
   The driver's configuration, its worker type's or else the application's, has the `resolvedImageDigest` of the
   image the attempt pulled for the driver, its manifest digest in Floci's ECR; the executors' has theirs, or the
@@ -306,7 +310,7 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
 * **Archives**: only the archives of `spark.archives` that are in S3 are unpacked into the driver's working
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
-* **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. Every run resolves its image again, as releases from 7.14 do and earlier ones with `applicationLevelDigestResolution` false: Floci keeps no digest from the application's start, and reports no `resolvedImageDigest` on the application; a job run's comes from its attempt's own pull (see **Image** above), and its image configurations carry no `applicationLevelDigestResolution`.
+* **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. An image's digest is resolved as the application starts where its `applicationLevelDigestResolution` is true, or left unset on EMR 7.13 or earlier, as the user guide's table has it, and AWS's "Custom images are resolved to a digest at application start; that digest is used for all jobs until the application restarts": the application's image configuration gets the digest of the image in Floci's ECR as its `resolvedImageDigest`, and each run pulls the image by it until the application starts again; a stopped application reports none. An image outside ECR, one in another account's repository (Floci does not check that the application may pull it), or one Floci's ECR does not hold or cannot read without Docker, has no digest to read and is resolved for each run, as every image is from 7.14 on; any other answer from Floci's ECR fails `StartApplication` with `InternalServerException`; such a run's digest comes from its attempt's own pull (see **Image** above), and a job run's image configurations carry no `applicationLevelDigestResolution`.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Data Plane**: Floci does not implement the data-plane API, such as interactive sessions.

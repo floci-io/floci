@@ -204,6 +204,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             }
             Target target = new Target(targetId, targetArn, input, inputPath);
             target.setInputTransformer(InputTransformer.fromJson(resolved.path("InputTransformer")));
+            JsonNode kinesisParamsNode = resolved.path("KinesisParameters");
+            if (kinesisParamsNode.isObject()) {
+                target.setKinesisParameters(MAPPER.convertValue(kinesisParamsNode, Target.KinesisParameters.class));
+            }
             JsonNode httpParamsNode = resolved.path("HttpParameters");
             if (httpParamsNode.isObject()) {
                 target.setHttpParameters(MAPPER.convertValue(httpParamsNode, HttpParameters.class));

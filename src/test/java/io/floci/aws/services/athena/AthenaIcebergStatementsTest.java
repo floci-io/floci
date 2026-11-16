@@ -10,11 +10,13 @@ import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.glue.iceberg.GlueIcebergCatalog;
 import io.floci.aws.services.glue.iceberg.GlueIcebergTokens;
+import io.floci.aws.services.glue.iceberg.IcebergRestException;
 import io.floci.aws.services.glue.model.Column;
 import io.floci.aws.services.glue.model.StorageDescriptor;
 import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.InlineMocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -95,12 +97,13 @@ class AthenaIcebergStatementsTest {
         assertEquals("ev\"ents", target.table());
         assertEquals("Lake . \"Ev\"\"ents\"", insert.substring(target.start(), target.end()));
 
-        assertEquals(new AthenaIcebergStatements.Target(null, "events", 12, 18),
+        assertEquals(new AthenaIcebergStatements.Target(null, "events", false, 12, 18),
                 AthenaIcebergStatements.target("DELETE FROM events WHERE id = 1"));
         AthenaIcebergStatements.Target merge = AthenaIcebergStatements.target(
                 "MERGE INTO awsdatacatalog.lake.events AS t USING src s ON t.id = s.id WHEN MATCHED THEN DELETE");
         assertEquals("lake", merge.database());
         assertEquals("events", merge.table());
+        assertTrue(merge.catalogNamed());
         assertEquals("events", AthenaIcebergStatements.target("UPDATE events SET a = 1").table());
 
         assertNull(AthenaIcebergStatements.target("UPDATE other_catalog.lake.events SET a = 1"));
@@ -126,6 +129,24 @@ class AthenaIcebergStatementsTest {
         verify(tokens).revoke("tok'en");
     }
 
+    /**
+     * In an S3 Tables context catalog, a write naming the default catalog goes through Glue's attachment, and one
+     * naming no catalog is the context's, which the S3 Tables attachment serves.
+     */
+    @Test
+    void inAnS3TablesContextOnlyAWriteNamingTheDefaultCatalogGoesThroughGlue() {
+        glueTable("lake", "events", true);
+        when(tokens.mint(eq("111122223333"), eq("eu-west-1"), any())).thenReturn("tok");
+
+        assertNull(statements.write("INSERT INTO events VALUES (1)", "s3tablescatalog/bucket", "lake"));
+        assertNull(statements.write("INSERT INTO lake.events VALUES (1)", "s3tablescatalog/bucket", "sales"));
+        verify(tokens, never()).mint(anyString(), anyString(), any());
+        AthenaIcebergStatements.IcebergWrite write = statements.write(
+                "INSERT INTO awsdatacatalog.lake.events SELECT * FROM orders", "s3tablescatalog/bucket", "sales");
+        assertEquals("INSERT INTO glue_iceberg.\"lake\".\"events\" SELECT * FROM orders", write.query());
+        statements.finished(write);
+    }
+
     @Test
     void aWriteToAHiveTableOrAMissingOneIsLeftAlone() {
         glueTable("lake", "hive_events", false);
@@ -135,6 +156,47 @@ class AthenaIcebergStatementsTest {
         assertNull(statements.write("INSERT INTO missing VALUES (1)", "lake"));
         assertNull(statements.write("SELECT 1", "lake"));
         verify(tokens, never()).mint(anyString(), anyString(), any());
+    }
+
+    @Test
+    void anS3TablesCatalogIsAttachedUnderItsOwnNameAndIsTheSearchPathAsTheContext() {
+        when(tokens.mint(eq("111122223333"), eq("eu-west-1"), any())).thenReturn("tok");
+        assertEquals("lake", AthenaIcebergStatements.s3TablesBucket("S3TablesCatalog/lake"));
+        assertNull(AthenaIcebergStatements.s3TablesBucket("AwsDataCatalog"));
+        assertNull(statements.s3TablesAttachment("SELECT 1", "AwsDataCatalog", "default"));
+
+        AthenaIcebergStatements.S3TablesAttachment attachment = statements.s3TablesAttachment(
+                "INSERT INTO \"s3tablescatalog/other\".ns.t SELECT * FROM orders", "s3tablescatalog/lake", "sales");
+
+        assertEquals("INSTALL iceberg; LOAD iceberg;\n"
+                + "ATTACH '111122223333:s3tablescatalog/lake' AS \"s3tablescatalog/lake\" (TYPE iceberg, ENDPOINT "
+                + "'http://floci:4566/iceberg', AUTHORIZATION_TYPE 'oauth2', TOKEN 'tok', ACCESS_DELEGATION_MODE 'none');\n"
+                + "ATTACH '111122223333:s3tablescatalog/other' AS \"s3tablescatalog/other\" (TYPE iceberg, ENDPOINT "
+                + "'http://floci:4566/iceberg', AUTHORIZATION_TYPE 'oauth2', TOKEN 'tok', ACCESS_DELEGATION_MODE 'none');\n",
+                attachment.attachSql());
+        assertEquals("SET search_path = '\"s3tablescatalog/lake\".\"sales\",memory.main';\n", attachment.searchPathSql());
+        statements.finished(attachment);
+        verify(tokens).revoke("tok");
+    }
+
+    /**
+     * A catalog only a comment or a string literal names is not attached, and a context namespace the bucket does
+     * not have (Athena's {@code default} for a query naming none) is not the search path, which the engine would
+     * refuse.
+     */
+    @Test
+    void anS3TablesCatalogNamedOnlyInACommentOrLiteralIsNotAttachedNorAMissingNamespaceSearched() {
+        when(tokens.mint(eq("111122223333"), eq("eu-west-1"), any())).thenReturn("tok");
+        assertNull(statements.s3TablesAttachment("SELECT '\"s3tablescatalog/a\".ns.t' -- \"s3tablescatalog/b\".ns.t\n"
+                + "/* \"s3tablescatalog/c\".ns.t */ FROM dual", "AwsDataCatalog", "default"));
+
+        IcebergRestException missing = InlineMocks.inlineMock(IcebergRestException.class);
+        when(missing.type()).thenReturn("NoSuchNamespaceException");
+        when(catalog.loadNamespace("s3tablescatalog:lake", "default")).thenThrow(missing);
+        AthenaIcebergStatements.S3TablesAttachment attachment = statements.s3TablesAttachment(
+                "SELECT * FROM \"s3tablescatalog/lake\".sales.orders", "s3tablescatalog/lake", "default");
+        assertTrue(attachment.attachSql().contains("AS \"s3tablescatalog/lake\""), attachment.attachSql());
+        assertEquals("", attachment.searchPathSql());
     }
 
     // ─── CREATE TABLE ─────────────────────────────────────────────────────────────

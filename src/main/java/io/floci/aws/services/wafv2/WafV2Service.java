@@ -3,16 +3,20 @@ package io.floci.aws.services.wafv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsPartition;
 import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.wafv2.model.IpSet;
 import io.floci.aws.services.wafv2.model.RegexPatternSet;
 import io.floci.aws.services.wafv2.model.RuleGroup;
+import io.floci.aws.services.wafv2.model.WafV2Resource;
 import io.floci.aws.services.wafv2.model.WebAcl;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -23,12 +27,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
- * WAF v2 management-plane business logic. Resources are stored by the
- * (Scope, Id) pair and get, update, and delete operations also validate Name.
+ * WAF v2 management-plane business logic. Resources are stored by Region, Scope and Id: WAF v2 is Regional, a
+ * {@code CLOUDFRONT}-scoped resource living in the partition's CloudFront Region, which its ARN names. Get, update,
+ * and delete operations also validate Name.
  * Updates/deletes enforce the LockToken optimistic-concurrency contract.
  * Recursive rule structures are stored opaquely as raw JSON.
  */
@@ -40,10 +46,13 @@ public class WafV2Service {
     private static final int MAX_TAG_VALUE_LENGTH = 256;
     private static final Pattern TAG_PATTERN = Pattern.compile("^[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*$");
 
-    private final StorageBackend<String, WebAcl> webAclStore;
-    private final StorageBackend<String, IpSet> ipSetStore;
-    private final StorageBackend<String, RegexPatternSet> regexStore;
-    private final StorageBackend<String, RuleGroup> ruleGroupStore;
+    /** Separates a key's Region from the {@code Scope:Id} part. */
+    private static final String KEY_SEPARATOR = "::";
+
+    private final AccountAwareStorageBackend<WebAcl> webAclStore;
+    private final AccountAwareStorageBackend<IpSet> ipSetStore;
+    private final AccountAwareStorageBackend<RegexPatternSet> regexStore;
+    private final AccountAwareStorageBackend<RuleGroup> ruleGroupStore;
     private final StorageBackend<String, String> loggingStore;
     private final StorageBackend<String, String> associationStore;
     private final StorageBackend<String, String> policyStore;
@@ -71,12 +80,27 @@ public class WafV2Service {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * Moves the web ACLs, IP sets, regex pattern sets and rule groups stored before they were keyed by Region, in
+     * every account, from {@code Scope:Id} onto the key of the Region they live in: the one their ARN names for a
+     * {@code REGIONAL} resource, that Region's partition's CloudFront Region for a {@code CLOUDFRONT} one, and the
+     * default Region for a resource without an ARN, so each is listed and found again.
+     */
+    @PostConstruct
+    void migrateLegacyKeys() {
+        webAclStore.migrateLegacyEntriesInAllAccounts(k -> !k.contains(KEY_SEPARATOR), this::keyOf);
+        ipSetStore.migrateLegacyEntriesInAllAccounts(k -> !k.contains(KEY_SEPARATOR), this::keyOf);
+        regexStore.migrateLegacyEntriesInAllAccounts(k -> !k.contains(KEY_SEPARATOR), this::keyOf);
+        ruleGroupStore.migrateLegacyEntriesInAllAccounts(k -> !k.contains(KEY_SEPARATOR), this::keyOf);
+    }
+
+
     // ──────────────────────────── Web ACL ────────────────────────────
 
     public WebAcl createWebAcl(WebAcl acl, String scope, String name, String region) {
         validateScope(scope);
         requireName(name);
-        if (findByName(webAclStore, scope, name) != null) {
+        if (findByName(webAclStore, scope, name, region) != null) {
             throw new AwsException("WAFDuplicateItemException",
                     "AWS WAF couldn't perform the operation because some resource "
                             + "in your request is a duplicate of an existing one.", 400);
@@ -91,7 +115,7 @@ public class WafV2Service {
         acl.setCapacity(computeCapacity(acl.getRules()));
         acl.setLabelNamespace("awswaf:" + regionResolver.getAccountId() + ":webacl:" + name + ":");
         acl.setArn(buildArn(scope, "webacl", name, acl.getId(), region));
-        webAclStore.put(key(scope, acl.getId()), acl);
+        webAclStore.put(key(scope, acl.getId(), region), acl);
         return acl;
     }
 
@@ -113,7 +137,7 @@ public class WafV2Service {
         existing.setAssociationConfig(changes.getAssociationConfig());
         existing.setDataProtectionConfig(changes.getDataProtectionConfig());
         existing.setCapacity(computeCapacity(changes.getRules()));
-        return rotate(existing, webAclStore, scope);
+        return rotate(existing, webAclStore);
     }
 
     public void deleteWebAcl(String scope, String id, String name, String lockToken) {
@@ -126,7 +150,7 @@ public class WafV2Service {
                     "AWS WAF couldn't perform the operation because your resource is "
                             + "associated with one or more web requests sources.", 400);
         }
-        webAclStore.delete(key(scope, id));
+        webAclStore.delete(keyOf(existing));
     }
 
     public List<WebAcl> listWebAcls(String scope) {
@@ -139,7 +163,7 @@ public class WafV2Service {
     public IpSet createIpSet(IpSet ipSet, String scope, String name, String region) {
         validateScope(scope);
         requireName(name);
-        if (findByName(ipSetStore, scope, name) != null) {
+        if (findByName(ipSetStore, scope, name, region) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate IPSet name: " + name, 400);
         }
         validateTags(ipSet.getTags());
@@ -150,7 +174,7 @@ public class WafV2Service {
         ipSet.setRegion(region);
         ipSet.setLockToken(UUID.randomUUID().toString());
         ipSet.setArn(buildArn(scope, "ipset", name, ipSet.getId(), region));
-        ipSetStore.put(key(scope, ipSet.getId()), ipSet);
+        ipSetStore.put(key(scope, ipSet.getId(), region), ipSet);
         return ipSet;
     }
 
@@ -165,13 +189,13 @@ public class WafV2Service {
         validateAddresses(addresses, existing.getIpAddressVersion());
         existing.setDescription(description);
         existing.setAddresses(addresses);
-        return rotate(existing, ipSetStore, scope);
+        return rotate(existing, ipSetStore);
     }
 
     public void deleteIpSet(String scope, String id, String name, String lockToken) {
         IpSet existing = require(ipSetStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
-        ipSetStore.delete(key(scope, id));
+        ipSetStore.delete(keyOf(existing));
     }
 
     public List<IpSet> listIpSets(String scope) {
@@ -184,7 +208,7 @@ public class WafV2Service {
     public RegexPatternSet createRegexPatternSet(RegexPatternSet set, String scope, String name, String region) {
         validateScope(scope);
         requireName(name);
-        if (findByName(regexStore, scope, name) != null) {
+        if (findByName(regexStore, scope, name, region) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate RegexPatternSet name: " + name, 400);
         }
         validateTags(set.getTags());
@@ -194,7 +218,7 @@ public class WafV2Service {
         set.setRegion(region);
         set.setLockToken(UUID.randomUUID().toString());
         set.setArn(buildArn(scope, "regexpatternset", name, set.getId(), region));
-        regexStore.put(key(scope, set.getId()), set);
+        regexStore.put(key(scope, set.getId(), region), set);
         return set;
     }
 
@@ -208,13 +232,13 @@ public class WafV2Service {
         checkLock(existing.getLockToken(), lockToken);
         existing.setDescription(description);
         existing.setRegularExpressionList(regexList);
-        return rotate(existing, regexStore, scope);
+        return rotate(existing, regexStore);
     }
 
     public void deleteRegexPatternSet(String scope, String id, String name, String lockToken) {
         RegexPatternSet existing = require(regexStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
-        regexStore.delete(key(scope, id));
+        regexStore.delete(keyOf(existing));
     }
 
     public List<RegexPatternSet> listRegexPatternSets(String scope) {
@@ -227,7 +251,7 @@ public class WafV2Service {
     public RuleGroup createRuleGroup(RuleGroup group, String scope, String name, String region) {
         validateScope(scope);
         requireName(name);
-        if (findByName(ruleGroupStore, scope, name) != null) {
+        if (findByName(ruleGroupStore, scope, name, region) != null) {
             throw new AwsException("WAFDuplicateItemException", "Duplicate RuleGroup name: " + name, 400);
         }
         validateTags(group.getTags());
@@ -238,7 +262,7 @@ public class WafV2Service {
         group.setLockToken(UUID.randomUUID().toString());
         group.setLabelNamespace("awswaf:" + regionResolver.getAccountId() + ":rulegroup:" + name + ":");
         group.setArn(buildArn(scope, "rulegroup", name, group.getId(), region));
-        ruleGroupStore.put(key(scope, group.getId()), group);
+        ruleGroupStore.put(key(scope, group.getId(), region), group);
         return group;
     }
 
@@ -253,13 +277,13 @@ public class WafV2Service {
         existing.setRules(changes.getRules());
         existing.setVisibilityConfig(changes.getVisibilityConfig());
         existing.setCustomResponseBodies(changes.getCustomResponseBodies());
-        return rotate(existing, ruleGroupStore, scope);
+        return rotate(existing, ruleGroupStore);
     }
 
     public void deleteRuleGroup(String scope, String id, String name, String lockToken) {
         RuleGroup existing = require(ruleGroupStore, scope, id, name);
         checkLock(existing.getLockToken(), lockToken);
-        ruleGroupStore.delete(key(scope, id));
+        ruleGroupStore.delete(keyOf(existing));
     }
 
     public List<RuleGroup> listRuleGroups(String scope) {
@@ -274,14 +298,17 @@ public class WafV2Service {
     // ──────────────────────────── Association ────────────────────────────
 
     public void associateWebAcl(String webAclArn, String resourceArn) {
-        if (scanArn(webAclStore, webAclArn) == null) {
+        if (webAclArn == null || scanArn(webAclStore, webAclArn) == null) {
             throw nonexistentItem();
         }
         associationStore.put(resourceArn, webAclArn);
     }
 
+    /** Removes the association of {@code resourceArn}, if its web ACL is one the request's Region reaches. */
     public void disassociateWebAcl(String resourceArn) {
-        associationStore.delete(resourceArn);
+        if (resourceArn != null && associationStore.get(resourceArn).filter(this::reachable).isPresent()) {
+            associationStore.delete(resourceArn);
+        }
     }
 
     public WebAcl getWebAclForResource(String resourceArn) {
@@ -289,13 +316,14 @@ public class WafV2Service {
         if (webAclArn == null) {
             return null;
         }
-        return webAclStore.scan(k -> true).stream()
-                .filter(a -> a.getArn().equals(webAclArn))
-                .findFirst().orElse(null);
+        return scanArn(webAclStore, webAclArn);
     }
 
     public List<String> listResourcesForWebAcl(String webAclArn) {
         List<String> resources = new ArrayList<>();
+        if (!reachable(webAclArn)) {
+            return resources;
+        }
         for (String resourceArn : associationStore.keys()) {
             associationStore.get(resourceArn)
                     .filter(webAclArn::equals)
@@ -307,7 +335,7 @@ public class WafV2Service {
     // ──────────────────────────── Logging ────────────────────────────
 
     public String putLoggingConfiguration(String resourceArn, String loggingConfigJson) {
-        if (scanArn(webAclStore, resourceArn) == null) {
+        if (resourceArn == null || scanArn(webAclStore, resourceArn) == null) {
             throw nonexistentItem();
         }
         loggingStore.put(resourceArn, loggingConfigJson);
@@ -315,43 +343,55 @@ public class WafV2Service {
     }
 
     public String getLoggingConfiguration(String resourceArn) {
-        return loggingStore.get(resourceArn).orElseThrow(() -> new AwsException(
+        return loggingStore.get(resourceArn).filter(stored -> reachable(resourceArn)).orElseThrow(() -> new AwsException(
                 "WAFNonexistentItemException", "No logging configuration for: " + resourceArn, 400));
     }
 
     public void deleteLoggingConfiguration(String resourceArn) {
-        loggingStore.delete(resourceArn);
+        if (reachable(resourceArn)) {
+            loggingStore.delete(resourceArn);
+        }
     }
 
-    public List<String> listLoggingConfigurations() {
-        return new ArrayList<>(loggingStore.scan(k -> true));
+    /** The logging configurations of the web ACLs of {@code scope} in the request's Region. */
+    public List<String> listLoggingConfigurations(String scope) {
+        validateScope(scope);
+        String prefix = "CLOUDFRONT".equals(scope) ? "global/" : "regional/";
+        return new ArrayList<>(loggingStore.scan(arn -> reachableArn(arn)
+                .filter(parsed -> parsed.resource().startsWith(prefix)).isPresent()));
     }
 
     // ──────────────────────────── Permission policy ────────────────────────────
 
+    /** Puts the policy of a rule group the request's Region reaches: AWS shares rule groups this way. */
     public void putPermissionPolicy(String resourceArn, String policy) {
+        if (resourceArn == null || scanArn(ruleGroupStore, resourceArn) == null) {
+            throw nonexistentItem();
+        }
         policyStore.put(resourceArn, policy);
     }
 
     public String getPermissionPolicy(String resourceArn) {
-        return policyStore.get(resourceArn).orElseThrow(() -> new AwsException(
+        return policyStore.get(resourceArn).filter(stored -> reachable(resourceArn)).orElseThrow(() -> new AwsException(
                 "WAFNonexistentItemException", "No policy for: " + resourceArn, 400));
     }
 
     public void deletePermissionPolicy(String resourceArn) {
-        policyStore.delete(resourceArn);
+        if (reachable(resourceArn)) {
+            policyStore.delete(resourceArn);
+        }
     }
 
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn) {
-        return tagsOf(taggable(resourceArn));
+        return taggable(resourceArn).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
         validateTags(tags);
-        Object resource = taggable(resourceArn);
-        Map<String, String> current = tagsOf(resource);
+        WafV2Resource resource = taggable(resourceArn);
+        Map<String, String> current = resource.getTags();
         Map<String, String> merged = new LinkedHashMap<>(current);
         merged.putAll(tags);
         requireTagCount(merged.size());
@@ -361,14 +401,14 @@ public class WafV2Service {
 
     public void untagResource(String resourceArn, List<String> keys) {
         keys.forEach(key -> requireValidTagKey(key, "TAG_KEYS"));
-        Object resource = taggable(resourceArn);
-        keys.forEach(tagsOf(resource)::remove);
+        WafV2Resource resource = taggable(resourceArn);
+        keys.forEach(resource.getTags()::remove);
         persistTagged(resource);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
-    private Object taggable(String resourceArn) {
+    private WafV2Resource taggable(String resourceArn) {
         if (resourceArn == null) {
             throw new AwsException("WAFInvalidParameterException", "ResourceARN is required.", 400);
         }
@@ -391,46 +431,53 @@ public class WafV2Service {
         throw new AwsException("WAFNonexistentItemException", "Resource not found: " + resourceArn, 400);
     }
 
-    private Map<String, String> tagsOf(Object resource) {
+    private void persistTagged(WafV2Resource resource) {
         if (resource instanceof WebAcl a) {
-            return a.getTags();
+            webAclStore.put(keyOf(a), a);
         } else if (resource instanceof IpSet i) {
-            return i.getTags();
+            ipSetStore.put(keyOf(i), i);
         } else if (resource instanceof RegexPatternSet r) {
-            return r.getTags();
+            regexStore.put(keyOf(r), r);
         } else if (resource instanceof RuleGroup g) {
-            return g.getTags();
-        }
-        throw new AwsException("WAFNonexistentItemException", "Resource not found.", 400);
-    }
-
-    private void persistTagged(Object resource) {
-        if (resource instanceof WebAcl a) {
-            webAclStore.put(key(a.getScope(), a.getId()), a);
-        } else if (resource instanceof IpSet i) {
-            ipSetStore.put(key(i.getScope(), i.getId()), i);
-        } else if (resource instanceof RegexPatternSet r) {
-            regexStore.put(key(r.getScope(), r.getId()), r);
-        } else if (resource instanceof RuleGroup g) {
-            ruleGroupStore.put(key(g.getScope(), g.getId()), g);
+            ruleGroupStore.put(keyOf(g), g);
         }
     }
 
-    private <V> V scanArn(StorageBackend<String, V> store, String arn) {
-        return store.scan(k -> true).stream()
-                .filter(v -> arn.equals(arnOf(v)))
-                .findFirst().orElse(null);
+    /** The resource {@code arn} names, if the request's Region reaches it ({@link #reachableArn}). */
+    private <V extends WafV2Resource> V scanArn(StorageBackend<String, V> store, String arn) {
+        return reachableArn(arn).map(parsed -> {
+            String prefix = parsed.region() + KEY_SEPARATOR;
+            return store.scan(k -> k.startsWith(prefix)).stream()
+                    .filter(v -> arn.equals(v.getArn()))
+                    .findFirst().orElse(null);
+        }).orElse(null);
     }
 
-    private String arnOf(Object v) {
-        if (v instanceof WebAcl a) return a.getArn();
-        if (v instanceof IpSet i) return i.getArn();
-        if (v instanceof RegexPatternSet r) return r.getArn();
-        if (v instanceof RuleGroup g) return g.getArn();
-        return null;
+    private boolean reachable(String arn) {
+        return reachableArn(arn).isPresent();
     }
 
-    private <V> V require(StorageBackend<String, V> store, String scope, String id, String name) {
+    /**
+     * {@code arn} parsed, when a request in the request's Region reaches the resource it names: a regional resource
+     * of that Region, or a global ({@code CLOUDFRONT}) one of its partition's CloudFront Region. Another Region's
+     * resource does not exist there, as on AWS.
+     */
+    private Optional<AwsArnUtils.Arn> reachableArn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "wafv2")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String scope = parsed.resource().startsWith("global/") ? "CLOUDFRONT" : "REGIONAL";
+        try {
+            String home = homeRegion(scope, regionResolver.getRegion());
+            return parsed.region().equals(home) && parsed.partition().equals(regionResolver.partitionForRegion(home))
+                    ? Optional.of(parsed) : Optional.empty();
+        } catch (AwsException e) {
+            return Optional.empty();
+        }
+    }
+
+    private <V extends WafV2Resource> V require(StorageBackend<String, V> store, String scope, String id, String name) {
         validateScope(scope);
         if (id == null) {
             throw new AwsException("WAFInvalidParameterException", "Id is required.", 400);
@@ -438,8 +485,8 @@ public class WafV2Service {
         if (name == null || name.isBlank()) {
             throw new AwsException("WAFInvalidParameterException", "Name is required.", 400);
         }
-        V resource = store.get(key(scope, id)).orElseThrow(WafV2Service::nonexistentItem);
-        if (!name.equals(nameOf(resource))) {
+        V resource = store.get(key(scope, id, regionResolver.getRegion())).orElseThrow(WafV2Service::nonexistentItem);
+        if (!name.equals(resource.getName())) {
             throw nonexistentItem();
         }
         return resource;
@@ -450,47 +497,25 @@ public class WafV2Service {
                 "AWS WAF couldn't perform the operation because your resource doesn't exist.", 400);
     }
 
-    private <V> V findByName(StorageBackend<String, V> store, String scope, String name) {
-        return store.scan(k -> true).stream()
-                .filter(v -> scope.equals(scopeOf(v)) && name.equals(nameOf(v)))
+    /** The resource of {@code scope} named {@code name} in {@code region}: a name is unique within one Region. */
+    private <V extends WafV2Resource> V findByName(StorageBackend<String, V> store, String scope, String name,
+                                                   String region) {
+        String prefix = homeRegion(scope, region) + KEY_SEPARATOR + scope + ":";
+        return store.scan(k -> k.startsWith(prefix)).stream()
+                .filter(v -> name.equals(v.getName()))
                 .findFirst().orElse(null);
     }
 
+    /** The resources of {@code scope} in the request's Region. */
     private <V> List<V> listByScope(StorageBackend<String, V> store, String scope) {
-        List<V> result = new ArrayList<>();
-        for (V v : store.scan(k -> true)) {
-            if (scope.equals(scopeOf(v))) {
-                result.add(v);
-            }
-        }
-        return result;
+        String prefix = homeRegion(scope, regionResolver.getRegion()) + KEY_SEPARATOR + scope + ":";
+        return new ArrayList<>(store.scan(k -> k.startsWith(prefix)));
     }
 
-    private String scopeOf(Object v) {
-        if (v instanceof WebAcl a) return a.getScope();
-        if (v instanceof IpSet i) return i.getScope();
-        if (v instanceof RegexPatternSet r) return r.getScope();
-        if (v instanceof RuleGroup g) return g.getScope();
-        return null;
-    }
-
-    private String nameOf(Object v) {
-        if (v instanceof WebAcl a) return a.getName();
-        if (v instanceof IpSet i) return i.getName();
-        if (v instanceof RegexPatternSet r) return r.getName();
-        if (v instanceof RuleGroup g) return g.getName();
-        return null;
-    }
-
-    @SuppressWarnings("unchecked")
-    private <V> String rotate(V resource, StorageBackend<String, V> store, String scope) {
+    private <V extends WafV2Resource> String rotate(V resource, StorageBackend<String, V> store) {
         String next = UUID.randomUUID().toString();
-        String id;
-        if (resource instanceof WebAcl a) { a.setLockToken(next); id = a.getId(); }
-        else if (resource instanceof IpSet i) { i.setLockToken(next); id = i.getId(); }
-        else if (resource instanceof RegexPatternSet r) { r.setLockToken(next); id = r.getId(); }
-        else { RuleGroup g = (RuleGroup) resource; g.setLockToken(next); id = g.getId(); }
-        store.put(key(scope, id), resource);
+        resource.setLockToken(next);
+        store.put(keyOf(resource), resource);
         return next;
     }
 
@@ -627,8 +652,32 @@ public class WafV2Service {
                 "Field: " + field + ", Parameter: " + parameter + ", Reason: " + reason, 400, extendedData);
     }
 
-    private String key(String scope, String id) {
-        return scope + ":" + id;
+    /**
+     * The Region a resource of {@code scope} lives in for a request in {@code region}: the request's for
+     * {@code REGIONAL}, the partition's CloudFront Region for {@code CLOUDFRONT}, the Region its ARN names.
+     */
+    private String homeRegion(String scope, String region) {
+        return "CLOUDFRONT".equals(scope) ? cloudFrontScopeRegion(region) : region;
+    }
+
+    private String key(String scope, String id, String region) {
+        return homeRegion(scope, region) + KEY_SEPARATOR + scope + ":" + id;
+    }
+
+    /**
+     * The key a stored resource belongs under: {@link #key} for the Region its ARN names, or, when it has none, the
+     * Region it records it was created in, or else the default Region. Null for a {@code CLOUDFRONT} resource of a
+     * partition without CloudFront, which no request reaches.
+     */
+    private String keyOf(WafV2Resource resource) {
+        String arn = resource.getArn();
+        String region = AwsArnUtils.isArnFor(arn, "wafv2") ? AwsArnUtils.parse(arn).region()
+                : Optional.ofNullable(resource.getRegion()).orElseGet(regionResolver::getDefaultRegion);
+        try {
+            return key(resource.getScope(), resource.getId(), region);
+        } catch (AwsException e) {
+            return null;
+        }
     }
 
     private String buildArn(String scope, String type, String name, String id, String region) {

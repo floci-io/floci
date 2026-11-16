@@ -1578,6 +1578,17 @@ class EksServiceTest {
         assertEquals(FargateProfileStatus.DELETING, deleted.getStatus());
         assertThrows(AwsException.class, () -> eksService.describeFargateProfile("my-eks-cluster", "profile-a"));
         assertEquals(List.of("profile-b"), eksService.listFargateProfiles("my-eks-cluster"));
+        assertEquals(Optional.of(deleted.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        FargateProfile replacement = eksService.createFargateProfile("my-eks-cluster", fargateProfileRequest("profile-a"));
+        assertNotEquals(deleted.getFargateProfileArn(), replacement.getFargateProfileArn());
+        assertEquals(Optional.of(replacement.getFargateProfileArn()),
+                eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a"));
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-a");
+        eksService.deleteFargateProfile("my-eks-cluster", "profile-b");
+        eksService.deleteCluster("my-eks-cluster");
+        createTestCluster("my-eks-cluster");
+        assertTrue(eksService.findResourceArn("my-eks-cluster", "fargate-profiles", "profile-a").isEmpty());
     }
 
     @Test

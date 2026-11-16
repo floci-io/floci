@@ -88,6 +88,31 @@ class CloudFormationIamIntegrationTest {
                 "111122223333", "StackInstanceRegion", REGION)), "cloudformation:DescribeStackInstance");
     }
 
+    /** A resource-tag condition reads the tags CloudFormation holds on the stack or the stack set a request names. */
+    @Test
+    void aResourceTagConditionReadsTheTagsOfTheStackAndTheStackSet() {
+        String tagged = name();
+        String untagged = name();
+        call(ACCOUNT, "CreateStack", Map.of("StackName", tagged, "TemplateBody", TEMPLATE,
+                "Tags.member.1.Key", "team", "Tags.member.1.Value", "data")).statusCode(200);
+        cleanup.register(() -> call(ACCOUNT, "DeleteStack", Map.of("StackName", tagged)));
+        stack(untagged);
+        String taggedSet = name();
+        String untaggedSet = name();
+        call(ACCOUNT, "CreateStackSet", Map.of("StackSetName", taggedSet, "TemplateBody", TEMPLATE,
+                "Tags.member.1.Key", "team", "Tags.member.1.Value", "data")).statusCode(200);
+        cleanup.register(() -> call(ACCOUNT, "DeleteStackSet", Map.of("StackSetName", taggedSet)));
+        stackSet(untaggedSet);
+        String user = user("{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":"
+                + "[\"cloudformation:DescribeStacks\",\"cloudformation:DescribeStackSet\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}]}");
+
+        call(user, "DescribeStacks", Map.of("StackName", tagged)).statusCode(200);
+        denied(call(user, "DescribeStacks", Map.of("StackName", untagged)), "cloudformation:DescribeStacks");
+        call(user, "DescribeStackSet", Map.of("StackSetName", taggedSet)).statusCode(200);
+        denied(call(user, "DescribeStackSet", Map.of("StackSetName", untaggedSet)), "cloudformation:DescribeStackSet");
+    }
+
     private String stack(String name) {
         String id = call(ACCOUNT, "CreateStack", Map.of("StackName", name, "TemplateBody", TEMPLATE)).statusCode(200)
                 .extract().xmlPath().getString("CreateStackResponse.CreateStackResult.StackId");

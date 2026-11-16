@@ -85,7 +85,7 @@ class S3InternalLambdaCodeDownloadIntegrationTest {
         }
     }
 
-    private static byte[] archive(String marker) throws Exception {
+    private static byte[] archive(String marker) {
         return LambdaCodeFixtures.nodeJsZip("exports.handler = async () => '" + marker + "';");
     }
 }

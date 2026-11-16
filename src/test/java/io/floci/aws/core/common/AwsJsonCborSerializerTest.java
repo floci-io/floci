@@ -2,11 +2,13 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -283,5 +285,20 @@ class AwsJsonCborSerializerTest {
 
     private static boolean contains(byte[] bytes, byte target) {
         return indexOf(bytes, target) >= 0;
+    }
+
+    @Test
+    void binaryNodeIsWrittenAsCborByteStringInBothDialects() throws Exception {
+        byte[] blob = {0x00, 0x01, (byte) 0xFF, 'a', 'b'};
+        ObjectNode node = jsonMapper.createObjectNode();
+        node.putObject("TranslatedDocument").put("Content", blob);
+
+        for (byte[] encoded : new byte[][] {
+                AwsJsonCborController.nodeToSmithyCbor(node),
+                AwsJsonCborController.nodeToLegacyCbor(node)}) {
+            JsonNode content = cborMapper.readTree(encoded).path("TranslatedDocument").path("Content");
+            assertTrue(content.isBinary(), "blob must be a CBOR byte string (major type 2), not text");
+            assertArrayEquals(blob, content.binaryValue());
+        }
     }
 }

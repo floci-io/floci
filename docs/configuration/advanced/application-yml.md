@@ -103,6 +103,17 @@ floci:
     # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
     spoof-aws-endpoints: false
 
+    # When Floci runs natively: a resolver on 127.0.0.1:<port> for the host's own resolver,
+    # answering the same names (Cloud Map <service>.<namespace>, Route 53 private zones) and
+    # refusing the rest.
+    # Via env var: FLOCI_DNS_HOST_PORT=5354
+    # host-port: 5354
+
+    # When Floci runs natively on a host with a docker0 bridge: listen on that bridge's
+    # address, port 53, for the containers Floci launches (needs root or CAP_NET_BIND_SERVICE).
+    # Via env var: FLOCI_DNS_BRIDGE_LISTENER_ENABLED=false
+    bridge-listener-enabled: true
+
   auth:
     validate-signatures: false               # Set to true to verify SigV4 signatures for every service (S3: header, presigned URL, presigned POST; others: header)
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
@@ -120,8 +131,8 @@ floci:
     log-max-size: "10m"                      # Max size per container log file before rotation
     log-max-file: "3"                        # Number of rotated log files to retain
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
-    max-connections: 1024                    # Docker client connection pool; each live Lambda container holds 1
-    streaming-max-connections: 512           # Separate pool for container log-follow streams
+    max-connections: 1024                    # Docker client connection pool for short calls
+    streaming-max-connections: 2048          # Separate pool for streams; each live Lambda container holds 2, plus 1 per extension
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 

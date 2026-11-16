@@ -2,11 +2,13 @@ package io.floci.aws.core.common.dns;
 
 import io.vertx.core.Vertx;
 import io.vertx.core.datagram.DatagramSocket;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
@@ -22,9 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @EnabledOnOs(OS.LINUX)
 class EmbeddedDnsReplySourceTest {
 
+    // The host listener (forContainers false) answers Floci's own names with its own address too, and
+    // is never the address handed to the containers Floci launches.
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void replyComesFromTheQueriedAddress(boolean connectedClient) throws Exception {
+    @CsvSource({"false,true", "true,true", "false,false", "true,false"})
+    void replyComesFromTheQueriedAddress(boolean connectedClient, boolean forContainers) throws Exception {
         Vertx vertx = Vertx.vertx();
         EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of());
         InetAddress serverAddress = InetAddress.getByName("127.0.0.2");
@@ -32,19 +36,16 @@ class EmbeddedDnsReplySourceTest {
         // Vert.x owns the server socket; the JDK socket models a resolver that filters its peer.
         try (java.net.DatagramSocket client =
                      new java.net.DatagramSocket(0, InetAddress.getByName("127.0.0.1"))) {
-            server = dns.listen(vertx, serverAddress.getHostAddress(), 0)
+            String address = serverAddress.getHostAddress();
+            server = (forContainers ? dns.listen(vertx, address, 0) : dns.bind(vertx, address, 0, false))
                     .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
             int serverPort = server.localAddress().port();
-            assertEquals(Optional.of(serverAddress.getHostAddress()), dns.getServerIp());
-            client.setSoTimeout(5000);
+            assertEquals(forContainers ? Optional.of(address) : Optional.empty(), dns.getServerIp());
             if (connectedClient) {
                 client.connect(serverAddress, serverPort);
             }
             byte[] request = DnsTestQuery.query(EmbeddedDnsServer.DEFAULT_SUFFIX, 1, 0x1234);
-            client.send(new DatagramPacket(request, request.length, serverAddress, serverPort));
-
-            DatagramPacket reply = new DatagramPacket(new byte[512], 512);
-            client.receive(reply);
+            DatagramPacket reply = exchange(client, serverAddress, serverPort, request);
 
             assertEquals(serverAddress, reply.getAddress());
             assertEquals(serverPort, reply.getPort());
@@ -55,13 +56,49 @@ class EmbeddedDnsReplySourceTest {
             assertArrayEquals(serverAddress.getAddress(),
                     Arrays.copyOfRange(reply.getData(), request.length + 12, request.length + 16));
         } finally {
-            try {
-                if (server != null) {
-                    server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
-                }
-            } finally {
-                vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            close(server, vertx);
+        }
+    }
+
+    // Catches: the host listener forwarding a name Floci does not hold to the host's resolver, which a
+    // resolver routing that domain to Floci sends straight back, so the lookup loops until it times out.
+    @Test
+    void theHostListenerRefusesNamesFlociDoesNotHold() throws Exception {
+        Vertx vertx = Vertx.vertx();
+        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of());
+        InetAddress loopback = InetAddress.getByName(EmbeddedDnsServer.LOOPBACK);
+        DatagramSocket server = null;
+        try (java.net.DatagramSocket client = new java.net.DatagramSocket(0, loopback)) {
+            server = dns.bind(vertx, EmbeddedDnsServer.LOOPBACK, 0, false)
+                    .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            byte[] request = DnsTestQuery.query("not-held.example.invalid", 1, 0x4321);
+
+            DatagramPacket reply = exchange(client, loopback, server.localAddress().port(), request);
+
+            ByteBuffer response = ByteBuffer.wrap(reply.getData(), 0, reply.getLength());
+            assertEquals((short) 0x4321, response.getShort(0));
+            assertEquals(5, response.getShort(2) & 0x000F, "REFUSED");
+        } finally {
+            close(server, vertx);
+        }
+    }
+
+    private static DatagramPacket exchange(java.net.DatagramSocket client, InetAddress serverAddress, int serverPort,
+                                           byte[] request) throws IOException {
+        client.setSoTimeout(5000);
+        client.send(new DatagramPacket(request, request.length, serverAddress, serverPort));
+        DatagramPacket reply = new DatagramPacket(new byte[512], 512);
+        client.receive(reply);
+        return reply;
+    }
+
+    private static void close(DatagramSocket server, Vertx vertx) throws Exception {
+        try {
+            if (server != null) {
+                server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
             }
+        } finally {
+            vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
     }
 }

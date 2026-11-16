@@ -650,6 +650,37 @@
         "UpdatePodIdentityAssociation": {"method": "POST", "requestUri": "/clusters/{name}/pod-identity-associations/{associationId}"}
       }
     },
+    "emr-containers": {
+      "credentialScope": "emr-containers",
+      "apiVersion": "2020-10-01",
+      "operations": {
+        "CancelJobRun": {"method": "DELETE", "requestUri": "/virtualclusters/{virtualClusterId}/jobruns/{jobRunId}"},
+        "CreateJobTemplate": {"method": "POST", "requestUri": "/jobtemplates"},
+        "CreateManagedEndpoint": {"method": "POST", "requestUri": "/virtualclusters/{virtualClusterId}/endpoints"},
+        "CreateSecurityConfiguration": {"method": "POST", "requestUri": "/securityconfigurations"},
+        "CreateVirtualCluster": {"method": "POST", "requestUri": "/virtualclusters"},
+        "DeleteJobTemplate": {"method": "DELETE", "requestUri": "/jobtemplates/{templateId}"},
+        "DeleteManagedEndpoint": {"method": "DELETE", "requestUri": "/virtualclusters/{virtualClusterId}/endpoints/{endpointId}"},
+        "DeleteSecurityConfiguration": {"method": "DELETE", "requestUri": "/securityconfigurations/{securityConfigurationId}"},
+        "DeleteVirtualCluster": {"method": "DELETE", "requestUri": "/virtualclusters/{virtualClusterId}"},
+        "DescribeJobRun": {"method": "GET", "requestUri": "/virtualclusters/{virtualClusterId}/jobruns/{jobRunId}"},
+        "DescribeJobTemplate": {"method": "GET", "requestUri": "/jobtemplates/{templateId}"},
+        "DescribeManagedEndpoint": {"method": "GET", "requestUri": "/virtualclusters/{virtualClusterId}/endpoints/{endpointId}"},
+        "DescribeSecurityConfiguration": {"method": "GET", "requestUri": "/securityconfigurations/{securityConfigurationId}"},
+        "DescribeVirtualCluster": {"method": "GET", "requestUri": "/virtualclusters/{virtualClusterId}"},
+        "GetManagedEndpointSessionCredentials": {"method": "POST", "requestUri": "/virtualclusters/{virtualClusterId}/endpoints/{endpointId}/credentials"},
+        "ListJobRuns": {"method": "GET", "requestUri": "/virtualclusters/{virtualClusterId}/jobruns"},
+        "ListJobTemplates": {"method": "GET", "requestUri": "/jobtemplates"},
+        "ListManagedEndpoints": {"method": "GET", "requestUri": "/virtualclusters/{virtualClusterId}/endpoints"},
+        "ListSecurityConfigurations": {"method": "GET", "requestUri": "/securityconfigurations"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn}"},
+        "ListVirtualClusters": {"method": "GET", "requestUri": "/virtualclusters"},
+        "StartJobRun": {"method": "POST", "requestUri": "/virtualclusters/{virtualClusterId}/jobruns"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn}"},
+        "UpdateVirtualCluster": {"method": "PATCH", "requestUri": "/virtualclusters/{virtualClusterId}"}
+      }
+    },
     "emr-serverless": {
       "credentialScope": "emr-serverless",
       "apiVersion": "2021-07-13",
@@ -766,6 +797,23 @@
         "UpdateExperimentTemplate": {"method": "PATCH", "requestUri": "/experimentTemplates/{id}"},
         "UpdateSafetyLeverState": {"method": "PATCH", "requestUri": "/safetyLevers/{id}/state"},
         "UpdateTargetAccountConfiguration": {"method": "PATCH", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations/{accountId}"}
+      }
+    },
+    "glue-iceberg-rest": {
+      "credentialScope": "glue",
+      "apiVersion": "apache-iceberg-1.6.1",
+      "documented": {"page": "https://docs.aws.amazon.com/glue/latest/dg/iceberg-rest-apis.html", "definitions": ["https://raw.githubusercontent.com/apache/iceberg/apache-iceberg-1.6.1/open-api/rest-catalog-open-api.yaml"], "pageDiffers": ["DeleteNamespace: the page gives DELETE/iceberg/v1/catalogs/{catalog}/namespces/{ns}, its definition DELETE /v1/{prefix}/namespaces/{namespace}", "CreateTable: the page gives GET /iceberg/v1/catalogs/{catalog}/namespaces/{ns}/tables, its definition POST /v1/{prefix}/namespaces/{namespace}/tables"], "retrieved": "2026-11-15"},
+      "operations": {
+        "CreateDatabase": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces"},
+        "CreateTable": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables"},
+        "DeleteDatabase": {"method": "DELETE", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}"},
+        "DeleteTable": {"method": "DELETE", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}"},
+        "GetCatalog": {"method": "GET", "requestUri": "/iceberg/v1/config"},
+        "GetDatabase": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces", "alternatives": [{"requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}", "located": {}}]},
+        "GetTable": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}", "alternatives": [{"method": "HEAD", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}", "located": {}}]},
+        "GetTables": {"method": "GET", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables"},
+        "UpdateDatabase": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/properties"},
+        "UpdateTable": {"method": "POST", "requestUri": "/iceberg/v1/catalogs/{catalog}/namespaces/{namespace}/tables/{table}"}
       }
     },
     "guardduty": {
@@ -2198,6 +2246,34 @@
         "TagResource": {"method": "POST", "requestUri": "/tag/{resourceArn}"},
         "UntagResource": {"method": "DELETE", "requestUri": "/tag/{resourceArn}"},
         "UpdateTableMetadataLocation": {"method": "PUT", "requestUri": "/tables/{tableBucketARN}/{namespace}/{name}/metadata-location"}
+      }
+    },
+    "s3vectors": {
+      "credentialScope": "s3vectors",
+      "apiVersion": "2025-07-15",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "CreateIndex": {"method": "POST", "requestUri": "/CreateIndex"},
+        "CreateVectorBucket": {"method": "POST", "requestUri": "/CreateVectorBucket"},
+        "DeleteIndex": {"method": "POST", "requestUri": "/DeleteIndex"},
+        "DeleteVectorBucket": {"method": "POST", "requestUri": "/DeleteVectorBucket"},
+        "DeleteVectorBucketPolicy": {"method": "POST", "requestUri": "/DeleteVectorBucketPolicy"},
+        "DeleteVectors": {"method": "POST", "requestUri": "/DeleteVectors"},
+        "GetIndex": {"method": "POST", "requestUri": "/GetIndex"},
+        "GetVectorBucket": {"method": "POST", "requestUri": "/GetVectorBucket"},
+        "GetVectorBucketPolicy": {"method": "POST", "requestUri": "/GetVectorBucketPolicy"},
+        "GetVectors": {"method": "POST", "requestUri": "/GetVectors"},
+        "ListIndexes": {"method": "POST", "requestUri": "/ListIndexes"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn}"},
+        "ListVectorBuckets": {"method": "POST", "requestUri": "/ListVectorBuckets"},
+        "ListVectors": {"method": "POST", "requestUri": "/ListVectors"},
+        "PutVectorBucketDefaultIndexMode": {"method": "POST", "requestUri": "/PutVectorBucketDefaultIndexMode"},
+        "PutVectorBucketPolicy": {"method": "POST", "requestUri": "/PutVectorBucketPolicy"},
+        "PutVectors": {"method": "POST", "requestUri": "/PutVectors"},
+        "QueryVectors": {"method": "POST", "requestUri": "/QueryVectors"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn}"},
+        "UpdateIndexMode": {"method": "POST", "requestUri": "/UpdateIndexMode"}
       }
     },
     "scheduler": {

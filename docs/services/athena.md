@@ -141,12 +141,16 @@ A delimited-text table that declares its CSV options (`field.delim` or `separato
 
 Only the tables a query names get views (by database and name; a name only a string literal or a comment holds doesn't count), since DuckDB binds every view of the batch before the query runs: a table whose view cannot be built (files that do not match its declared format or schema) then fails the queries that read it and no others. A query that reads `information_schema` or is a `SHOW` statement gets a view for every table.
 
+A partitioned table without partition projection is read through the partitions registered for it in Glue, as Athena reads it: each partition from its own location, with its values as the partition keys. The partitions come from `ALTER TABLE ADD PARTITION`, `MSCK REPAIR TABLE` or Glue's `CreatePartition` and `BatchCreatePartition`. A partition without a location of its own is read at `<table location>/key=value/...`. A folder under the table's location that no partition names isn't read, a partition's location may lie outside it, a non-Hive layout (`2026/11/16/`) is read through the partitions added for it, and a table with no partitions registered answers no rows until they are loaded. The partitions are read together with their columns matched by name, so a partition written before a column was added reads NULL for it. A partition value its key's type cannot hold fails the query with Athena's `HIVE_INVALID_PARTITION_VALUE`, and a partition that does not give one value for each key, which Glue refuses on AWS, is not read.
+
+A table whose location holds no data, or only folder markers (keys ending in `/`), answers no rows with its declared columns as their types, as Athena does: its view selects no rows rather than reading the empty location, which DuckDB refuses to bind. Nested and binary columns take the types the engine reads them as (`array<string>` as `VARCHAR[]`, `binary` as `BLOB`). For a table with partition projection, only the objects its read path reaches count. A location holding another glob character (`?`, a bracket or a brace), which Athena does not take in a location, is read as before.
+
 ## Partition projection
 
 A Glue table with `projection.enabled` set to `true` is read the way Athena reads it, from its partition layout rather than from its whole location:
 
 - **Read path**: only the partition folders are read, `<location>/<key>=*/...` in the default `column=value` layout, or the `storage.location.template` with each `${key}` placeholder as a wildcard (one per folder, for a `date` format that holds slashes). Anything else stored under the location, such as query results, is not read as table data.
-- **Partition values**: in the default layout, DuckDB's Hive partitioning supplies each key's value. With a template, the view takes each value from the object's S3 path by matching it against the template, and casts it to the key's declared type. A `date` projection whose `format` holds slashes (`yyyy/MM/dd/HH`, the Firehose layout) spans that many folders behind one placeholder. A repeated placeholder must hold the same value at each occurrence, and an object whose path value does not parse as its key's type is not read.
+- **Partition values**: in the default layout, DuckDB's Hive partitioning supplies each key's value, read as text and cast to the key's declared type, so a `string` key holding `2026-11-14` stays a string; a folder whose value the key's type cannot hold (`dt=latest` for a `date`) is not read. A `date` or `timestamp` key whose date projection sets a `format` is parsed with it in either layout (`dt=20261116` for `yyyyMMdd`); a format using pattern letters other than `yyyy`, `yy`, `MM`, `dd`, `HH`, `mm` and `ss` is cast as an ISO value. With a template, the view takes each value from the object's S3 path by matching it against the template, and casts it to the key's declared type. A `date` projection whose `format` holds slashes (`yyyy/MM/dd/HH`, the Firehose layout) spans that many folders behind one placeholder. A repeated placeholder must hold the same value at each occurrence, and an object whose path value does not parse as its key's type is not read.
 - **Validation**: as on Athena, a query fails when it leaves an `injected` key without a static equality condition in its `WHERE` clause (`CONSTRAINT_VIOLATION`), or when it reads a table whose template has no placeholder for one of its keys (`INVALID_TABLE_PROPERTY`). Such a table gets no view, so the other tables stay queryable.
 
 Not yet supported:
@@ -177,6 +181,16 @@ Athena manages Iceberg tables through AWS Glue's Iceberg REST catalog, which Flo
 - `DROP TABLE` deletes an Iceberg table's files too (see [Hive DDL](#hive-ddl)).
 
 `CREATE TABLE AS` with `table_type = 'ICEBERG'` and `OPTIMIZE` are not supported yet.
+
+### S3 Tables catalogs
+
+A table bucket integrated with the Glue Data Catalog (see [Glue's catalogs and Amazon S3 Tables](glue.md#catalogs-and-amazon-s3-tables)) is the catalog `s3tablescatalog/<bucket>`, with its namespaces as databases. With that catalog in the query's `QueryExecutionContext` (`{"Catalog": "s3tablescatalog/<bucket>", "Database": "<namespace>"}`), or named in the query (`"s3tablescatalog/<bucket>".<namespace>.<table>`):
+
+- DDL statements run in the context catalog, naming a table `[namespace.]table` as Athena's do. `CREATE DATABASE` creates a namespace, and `CREATE TABLE ... TBLPROPERTIES ('table_type'='iceberg')` an Iceberg table in the bucket; it names no `LOCATION`, since S3 Tables decides where the table lives.
+- `SELECT`, `INSERT INTO`, `UPDATE`, `DELETE FROM` and `MERGE INTO` run in the query engine, which attaches each S3 Tables catalog the query names under that name, through Glue's Iceberg REST endpoint with a token for the calling account. A context catalog's namespace resolves names given without one. With no `Database`, the context database is Athena's `default`, so only the names the query qualifies resolve, unless the bucket has a `default` namespace. A write naming `awsdatacatalog.<database>.<table>` writes the default catalog's Iceberg table.
+- `DROP TABLE`, in the context catalog, deletes the table, data and all.
+
+As on Athena, `OPTIMIZE` and `VACUUM` are refused (S3 manages compaction and snapshots), and so are Hive DDL statements. `CREATE TABLE AS` into an S3 Tables catalog is not supported yet.
 
 ## Configuration
 

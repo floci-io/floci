@@ -11,6 +11,8 @@ import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.RedshiftAuditTarget;
 import io.floci.aws.services.redshift.SnapshotDumpCopier;
 import io.floci.aws.services.redshift.TempCredential;
 import io.floci.aws.services.redshift.model.Endpoint;
@@ -128,6 +130,9 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
     /** Looked up lazily: the endpoint service is built on this one. */
     @Inject
     Instance<RedshiftServerlessEndpointAccessService> endpointAccess;
+    /** Looked up lazily so a build without the publisher, and the unit tests that never wire one, still start. */
+    @Inject
+    Instance<RedshiftAuditLogPublisher> auditPublisher;
 
     public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
                                      RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
@@ -210,6 +215,63 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
         workgroup.setMasterUsername(masterUsername);
         workgroup.setRuntimeHost(backend.host());
         workgroup.setRuntimePort(backend.port());
+        registerAudit(accountId, region, workgroup, namespace);
+    }
+
+    /** Stops the workgroup's runtime, and with it the audit export of its namespace. */
+    private void stopRuntime(String accountId, String region, String workgroupName) {
+        runtime.stop(accountId, region, workgroupName);
+        unregisterAudit(accountId, region, workgroupName);
+    }
+
+    private void unregisterAudit(String accountId, String region, String workgroupName) {
+        publisher().ifPresent(publisher -> publisher.unregister(accountId,
+                RedshiftServerlessRuntime.backendId(region, workgroupName)));
+    }
+
+    private Optional<RedshiftAuditLogPublisher> publisher() {
+        return auditPublisher == null || auditPublisher.isUnsatisfied()
+                ? Optional.empty() : Optional.of(auditPublisher.get());
+    }
+
+    /** Re-registers the audit export of the namespace's workgroup after the namespace's settings changed. */
+    private void syncAudit(String accountId, String region, Namespace namespace) {
+        workgroupOf(namespace.getNamespaceName(), region)
+                .ifPresent(workgroup -> registerAudit(accountId, region, workgroup, namespace));
+    }
+
+    /**
+     * Registers what the workgroup's backend exports to CloudWatch Logs: the log types its namespace selects in
+     * {@code logExports}, under {@code /aws/redshift/<namespace>/<log type>}. A workgroup without a running
+     * backend has nothing to export.
+     */
+    private void registerAudit(String accountId, String region, Workgroup workgroup, Namespace namespace) {
+        publisher().ifPresent(publisher -> {
+            String backendId = RedshiftServerlessRuntime.backendId(region, workgroup.getWorkgroupName());
+            if (hasLiveRuntime(workgroup)) {
+                try {
+                    publisher.register(accountId, region, auditTarget(backendId, workgroup, namespace));
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Failed to register Redshift audit target for workgroup {0}",
+                            workgroup.getWorkgroupName());
+                }
+            } else {
+                publisher.unregister(accountId, backendId);
+            }
+        });
+    }
+
+    static RedshiftAuditTarget auditTarget(String backendId, Workgroup workgroup, Namespace namespace) {
+        List<String> exports = namespace.getLogExports() == null ? List.of() : namespace.getLogExports().stream()
+                .filter(Objects::nonNull)
+                .toList();
+        boolean activityLogging = workgroup.getConfigParameters() != null
+                && workgroup.getConfigParameters().stream()
+                .anyMatch(parameter -> "enable_user_activity_logging".equals(parameter.getParameterKey())
+                        && "true".equalsIgnoreCase(parameter.getParameterValue()));
+        return new RedshiftAuditTarget(backendId, "serverless", "/aws/redshift/" + namespace.getNamespaceName(),
+                "namespace/" + namespace.getNamespaceName(), !exports.isEmpty(), "cloudwatch", null, null, exports,
+                activityLogging, 0L);
     }
 
     private Supplier<Optional<RedshiftServerlessRuntime.AdminCredentials>> adminSupplier(
@@ -428,12 +490,16 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             }
             storeAttempted = true;
             namespaces.put(key, updated);
+            syncAudit(workgroups.accountId(), region, updated);
             if (wasManaged && !managed) {
                 requireAdminSecrets().delete(current, region);
             }
         } catch (RuntimeException failure) {
             if (storeAttempted) {
-                compensate(() -> namespaces.put(key, current), failure, "restore namespace credentials");
+                compensate(() -> {
+                    namespaces.put(key, current);
+                    syncAudit(workgroups.accountId(), region, current);
+                }, failure, "restore namespace credentials");
             }
             if (backendChanged) {
                 compensate(() -> restoreAdminPassword(current, region), failure, "restore backend admin password");
@@ -482,6 +548,7 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             }
         }
         namespaces.put(storageKey(region, previous.getNamespaceName()), previous);
+        syncAudit(workgroups.accountId(), region, previous);
     }
 
     public synchronized Namespace deleteNamespace(String namespaceName, String region) {
@@ -1251,7 +1318,7 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             // The runtime may have started before the failure (a failed put), so tear it down; a
             // runtime that failed to start has already rolled itself back and this is then a no-op.
             try {
-                runtime.stop(workgroups.accountId(), region, workgroupName);
+                stopRuntime(workgroups.accountId(), region, workgroupName);
             } catch (RuntimeException stopFailure) {
                 LOG.warnv(stopFailure, "Could not stop the runtime of workgroup {0} after a failed create",
                         workgroupName);
@@ -1325,6 +1392,8 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
             }
         }
         workgroups.put(storageKey(region, workgroupName), updated);
+        namespaces.get(storageKey(region, updated.getNamespaceName()))
+                .ifPresent(namespace -> registerAudit(workgroups.accountId(), region, updated, namespace));
         return updated;
     }
 
@@ -1333,7 +1402,7 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
         // The proxy goes first and its failure aborts the delete: a listener that could not be closed
         // keeps its port, so the workgroup must stay on record and the call can be retried.
         try {
-            runtime.stop(workgroups.accountId(), region, workgroupName);
+            stopRuntime(workgroups.accountId(), region, workgroupName);
         } catch (RuntimeException e) {
             LOG.warnv(e, "Failed to stop the runtime of workgroup {0}", workgroupName);
             throw new AwsException("InternalServerException",
@@ -1623,14 +1692,18 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
     @Override
     public void clear() {
         for (AccountAwareStorageBackend.AccountEntry<Workgroup> entry : workgroups.scanAllAccountEntries(key -> true)) {
+            String region = regionOf(entry.key());
+            String workgroupName = entry.value().getWorkgroupName();
             try {
-                runtime.stop(entry.accountId(), regionOf(entry.key()), entry.value().getWorkgroupName());
+                stopRuntime(entry.accountId(), region, workgroupName);
                 endpoints.release(entry.value().getEndpoint());
             } catch (RuntimeException e) {
+                // The workgroup record is about to be cleared, so drop its audit target even if shutdown failed.
+                unregisterAudit(entry.accountId(), region, workgroupName);
                 // The listener may still be bound, so the endpoint stays reserved rather than being
                 // handed to a later cluster or workgroup whose proxy could not bind it.
                 LOG.warnv(e, "Could not stop the runtime of workgroup {0} while clearing state; "
-                        + "its endpoint stays reserved", entry.value().getWorkgroupName());
+                        + "its endpoint stays reserved", workgroupName);
             }
         }
         namespaces.clear();

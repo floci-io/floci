@@ -4,10 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.HybridStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
-import io.floci.aws.core.storage.WalStorage;
+import io.floci.aws.testing.StorageTestBackends;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -159,7 +158,7 @@ class RedshiftDataIdempotencyStoreTest {
             store(new AccountAwareStorageBackend<>(initial, null, "000000000000"), START)
                     .put(scope, mapper.createObjectNode().put("Id", "persisted"));
         } finally {
-            shutdown(initial);
+            StorageTestBackends.close(initial);
         }
         StorageBackend<String, RedshiftDataIdempotencyStore.Receipt> reopened = writeBehind(mode, directory);
         reopened.load();
@@ -167,25 +166,14 @@ class RedshiftDataIdempotencyStoreTest {
             assertEquals("persisted", store(new AccountAwareStorageBackend<>(reopened, null, "000000000000"), START)
                     .find(scope).response.path("Id").asText());
         } finally {
-            shutdown(reopened);
+            StorageTestBackends.close(reopened);
         }
     }
 
     private StorageBackend<String, RedshiftDataIdempotencyStore.Receipt> writeBehind(String mode, Path directory) {
         TypeReference<Map<String, RedshiftDataIdempotencyStore.Receipt>> type = new TypeReference<>() { };
-        return switch (mode) {
-            case "hybrid" -> new HybridStorage<>(directory.resolve("idempotency.json"), type, 60000);
-            case "wal" -> new WalStorage<>(directory.resolve("idempotency.json"), directory.resolve("idempotency.wal"), type, 60000);
-            default -> throw new IllegalArgumentException(mode);
-        };
-    }
-
-    private void shutdown(StorageBackend<String, RedshiftDataIdempotencyStore.Receipt> backend) {
-        if (backend instanceof HybridStorage<String, RedshiftDataIdempotencyStore.Receipt> hybrid) {
-            hybrid.shutdown();
-        } else if (backend instanceof WalStorage<String, RedshiftDataIdempotencyStore.Receipt> wal) {
-            wal.shutdown();
-        }
+        return StorageTestBackends.create(mode, directory.resolve("idempotency.json"),
+                directory.resolve("idempotency.wal"), type, 60000);
     }
 
     private AccountAwareStorageBackend<RedshiftDataIdempotencyStore.Receipt> persistent(Path file) {
