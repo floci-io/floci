@@ -1,5 +1,6 @@
 package io.floci.aws.services.iot;
 
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.floci.aws.testing.ServicesOffSettingsProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -145,7 +146,7 @@ class IotMqttWebSocketLazyStartIntegrationTest {
     }
 
     private String ws() {
-        return "ws://127.0.0.1:" + testHttpPort + "/mqtt";
+        return "ws://127.0.0.1:" + testHttpPort + "/mqtt" + IotWebSocketSigV4.QUERY;
     }
 
     /** The close future can resolve before the OS releases the port; wait until it refuses. */

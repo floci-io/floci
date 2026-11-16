@@ -22,6 +22,7 @@ import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.testing.IotWebSocketSigV4;
 import io.floci.aws.testing.ThreadStates;
 import io.floci.aws.testutil.FreePorts;
 import io.netty.handler.codec.mqtt.MqttProperties;
@@ -123,6 +124,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
@@ -546,10 +548,27 @@ class IotMqttBrokerServiceTest {
     }
 
     @Test
+    void anUnsignedWebSocketConnectNamingNoAuthorizerGoesThroughTheDefaultAuthorizer() {
+        IotService service = mock(IotService.class);
+        when(iotService.get()).thenReturn(service);
+        when(customAuthorizer.connectPolicies(isNull(), eq("ws-unsigned"), any(), any(), any())).thenReturn(List.of("{}"));
+        SocketAddress bridge = SocketAddress.inetSocketAddress(50126, "127.0.0.1");
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(Map.of(), "", null, "203.0.113.7", 41236));
+        MqttEndpoint endpoint = mock(MqttEndpoint.class);
+        when(endpoint.clientIdentifier()).thenReturn("ws-unsigned");
+        when(endpoint.remoteAddress()).thenReturn(bridge);
+
+        broker.handleEndpoint(endpoint, false);
+
+        verify(service, timeout(10_000)).isConnectAllowedBy(List.of("{}"), "ws-unsigned", "203.0.113.7", null);
+    }
+
+    @Test
     void aWebSocketClientsConnectedEventCarriesTheWebSocketClientsAddress() throws Exception {
         startBrokerRecordingPublishes();
         SocketAddress bridge = SocketAddress.inetSocketAddress(50124, "127.0.0.1");
-        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(Map.of(), "", null, "203.0.113.7", 41234));
+        broker.webSocketUpgrades().put(bridge, new IotCustomAuthorizer.WebSocketUpgrade(
+                Map.of(), IotWebSocketSigV4.QUERY.substring(1), null, "203.0.113.7", 41234));
         MqttEndpoint endpoint = mock(MqttEndpoint.class);
         when(endpoint.clientIdentifier()).thenReturn("ws-client");
         when(endpoint.remoteAddress()).thenReturn(bridge);

@@ -446,8 +446,9 @@ public class IotMqttBrokerService implements Resettable {
      * has registered and whose attached policies allow {@code iot:Connect} for the client id;
      * anything else is answered with CONNACK not authorized (return code 5, reason code 0x87 on
      * MQTT 5) and never becomes a session, so a client already holding that client id keeps its
-     * connection. The plaintext listener, which the WebSocket bridge also lands on, stays open to
-     * every client except one that names a custom authorizer, see {@link #authorizeCustom}.
+     * connection. The plaintext listener stays open to every client except one that names a custom
+     * authorizer, see {@link #authorizeCustom}. A WebSocket client that names none goes through the
+     * default authorizer unless its upgrade carries a SigV4 signature, which is not verified.
      */
     void handleEndpoint(MqttEndpoint endpoint, boolean verifyDevice) {
         long connectNanos = nanoTime.getAsLong();
@@ -472,7 +473,7 @@ public class IotMqttBrokerService implements Resettable {
             }
             String username = endpoint.auth() == null ? null : endpoint.auth().getUsername();
             String authorizerName = IotCustomAuthorizer.authorizerName(username, upgrade);
-            if (authorizerName != null) {
+            if (authorizerName != null || (upgrade != null && !upgrade.isSigV4Signed())) {
                 authorizeCustom(endpoint, authorizerName, upgrade, sourceIp, sourcePort, connectNanos);
                 return;
             }
@@ -481,10 +482,11 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * A CONNECT naming a custom authorizer is admitted only when the authorizer's function allows
-     * it and the policies it returns allow {@code iot:Connect} for the client id. The function runs
-     * off the event loop. A refusal closes an MQTT 3.1.1 connection without a CONNACK and answers
-     * MQTT 5 with reason code 0x87, as AWS IoT does.
+     * A CONNECT through a custom authorizer, the default one when {@code authorizerName} is null, is
+     * admitted only when the authorizer's function allows it and the policies it returns allow
+     * {@code iot:Connect} for the client id. The function runs off the event loop. A refusal closes
+     * an MQTT 3.1.1 connection without a CONNACK and answers MQTT 5 with reason code 0x87, as AWS
+     * IoT does.
      */
     private void authorizeCustom(MqttEndpoint endpoint, String authorizerName, IotCustomAuthorizer.WebSocketUpgrade upgrade,
                                  String sourceIp, int sourcePort, long connectNanos) {

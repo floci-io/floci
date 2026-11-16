@@ -88,11 +88,11 @@ The function is invoked synchronously with the event AWS IoT sends (`protocolDat
 
 - `TestInvokeAuthorizer` works on `ACTIVE` and `INACTIVE` authorizers. It returns the request errors (`InvalidRequestException`) and answer errors (`InvalidResponseException`) with AWS's messages, and passes the contexts on as given: header case is kept and `queryString` keeps its leading `?`.
 - An MQTT `CONNECT` on the plaintext listener or on [MQTT over WebSocket](#mqtt-over-websocket) that names an authorizer, in the username (`<clientId>?x-amz-customauthorizer-name=<name>`), the WebSocket URL query or the `x-amz-customauthorizer-name` upgrade header, is admitted only when the authorizer exists and is `ACTIVE`, the signature verifies for a signed authorizer, the answer is valid, `isAuthenticated` is `true`, and the returned policies allow `iot:Connect` on `arn:aws:iot:<region>:<account>:client/<clientId>`. The event carries the username with its query, the password in base64, and for WebSocket the lower-cased upgrade headers, the query string without `?` and, over TLS, the server name.
-- A refused MQTT 3.1.1 client is disconnected without a `CONNACK`; an MQTT 5 client gets `CONNACK` reason code `0x87` with the reason string AWS sends, then the connection closes. A `CONNECT` that names no authorizer is handled as before.
+- A refused MQTT 3.1.1 client is disconnected without a `CONNACK`; an MQTT 5 client gets `CONNACK` reason code `0x87` with the reason string AWS sends, then the connection closes.
+- A `CONNECT` over MQTT over WebSocket that names no authorizer and whose upgrade URL carries no SigV4 signature (`X-Amz-Signature` in the query) goes through the account's default authorizer (`SetDefaultAuthorizer`), as on AWS. Without a default authorizer it is refused the same way. On the plaintext listener a `CONNECT` that names no authorizer is admitted.
 
 Current limitations:
 
-- The default authorizer is not used: a `CONNECT` that names no authorizer is not authenticated.
 - HTTPS publish does not invoke authorizers, and `enableCachingForHttp` has no effect.
 - `refreshAfterInSeconds` and `disconnectAfterInSeconds` are returned but do not schedule a re-invocation or a disconnect.
 - The returned policies decide `iot:Connect` only; publish, subscribe and receive are not checked against them.
@@ -276,8 +276,9 @@ No client certificate is requested on this path. On AWS it authenticates by SigV
 string on the upgrade URL) or by a custom authorizer (`<clientId>?x-amz-customauthorizer-name=<name>`
 as the MQTT username with a token as the password). Floci enforces a custom authorizer named in the
 username, the URL query or the `x-amz-customauthorizer-name` upgrade header, see
-[Authorizers](#authorizers); it does not verify a SigV4 signature, and a CONNECT that names no
-authorizer is accepted as is.
+[Authorizers](#authorizers). A CONNECT that names no authorizer is admitted when the upgrade URL
+carries a SigV4 query string, which Floci does not verify; otherwise it goes through the default
+authorizer and is refused when none is set.
 
 ### Lifecycle events
 
