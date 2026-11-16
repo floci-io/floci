@@ -330,7 +330,20 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         return lb;
     }
 
-    /** Validate cardinality before subnet lookup; resolved zones are validated separately. */
+    /**
+     * Every load balancer type takes {@code Subnets} or {@code SubnetMappings}, and an Application Load
+     * Balancer takes at least two by default, so a CreateLoadBalancer with fewer is refused before anything is
+     * created, with the message AWS gives an Application or a Network Load Balancer. A Gateway Load
+     * Balancer, which takes subnets the way a Network Load Balancer does, gets the Network one. AWS
+     * counts before it looks a subnet up, so one subnet that does not exist gets this error too, not
+     * SubnetNotFound. On create this runs after the duplicate-name check, because a CloudFormation stack
+     * update finds the balancer it keeps through DuplicateLoadBalancerName, whatever subnets its
+     * template names. SetSubnets takes the same subnets, so {@link #setSubnetsFromRequest} runs this on
+     * a SetSubnets that names none, and {@link #setSubnets} on a list that names some, once it has the
+     * balancer's type; whether the subnets span two Availability Zones is checked after they are looked
+     * up. No public report shows what AWS answers a SetSubnets with one subnet, so it gets the create
+     * message and order. Explicit global or regional single-zone overrides reduce the minimum to one.
+     */
     private void requireSubnets(String region, String lbType, List<String> subnets) {
         int count = subnets == null ? 0 : subnets.size();
         if ("application".equals(lbType) && requiresTwoAlbZones(region) && count < 2) {
@@ -355,7 +368,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             }
         }
         return switch (rule) {
-            case AWS -> !"ap-northeast-3".equals(region); // partition-literal: verified Osaka ALB policy exception
+            case AWS -> true;
             case ALLOW_SINGLE_ZONE -> false;
             case REQUIRE_TWO_ZONES -> true;
         };
