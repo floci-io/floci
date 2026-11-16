@@ -35,7 +35,7 @@ public class IotLoggingController {
     public Response setV2LoggingOptions(@Context HttpHeaders headers, String body) {
         loggingService.setV2LoggingOptions(IotRequestBody.read(objectMapper, body),
                 regionResolver.resolveRegion(headers));
-        return Response.ok(objectMapper.createObjectNode()).build();
+        return Response.ok().build();
     }
 
     @GET

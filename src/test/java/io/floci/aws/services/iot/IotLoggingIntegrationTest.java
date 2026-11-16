@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -45,7 +46,7 @@ class IotLoggingIntegrationTest {
             .post("/v2LoggingOptions")
         .then()
             .statusCode(200)
-            .body(equalTo("{}"));
+            .body(emptyString());
 
         given()
             .header("Authorization", auth)
