@@ -632,6 +632,14 @@ AWS::S3::Bucket	ObjectLockConfiguration	silently dropped, as the S3CfnProvisione
 AWS::S3::Bucket	ObjectLockEnabled	accepted and ignored
 AWS::S3::Bucket	ReplicationConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::SES::ConfigurationSet	ArchivingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	DeliveryOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	ReputationOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	SendingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	SuppressionOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	Tags	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	TrackingOptions	explicitly rejected; only the Name property is currently provisioned
+AWS::SES::ConfigurationSet	VdmOptions	explicitly rejected; only the Name property is currently provisioned
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored
 AWS::SNS::Subscription	ReplayPolicy	accepted and ignored

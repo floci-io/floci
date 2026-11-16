@@ -185,6 +185,7 @@ AWS::S3::Bucket	Arn,DomainName,DualStackDomainName,RegionalDomainName,WebsiteURL
 AWS::S3::BucketPolicy		Bucket,PolicyDocument
 AWS::S3Vectors::Index	CreationTime,IndexArn	DataType,Dimension,DistanceMetric,EncryptionConfiguration,IndexName,MetadataConfiguration,Tags,VectorBucketArn,VectorBucketName
 AWS::S3Vectors::VectorBucket	CreationTime,VectorBucketArn	EncryptionConfiguration,Tags,VectorBucketName
+AWS::SES::ConfigurationSet		ArchivingOptions,DeliveryOptions,Name,ReputationOptions,SendingOptions,SuppressionOptions,Tags,TrackingOptions,VdmOptions
 AWS::SES::EmailIdentity	DkimDNSTokenName1,DkimDNSTokenName2,DkimDNSTokenName3,DkimDNSTokenValue1,DkimDNSTokenValue2,DkimDNSTokenValue3	ConfigurationSetAttributes,DkimAttributes,DkimSigningAttributes,EmailIdentity,FeedbackAttributes,MailFromAttributes,Tags
 AWS::SES::ReceiptRule	RuleName	After,Rule,RuleSetName
 AWS::SNS::Subscription	Arn	DeliveryPolicy,Endpoint,FilterPolicy,FilterPolicyScope,Protocol,RawMessageDelivery,RedrivePolicy,Region,ReplayPolicy,SubscriptionRoleArn,TopicArn
