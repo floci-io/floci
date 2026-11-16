@@ -96,7 +96,7 @@ class RdsParameterGroupEngineIntegrationTest {
                             + ".DBCluster.DBClusterParameterGroup");
             assertThat(reported, equalTo(group));
 
-            createWriter(writerId, clusterId, null);
+            createWriter(writerId, clusterId, "aurora-mysql", null);
             rds("ModifyDBClusterParameterGroup")
                     .formParam("DBClusterParameterGroupName", group)
                     .formParam("Parameters.member.1.ParameterName", "max_connections")
@@ -141,7 +141,7 @@ class RdsParameterGroupEngineIntegrationTest {
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("500 1"));
 
-            createWriter(writerId, clusterId, writerGroup);
+            createWriter(writerId, clusterId, "aurora-mysql", writerGroup);
             assertThat(query(port, "SELECT @@GLOBAL.max_connections, @@GLOBAL.slow_query_log"),
                     equalTo("800 1"));
 
@@ -232,22 +232,18 @@ class RdsParameterGroupEngineIntegrationTest {
     }
 
     @Test
-    void auroraPostgresqlClusterWithLogicalReplicationRunsWithLogicalWal() throws Exception {
+    void auroraPostgresqlWriterRunsWithLogicalReplicationFromItsClusterParameterGroup() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String group = "engine-pg-cpg-" + suffix;
         String clusterId = "engine-pg-cluster-" + suffix;
+        String writerId = "engine-pg-writer-" + suffix;
         rds("CreateDBClusterParameterGroup")
                 .formParam("DBClusterParameterGroupName", group)
                 .formParam("DBParameterGroupFamily", "aurora-postgresql16")
                 .formParam("Description", "engine parameters")
         .when().post("/").then().statusCode(200);
         try {
-            rds("ModifyDBClusterParameterGroup")
-                    .formParam("DBClusterParameterGroupName", group)
-                    .formParam("Parameters.member.1.ParameterName", "rds.logical_replication")
-                    .formParam("Parameters.member.1.ParameterValue", "1")
-                    .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
-            .when().post("/").then().statusCode(200);
+            modifyClusterLogicalReplication(group, "1");
 
             int port = rds("CreateDBCluster")
                     .formParam("DBClusterIdentifier", clusterId)
@@ -257,9 +253,16 @@ class RdsParameterGroupEngineIntegrationTest {
                     .formParam("MasterUserPassword", MASTER_PASSWORD)
             .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getInt("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.Port");
-
+            createWriter(writerId, clusterId, "aurora-postgresql", null);
             assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+
+            modifyClusterLogicalReplication(group, "0");
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+
+            rebootInstance(writerId);
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
         } finally {
+            deleteInstance(writerId);
             rds("DeleteDBCluster")
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("SkipFinalSnapshot", "true")
@@ -275,7 +278,11 @@ class RdsParameterGroupEngineIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String group = "engine-pg-pg-" + suffix;
         String instanceId = "engine-pg-db-" + suffix;
-        createParameterGroup(group, "postgres16", "rds.logical_replication", "0");
+        rds("CreateDBParameterGroup")
+                .formParam("DBParameterGroupName", group)
+                .formParam("DBParameterGroupFamily", "postgres16")
+                .formParam("Description", "engine parameters")
+        .when().post("/").then().statusCode(200);
         try {
             int port = rds("CreateDBInstance")
                     .formParam("DBInstanceIdentifier", instanceId)
@@ -295,8 +302,9 @@ class RdsParameterGroupEngineIntegrationTest {
                     .formParam("Parameters.member.1.ParameterValue", "1")
                     .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
             .when().post("/").then().statusCode(200);
-            rebootInstance(instanceId);
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
 
+            rebootInstance(instanceId);
             assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
         } finally {
             deleteInstance(instanceId);
@@ -320,11 +328,11 @@ class RdsParameterGroupEngineIntegrationTest {
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
     }
 
-    private static void createWriter(String writerId, String clusterId, String parameterGroup) {
+    private static void createWriter(String writerId, String clusterId, String engine, String parameterGroup) {
         RequestSpecification request = rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", writerId)
                 .formParam("DBClusterIdentifier", clusterId)
-                .formParam("Engine", "aurora-mysql")
+                .formParam("Engine", engine)
                 .formParam("DBInstanceClass", "db.r6g.large");
         if (parameterGroup != null) {
             request = request.formParam("DBParameterGroupName", parameterGroup);
@@ -357,6 +365,15 @@ class RdsParameterGroupEngineIntegrationTest {
                 .formParam("Parameters.member.1.ParameterName", parameter)
                 .formParam("Parameters.member.1.ParameterValue", value)
                 .formParam("Parameters.member.1.ApplyMethod", "immediate")
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static void modifyClusterLogicalReplication(String group, String value) {
+        rds("ModifyDBClusterParameterGroup")
+                .formParam("DBClusterParameterGroupName", group)
+                .formParam("Parameters.member.1.ParameterName", "rds.logical_replication")
+                .formParam("Parameters.member.1.ParameterValue", value)
+                .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
         .when().post("/").then().statusCode(200);
     }
 
