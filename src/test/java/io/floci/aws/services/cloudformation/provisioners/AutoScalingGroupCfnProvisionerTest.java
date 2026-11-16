@@ -15,11 +15,14 @@ import io.floci.aws.services.autoscaling.model.MixedInstancesPolicy;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -394,7 +397,8 @@ class AutoScalingGroupCfnProvisionerTest {
     @Test
     void launchConfigurationReplacementRejectsUnchangedExplicitNameBeforeMutation() {
         AwsException failure = assertThrows(AwsException.class, () -> launchConfigurationUpdate("old-lc", true));
-        assertTrue(failure.getMessage().contains("new LaunchConfigurationName"));
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("Rename old-lc"));
         verify(autoScaling, never()).createLaunchConfiguration(anyString(), anyString(), any(), any(),
                 any(), any(), anyList(), any(), any(), any(), any(), anyList(), any());
         verify(autoScaling, never()).deleteLaunchConfiguration(anyString(), anyString());
@@ -407,7 +411,6 @@ class AutoScalingGroupCfnProvisionerTest {
         }
         ObjectNode after = before.deepCopy().put("InstanceType", "t3.small");
         StackResource resource = resource(LAUNCH_CONFIGURATION, "Lc", oldName);
-        resource.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "LaunchConfigurationProperties", before.toString());
         LaunchConfiguration old = new LaunchConfiguration();
         old.setLaunchConfigurationName(oldName);
         when(autoScaling.describeLaunchConfigurations(REGION, List.of(oldName))).thenReturn(List.of(old));
@@ -418,71 +421,67 @@ class AutoScalingGroupCfnProvisionerTest {
                     created.setLaunchConfigurationArn("arn:aws:autoscaling:us-east-1:000000000000:launchConfiguration:new");
                     return created;
                 });
-        provisioner.provision(resource, after, ctx(oldName));
+        ProvisionContext original = ctx(oldName);
+        ProvisionContext update = new ProvisionContext(original.engine(), REGION, "000000000000",
+                "my-stack", oldName, event -> {}, before);
+        provisioner.provision(resource, after, update);
         return resource;
     }
 
     @Test
-    void legacyInstanceConfigurationReusesUnchangedLiteralTemplateAndStoresInputs() {
-        ObjectNode props = legacyInstanceProperties();
-        StackResource resource = provisionLegacyInstance(props, props.deepCopy(), false);
+    void launchConfigurationReusesUnchangedInstanceTemplateWithoutExtraSnapshot() {
+        ObjectNode props = instanceProperties();
+        StackResource resource = provisionExistingInstance(props, props.deepCopy(), null, false);
         assertEquals("my-lc", resource.getPhysicalId());
-        assertEquals(props.toString(), resource.getAttributes().get(
-                CfnRollback.USES_ATTR_PREFIX + "LaunchConfigurationProperties"));
+        assertTrue(resource.getAttributes().isEmpty());
     }
 
     @Test
-    void legacyInstanceConfigurationRejectsChangedInstanceBeforeMutation() {
-        ObjectNode previous = legacyInstanceProperties();
-        provisionLegacyInstance(previous.deepCopy().put("InstanceId", "i-changed"), previous, true);
+    void launchConfigurationRejectsChangedInstanceBeforeMutation() {
+        ObjectNode previous = instanceProperties();
+        provisionExistingInstance(previous.deepCopy().put("InstanceId", "i-changed"), previous, null, true);
     }
 
     @Test
-    void legacyInstanceConfigurationRejectsOtherChangedInputsBeforeMutation() {
-        ObjectNode previous = legacyInstanceProperties();
-        provisionLegacyInstance(previous.deepCopy().put("InstanceType", "t3.small"), previous, true);
+    void launchConfigurationRejectsOtherChangedInputsBeforeMutation() {
+        ObjectNode previous = instanceProperties();
+        provisionExistingInstance(previous.deepCopy().put("InstanceType", "t3.small"), previous, null, true);
     }
 
     @Test
-    void legacyInstanceConfigurationCannotInferMissingPriorInputs() {
-        provisionLegacyInstance(legacyInstanceProperties(), null, true);
+    void launchConfigurationRejectsAddedCreateOnlyInputBeforeMutation() {
+        ObjectNode previous = instanceProperties();
+        ObjectNode current = previous.deepCopy().put("UserData", "IyEvYmluL3NoCmVjaG8gcmVhZHkK");
+        PropertyChanges changes = PropertyChanges.between(LAUNCH_CONFIGURATION, true, previous, current,
+                null, null, false);
+        provisionExistingInstance(current, previous, changes, true);
     }
 
-    @Test
-    void legacyInstanceConfigurationDoesNotResolveOldReferenceWithCurrentParameters() {
-        ObjectNode previous = legacyInstanceProperties();
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void launchConfigurationUsesEngineDecisionForReferenceValues(boolean replacement) {
+        ObjectNode previous = instanceProperties();
         previous.putObject("InstanceId").put("Ref", "SourceInstance");
-        provisionLegacyInstance(legacyInstanceProperties(), previous, true);
-    }
-
-    @Test
-    void legacyInstanceConfigurationReusesAReferenceMatchingThePersistedType() {
-        ObjectNode previous = legacyInstanceProperties();
         previous.putObject("InstanceType").put("Ref", "InstanceType");
-        provisionLegacyInstance(legacyInstanceProperties(), previous, false);
+        PropertyChanges changes = new PropertyChanges(Map.of(), replacement);
+        provisionExistingInstance(instanceProperties(), previous, changes, replacement);
     }
 
     @Test
-    void legacyInstanceConfigurationRejectsAReferenceWhoseValueChanged() {
-        ObjectNode previous = legacyInstanceProperties();
-        previous.putObject("InstanceType").put("Ref", "InstanceType");
-        provisionLegacyInstance(legacyInstanceProperties().put("InstanceType", "t3.small"), previous, true);
-    }
-
-    @Test
-    void legacyInstanceConfigurationRejectsRemovalOfTheInstanceSource() {
-        ObjectNode previous = legacyInstanceProperties().put("ImageId", "ami-original");
+    void launchConfigurationRejectsRemovalOfTheInstanceSource() {
+        ObjectNode previous = instanceProperties().put("ImageId", "ami-original");
         ObjectNode current = previous.deepCopy();
         current.remove("InstanceId");
-        provisionLegacyInstance(current, previous, true);
+        provisionExistingInstance(current, previous, null, true);
     }
 
-    private ObjectNode legacyInstanceProperties() {
+    private ObjectNode instanceProperties() {
         return mapper.createObjectNode().put("LaunchConfigurationName", "my-lc")
                 .put("InstanceId", "i-original").put("InstanceType", "t3.micro");
     }
 
-    private StackResource provisionLegacyInstance(ObjectNode current, JsonNode previous, boolean rejected) {
+    private StackResource provisionExistingInstance(ObjectNode current, JsonNode previous,
+                                                    PropertyChanges changes, boolean rejected) {
         LaunchConfiguration lc = new LaunchConfiguration();
         lc.setLaunchConfigurationName("my-lc");
         lc.setImageId("ami-original");
@@ -491,11 +490,12 @@ class AutoScalingGroupCfnProvisionerTest {
         StackResource resource = resource(LAUNCH_CONFIGURATION, "Lc", "my-lc");
         ProvisionContext original = ctx("my-lc");
         ProvisionContext context = new ProvisionContext(original.engine(), REGION, "000000000000",
-                "my-stack", "my-lc", event -> {}, previous);
+                "my-stack", "my-lc", event -> {}, previous, changes);
         if (rejected) {
             AwsException failure = assertThrows(AwsException.class,
                     () -> provisioner.provision(resource, current, context));
-            assertTrue(failure.getMessage().contains("new LaunchConfigurationName"));
+            assertEquals("ValidationError", failure.getErrorCode());
+            assertTrue(failure.getMessage().contains("Rename my-lc"));
             assertTrue(resource.getAttributes().isEmpty());
         } else {
             provisioner.provision(resource, current, context);

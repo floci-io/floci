@@ -3,7 +3,6 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.autoscaling.model.AsgOptionalFields;
@@ -25,7 +24,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -49,7 +47,6 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
     private static final String GROUP = "AWS::AutoScaling::AutoScalingGroup";
 
     private static final String LAUNCH_CONFIGURATION = "AWS::AutoScaling::LaunchConfiguration";
-    private static final String LC_PROPERTIES = CfnRollback.USES_ATTR_PREFIX + "LaunchConfigurationProperties";
 
     private static final Logger LOG = Logger.getLogger(AutoScalingGroupCfnProvisioner.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -208,29 +205,18 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         String region = ctx.region();
         String explicitName = ctx.resolveOptional(props, "LaunchConfigurationName");
         String name = ctx.stablePhysicalName(explicitName, r.getLogicalId(), 255, false);
-        JsonNode resolved = ctx.engine().resolveNode(props);
         List<LaunchConfigurationBlockDeviceMapping> mappings = blockDeviceMappings(props, ctx);
         LaunchTemplateData.MetadataOptions metadata = metadataOptions(props, ctx);
         LaunchConfiguration prior = existingEntity(ctx, ctx.priorPhysicalId(),
                 n -> requireLaunchConfiguration(region, n));
         if (ctx.isUpdate()) {
             ReplacementCleanup.endRollbackRetry(r);
-            String stored = r.getAttributes().get(LC_PROPERTIES);
-            JsonNode previous = stored == null ? null : readLaunchConfigurationProperties(stored);
-            boolean unchanged = previous == null
-                    ? legacyLaunchConfigurationMatches(prior, props, ctx, mappings, metadata)
-                    : resolved.equals(previous);
-            boolean explicitNameRemoved = (explicitName == null || explicitName.isBlank())
-                    && (previous == null
-                            ? !ctx.isGeneratedPhysicalName(ctx.priorPhysicalId(), r.getLogicalId(), 255, false)
-                            : previous.hasNonNull("LaunchConfigurationName"));
-            if (unchanged && ctx.reusesPriorEntity(name) && !explicitNameRemoved && prior != null) {
-                r.getAttributes().put(LC_PROPERTIES, resolved.toString());
+            if (!launchConfigurationRequiresReplacement(props, ctx)
+                    && ctx.reusesPriorEntity(name) && prior != null) {
                 return;
             }
             if (explicitName != null && !explicitName.isBlank() && ctx.reusesPriorEntity(name)) {
-                throw new AwsException("ValidationError", "CloudFormation cannot replace a custom-named launch "
-                        + "configuration without a new LaunchConfigurationName.", 400);
+                throw CfnExceptions.customNamedReplacement(name);
             }
             if (explicitName == null || explicitName.isBlank()) {
                 name = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
@@ -247,62 +233,20 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                         : Boolean.parseBoolean(associatePublicIp), null, mappings, metadata);
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
-        r.getAttributes().put(LC_PROPERTIES, resolved.toString());
         ReplacementCleanup.record(r, ctx, before);
     }
 
-    private JsonNode readLaunchConfigurationProperties(String stored) {
-        try {
-            return MAPPER.readTree(stored);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Invalid persisted launch configuration properties", e);
+    private static boolean launchConfigurationRequiresReplacement(JsonNode props, ProvisionContext ctx) {
+        PropertyChanges changes = ctx.changes(LAUNCH_CONFIGURATION, props);
+        if (changes.requiresReplacement()) {
+            return true;
         }
-    }
-
-    private boolean legacyLaunchConfigurationMatches(LaunchConfiguration prior, JsonNode props,
-            ProvisionContext ctx, List<LaunchConfigurationBlockDeviceMapping> mappings,
-            LaunchTemplateData.MetadataOptions metadata) {
-        if (prior == null) {
+        if (ctx.priorProperties() == null) {
             return false;
         }
-        if (ctx.resolveOptional(props, "InstanceId") != null || ctx.previouslyDeclared("InstanceId")) {
-            JsonNode previous = ctx.priorProperties();
-            return previous != null && previous.path("InstanceId").isTextual()
-                    && legacyInstanceInputsMatch(prior, previous, ctx.engine().resolveNode(props));
-        }
-        String publicIp = ctx.resolveOptional(props, "AssociatePublicIpAddress");
-        Boolean associatePublicIp = publicIp == null || publicIp.isBlank() ? null : Boolean.parseBoolean(publicIp);
-        return Objects.equals(prior.getImageId(), ctx.resolveOptional(props, "ImageId"))
-                && Objects.equals(prior.getInstanceType(), ctx.resolveOptional(props, "InstanceType"))
-                && Objects.equals(prior.getKeyName(), ctx.resolveOptional(props, "KeyName"))
-                && Objects.equals(prior.getSecurityGroups(), ctx.resolveStringList(props, "SecurityGroups"))
-                && Objects.equals(prior.getUserData(), ctx.resolveOptional(props, "UserData"))
-                && Objects.equals(prior.getIamInstanceProfile(), ctx.resolveOptional(props, "IamInstanceProfile"))
-                && Objects.equals(prior.getAssociatePublicIpAddress(), associatePublicIp)
-                && MAPPER.valueToTree(prior.getBlockDeviceMappings()).equals(MAPPER.valueToTree(mappings))
-                && MAPPER.valueToTree(prior.getMetadataOptions()).equals(MAPPER.valueToTree(metadata));
-    }
-
-    private boolean legacyInstanceInputsMatch(LaunchConfiguration prior, JsonNode previous, JsonNode resolved) {
-        // Read prior Ref values from the immutable configuration, never from current stack parameters.
-        // Keep omitted instance-derived inputs omitted and require the original literal InstanceId.
-        ObjectNode observed = MAPPER.createObjectNode()
-                .put("LaunchConfigurationName", prior.getLaunchConfigurationName())
-                .put("ImageId", prior.getImageId())
-                .put("InstanceType", prior.getInstanceType())
-                .put("KeyName", prior.getKeyName())
-                .put("UserData", prior.getUserData())
-                .put("IamInstanceProfile", prior.getIamInstanceProfile())
-                .put("AssociatePublicIpAddress", prior.getAssociatePublicIpAddress());
-        observed.set("SecurityGroups", MAPPER.valueToTree(prior.getSecurityGroups()));
-        ObjectNode comparable = previous.deepCopy();
-        for (Map.Entry<String, JsonNode> field : observed.properties()) {
-            JsonNode declared = previous.get(field.getKey());
-            if (declared != null && declared.isContainerNode()) {
-                comparable.set(field.getKey(), field.getValue());
-            }
-        }
-        return comparable.equals(resolved);
+        // The shared replacement flag currently omits newly added create-only properties.
+        return changes.byName().values().stream()
+                .anyMatch(change -> change.createOnly() && change.kind() == PropertyChanges.Kind.ADDED);
     }
 
     @Override

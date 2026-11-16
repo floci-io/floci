@@ -5,11 +5,11 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.autoscaling.model.AsgOptionalFields;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -19,7 +19,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -64,8 +63,8 @@ class AutoScalingLaunchConfigurationAttachmentTest {
                 return assertThrows(AwsException.class,
                         () -> service.deleteLaunchConfiguration(REGION, "configuration"));
             });
-            await().atMost(Duration.ofSeconds(5)).until(() -> deletion.isDone()
-                    || deletingThread.get() != null && deletingThread.get().getState() == Thread.State.BLOCKED);
+            ThreadStates.awaitBlockedOrDone(deletingThread, deletion);
+            assertEquals(Thread.State.BLOCKED, deletingThread.get().getState());
             assertFalse(deletion.isDone(), "Deletion must wait for the attachment it raced");
             workers.submit(() -> {
                 service.createLaunchConfiguration("us-west-2", "configuration", null, "ami-test", "t3.micro",

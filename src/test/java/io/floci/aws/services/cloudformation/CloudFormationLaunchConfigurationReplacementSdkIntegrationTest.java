@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
@@ -11,13 +12,10 @@ import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingException;
 import software.amazon.awssdk.services.autoscaling.model.LaunchConfiguration;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
-import software.amazon.awssdk.services.cloudformation.model.Stack;
 
 import java.net.URI;
-import java.time.Duration;
 import java.util.UUID;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -77,6 +75,69 @@ class CloudFormationLaunchConfigurationReplacementSdkIntegrationTest {
         }
     }
 
+    @Test
+    void parameterChangesReplaceConfigurationsUsingThePreviousStackValues() {
+        try (Scenario scenario = new Scenario()) {
+            String initial = parameterTemplate(1);
+            scenario.create(initial);
+            String original = scenario.physical("Launch");
+            scenario.update(parameterTemplate(2), "UPDATE_COMPLETE");
+            assertEquals(original, scenario.physical("Launch"));
+
+            scenario.cfn.updateStack(request -> request.stackName(scenario.name).templateBody(parameterTemplate(2))
+                    .parameters(parameter -> parameter.parameterKey("InstanceType").parameterValue("t3.small")));
+            CfnStackWaits.awaitStatus(scenario.cfn, scenario.name, "UPDATE_COMPLETE");
+            String replacement = scenario.physical("Launch");
+            assertNotEquals(original, replacement);
+            assertEquals("t3.small", scenario.launch(replacement).instanceType());
+            assertTrue(scenario.scaling.describeLaunchConfigurations(request ->
+                    request.launchConfigurationNames(original)).launchConfigurations().isEmpty());
+            assertEquals(replacement, scenario.scaling.describeAutoScalingGroups(request ->
+                    request.autoScalingGroupNames(scenario.physical("Group")))
+                    .autoScalingGroups().getFirst().launchConfigurationName());
+
+            scenario.cfn.updateStack(request -> request.stackName(scenario.name).templateBody(parameterTemplate(3))
+                    .parameters(parameter -> parameter.parameterKey("InstanceType").usePreviousValue(true)));
+            CfnStackWaits.awaitStatus(scenario.cfn, scenario.name, "UPDATE_COMPLETE");
+            assertEquals(replacement, scenario.physical("Launch"));
+            assertEquals("t3.small", scenario.launch(replacement).instanceType());
+        }
+    }
+
+    @Test
+    void addingUserDataReplacesAndReattachesTheGroup() {
+        try (Scenario scenario = new Scenario()) {
+            scenario.create(template(null, "t3.micro", 1));
+            String original = scenario.physical("Launch");
+            String userData = "IyEvYmluL3NoCmVjaG8gcmVhZHkK";
+            String updated = template(null, "t3.micro", 2)
+                    .replace("\"ImageId\":", "\"UserData\": \"" + userData + "\",\n        \"ImageId\":");
+
+            scenario.update(updated, "UPDATE_COMPLETE");
+
+            String replacement = scenario.physical("Launch");
+            assertNotEquals(original, replacement);
+            assertEquals(userData, scenario.launch(replacement).userData());
+            assertEquals(replacement, scenario.scaling.describeAutoScalingGroups(request ->
+                    request.autoScalingGroupNames(scenario.physical("Group")))
+                    .autoScalingGroups().getFirst().launchConfigurationName());
+            assertTrue(scenario.scaling.describeLaunchConfigurations(request ->
+                    request.launchConfigurationNames(original)).launchConfigurations().isEmpty());
+
+            scenario.update(updated.replace("\"MaxSize\": \"2\"", "\"MaxSize\": \"3\""), "UPDATE_COMPLETE");
+            assertEquals(replacement, scenario.physical("Launch"));
+            assertEquals(userData, scenario.launch(replacement).userData());
+        }
+    }
+
+    private static String parameterTemplate(int max) {
+        return template(null, "t3.micro", max)
+                .replace("\"Resources\": {", """
+                        "Parameters": {"InstanceType": {"Type": "String", "Default": "t3.micro"}},
+                          "Resources": {""")
+                .replace("\"InstanceType\": \"t3.micro\"", "\"InstanceType\": {\"Ref\": \"InstanceType\"}");
+    }
+
     private static String template(String name, String instanceType, int max) {
         return """
                 {
@@ -123,7 +184,7 @@ class CloudFormationLaunchConfigurationReplacementSdkIntegrationTest {
         private final String name = "lc-replacement-" + UUID.randomUUID().toString().substring(0, 8);
         private final CloudFormationClient cfn;
         private final AutoScalingClient scaling;
-        private String stackId;
+        private boolean created;
 
         private Scenario() {
             URI endpoint = URI.create("http://127.0.0.1:" + RestAssured.port);
@@ -136,20 +197,12 @@ class CloudFormationLaunchConfigurationReplacementSdkIntegrationTest {
         }
 
         private void create(String template) {
-            stackId = cfn.createStack(request -> request.stackName(name).templateBody(template)).stackId();
-            awaitStatus("CREATE_COMPLETE");
+            created = true;
+            CfnStackWaits.createStack(cfn, name, template, "CREATE_COMPLETE");
         }
 
         private void update(String template, String expected) {
-            cfn.updateStack(request -> request.stackName(name).templateBody(template));
-            awaitStatus(expected);
-        }
-
-        private void awaitStatus(String expected) {
-            await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(50)).untilAsserted(() -> {
-                Stack stack = cfn.describeStacks(request -> request.stackName(stackId)).stacks().getFirst();
-                assertEquals(expected, stack.stackStatusAsString(), stack.stackStatusReason());
-            });
+            CfnStackWaits.updateStack(cfn, name, template, expected);
         }
 
         private String physical(String logicalId) {
@@ -165,9 +218,8 @@ class CloudFormationLaunchConfigurationReplacementSdkIntegrationTest {
         @Override
         public void close() {
             try {
-                if (stackId != null) {
-                    cfn.deleteStack(request -> request.stackName(stackId));
-                    awaitStatus("DELETE_COMPLETE");
+                if (created) {
+                    CfnStackWaits.deleteStack(cfn, name);
                     assertTrue(scaling.describeAutoScalingGroups().autoScalingGroups().stream()
                             .noneMatch(group -> group.autoScalingGroupName().startsWith(name + "-")));
                     assertTrue(scaling.describeLaunchConfigurations().launchConfigurations().stream()

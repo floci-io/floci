@@ -422,11 +422,11 @@ configuration requires a new `LaunchConfigurationName`. The old configuration re
 until dependent groups switch and the stack update commits. A failed update restores the prior
 configuration. `BlockDeviceMappings` and `MetadataOptions` are passed to Auto Scaling.
 
-For legacy configurations without saved input properties, an unchanged literal `InstanceId`
-template can be recovered from the prior stack template. References in scalar inputs and
-`SecurityGroups` are compared with the persisted configuration, without resolving prior
-references using new stack parameters. Removing `InstanceId` requires replacement.
-Missing prior inputs or an unresolved prior instance reference cannot establish equality.
+The shared CloudFormation change detector compares create-only properties using each stack
+version's parameters and resource references. This also covers configurations created before
+replacement support: unchanged references retain their identity, while added or changed values
+or a removed `InstanceId` require replacement. No separate launch-configuration input snapshot
+is needed.
 
 Group creation and updates coordinate with launch-configuration deletion, so a concurrent
 attachment cannot bypass the in-use check. A configuration already deleted cannot be attached.
