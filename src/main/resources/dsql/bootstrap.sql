@@ -104,13 +104,124 @@ LANGUAGE sql IMMUTABLE AS $$ SELECT 10995116277760::bigint $$;
 CREATE OR REPLACE FUNCTION sys.cluster_size() RETURNS bigint
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$ SELECT pg_database_size(current_database()) $$;
 
+-- ── The cluster's roles, and the names a client knows them by ─────────────────
+
+-- The backend roles this cluster owns: its admin, its owner unless that is a superuser, and every role
+-- a recorded role holds the ADMIN option on, which PostgreSQL gives a role's creator. On a server
+-- Floci shares between clusters ({{external}} is true) each backend name is the client's name after
+-- the prefix {{role_prefix}}, and only a role with that prefix is recorded through the ADMIN option;
+-- in a cluster's own container the prefix is empty. Deleting the cluster drops what is recorded here.
+CREATE TABLE IF NOT EXISTS sys.backend_roles (
+    role_oid oid PRIMARY KEY,
+    backend_name name NOT NULL,
+    logical_name text NOT NULL
+);
+REVOKE ALL ON sys.backend_roles FROM PUBLIC;
+
+-- A backend role's name without the cluster's prefix; any other name itself.
+CREATE OR REPLACE FUNCTION sys._strip_role_prefix(role_name text) RETURNS text
+LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE
+    prefix constant text := {{role_prefix}};
+BEGIN
+    IF starts_with(role_name, prefix) THEN
+        RETURN substr(role_name, length(prefix) + 1);
+    END IF;
+    RETURN role_name;
+END
+$$;
+
+-- The name a client knows a backend role by: the recorded one, else the name without the prefix.
+-- With no prefix it is the name itself.
+CREATE OR REPLACE FUNCTION sys._logical_role(role_name name) RETURNS text
+LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+    SELECT coalesce((SELECT b.logical_name FROM sys.backend_roles b WHERE b.backend_name = role_name LIMIT 1),
+                    sys._strip_role_prefix(role_name))
+$$;
+
+-- Brings sys.backend_roles up to date. The cluster's roles are its admin, its owner unless that is a
+-- superuser, and every role reached from the admin or a role already recorded through the ADMIN option
+-- that, on a shared server, also carries the cluster's prefix: a role another cluster's admin was
+-- granted WITH ADMIN OPTION stays that cluster's. On a shared server the ADMIN option counts only when
+-- it is the one PostgreSQL 16 gives a role's creator, which the bootstrap superuser (oid 10) grants,
+-- or one this cluster's admin or recorded roles granted: a role another cluster's admin creates under
+-- this cluster's prefix and grants to this cluster's roles is not taken for this cluster's. A recorded
+-- role that is no longer one of them, or no longer exists, is forgotten; a renamed one is followed. On a
+-- shared server each role recorded may connect to the cluster's database, which PUBLIC may not, and a
+-- role forgotten no longer may.
+CREATE OR REPLACE PROCEDURE sys._record_backend_roles()
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    cluster_roles oid[];
+    entry record;
+BEGIN
+    WITH RECURSIVE owned (oid) AS (
+        SELECT a.oid FROM pg_authid a WHERE a.rolname = {{admin_literal}}
+        UNION
+        SELECT a.oid FROM sys.backend_roles b JOIN pg_authid a ON a.oid = b.role_oid
+        WHERE a.rolname <> {{owner_literal}} AND (NOT {{external}} OR starts_with(a.rolname, {{role_prefix}}))
+        UNION
+        SELECT m.roleid FROM pg_auth_members m JOIN owned o ON m.member = o.oid JOIN pg_authid r ON r.oid = m.roleid
+        WHERE m.admin_option
+          AND (NOT {{external}}
+               OR (starts_with(r.rolname, {{role_prefix}})
+                   AND (m.grantor = 10::oid
+                        OR m.grantor IN (SELECT a.oid FROM pg_authid a WHERE a.rolname = {{admin_literal}})
+                        OR m.grantor IN (SELECT b.role_oid FROM sys.backend_roles b))))
+    )
+    SELECT coalesce(array_agg(a.oid), '{}') INTO cluster_roles FROM pg_authid a
+    WHERE (a.oid IN (SELECT oid FROM owned) OR a.rolname = {{owner_literal}}) AND NOT a.rolsuper;
+
+    FOR entry IN SELECT b.role_oid, a.rolname FROM sys.backend_roles b LEFT JOIN pg_authid a ON a.oid = b.role_oid
+                 WHERE NOT (b.role_oid = ANY (cluster_roles)) LOOP
+        DELETE FROM sys.backend_roles WHERE role_oid = entry.role_oid;
+        IF {{external}} AND entry.rolname IS NOT NULL THEN
+            EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), entry.rolname);
+        END IF;
+    END LOOP;
+    UPDATE sys.backend_roles b SET backend_name = a.rolname, logical_name = sys._strip_role_prefix(a.rolname)
+    FROM pg_authid a WHERE a.oid = b.role_oid AND a.rolname <> b.backend_name;
+    FOR entry IN SELECT a.oid, a.rolname FROM pg_authid a
+                 WHERE a.oid = ANY (cluster_roles)
+                   AND NOT EXISTS (SELECT 1 FROM sys.backend_roles b WHERE b.role_oid = a.oid)
+                 ORDER BY a.oid LOOP
+        INSERT INTO sys.backend_roles VALUES (entry.oid, entry.rolname, sys._strip_role_prefix(entry.rolname));
+        IF {{external}} THEN
+            EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), entry.rolname);
+        END IF;
+    END LOOP;
+END
+$$;
+
+-- On a shared server, the roles about to be dropped give up connecting to the cluster's database, a
+-- privilege that would otherwise keep DROP ROLE from dropping them. Only roles of this cluster on which
+-- the caller holds the ADMIN option, as DROP ROLE requires; a DROP ROLE that fails takes this back.
+CREATE OR REPLACE PROCEDURE sys._release_backend_roles(role_names text[])
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    released name;
+BEGIN
+    IF {{external}} THEN
+        FOR released IN SELECT a.rolname FROM pg_authid a JOIN sys.backend_roles b ON b.role_oid = a.oid
+                        WHERE a.rolname = ANY (role_names)
+                          AND pg_has_role(session_user, a.oid, 'MEMBER WITH ADMIN OPTION') LOOP
+            EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), released);
+        END LOOP;
+    END IF;
+END
+$$;
+
+-- On a shared server, only the cluster's roles, by the names its clients know, and not its owner,
+-- which is Floci's own.
 CREATE OR REPLACE VIEW sys.roles AS
-SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication,
-       rolconnlimit, '********'::text AS rolpassword, rolvaliduntil, rolbypassrls,
+SELECT sys._logical_role(rolname)::name AS rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
+       rolcanlogin, rolreplication, rolconnlimit, '********'::text AS rolpassword, rolvaliduntil, rolbypassrls,
        s.setconfig AS rolconfig, pg_authid.oid
 FROM pg_authid
 LEFT JOIN pg_db_role_setting s ON pg_authid.oid = s.setrole AND s.setdatabase = 0::oid
-WHERE pg_authid.rolname !~~ 'pg_%';
+WHERE pg_authid.rolname !~~ 'pg_%'
+  AND (NOT {{external}} OR (pg_authid.oid IN (SELECT role_oid FROM sys.backend_roles)
+                            AND pg_authid.rolname <> {{owner_literal}}));
 GRANT SELECT ON sys.roles TO PUBLIC;
 
 -- ── A transaction's limits: one DDL statement, no DDL with DML, 3,000 rows ────
@@ -479,8 +590,8 @@ CREATE TABLE IF NOT EXISTS sys.iam_auth_member (
 );
 
 CREATE OR REPLACE VIEW sys.iam_pg_role_mappings AS
-SELECT i.oid::oid AS iam_oid, i.arn, m.roleid AS pg_role_oid, a.rolname AS pg_role_name,
-       m.grantor AS grantor_pg_role_oid, b.rolname AS grantor_pg_role_name
+SELECT i.oid::oid AS iam_oid, i.arn, m.roleid AS pg_role_oid, sys._logical_role(a.rolname)::name AS pg_role_name,
+       m.grantor AS grantor_pg_role_oid, sys._logical_role(b.rolname)::name AS grantor_pg_role_name
 FROM sys.iam_identity i
 JOIN sys.iam_auth_member m ON i.oid = m.member
 JOIN pg_authid a ON a.oid = m.roleid
@@ -489,7 +600,7 @@ GRANT SELECT ON sys.iam_pg_role_mappings TO PUBLIC;
 
 -- The role an IAM role may be trusted with: one that exists, is no superuser, and on which the caller
 -- holds the ADMIN option, which {{admin}} holds on every role it created and on none other, itself
--- included.
+-- included. Its messages name the role as the client knows it.
 CREATE OR REPLACE FUNCTION sys._trusted_role(role_name text, verb text, preposition text) RETURNS oid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
@@ -498,17 +609,18 @@ DECLARE
 BEGIN
     SELECT oid, rolsuper INTO role_oid, superuser FROM pg_roles WHERE rolname = role_name;
     IF role_oid IS NULL THEN
-        RAISE EXCEPTION USING ERRCODE = '42704', MESSAGE = format('role "%s" does not exist', role_name);
+        RAISE EXCEPTION USING ERRCODE = '42704', MESSAGE = format('role "%s" does not exist', sys._logical_role(role_name));
     END IF;
     IF superuser THEN
-        RAISE EXCEPTION USING ERRCODE = '0LP01', MESSAGE = format('cannot establish trust with role "%s"', role_name),
+        RAISE EXCEPTION USING ERRCODE = '0LP01',
+            MESSAGE = format('cannot establish trust with role "%s"', sys._logical_role(role_name)),
             DETAIL = 'cannot GRANT/REVOKE IAM for roles with the SUPERUSER attribute';
     END IF;
     IF NOT pg_has_role(session_user, role_oid, 'MEMBER WITH ADMIN OPTION') THEN
         RAISE EXCEPTION USING ERRCODE = '42501',
-            MESSAGE = format('permission denied to %s IAM trust with role "%s"', verb, role_name),
+            MESSAGE = format('permission denied to %s IAM trust with role "%s"', verb, sys._logical_role(role_name)),
             DETAIL = format('Only roles with the ADMIN option on role "%s" may %s IAM trust %s this role.',
-                            role_name, verb, preposition);
+                            sys._logical_role(role_name), verb, preposition);
     END IF;
     RETURN role_oid;
 END
@@ -538,11 +650,11 @@ BEGIN
     INSERT INTO sys.iam_identity (arn) VALUES (iam_arn) ON CONFLICT (arn) DO NOTHING;
     SELECT oid INTO identity FROM sys.iam_identity WHERE arn = iam_arn;
     IF EXISTS (SELECT 1 FROM sys.iam_auth_member m WHERE m.member = identity AND m.roleid = role_oid) THEN
-        SELECT coalesce(b.rolname::text, m.grantor::text) INTO granted_by FROM sys.iam_auth_member m
+        SELECT coalesce(sys._logical_role(b.rolname), m.grantor::text) INTO granted_by FROM sys.iam_auth_member m
         LEFT JOIN pg_authid b ON b.oid = m.grantor
         WHERE m.member = identity AND m.roleid = role_oid;
         RAISE NOTICE 'IAM role "%" has already been granted access to role "%" by role "%"',
-            iam_arn, role_name, granted_by;
+            iam_arn, sys._logical_role(role_name), granted_by;
         RETURN;
     END IF;
     INSERT INTO sys.iam_auth_member (member, roleid, grantor)
@@ -574,7 +686,8 @@ $$;
 -- per mapping, in the order they were granted.
 CREATE OR REPLACE FUNCTION sys._trust_relationships(role_name text) RETURNS text
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
-    SELECT string_agg(format('privileges for trust relationship of role %s with arn %s', role_name, i.arn),
+    SELECT string_agg(format('privileges for trust relationship of role %s with arn %s', sys._logical_role(role_name),
+                             i.arn),
                       E'\n' ORDER BY i.oid)
     FROM sys.iam_auth_member m
     JOIN sys.iam_identity i ON i.oid = m.member
@@ -584,7 +697,8 @@ $$;
 
 -- A statement on roles, which DSQL counts as DDL (measured) though PostgreSQL fires no event trigger
 -- for one: CREATE or ALTER ROLE, USER or GROUP, and GRANT or REVOKE of a role, which Floci's
--- endpoint hands here, counted, then run as the caller. Anything else is not one of them.
+-- endpoint hands here, counted, then run as the caller. Anything else is not one of them. A role it
+-- creates is then recorded as the cluster's.
 CREATE OR REPLACE PROCEDURE sys.run_role_ddl(statement text)
 LANGUAGE plpgsql AS $$
 BEGIN
@@ -593,11 +707,12 @@ BEGIN
     END IF;
     PERFORM sys._count_ddl();
     EXECUTE statement;
+    CALL sys._record_backend_roles();
 END
 $$;
 
 -- DROP ROLE, USER or GROUP, which Floci's endpoint hands here: refused for a mapped role, otherwise
--- counted as DDL and run as the caller.
+-- counted as DDL and run as the caller, and the roles dropped are no longer recorded as the cluster's.
 CREATE OR REPLACE PROCEDURE sys.drop_roles(role_names text[], missing_ok boolean)
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -609,12 +724,15 @@ BEGIN
         trust := sys._trust_relationships(role_name);
         IF trust IS NOT NULL THEN
             RAISE EXCEPTION USING ERRCODE = '2BP01',
-                MESSAGE = format('role "%s" cannot be dropped because some objects depend on it', role_name),
+                MESSAGE = format('role "%s" cannot be dropped because some objects depend on it',
+                                 sys._logical_role(role_name)),
                 DETAIL = trust;
         END IF;
     END LOOP;
+    CALL sys._release_backend_roles(role_names);
     EXECUTE format('DROP ROLE %s%s', CASE WHEN missing_ok THEN 'IF EXISTS ' ELSE '' END,
                    (SELECT string_agg(quote_ident(name), ', ') FROM unnest(role_names) AS name));
+    CALL sys._record_backend_roles();
 END
 $$;
 
@@ -634,4 +752,7 @@ BEGIN
     END LOOP;
 END
 $$;
+
+-- The admin, the owner and the roles they made, recorded as the cluster's.
+CALL sys._record_backend_roles();
 RESET session_replication_role;

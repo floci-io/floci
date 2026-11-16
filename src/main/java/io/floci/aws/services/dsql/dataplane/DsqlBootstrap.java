@@ -8,8 +8,9 @@ import java.nio.charset.StandardCharsets;
 /**
  * Renders the DSQL bootstrap script for the database, owner role and admin role of one cluster.
  * The script's placeholders: {@code {{database}}}, {@code {{owner}}} and {@code {{admin}}} as
- * identifiers, always quoted; {@code {{owner_literal}}} and {@code {{admin_literal}}}
- * as SQL string literals.
+ * identifiers, always quoted; {@code {{owner_literal}}}, {@code {{admin_literal}}} and
+ * {@code {{role_prefix}}} as SQL string literals ({@code 'dabc_'}, or {@code ''} for no prefix);
+ * {@code {{external}}} as the SQL boolean {@code true} or {@code false}.
  */
 final class DsqlBootstrap {
 
@@ -18,14 +19,20 @@ final class DsqlBootstrap {
     private DsqlBootstrap() {
     }
 
-    /** The script for one cluster's database. */
-    static String render(String database, String owner, String admin) {
+    /**
+     * The script for one cluster's database. {@code rolePrefix} is what the cluster's backend role
+     * names start with (empty in Docker mode), and {@code external} says whether the database is one
+     * of many on a shared server, whose roles are not all the cluster's.
+     */
+    static String render(String database, String owner, String admin, String rolePrefix, boolean external) {
         return template()
                 .replace("{{database}}", identifier(database))
                 .replace("{{owner_literal}}", literal(owner))
                 .replace("{{owner}}", identifier(owner))
                 .replace("{{admin_literal}}", literal(admin))
-                .replace("{{admin}}", identifier(admin));
+                .replace("{{admin}}", identifier(admin))
+                .replace("{{role_prefix}}", literal(rolePrefix))
+                .replace("{{external}}", Boolean.toString(external));
     }
 
     private static String template() {
