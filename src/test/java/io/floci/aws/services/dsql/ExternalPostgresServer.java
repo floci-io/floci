@@ -93,6 +93,10 @@ public final class ExternalPostgresServer implements AutoCloseable {
     }
 
     public String jdbcUrl(String database) {
+        return jdbcUrl(port, database);
+    }
+
+    private static String jdbcUrl(int port, String database) {
         return "jdbc:postgresql://127.0.0.1:" + port + "/" + database;
     }
 
@@ -141,8 +145,8 @@ public final class ExternalPostgresServer implements AutoCloseable {
         Instant deadline = Instant.now().plus(READY_TIMEOUT);
         SQLException last = null;
         while (Instant.now().isBefore(deadline)) {
-            try (Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + port
-                    + "/postgres", "postgres", password); Statement statement = connection.createStatement()) {
+            try (Connection connection = DriverManager.getConnection(jdbcUrl(port, "postgres"), "postgres",
+                    password); Statement statement = connection.createStatement()) {
                 statement.execute("SELECT 1");
                 return;
             } catch (SQLException e) {

@@ -42,7 +42,6 @@ class DsqlBootstrapExternalIntegrationTest {
     private static final String ARN = "arn:aws:iam::123456789012:role/app";
 
     private ExternalPostgresServer server;
-    private int port;
 
     @BeforeAll
     void startServerAndBootstrapTwice() throws Exception {
@@ -51,7 +50,6 @@ class DsqlBootstrapExternalIntegrationTest {
         } catch (ExternalPostgresServer.DockerUnavailableException e) {
             throw new TestAbortedException(e.getMessage(), e);
         }
-        port = server.port();
 
         createClusterDatabase(DATABASE, OWNER);
         createClusterDatabase(OTHER_DATABASE, OTHER_OWNER);
@@ -252,6 +250,6 @@ class DsqlBootstrapExternalIntegrationTest {
     }
 
     private Connection connect(String database, String user) throws SQLException {
-        return DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + port + "/" + database, user, "");
+        return DriverManager.getConnection(server.jdbcUrl(database), user, "");
     }
 }
