@@ -2,6 +2,13 @@
 
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+## AWS managed policy identifiers
+
+AWS managed policy resource paths and names resolve without regard to letter case.
+Responses retain the catalog's canonical ARN and policy name. Attachments and
+permissions boundaries use that same identity, so alternate spellings do not create
+duplicate attachments or prevent removal. Unknown policies still return `NoSuchEntity`.
+
 ## AWS Sign-In login credentials
 
 Floci also implements the AWS Sign-In data-plane flow used by the AWS CLI login credentials

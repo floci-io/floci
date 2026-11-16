@@ -51,6 +51,11 @@ class CloudFormationIamAttachmentProvisionerTest {
     void setUp() {
         iamService = mock(IamService.class);
         IamInlinePolicyMock.configure(iamService);
+        when(iamService.getPolicy(anyString())).thenAnswer(call -> {
+            IamPolicy policy = new IamPolicy();
+            policy.setArn(call.getArgument(0));
+            return policy;
+        });
         provisioner = CfnProvisionerFixture.builder()
                 .iam(iamService)
                 .objectMapper(mapper)

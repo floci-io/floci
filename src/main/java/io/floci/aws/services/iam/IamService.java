@@ -80,6 +80,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -814,7 +815,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             Instant createDate = def.createDate() != null ? def.createDate() : updateDate;
             PolicyVersion defaultVersion = new PolicyVersion(
                     def.defaultVersionId(), def.document(), true, updateDate);
-            catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
+            catalog.put(arn.toLowerCase(Locale.ROOT), new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
                     def.description(), defaultVersion, createDate, updateDate));
         }
         return catalog;
@@ -888,7 +889,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public IamUser createUser(String userName, String path, String permissionsBoundaryArn) {
         if (permissionsBoundaryArn != null) {
-            requirePolicy(permissionsBoundaryArn); // validate before anything is created
+            permissionsBoundaryArn = requirePolicy(permissionsBoundaryArn).getArn();
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(users, IamUser::getUserName, userName)) {
@@ -1288,6 +1289,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         validateRoleDescription(description);
         if (permissionsBoundaryArn != null) {
             requireBoundaryPolicy(permissionsBoundaryArn); // validate before anything is created
+            permissionsBoundaryArn = requirePolicy(permissionsBoundaryArn).getArn();
         }
         synchronized (resourceNameLock) {
             if (containsNameIgnoreCase(roles, IamRole::getRoleName, roleName)) {
@@ -1783,7 +1785,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public IamPolicy getPolicy(String policyArn) {
         IamPolicy policy = requirePolicy(policyArn);
         if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
-            return managedPolicySnapshot(policy, managedPolicyAttachmentCount(policyArn));
+            return managedPolicySnapshot(policy, managedPolicyAttachmentCount(policy.getArn()));
         }
         return policy;
     }
@@ -1804,7 +1806,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private Optional<IamPolicy> resolvePolicy(String arn) {
         if (AwsManagedPolicies.isManagedPolicyArn(arn)) {
             // Authorization and ListAttached* need policy documents or names, not attachment counts.
-            return Optional.ofNullable(awsManagedPoliciesFor(arn).get(arn));
+            return Optional.ofNullable(awsManagedPoliciesFor(arn).get(arn.toLowerCase(Locale.ROOT)));
         }
         return policies.get(arn);
     }
@@ -1938,15 +1940,15 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * succeed. Attachments are tracked on the principals, so this scans them for the given ARN.
      */
     public PolicyEntities listEntitiesForPolicy(String policyArn) {
-        requirePolicy(policyArn); // AWS raises NoSuchEntity for an unknown policy ARN; fail fast likewise.
+        String canonicalArn = requirePolicy(policyArn).getArn();
         List<IamRole> attachedRoles = roles.scan(k -> true).stream()
-                .filter(r -> r.getAttachedPolicyArns().contains(policyArn))
+                .filter(r -> r.getAttachedPolicyArns().contains(canonicalArn))
                 .toList();
         List<IamUser> attachedUsers = users.scan(k -> true).stream()
-                .filter(u -> u.getAttachedPolicyArns().contains(policyArn))
+                .filter(u -> u.getAttachedPolicyArns().contains(canonicalArn))
                 .toList();
         List<IamGroup> attachedGroups = groups.scan(k -> true).stream()
-                .filter(g -> g.getAttachedPolicyArns().contains(policyArn))
+                .filter(g -> g.getAttachedPolicyArns().contains(canonicalArn))
                 .toList();
         return new PolicyEntities(attachedRoles, attachedUsers, attachedGroups);
     }
@@ -2203,8 +2205,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void attachUserPolicy(String userName, String policyArn) {
         IamUser user = getUser(userName);
         IamPolicy policy = requirePolicy(policyArn);
-        if (!user.getAttachedPolicyArns().contains(policyArn)) {
-            user.getAttachedPolicyArns().add(policyArn);
+        if (!user.getAttachedPolicyArns().contains(policy.getArn())) {
+            user.getAttachedPolicyArns().add(policy.getArn());
             users.put(userName, user);
             incrementCustomerManagedPolicyAttachmentCount(policy);
         }
@@ -2212,12 +2214,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void detachUserPolicy(String userName, String policyArn) {
         IamUser user = getUser(userName);
-        if (!user.getAttachedPolicyArns().remove(policyArn)) {
+        String canonicalArn = resolvePolicy(policyArn).map(IamPolicy::getArn).orElse(policyArn);
+        if (!user.getAttachedPolicyArns().remove(canonicalArn)) {
             throw new AwsException("NoSuchEntity",
                     "Policy " + policyArn + " is not attached to user " + userName + ".", 404);
         }
         users.put(userName, user);
-        decrementCustomerManagedPolicyAttachmentCount(policyArn);
+        decrementCustomerManagedPolicyAttachmentCount(canonicalArn);
     }
 
     public List<IamPolicy> listAttachedUserPolicies(String userName, String pathPrefix) {
@@ -2234,8 +2237,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void attachGroupPolicy(String groupName, String policyArn) {
         IamGroup group = getGroup(groupName);
         IamPolicy policy = requirePolicy(policyArn);
-        if (!group.getAttachedPolicyArns().contains(policyArn)) {
-            group.getAttachedPolicyArns().add(policyArn);
+        if (!group.getAttachedPolicyArns().contains(policy.getArn())) {
+            group.getAttachedPolicyArns().add(policy.getArn());
             groups.put(groupName, group);
             incrementCustomerManagedPolicyAttachmentCount(policy);
         }
@@ -2243,12 +2246,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
 
     public void detachGroupPolicy(String groupName, String policyArn) {
         IamGroup group = getGroup(groupName);
-        if (!group.getAttachedPolicyArns().remove(policyArn)) {
+        String canonicalArn = resolvePolicy(policyArn).map(IamPolicy::getArn).orElse(policyArn);
+        if (!group.getAttachedPolicyArns().remove(canonicalArn)) {
             throw new AwsException("NoSuchEntity",
                     "Policy " + policyArn + " is not attached to group " + groupName + ".", 404);
         }
         groups.put(groupName, group);
-        decrementCustomerManagedPolicyAttachmentCount(policyArn);
+        decrementCustomerManagedPolicyAttachmentCount(canonicalArn);
     }
 
     public List<IamPolicy> listAttachedGroupPolicies(String groupName, String pathPrefix) {
@@ -2268,8 +2272,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireNotServiceLinked(role, roleName);
             IamPolicy policy = requirePolicy(policyArn);
-            if (!role.getAttachedPolicyArns().contains(policyArn)) {
-                role.getAttachedPolicyArns().add(policyArn);
+            if (!role.getAttachedPolicyArns().contains(policy.getArn())) {
+                role.getAttachedPolicyArns().add(policy.getArn());
                 roles.put(roleName, role);
                 incrementCustomerManagedPolicyAttachmentCount(policy);
             }
@@ -2281,12 +2285,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             validateRoleName(roleName);
             IamRole role = getRole(roleName);
             requireNotServiceLinked(role, roleName);
-            if (!role.getAttachedPolicyArns().remove(policyArn)) {
+            String canonicalArn = resolvePolicy(policyArn).map(IamPolicy::getArn).orElse(policyArn);
+            if (!role.getAttachedPolicyArns().remove(canonicalArn)) {
                 throw new AwsException("NoSuchEntity",
                         "Policy " + policyArn + " is not attached to role " + roleName + ".", 404);
             }
             roles.put(roleName, role);
-            decrementCustomerManagedPolicyAttachmentCount(policyArn);
+            decrementCustomerManagedPolicyAttachmentCount(canonicalArn);
         }
     }
 
@@ -2306,12 +2311,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             IamRole role = getRole(roleName);
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
-            List<String> desired = policyArns.stream().distinct().toList();
-            for (String arn : desired) {
-                requirePolicy(arn);
-            }
+            List<String> desired = policyArns.stream().map(this::requirePolicy)
+                    .map(IamPolicy::getArn).distinct().toList();
             if (boundaryArn != null) {
-                requirePolicy(boundaryArn);
+                boundaryArn = requirePolicy(boundaryArn).getArn();
             }
             Map<String, String> checkedInline = new LinkedHashMap<>();
             for (Map.Entry<String, String> entry : inlinePolicies.entrySet()) {
@@ -6428,10 +6431,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn, String expectedUserId) {
         requireBoundaryPolicy(permissionsBoundaryArn);
+        String canonicalArn = requirePolicy(permissionsBoundaryArn).getArn();
         synchronized (resourceNameLock) {
             IamUser user = getUser(userName);
             requireSameUser(user, userName, expectedUserId);
-            user.setPermissionsBoundaryArn(permissionsBoundaryArn);
+            user.setPermissionsBoundaryArn(canonicalArn);
             users.put(userName, user);
         }
         LOG.infov("Set permissions boundary for user {0}: {1}", userName, permissionsBoundaryArn);
@@ -6472,7 +6476,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             requireSameRole(role, roleName, expectedRoleId);
             requireNotServiceLinked(role, roleName);
             requireBoundaryPolicy(permissionsBoundaryArn);
-            role.setPermissionsBoundaryArn(permissionsBoundaryArn);
+            String canonicalArn = requirePolicy(permissionsBoundaryArn).getArn();
+            role.setPermissionsBoundaryArn(canonicalArn);
             roles.put(roleName, role);
         }
         LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);

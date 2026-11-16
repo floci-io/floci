@@ -130,6 +130,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
 
         LinkedHashSet<String> groupsAddedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> groupsRemovedByThisAttempt = new LinkedHashSet<>();
+        List<String> canonicalPolicyArns = new ArrayList<>();
         LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> detachedByThisAttempt = new LinkedHashSet<>();
         LinkedHashSet<String> inlineWrittenByThisAttempt = new LinkedHashSet<>();
@@ -162,9 +163,11 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
             }
 
             for (String policyArn : managedPolicyArns) {
-                iamService.attachUserPolicy(resolvedUserName, policyArn);
-                if (!originalPolicyArns.contains(policyArn)) {
-                    attachedByThisAttempt.add(policyArn);
+                String canonicalArn = iamService.getPolicy(policyArn).getArn();
+                iamService.attachUserPolicy(resolvedUserName, canonicalArn);
+                canonicalPolicyArns.add(canonicalArn);
+                if (!originalPolicyArns.contains(canonicalArn)) {
+                    attachedByThisAttempt.add(canonicalArn);
                 }
             }
 
@@ -201,7 +204,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
                 inlineWrittenByThisAttempt.add(policy.getKey());
             }
             for (String stale : previousManagedArns) {
-                if (!managedPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
+                if (!canonicalPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
                     iamService.detachUserPolicy(resolvedUserName, stale);
                     detachedByThisAttempt.add(stale);
                 }
@@ -323,7 +326,7 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         }
 
         CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
-        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, canonicalPolicyArns);
         CfnTrackedSets.write(r, GROUPS_ATTR, groups);
     }
 
