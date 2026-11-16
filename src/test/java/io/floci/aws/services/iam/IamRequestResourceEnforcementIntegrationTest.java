@@ -1861,6 +1861,62 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     /** The user's JSON-protocol request to the target, {@code <prefix>.<operation>}, with the body. */
     /**
+     * An {@code aws:ResourceTag} condition reads a Step Functions state machine's tags for the state machine, its
+     * version and its execution, and an activity's own, so an allow on one team's tag lets the caller read that
+     * team's and not another's.
+     */
+    @Test
+    void aStepFunctionsResourceTagConditionReadsTheStateMachineTagsAndTheActivityTags() {
+        String definition = "{\\\"StartAt\\\":\\\"Done\\\",\\\"States\\\":{\\\"Done\\\":{\\\"Type\\\":\\\"Pass\\\","
+                + "\\\"End\\\":true}}}";
+        String tagged = stateMachine("res-tag-sm-" + suffix(), definition, "data");
+        String other = stateMachine("res-tag-sm-" + suffix(), definition, "web");
+        String version = sfn("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + tagged + "\"}")
+                .statusCode(200).extract().path("stateMachineVersionArn");
+        String execution = sfn("StartExecution", "{\"stateMachineArn\":\"" + tagged + "\"}")
+                .statusCode(200).extract().path("executionArn");
+        String otherExecution = sfn("StartExecution", "{\"stateMachineArn\":\"" + other + "\"}")
+                .statusCode(200).extract().path("executionArn");
+        String activity = activity("res-tag-act-" + suffix(), "data");
+        String otherActivity = activity("res-tag-act-" + suffix(), "web");
+
+        User user = user("res-sfn-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":[\"states:DescribeStateMachine\",\"states:DescribeExecution\","
+                + "\"states:DescribeActivity\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describe(user, "DescribeStateMachine", "stateMachineArn", tagged).statusCode(200);
+        describe(user, "DescribeStateMachine", "stateMachineArn", version).statusCode(200);
+        refusedJson(describe(user, "DescribeStateMachine", "stateMachineArn", other), "states:DescribeStateMachine");
+        describe(user, "DescribeExecution", "executionArn", execution).statusCode(200);
+        refusedJson(describe(user, "DescribeExecution", "executionArn", otherExecution), "states:DescribeExecution");
+        describe(user, "DescribeActivity", "activityArn", activity).statusCode(200);
+        refusedJson(describe(user, "DescribeActivity", "activityArn", otherActivity), "states:DescribeActivity");
+    }
+
+    private String stateMachine(String name, String definition, String team) {
+        String arn = sfn("CreateStateMachine", "{\"name\":\"" + name + "\",\"definition\":\"" + definition
+                + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/sfn\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").statusCode(200).extract().path("stateMachineArn");
+        cleanup.register(() -> sfn("DeleteStateMachine", "{\"stateMachineArn\":\"" + arn + "\"}"));
+        return arn;
+    }
+
+    private String activity(String name, String team) {
+        String arn = sfn("CreateActivity", "{\"name\":\"" + name + "\",\"tags\":[{\"key\":\"team\",\"value\":\""
+                + team + "\"}]}").statusCode(200).extract().path("activityArn");
+        cleanup.register(() -> sfn("DeleteActivity", "{\"activityArn\":\"" + arn + "\"}"));
+        return arn;
+    }
+
+    private static ValidatableResponse sfn(String operation, String body) {
+        return adminJson("states", "AWSStepFunctions." + operation, "1.0").body(body).post("/").then();
+    }
+
+    private static ValidatableResponse describe(User user, String operation, String member, String arn) {
+        return send(user, "states", "AWSStepFunctions." + operation, "1.0", "{\"" + member + "\":\"" + arn + "\"}");
+    }
+
+    /**
      * A Glue table is checked on the account's catalog, its database and itself, the types AWS gives
      * {@code glue:GetTable}, so a grant on all three allows it, the same grant refuses another table of the database,
      * a grant leaving out the catalog refuses it, and a deny scoped to the table holds under an allow on everything.
