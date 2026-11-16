@@ -19,6 +19,12 @@ import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -132,6 +138,63 @@ class ExternalDsqlBackendTest {
     void postgresql16AndLaterAreAccepted() throws SQLException {
         ExternalDsqlBackend.requireSupportedVersion(serverOfVersion(16, "16.4"), "db.example:5432");
         ExternalDsqlBackend.requireSupportedVersion(serverOfVersion(17, "17.2"), "db.example:5432");
+    }
+
+    @Test
+    void aClustersWorkWaitsForTheWorkAlreadyHoldingItsLock() throws Exception {
+        ExternalDsqlBackend backend = new ExternalDsqlBackend(unreachableExternalServer());
+        CountDownLatch startHolds = new CountDownLatch(1);
+        CountDownLatch startMayFinish = new CountDownLatch(1);
+        AtomicBoolean deletionRan = new AtomicBoolean();
+        try (ExecutorService threads = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<Object> start = threads.submit(() -> backend.underLock("c1", () -> {
+                startHolds.countDown();
+                await(startMayFinish);
+                return null;
+            }));
+            await(startHolds);
+            Future<Object> deletion = threads.submit(() -> backend.underLock("c1", () -> {
+                deletionRan.set(true);
+                return null;
+            }));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+            while (!backend.awaitedLock("c1") && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+
+            assertTrue(backend.awaitedLock("c1"), "the deletion waits for the start's lock");
+            assertFalse(deletionRan.get());
+            assertEquals("other", backend.underLock("c2", () -> "other"), "another cluster is not held up");
+
+            startMayFinish.countDown();
+            start.get(10, TimeUnit.SECONDS);
+            deletion.get(10, TimeUnit.SECONDS);
+        }
+
+        assertTrue(deletionRan.get());
+        assertEquals(0, backend.lockedClusters(), "no lock is kept once nobody holds or awaits it");
+    }
+
+    @Test
+    void aFailureReleasesTheClustersLock() {
+        ExternalDsqlBackend backend = new ExternalDsqlBackend(unreachableExternalServer());
+
+        assertThrows(SQLException.class, () -> backend.underLock("c1", () -> {
+            throw new SQLException("refused");
+        }));
+        assertThrows(SQLException.class, () -> backend.start(cluster()));
+        assertThrows(IllegalStateException.class, () -> backend.stop(cluster(), true));
+
+        assertEquals(0, backend.lockedClusters());
+    }
+
+    private static void await(CountDownLatch latch) {
+        try {
+            assertTrue(latch.await(10, TimeUnit.SECONDS));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     private static Connection serverOfVersion(int major, String version) throws SQLException {

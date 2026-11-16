@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Each cluster's database on one PostgreSQL server that already runs, with no Docker. A cluster has
@@ -47,6 +48,10 @@ public class ExternalDsqlBackend implements DsqlBackend {
     private static final int SCRAM_SALT_BYTES = 16;
 
     private final EmulatorConfig config;
+    // One lock per cluster, so a deletion waits for a start still running, and the reverse. Nothing
+    // else is locked while one is held, and none is taken under DsqlService's or DsqlDataPlane's
+    // locks, as those call this class only from their own threads, so they cannot deadlock.
+    private final Map<String, ClusterLock> locks = new ConcurrentHashMap<>();
 
     @Inject
     public ExternalDsqlBackend(EmulatorConfig config) {
@@ -61,6 +66,10 @@ public class ExternalDsqlBackend implements DsqlBackend {
      */
     @Override
     public DsqlDatabases.Backend start(DsqlCluster cluster) throws SQLException {
+        return underLock(cluster.getIdentifier(), () -> startLocked(cluster));
+    }
+
+    private DsqlDatabases.Backend startLocked(DsqlCluster cluster) throws SQLException {
         if (cluster.getBackendSecret() == null) {
             cluster.setBackendSecret(newSecret());
         }
@@ -113,6 +122,10 @@ public class ExternalDsqlBackend implements DsqlBackend {
      */
     @Override
     public List<String> rolesToDrop(DsqlCluster cluster) throws SQLException {
+        return underLock(cluster.getIdentifier(), () -> rolesToDropLocked(cluster));
+    }
+
+    private List<String> rolesToDropLocked(DsqlCluster cluster) throws SQLException {
         Names names = new Names(cluster.getIdentifier());
         try (Connection server = connect(external().database())) {
             if (!databaseExists(server, names.database())) {
@@ -150,7 +163,8 @@ public class ExternalDsqlBackend implements DsqlBackend {
      * With {@code dropData}, ends every session on the cluster's database, drops the database, then
      * drops each role in {@link DsqlCluster#getPendingBackendRoles()}. What is already gone is
      * passed over; anything else that fails is thrown, so the deletion is not taken for done.
-     * Without it nothing happens: the server keeps running for the next start.
+     * Without it nothing happens: the server keeps running for the next start. A start of the same
+     * cluster still running is waited for, so a deletion never drops what it is creating.
      */
     @Override
     public void stop(DsqlCluster cluster, boolean dropData) {
@@ -160,16 +174,21 @@ public class ExternalDsqlBackend implements DsqlBackend {
         Names names = new Names(cluster.getIdentifier());
         List<String> roles = cluster.getPendingBackendRoles() == null || cluster.getPendingBackendRoles().isEmpty()
                 ? List.of(names.admin(), names.owner()) : cluster.getPendingBackendRoles();
-        try (Connection server = connect(external().database())) {
-            dropDatabase(server, names);
-            for (String role : roles) {
-                if (!names.owns(role)) {
-                    LOG.warnv("Role {0} is not one of DSQL cluster {1}'s roles; it is left in place", role,
-                            cluster.getIdentifier());
-                    continue;
+        try {
+            underLock(cluster.getIdentifier(), () -> {
+                try (Connection server = connect(external().database())) {
+                    dropDatabase(server, names);
+                    for (String role : roles) {
+                        if (!names.owns(role)) {
+                            LOG.warnv("Role {0} is not one of DSQL cluster {1}'s roles; it is left in place", role,
+                                    cluster.getIdentifier());
+                            continue;
+                        }
+                        execute(server, "DROP ROLE IF EXISTS " + quote(role));
+                    }
                 }
-                execute(server, "DROP ROLE IF EXISTS " + quote(role));
-            }
+                return null;
+            });
         } catch (SQLException e) {
             throw new IllegalStateException("The database and roles of DSQL cluster " + cluster.getIdentifier()
                     + " could not be dropped: " + e.getMessage(), e);
@@ -186,6 +205,48 @@ public class ExternalDsqlBackend implements DsqlBackend {
         List<String> pending = cluster.getPendingBackendRoles();
         List<String> roles = pending == null || pending.isEmpty() ? List.of(names.admin(), names.owner()) : pending;
         return Optional.of("database " + names.database() + " and roles " + String.join(", ", roles));
+    }
+
+    /**
+     * Runs {@code work} holding the cluster's lock. The lock is dropped from {@link #locks} once no
+     * thread holds or waits for it; its count of users is only changed inside the map's atomic
+     * {@code compute}.
+     */
+    <T> T underLock(String clusterId, LockedWork<T> work) throws SQLException {
+        ClusterLock entry = locks.compute(clusterId, (id, held) -> {
+            ClusterLock used = held == null ? new ClusterLock() : held;
+            used.users++;
+            return used;
+        });
+        entry.lock.lock();
+        try {
+            return work.run();
+        } finally {
+            entry.lock.unlock();
+            locks.computeIfPresent(clusterId, (id, held) -> --held.users == 0 ? null : held);
+        }
+    }
+
+    /** Whether another thread waits for the cluster's lock; for tests. */
+    boolean awaitedLock(String clusterId) {
+        ClusterLock entry = locks.get(clusterId);
+        return entry != null && entry.lock.hasQueuedThreads();
+    }
+
+    /** How many clusters' locks are held or awaited; for tests. */
+    int lockedClusters() {
+        return locks.size();
+    }
+
+    /** What runs under a cluster's lock. */
+    @FunctionalInterface
+    interface LockedWork<T> {
+        T run() throws SQLException;
+    }
+
+    private static final class ClusterLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private int users;
     }
 
     /** The password of a backend role: base64url, unpadded, of HMAC-SHA256 keyed by the cluster's secret. */
