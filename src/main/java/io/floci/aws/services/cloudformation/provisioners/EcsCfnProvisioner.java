@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.ecs.EcsService;
+import io.floci.aws.services.ecs.container.HostVolumePolicy;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.CapacityProviderStrategyItem;
 import io.floci.aws.services.ecs.model.ClusterSetting;
@@ -17,11 +18,13 @@ import io.floci.aws.services.ecs.model.CreateServiceRequest;
 import io.floci.aws.services.ecs.model.EcsCluster;
 import io.floci.aws.services.ecs.model.EcsLoadBalancer;
 import io.floci.aws.services.ecs.model.EcsServiceModel;
+import io.floci.aws.services.ecs.model.EfsVolumeConfiguration;
 import io.floci.aws.services.ecs.model.FirelensConfiguration;
 import io.floci.aws.services.ecs.model.HealthCheck;
 import io.floci.aws.services.ecs.model.KeyValuePair;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.LogConfiguration;
+import io.floci.aws.services.ecs.model.MountPoint;
 import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.PortMapping;
@@ -30,6 +33,7 @@ import io.floci.aws.services.ecs.model.RuntimePlatform;
 import io.floci.aws.services.ecs.model.Secret;
 import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.UpdateServiceRequest;
+import io.floci.aws.services.ecs.model.Volume;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -59,10 +63,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
     private static final TypeReference<List<ClusterSetting>> SETTINGS = new TypeReference<>() { };
 
     private final EcsService ecsService;
+    private final HostVolumePolicy hostVolumePolicy;
 
     @Inject
-    public EcsCfnProvisioner(EcsService ecsService) {
+    public EcsCfnProvisioner(EcsService ecsService, HostVolumePolicy hostVolumePolicy) {
         this.ecsService = ecsService;
+        this.hostVolumePolicy = hostVolumePolicy;
     }
 
     @Override
@@ -262,6 +268,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         RegisterTaskDefinitionRequest request = new RegisterTaskDefinitionRequest();
         request.setFamily(family);
         request.setContainerDefinitions(parseContainerDefinitions(props.get("ContainerDefinitions"), ctx));
+        request.setVolumes(parseVolumes(ctx.engine().resolveNode(props.path("Volumes"))));
         request.setNetworkMode(parseEnum(NetworkMode.class, ctx.resolveOptional(props, "NetworkMode")));
         request.setCpu(ctx.resolveOptional(props, "Cpu"));
         request.setMemory(ctx.resolveOptional(props, "Memory"));
@@ -540,6 +547,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                 def.setMemoryReservation(item.path("MemoryReservation").asInt());
             }
             def.setPortMappings(parsePortMappings(item.path("PortMappings")));
+            def.setMountPoints(parseMountPoints(item.path("MountPoints")));
             def.setEnvironment(parseEnvironment(item.path("Environment")));
             def.setSecrets(parseSecrets(item.path("Secrets")));
             def.setLogConfiguration(parseLogConfiguration(item.path("LogConfiguration")));
@@ -571,6 +579,97 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         }
         return new HealthCheck(toStringList(node.path("Command")), optionalInt(node, "Interval"),
                 optionalInt(node, "Timeout"), optionalInt(node, "Retries"), optionalInt(node, "StartPeriod"));
+    }
+
+    private static List<MountPoint> parseMountPoints(JsonNode node) {
+        List<MountPoint> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            if (item.isObject()) {
+                result.add(new MountPoint(item.path("SourceVolume").asText(null),
+                        item.path("ContainerPath").asText(null),
+                        item.hasNonNull("ReadOnly") ? item.path("ReadOnly").asBoolean() : null));
+            }
+        }
+        return result;
+    }
+
+    private List<Volume> parseVolumes(JsonNode node) {
+        List<Volume> result = new ArrayList<>();
+        if (node == null || !node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            if (!item.isObject()) {
+                continue;
+            }
+            JsonNode efs = item.path("EFSVolumeConfiguration");
+            JsonNode authorization = efs.path("AuthorizationConfig");
+            EfsVolumeConfiguration efsConfiguration = null;
+            if (efs.isObject()) {
+                String fileSystemId = efs.path("FilesystemId").asText(null);
+                if (fileSystemId == null || fileSystemId.isBlank()) {
+                    throw new AwsException("InvalidParameterException",
+                            "EFS volume configuration requires a fileSystemId.", 400);
+                }
+                String rootDirectory = efs.path("RootDirectory").asText(null);
+                String accessPointId = authorization.path("AccessPointId").asText(null);
+                if (accessPointId != null && !accessPointId.isBlank()
+                        && rootDirectory != null && !rootDirectory.isBlank() && !"/".equals(rootDirectory)) {
+                    throw new AwsException("InvalidParameterException",
+                            "Root directory must either be omitted or set to '/' when an EFS access point "
+                                    + "is specified in authorizationConfig.accessPointId.", 400);
+                }
+                efsConfiguration = new EfsVolumeConfiguration(fileSystemId, rootDirectory,
+                        efs.path("TransitEncryption").asText(null),
+                        efs.hasNonNull("TransitEncryptionPort") ? efs.path("TransitEncryptionPort").asInt() : null,
+                        accessPointId, authorization.path("IAM").asText(null));
+            }
+            Map<String, Object> unparsed = new LinkedHashMap<>();
+            for (String member : List.of("Host", "DockerVolumeConfiguration",
+                    "FSxWindowsFileServerVolumeConfiguration", "S3FilesVolumeConfiguration", "ConfiguredAtLaunch")) {
+                if (item.hasNonNull(member)) {
+                    String apiMember = switch (member) {
+                        case "FSxWindowsFileServerVolumeConfiguration" -> "fsxWindowsFileServerVolumeConfiguration";
+                        case "S3FilesVolumeConfiguration" -> "s3filesVolumeConfiguration";
+                        default -> Character.toLowerCase(member.charAt(0)) + member.substring(1);
+                    };
+                    unparsed.put(apiMember, toEcsVolumeValue(item.get(member)));
+                }
+            }
+            String hostSourcePath = item.path("Host").path("SourcePath").asText(null);
+            if (hostSourcePath != null && !hostSourcePath.isBlank()) {
+                hostVolumePolicy.validate(hostSourcePath);
+            }
+            result.add(new Volume(item.path("Name").asText(null),
+                    hostSourcePath, efsConfiguration,
+                    unparsed.isEmpty() ? null : unparsed));
+        }
+        return result;
+    }
+
+    private static Object toEcsVolumeValue(JsonNode node) {
+        if (node.isObject()) {
+            Map<String, Object> value = new LinkedHashMap<>();
+            node.fields().forEachRemaining(field -> {
+                if (!field.getValue().isNull()) {
+                    String key = field.getKey();
+                    Object memberValue = "DriverOpts".equals(key) || "Labels".equals(key)
+                            ? MAPPER.convertValue(field.getValue(), Object.class)
+                            : toEcsVolumeValue(field.getValue());
+                    value.put(Character.toLowerCase(key.charAt(0)) + key.substring(1), memberValue);
+                }
+            });
+            return value;
+        }
+        if (node.isArray()) {
+            List<Object> value = new ArrayList<>();
+            node.forEach(item -> value.add(toEcsVolumeValue(item)));
+            return value;
+        }
+        return MAPPER.convertValue(node, Object.class);
     }
 
     private static Integer optionalInt(JsonNode node, String member) {
