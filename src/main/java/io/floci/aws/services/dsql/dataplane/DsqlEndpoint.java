@@ -466,8 +466,10 @@ public class DsqlEndpoint {
 
     /**
      * Sets the password of {@code backendRole}, as its SCRAM verifier so the password itself never
-     * reaches the server, when the role exists, can log in and is no superuser; true when it did.
-     * Every login sets the same value, so concurrent logins do not race.
+     * reaches the server, when the role exists, can log in, is no superuser and has another
+     * password; true when it did. PostgreSQL aborts one of two concurrent updates of a role with
+     * "tuple concurrently updated", even to the same value, so a password already set is left as it
+     * is, and a change is made under an advisory lock on the role, checked again once it is held.
      */
     static boolean setLoginPassword(DsqlDatabases.Backend backend, String backendRole) throws SQLException {
         String verifier = backend.credentials().verifierFor(backendRole);
@@ -475,20 +477,40 @@ public class DsqlEndpoint {
             return false;
         }
         try (Connection connection = DsqlDatabases.superuser(backend)) {
-            try (PreparedStatement query = connection.prepareStatement(
-                    "SELECT 1 FROM pg_roles WHERE rolname = ? AND rolcanlogin AND NOT rolsuper")) {
-                query.setString(1, backendRole);
-                try (ResultSet rows = query.executeQuery()) {
-                    if (!rows.next()) {
-                        return false;
+            if (!needsPassword(connection, backendRole, verifier)) {
+                return false;
+            }
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement lock = connection.prepareStatement("SELECT pg_advisory_xact_lock(hashtext(?))")) {
+                    lock.setString(1, backendRole);
+                    lock.execute();
+                }
+                boolean changed = needsPassword(connection, backendRole, verifier);
+                if (changed) {
+                    try (Statement statement = connection.createStatement()) {
+                        statement.execute("ALTER ROLE " + quoteIdentifier(backendRole) + " PASSWORD "
+                                + PostgresWire.quoteLiteral(verifier));
                     }
                 }
+                connection.commit();
+                return changed;
+            } catch (SQLException e) {
+                connection.rollback();
+                throw e;
             }
-            try (Statement statement = connection.createStatement()) {
-                statement.execute("ALTER ROLE " + quoteIdentifier(backendRole) + " PASSWORD "
-                        + PostgresWire.quoteLiteral(verifier));
+        }
+    }
+
+    /** Whether {@code backendRole} exists, can log in, is no superuser, and has a password other than {@code verifier}. */
+    private static boolean needsPassword(Connection connection, String backendRole, String verifier)
+            throws SQLException {
+        try (PreparedStatement query = connection.prepareStatement("SELECT rolpassword FROM pg_authid"
+                + " WHERE rolname = ? AND rolcanlogin AND NOT rolsuper")) {
+            query.setString(1, backendRole);
+            try (ResultSet rows = query.executeQuery()) {
+                return rows.next() && !verifier.equals(rows.getString(1));
             }
-            return true;
         }
     }
 

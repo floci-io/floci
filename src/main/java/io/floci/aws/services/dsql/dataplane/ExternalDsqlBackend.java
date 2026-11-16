@@ -22,6 +22,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Each cluster's database on one PostgreSQL server that already runs, with no Docker. A cluster has
@@ -204,8 +206,18 @@ public class ExternalDsqlBackend implements DsqlBackend {
         }
     }
 
-    /** Each backend role's password and its verifier, derived from the cluster's secret. */
-    private record DerivedCredentials(String secret) implements BackendCredentials {
+    /**
+     * Each backend role's password and its verifier, derived from the cluster's secret. A verifier
+     * is computed once per role, as its PBKDF2 would otherwise run on every login.
+     */
+    private static final class DerivedCredentials implements BackendCredentials {
+        private final String secret;
+        private final Map<String, String> verifiers = new ConcurrentHashMap<>();
+
+        DerivedCredentials(String secret) {
+            this.secret = secret;
+        }
+
         @Override
         public String passwordFor(String backendRole) {
             return derive(secret, backendRole);
@@ -213,7 +225,7 @@ public class ExternalDsqlBackend implements DsqlBackend {
 
         @Override
         public String verifierFor(String backendRole) {
-            return verifier(secret, backendRole);
+            return verifiers.computeIfAbsent(backendRole, role -> verifier(secret, role));
         }
 
         @Override

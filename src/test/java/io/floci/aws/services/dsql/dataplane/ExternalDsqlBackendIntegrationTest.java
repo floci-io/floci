@@ -188,6 +188,7 @@ class ExternalDsqlBackendIntegrationTest {
         try {
             String verifier = started.credentials().verifierFor(admin);
             String password = started.credentials().passwordFor(admin);
+            assertFalse(DsqlEndpoint.setLoginPassword(started, admin), "a password already set is left as it is");
             assertTrue(verifier.startsWith("SCRAM-SHA-256$4096:"), verifier);
             assertEquals(verifier, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
                     + admin + "'"), "the server keeps the verifier Floci sent, not one of its own");
@@ -196,6 +197,7 @@ class ExternalDsqlBackendIntegrationTest {
             }
 
             assertTrue(DsqlEndpoint.setLoginPassword(started, admin));
+            assertFalse(DsqlEndpoint.setLoginPassword(started, admin), "once set, it is not set again");
 
             assertEquals(verifier, single("postgres", "SELECT rolpassword FROM pg_authid WHERE rolname = '"
                     + admin + "'"));

@@ -18,6 +18,12 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -94,6 +100,32 @@ class DsqlExternalBackendIntegrationTest {
         try (Connection connection = cluster.connect("admin", cluster.adminToken())) {
             assertTrue(connection.isValid(5));
         }
+    }
+
+    @Test
+    void sixteenParallelAdminLoginsAllSucceed() throws Exception {
+        String verifier = onServer("SELECT rolpassword FROM pg_authid WHERE rolname = '" + backendAdmin() + "'");
+        ExecutorService pool = Executors.newFixedThreadPool(16);
+        try {
+            List<Future<String>> logins = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                logins.add(pool.submit(() -> {
+                    try (Connection connection = cluster.connect("admin", cluster.adminToken());
+                         Statement statement = connection.createStatement();
+                         ResultSet row = statement.executeQuery("SELECT current_user")) {
+                        assertTrue(row.next());
+                        return row.getString(1);
+                    }
+                }));
+            }
+            for (Future<String> login : logins) {
+                assertEquals(backendAdmin(), login.get(60, TimeUnit.SECONDS));
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(verifier, onServer("SELECT rolpassword FROM pg_authid WHERE rolname = '" + backendAdmin()
+                + "'"), "the logins left the password as it was");
     }
 
     private String backendAdmin() {
