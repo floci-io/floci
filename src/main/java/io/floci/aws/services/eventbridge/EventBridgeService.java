@@ -760,22 +760,22 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private Optional<TagResource> findTagResource(String accountId, String region, String resource) {
         if (resource.startsWith("event-bus/")) {
             String key = busKey(region, resource.substring("event-bus/".length()));
-            return accountGet(busStore, accountId, key)
+            return getInAccount(busStore, accountId, key)
                     .map(bus -> new TagResource(bus.getArn(), bus.getTags(),
-                            () -> accountPut(busStore, accountId, key, bus)));
+                            () -> putInAccount(busStore, accountId, key, bus)));
         }
         if (resource.startsWith("rule/")) {
             RuleRef ref = parseRuleResource(resource);
             String key = ruleKey(region, ref.busName(), ref.ruleName());
-            return accountGet(ruleStore, accountId, key)
+            return getInAccount(ruleStore, accountId, key)
                     .map(rule -> new TagResource(rule.getArn(), rule.getTags(),
-                            () -> accountPut(ruleStore, accountId, key, rule)));
+                            () -> putInAccount(ruleStore, accountId, key, rule)));
         }
         if (resource.startsWith("archive/")) {
             String key = archiveKey(region, resource.substring("archive/".length()));
-            return accountGet(archiveStore, accountId, key)
+            return getInAccount(archiveStore, accountId, key)
                     .map(archive -> new TagResource(archive.getArchiveArn(), archive.getTags(),
-                            () -> accountPut(archiveStore, accountId, key, archive)));
+                            () -> putInAccount(archiveStore, accountId, key, archive)));
         }
         return Optional.empty();
     }
