@@ -654,6 +654,16 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                     throw SmithyValidationErrors.validationException(violation);
                 }
             }
+            Target.KinesisParameters kinesisParameters = target.getKinesisParameters();
+            if (kinesisParameters != null) {
+                String path = kinesisParameters.partitionKeyPath();
+                String field = "targets." + (i + 1) + ".member.kinesisParameters.partitionKeyPath";
+                String violation = path == null ? SmithyValidationErrors.notNull(field)
+                        : SmithyValidationErrors.Violations.WITHOUT_VALUES.lengthOutOfRange(field, path, 0, 256);
+                if (violation != null) {
+                    throw SmithyValidationErrors.validationException(violation);
+                }
+            }
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
             Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
             String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
