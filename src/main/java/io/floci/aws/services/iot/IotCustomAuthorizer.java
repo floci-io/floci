@@ -64,7 +64,8 @@ public class IotCustomAuthorizer {
                             int sourcePort) {
 
         boolean isSigV4Signed() {
-            return params(null, Map.of(), queryString).containsKey("X-Amz-Signature");
+            String signature = params(null, Map.of(), queryString).get("X-Amz-Signature");
+            return signature != null && !signature.isEmpty();
         }
     }
 

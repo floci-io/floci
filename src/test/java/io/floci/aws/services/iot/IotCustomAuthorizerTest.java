@@ -507,6 +507,8 @@ class IotCustomAuthorizerTest {
                 .isSigV4Signed());
         assertFalse(new WebSocketUpgrade(Map.of(), "", null, null, -1).isSigV4Signed());
         assertFalse(new WebSocketUpgrade(Map.of(), "X-Amz-Algorithm=AWS4-HMAC-SHA256", null, null, -1).isSigV4Signed());
+        assertFalse(new WebSocketUpgrade(Map.of(), "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=", null, null, -1)
+                .isSigV4Signed());
         assertFalse(new WebSocketUpgrade(Map.of("x-amz-signature", "00"), "", null, null, -1).isSigV4Signed());
     }
 
