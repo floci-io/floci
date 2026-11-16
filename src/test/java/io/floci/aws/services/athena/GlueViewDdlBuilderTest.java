@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.athena.GluePartitions.partition;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -26,6 +27,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlueViewDdlBuilderTest {
@@ -104,6 +107,8 @@ class GlueViewDdlBuilderTest {
      */
     @Test
     void testDeclaredColumnsAreProjectedInsteadOfStar() {
+        holds("audit", "", "tenant=acme/year=2026/part-0");
+        when(glueService.getPartitions("audit", "audit_events")).thenReturn(List.of(partition(null, "acme", "2026")));
         String ddl = ddlFor(tableWithColumns("audit_events", "s3://audit/",
                 List.of(column("eventid"), column("tenantid")),
                 List.of(column("tenant"), column("year"))));
@@ -116,13 +121,17 @@ class GlueViewDdlBuilderTest {
     /** Partition keys are part of the schema and are what partition predicates filter on. */
     @Test
     void testPartitionKeysAreProjectedAlongsideDataColumns() {
+        holds("audit", "", "tenant=acme/year=2026/month=11/day=16/part-0");
+        when(glueService.getPartitions("audit", "audit_events"))
+                .thenReturn(List.of(partition(null, "acme", "2026", "11", "16")));
         String ddl = ddlFor(tableWithColumns("audit_events", "s3://audit/",
                 List.of(column("eventid")),
                 List.of(column("tenant"), column("year"), column("month"), column("day"))));
 
-        for (String name : List.of("eventid", "tenant", "year", "month", "day")) {
-            assertTrue(ddl.contains("\"" + name + "\" AS \"" + name + "\""), name + " missing from: " + ddl);
-        }
+        assertTrue(ddl.contains("AS SELECT r.\"eventid\" AS \"eventid\", p.\"tenant\" AS \"tenant\", p.\"year\" AS \"year\", "
+                + "p.\"month\" AS \"month\", p.\"day\" AS \"day\" FROM read_json_auto(['s3://audit/tenant=acme/year=2026/month=11/day=16/**'], "
+                + "union_by_name = true, filename = '$path', hive_partitioning = false) AS r JOIN (VALUES "
+                + "('s3://audit/tenant=acme/year=2026/month=11/day=16/', 'acme', '2026', '11', '16'))"), ddl);
     }
 
     /** A partition key repeating a data column would bind twice and make the view ambiguous. */
@@ -257,11 +266,11 @@ class GlueViewDdlBuilderTest {
     void aTableWhoseLocationHoldsNoDataGetsATypedViewOfNoRows() {
         holds("lake", "events/");
         String empty = "CREATE OR REPLACE VIEW \"audit\".\"events\" AS SELECT CAST(NULL AS BIGINT) AS \"id\", "
-                + "CAST(NULL AS VARCHAR) AS \"name\", CAST(NULL AS VARCHAR) AS \"dt\" LIMIT 0;\n";
-        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/events/")).contains(empty));
+                + "CAST(NULL AS VARCHAR) AS \"name\" LIMIT 0;\n";
+        assertTrue(ddlFor(unpartitioned(headerlessTsvTable("events", "s3://lake/events/"))).contains(empty));
 
         holds("lake", "events/", "events/", "events/dt=2026-11-16/");
-        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/events")).contains(empty));
+        assertTrue(ddlFor(unpartitioned(headerlessTsvTable("events", "s3://lake/events"))).contains(empty));
 
         holds("b", "hive/", "hive/_SUCCESS", "hive/other/part-0");
         assertTrue(ddlFor(projectingParquetTable("s3://b/hive/", Map.of("projection.enabled", "true")))
@@ -272,12 +281,61 @@ class GlueViewDdlBuilderTest {
                 .contains("FROM read_parquet('s3://b/hive/region=*/dt=*/**'"));
     }
 
+    /**
+     * A partitioned table is read through its registered partitions: each holding data from its own location, its
+     * default folder or one outside the table's, with its values as the keys (Hive's default partition as NULL); none
+     * registered or none holding data answers no rows.
+     */
+    @Test
+    void aPartitionedTableIsReadThroughItsRegisteredPartitions() {
+        Table table = headerlessTsvTable("events", "s3://lake/events/");
+        assertTrue(ddlFor(table).contains("\"events\" AS SELECT CAST(NULL AS BIGINT) AS \"id\", "
+                + "CAST(NULL AS VARCHAR) AS \"name\", CAST(NULL AS VARCHAR) AS \"dt\" LIMIT 0;\n"));
+
+        holds("lake", "events/", "events/dt=2026-11-14/part-0", "events/dt=2026-11-17/part-0");
+        when(glueService.getPartitions("audit", "events")).thenReturn(List.of(partition(null, "2026-11-14"),
+                partition("s3://archive/2026/11/16", "__HIVE_DEFAULT_PARTITION__"), partition(null, "2026-11-15"),
+                partition(null)));
+        String ddl = ddlFor(table);
+        assertTrue(ddl.contains("AS SELECT TRY_CAST(r.\"id\" AS BIGINT) AS \"id\", r.\"name\" AS \"name\", p.\"dt\" AS \"dt\" "
+                + "FROM read_csv(['s3://lake/events/dt=2026-11-14/**', 's3://archive/2026/11/16/**'], header = false"), ddl);
+        assertTrue(ddl.contains(", filename = '$path', hive_partitioning = false) AS r JOIN (VALUES "
+                + "('s3://lake/events/dt=2026-11-14/', '2026-11-14'), ('s3://archive/2026/11/16/', CAST(NULL AS VARCHAR))) "
+                + "AS p(\"$location\", \"dt\") ON starts_with(r.\"$path\", p.\"$location\");\n"), ddl);
+        assertFalse(ddl.contains("2026-11-15") || ddl.contains("2026-11-17"), ddl);
+        // One listing of the table's location answers for every partition under it.
+        verify(s3, times(1)).listObjects(eq("lake"), eq("events/"), isNull(), anyInt());
+    }
+
+    /**
+     * A Parquet table's partitions are read together, columns matched by name, so a partition written before a column
+     * was added reads NULL for it; a value its key's type cannot hold fails the query with Athena's
+     * HIVE_INVALID_PARTITION_VALUE rather than reading its rows under a NULL key.
+     */
+    @Test
+    void parquetPartitionsAreReadByNameAndAnInvalidValueFailsAsAthenaDoes() {
+        Table table = createTable("events", "s3://lake/parquet/", PARQUET_SERDE, null);
+        table.getStorageDescriptor().setColumns(List.of(column("id", "bigint"), column("added", "string")));
+        table.setPartitionKeys(List.of(column("year", "int")));
+        holds("lake", "parquet/", "parquet/year=2026/part-0", "parquet/year=soon/part-0");
+        when(glueService.getPartitions("audit", "events")).thenReturn(List.of(partition(null, "2026"),
+                partition(null, "soon")));
+
+        String ddl = ddlFor(table);
+        assertTrue(ddl.contains("FROM read_parquet(['s3://lake/parquet/year=2026/**', 's3://lake/parquet/year=soon/**'], "
+                + "union_by_name = true, filename = '$path', hive_partitioning = false) AS r"), ddl);
+        assertTrue(ddl.contains("CASE WHEN TRY_CAST('soon' AS INTEGER) IS NULL THEN error('HIVE_INVALID_PARTITION_VALUE: "
+                + "Invalid partition value ''soon'' for INTEGER partition key: year=soon') ELSE CAST('soon' AS INTEGER) END"),
+                ddl);
+    }
+
     /** A location whose bucket is gone is read as before, so the query reports it. */
     @Test
     void aTableInAMissingBucketIsReadAsBefore() {
         when(s3.listObjects(eq("gone"), anyString(), isNull(), anyInt()))
                 .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
-        assertTrue(ddlFor(headerlessTsvTable("events", "s3://gone/events/")).contains("read_csv('s3://gone/events/**'"));
+        assertTrue(ddlFor(unpartitioned(headerlessTsvTable("events", "s3://gone/events/")))
+                .contains("read_csv('s3://gone/events/**'"));
     }
 
     /** A location holding a glob character the check does not model keeps the read, which the engine globs. */
@@ -285,8 +343,15 @@ class GlueViewDdlBuilderTest {
     void aLocationHoldingAnUnmodeledGlobIsReadAsBefore() {
         holds("lake", "events?/");
         holds("lake", "[ab]/");
-        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/events?/")).contains("read_csv('s3://lake/events?/**'"));
-        assertTrue(ddlFor(headerlessTsvTable("events", "s3://lake/[ab]/")).contains("read_csv('s3://lake/[ab]/**'"));
+        assertTrue(ddlFor(unpartitioned(headerlessTsvTable("events", "s3://lake/events?/")))
+                .contains("read_csv('s3://lake/events?/**'"));
+        assertTrue(ddlFor(unpartitioned(headerlessTsvTable("events", "s3://lake/[ab]/")))
+                .contains("read_csv('s3://lake/[ab]/**'"));
+    }
+
+    private static Table unpartitioned(Table table) {
+        table.setPartitionKeys(List.of());
+        return table;
     }
 
     /** The view of no rows types a nested or binary column as the engine reads it, not as text. */
@@ -313,12 +378,15 @@ class GlueViewDdlBuilderTest {
 
     @Test
     void headerlessDelimitedTextIsReadWithItsDelimiterColumnNamesAndTypes() {
+        holds("lake", "events/", "events/dt=2026-11-16/part-0");
+        when(glueService.getPartitions("audit", "events")).thenReturn(List.of(partition(null, "2026-11-16")));
         String ddl = ddlFor(headerlessTsvTable("events", "s3://lake/events/"));
 
-        assertTrue(ddl.contains("read_csv('s3://lake/events/**', header = false, delim = '\t', quote = '', "
+        assertTrue(ddl.contains("read_csv(['s3://lake/events/dt=2026-11-16/**'], header = false, delim = '\t', quote = '', "
                 + "nullstr = '\\N', auto_detect = false, null_padding = true, strict_mode = false, "
-                + "columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}, hive_types_autocast = false)"), ddl);
-        assertTrue(ddl.contains("SELECT TRY_CAST(\"id\" AS BIGINT) AS \"id\", \"name\" AS \"name\", \"dt\" AS \"dt\" FROM"), ddl);
+                + "columns = {'id': 'VARCHAR', 'name': 'VARCHAR'}, filename = '$path', hive_partitioning = false)"), ddl);
+        assertTrue(ddl.contains("SELECT TRY_CAST(r.\"id\" AS BIGINT) AS \"id\", r.\"name\" AS \"name\", "
+                + "p.\"dt\" AS \"dt\" FROM"), ddl);
         assertFalse(ddl.contains("read_csv_auto"), ddl);
     }
 
@@ -326,10 +394,13 @@ class GlueViewDdlBuilderTest {
     void delimitedTextPartitionKeysTakeTheirDeclaredTypesToo() {
         Table table = headerlessTsvTable("events", "s3://lake/events/");
         table.setPartitionKeys(List.of(column("year", "int")));
+        holds("lake", "events/", "events/year=2026/part-0");
+        when(glueService.getPartitions("audit", "events")).thenReturn(List.of(partition(null, "2026")));
 
         String ddl = ddlFor(table);
 
-        assertTrue(ddl.contains("TRY_CAST(\"year\" AS INTEGER) AS \"year\""), ddl);
+        assertTrue(ddl.contains("ELSE CAST('2026' AS INTEGER) END)"), ddl);
+        assertTrue(ddl.contains("p.\"year\" AS \"year\""), ddl);
     }
 
     @Test
