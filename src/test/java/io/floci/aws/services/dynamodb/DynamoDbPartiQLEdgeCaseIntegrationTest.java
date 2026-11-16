@@ -18,6 +18,7 @@ import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -889,6 +890,41 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 "NOT sk='1' OR flag='one'")) {
             statement(select + where).statusCode(200);
         }
+    }
+
+    @Test
+    @Order(35)
+    void readsTheWholeTableForABranchThatNamesTheSortKeyTwice() {
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
+
+        statement(select + "pk='ranges' AND sk >= '1' AND sk <= '2'")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("1", "2"));
+        statement(select + "pk='ranges' AND ((sk >= '1' AND sk <= '2') OR sk = '1')")
+            .statusCode(200)
+            .body("Items.sk.S", containsInAnyOrder("1", "2"));
+        statement(select + "pk='ranges' AND (sk = '1' OR flag = 'x') AND (sk = '2' OR flag = 'one')")
+            .statusCode(200)
+            .body("Items.sk.S", contains("1"));
+        String pairs = IntStream.range(0, 9)
+                .mapToObj(n -> "(sk = 's" + n + "' OR flag = '" + n + "')")
+                .collect(Collectors.joining(" AND "));
+        for (String where : List.of("pk='ranges' AND sk = '1' AND sk = '2'", "pk='ranges' AND " + pairs,
+                "pk=true AND sk >= '1' AND sk <= '2'", "pk=1 AND sk >= '1' AND sk <= '2'",
+                "pk='ranges' AND sk >= 1 AND sk <= '2'")) {
+            statement(select + where).statusCode(200).body("Items", empty());
+        }
+
+        statement(select + "pk='ranges' AND (sk = '1' OR flag = 'x') AND (sk = '1' OR flag = 'one')")
+            .statusCode(400)
+            .body("message", equalTo("Overlapping conditions with range keys are not supported in where clause"));
+        statement(select + "pk=true AND (sk = 'a' OR (sk >= 'b' AND sk <= 'c'))")
+            .statusCode(400)
+            .body("message", equalTo("Key value must be of type S, N, or B. Key name: pk, Key type: BOOL"));
+        statement(select + "pk='ranges' AND sk >= '1' AND sk <= '2' ORDER BY sk DESC")
+            .statusCode(400)
+            .body("message", equalTo(
+                    "Must have at least one non-optional hash key condition in WHERE clause when using ORDER BY clause."));
     }
 
     private static void putItem(String pk, String attributes) {
