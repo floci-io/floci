@@ -98,6 +98,18 @@ class AthenaMultiArgumentUnnestSidecarIntegrationTest {
                         + "CROSS JOIN UNNEST(keys, ARRAY[id, name]) AS f (name, value) ORDER BY 1", "name", "value"));
     }
 
+    /**
+     * As on Athena: an array of rows unnests into one row column beside another array, its fields not expanded,
+     * whether they are named or not. Athena returns {@code {v=1}} for {@code x}, typed {@code row(v integer)}; the
+     * sidecar's JSON gives no struct values, so its type is compared.
+     */
+    @Test
+    void anArrayOfRowsUnnestsIntoOneRowColumn() {
+        assertEquals(List.of(List.of("STRUCT(v INTEGER)", "a")),
+                rows("SELECT typeof(x) AS tx, y FROM UNNEST(ARRAY[CAST(ROW(1) AS ROW(v INTEGER))], ARRAY['a']) "
+                        + "AS t (x, y)", "tx", "y"));
+    }
+
     /** Access Graph's facet query: each scanned row unpivoted into (column name, value) pairs, then counted. */
     @Test
     void aFacetQueryCountsEachColumnsValues() {
