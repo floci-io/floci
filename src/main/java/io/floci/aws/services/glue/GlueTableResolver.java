@@ -45,6 +45,11 @@ public final class GlueTableResolver {
      */
     private static final String OBJECT_PATH_COLUMN = "$path";
 
+    /** The value Hive gives a partition whose key is NULL. */
+    private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
+    /** The column of a registered-partition read's value list holding each partition's location. */
+    private static final String PARTITION_LOCATION_COLUMN = "$location";
+
     /** The largest group index DuckDB's scalar {@code regexp_extract} accepts. */
     private static final int MAX_SCALAR_GROUP = 9;
 
@@ -302,6 +307,98 @@ public final class GlueTableResolver {
         return declared.stream()
                 .map(column -> "CAST(NULL AS " + columnType(column.getType()) + ") AS " + quote(column.getName()))
                 .collect(Collectors.joining(", ")) + " LIMIT 0";
+    }
+
+    /**
+     * Whether Athena reads the table through the partitions registered for it, each from its own location: a Hive
+     * table with partition keys and no partition projection. A folder under its location that no partition names is
+     * not read, and a partition's location may lie anywhere.
+     */
+    public static boolean readsRegisteredPartitions(Table table) {
+        return table != null && !isIcebergTable(table) && table.getPartitionKeys() != null
+                && !table.getPartitionKeys().isEmpty() && !PartitionProjection.enabled(table);
+    }
+
+    /** A registered partition of a table: its location, without a trailing slash, and its values in key order. */
+    public record RegisteredPartition(String location, List<String> values) {
+    }
+
+    /**
+     * The rows of a table read through its registered partitions, Athena's way of reading a partitioned table: one read
+     * of every partition's location, the files' columns matched by name across them ({@code union_by_name}, so a
+     * partition written before a column was added reads NULL for it), each row joined by its file's path to the
+     * partition whose location holds it, which gives its key values. The values are not in the files, and a
+     * partition's location need not spell them.
+     */
+    public static String registeredPartitionsSelect(Table table, List<RegisteredPartition> partitions) {
+        List<Column> keys = new ArrayList<>();
+        for (Column key : table.getPartitionKeys()) {
+            if (key != null && key.getName() != null) {
+                keys.add(key);
+            }
+        }
+        Set<String> keyNames = new HashSet<>();
+        keys.forEach(key -> keyNames.add(key.getName().toLowerCase(Locale.ROOT)));
+        Map<String, Column> textColumns = readsDelimitedText(table) ? columnsByName(declaredColumns(table)) : Map.of();
+        List<String> projected = new ArrayList<>();
+        for (Column column : declaredColumns(table)) {
+            String name = column.getName();
+            if (keyNames.contains(name.toLowerCase(Locale.ROOT))) {
+                projected.add("p." + quote(name) + " AS " + quote(name));
+                continue;
+            }
+            Column text = textColumns.get(name.toLowerCase(Locale.ROOT));
+            String read = "r." + quote(name);
+            projected.add((text != null ? typedText(read, text.getType()) : read) + " AS " + quote(name));
+        }
+        List<String> rows = new ArrayList<>();
+        List<String> globs = new ArrayList<>();
+        for (RegisteredPartition partition : partitions) {
+            globs.add("'" + escape(partition.location()) + "/**'");
+            List<String> row = new ArrayList<>();
+            row.add("'" + escape(partition.location()) + "/'");
+            for (int i = 0; i < keys.size(); i++) {
+                row.add(partitionValue(keys.get(i), partition.values().get(i)));
+            }
+            rows.add("(" + String.join(", ", row) + ")");
+        }
+        List<String> aliases = new ArrayList<>();
+        aliases.add(quote(PARTITION_LOCATION_COLUMN));
+        keys.forEach(key -> aliases.add(quote(key.getName())));
+        String files = "[" + String.join(", ", globs) + "]";
+        String options = ", filename = '" + escape(OBJECT_PATH_COLUMN) + "', hive_partitioning = false";
+        String readFunction = inferReadFunction(table);
+        String read = "read_csv_auto".equals(readFunction) && hasCsvOptions(table)
+                ? csvReadExpressionForInput(table, files, options)
+                : readFunction + "(" + files + ", union_by_name = true" + options + ")";
+        return "SELECT " + String.join(", ", projected) + " FROM " + read + " AS r JOIN (VALUES "
+                + String.join(", ", rows) + ") AS p(" + String.join(", ", aliases) + ") ON starts_with(r."
+                + quote(OBJECT_PATH_COLUMN) + ", p." + quote(PARTITION_LOCATION_COLUMN) + ")";
+    }
+
+    /**
+     * A registered partition's value as its key's type: Hive's {@code __HIVE_DEFAULT_PARTITION__} as NULL, and a value
+     * the type cannot hold failing the query as Athena's does ({@code HIVE_INVALID_PARTITION_VALUE}).
+     */
+    private static String partitionValue(Column key, String value) {
+        String type = scalarType(key.getType());
+        if (value == null || HIVE_DEFAULT_PARTITION.equals(value)) {
+            return "CAST(NULL AS " + type + ")";
+        }
+        String literal = "'" + escape(value) + "'";
+        if ("VARCHAR".equals(type)) {
+            return literal;
+        }
+        String message = "HIVE_INVALID_PARTITION_VALUE: Invalid partition value '" + value + "' for " + type
+                + " partition key: " + key.getName() + "=" + value;
+        return "CASE WHEN TRY_CAST(" + literal + " AS " + type + ") IS NULL THEN error('" + escape(message)
+                + "') ELSE CAST(" + literal + " AS " + type + ") END";
+    }
+
+    /** Whether a registered partition gives one value for each of the table's partition keys. */
+    public static boolean valuesEachKey(Table table, List<String> values) {
+        return values != null && table.getPartitionKeys() != null && values.size() == table.getPartitionKeys().size()
+                && values.stream().allMatch(value -> value != null);
     }
 
     /**

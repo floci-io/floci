@@ -5,6 +5,8 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 
 import java.util.Arrays;
+import java.util.NavigableSet;
+import java.util.TreeSet;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -67,6 +69,31 @@ record TableLocation(String bucket, String prefix) {
         } catch (AwsException e) {
             if ("NoSuchBucket".equals(e.getErrorCode())) {
                 return false;
+            }
+            throw e;
+        }
+    }
+
+    /** Whether {@code other} lies at or under this location, in the same bucket. */
+    boolean covers(TableLocation other) {
+        return bucket.equals(other.bucket) && other.prefix.startsWith(prefix);
+    }
+
+    /**
+     * The keys under the location that hold data, folder markers left out, from one scan, so the locations it covers
+     * can be told apart without a listing each. Null when the location holds a glob character or its bucket does not
+     * exist, which reading it reports as it did.
+     */
+    NavigableSet<String> keysHoldingData(S3Service s3) {
+        if (UNMODELED_GLOB.matcher(prefix).find() || prefix.indexOf('*') >= 0) {
+            return null;
+        }
+        try {
+            return s3.listObjects(bucket, prefix, null, Integer.MAX_VALUE).stream().map(S3Object::getKey)
+                    .filter(key -> !key.endsWith("/")).collect(Collectors.toCollection(TreeSet::new));
+        } catch (AwsException e) {
+            if ("NoSuchBucket".equals(e.getErrorCode())) {
+                return null;
             }
             throw e;
         }

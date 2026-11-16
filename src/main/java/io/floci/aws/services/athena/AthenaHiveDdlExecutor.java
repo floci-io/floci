@@ -275,7 +275,7 @@ final class AthenaHiveDdlExecutor {
     }
 
     /** Athena's location for a partition added without one: {@code <table location>/key=value/...}. */
-    private static String defaultLocation(Table table, List<String> values) {
+    static String defaultLocation(Table table, List<String> values) {
         String location = table.getStorageDescriptor() != null && table.getStorageDescriptor().getLocation() != null
                 ? table.getStorageDescriptor().getLocation() : "";
         StringBuilder path = new StringBuilder(location.endsWith("/") ? location : location + "/");
