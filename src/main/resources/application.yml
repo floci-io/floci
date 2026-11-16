@@ -826,6 +826,9 @@ floci:
       publish-awsvpc-ports-to-host: false
       dynamic-awsvpc-host-ports: false
       host-port-bind-address: "127.0.0.1"
+      # Put an awsvpc task's containers in one network namespace, so they reach each other on
+      # localhost as on Fargate, without security-group enforcement.
+      shared-task-network: false               # FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK
       host-volume-roots: []
       allow-unsafe-host-volumes: false
       allow-privileged-containers: false

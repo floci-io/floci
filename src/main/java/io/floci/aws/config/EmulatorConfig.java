@@ -2705,6 +2705,15 @@ public interface EmulatorConfig {
         @WithDefault("127.0.0.1")
         String hostPortBindAddress();
 
+        /**
+         * Opt-in: the containers of an {@code awsvpc} task share one network namespace, held by a helper
+         * container as the ECS agent's pause container holds it, so they reach each other on {@code localhost}
+         * as on Fargate. Applies while security-group enforcement is off, which already gives a task one
+         * namespace. Off by default: each container keeps a namespace and address of its own.
+         */
+        @WithDefault("false")
+        boolean sharedTaskNetwork();
+
         Optional<String> dockerNetwork();
 
         @WithDefault("512")

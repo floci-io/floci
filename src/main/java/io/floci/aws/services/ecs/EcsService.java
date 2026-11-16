@@ -5711,7 +5711,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void retainPendingCleanupHandle(String taskArn, EcsTaskHandle handle) {
         if (handle != null && (handle.hasOpenLogStreams() || handle.hasTaskVolumes()
-                || !handle.allContainersRemoved())) {
+                || !handle.allContainersRemoved() || handle.isNamespaceHelperPending())) {
             taskHandles.put(taskArn, handle);
         } else {
             shutdownCleanupTasks.remove(taskArn);

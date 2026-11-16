@@ -197,9 +197,11 @@ An injected `http://` endpoint also gets `tls Off`. Fluent Bit 1.9 (the `aws-for
 and `:latest` line) still calls `flb_tls_session_create` on HTTP S3 and SIGSEGVs on a NULL
 TLS context; the scheme alone is not enough. A `tls` the task definition already set is left
 alone.
-The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci only
-shares a network namespace when security-group enforcement is enabled for an awsvpc task. In every
-other case, the injected `FLUENT_HOST` (the router's container IP) must be reachable. Fluent Bit
+The TCP forward listens on `0.0.0.0` rather than AWS's awsvpc `127.0.0.1` because Floci shares a
+network namespace only when security-group enforcement or
+[a shared task network](#same-task-localhost-for-awsvpc-tasks) gives an awsvpc task one. Such a task
+gets `FLUENT_HOST=127.0.0.1`, the value the ECS agent sets for awsvpc. In every other case, the
+injected `FLUENT_HOST` (the router's container IP) must be reachable. Fluent Bit
 config is written to `/fluent-bit/etc/fluent-bit.conf`. Fluentd config is
 written to `/fluentd/etc/fluent.conf` and uses `@type` (not `Name`) for output plugins; Floci
 does not inject an `endpoint` into Fluentd outputs.
@@ -381,8 +383,10 @@ With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true` 
 address, so an EC2 instance, a `VpcConfig` Lambda function or any other container on that network
 reaches the task at the `privateIPv4Address` that `DescribeTasks` reports. AWS gives the whole task
 that one address; Floci gives it to one container, the first in the task definition that maps a
-port, else the first, and the task's other containers do not answer at it. A task in a
-security-group protected namespace keeps that namespace and does not join the VPC network.
+port, else the first, and the task's other containers do not answer at it. A task with
+[a shared task network](#same-task-localhost-for-awsvpc-tasks) gives it to the helper holding its
+namespace instead, so every container answers at it. A task in a security-group protected namespace
+keeps that namespace and does not join the VPC network.
 
 #### Capacity providers
 
@@ -634,7 +638,7 @@ carries `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT`, chosen by network mode:
 
 | Network mode | `AWS_INSTANCE_IPV4` | `AWS_INSTANCE_PORT` |
 |---|---|---|
-| `awsvpc` | the address the task's container holds on the Docker network it was created on | the entry's `containerPort` |
+| `awsvpc` | the address the task's container holds on the Docker network it was created on, or the namespace helper's for a task whose containers share one | the entry's `containerPort` |
 | `bridge` or `host` | the address Floci reaches the container at: `127.0.0.1` when Floci runs natively, the container's Docker network address when Floci runs in Docker | the host port the entry's `containerPort` was published on, or the `containerPort` when it has no binding |
 
 An explicit `port` on the registry entry is registered as-is in every mode, as on AWS. The
@@ -934,13 +938,14 @@ resource type in the Service Authorization Reference (`ListClusters`, `ListServi
 
 ## Configuration
 
-Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, a Docker-backed task's containers additionally share one protected network namespace built around that ENI, and packets are filtered against its security groups. A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state, including the ENI, and does not enforce packet filtering.
+Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, a Docker-backed task's containers additionally share one protected network namespace built around that ENI, and packets are filtered against its security groups. Without enforcement, `FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK=true` gives them one namespace with no filtering; see [Same-task localhost for awsvpc tasks](#same-task-localhost-for-awsvpc-tasks). A task without explicit security groups uses its subnet VPC's default group. Containers in the same task can communicate over localhost. Bridge and host task networking do not attach task-level `awsvpc` security groups. Mock mode reports control-plane state, including the ENI, and does not enforce packet filtering.
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable or disable the ECS service |
 | `FLOCI_SERVICES_ECS_MOCK` | `false` | Skip Docker; tasks reach `RUNNING` with nothing running behind them (useful for CI) |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | *(unset)* | Docker network for task containers |
+| `FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK` | `false` | Put an `awsvpc` task's containers in one network namespace, so they reach each other on `localhost`, without security-group enforcement (see [Same-task localhost for awsvpc tasks](#same-task-localhost-for-awsvpc-tasks)) |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
 | `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS` | *(unset)* | Approved parent directories for host volume bind mounts (`volumes[].host.sourcePath`) and container devices (`linuxParameters.devices[].hostPath`) |
@@ -1146,6 +1151,30 @@ services:
     environment:
       FLOCI_SERVICES_ECS_DOCKER_NETWORK: aws-local_default
 ```
+
+### Same-task localhost for awsvpc tasks
+
+On Fargate, the containers of an `awsvpc` task share one network namespace and reach each other on
+`localhost`: an nginx in front of php-fpm on `127.0.0.1:9000`, or an Envoy or log-router sidecar.
+Floci gives each task container a namespace of its own by default, so `127.0.0.1:<port of a sibling>`
+is refused. Security-group enforcement shares one, but it needs rootful Docker on Linux.
+
+Set `FLOCI_SERVICES_ECS_SHARED_TASK_NETWORK=true` (`floci.services.ecs.shared-task-network`,
+default `false`) to share one namespace without enforcement. Each Docker-backed `awsvpc` task then
+gets a helper container that holds its namespace, as the ECS agent's pause container does, and every
+container in the task joins it. Nothing is filtered, and the helper needs no privileges, so this works
+on rootless Docker and Podman. With enforcement on, the setting changes nothing: the task gets its
+protected namespace.
+
+The helper holds what the task has once rather than per container: its published ports (with the
+host-port settings below), the link-local address its containers reach the
+[task-role credential endpoint](#task-iam-role-credentials) from, and its ENI address on the VPC's
+Docker network. It is removed when the task stops, and a helper a previous run left behind is
+removed at startup with the task's other containers. It uses the security-group helper image,
+`FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE`, which Floci builds locally by default.
+
+As on AWS, two containers in one task can no longer listen on the same port, and a container
+reaches its siblings only on `localhost`, not at an address of its own.
 
 ### Host access to awsvpc task ports
 
