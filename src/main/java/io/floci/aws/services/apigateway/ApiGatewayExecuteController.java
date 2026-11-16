@@ -3076,13 +3076,12 @@ public class ApiGatewayExecuteController {
     }
 
     /** REST integrations default to AWS's 29s and may opt out of backend TLS verification. */
-    private static io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions
-            proxyOptions(Integration integration) {
+    private static HttpProxyInvoker.ProxyOptions proxyOptions(Integration integration) {
         long timeoutMillis = integration.getTimeoutInMillis() != null
                 ? integration.getTimeoutInMillis() : 29_000L;
         boolean insecure = integration.getTlsConfig() != null
                 && integration.getTlsConfig().isInsecureSkipVerification();
-        return new io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker.ProxyOptions(
+        return new HttpProxyInvoker.ProxyOptions(
                 java.time.Duration.ofMillis(timeoutMillis), insecure);
     }
 

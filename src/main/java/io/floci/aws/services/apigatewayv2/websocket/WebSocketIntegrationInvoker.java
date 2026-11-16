@@ -87,19 +87,8 @@ public class WebSocketIntegrationInvoker {
         this.serviceRouter = serviceRouter;
         this.objectMapper = objectMapper;
         this.vtlEngine = vtlEngine;
-        this.httpClient = backendClient(sslContext);
+        this.httpClient = ContainerCaBundle.httpClientBuilder(sslContext).build();
         this.addressResolver = addressResolver;
-    }
-
-    // The client HTTP and HTTP_PROXY integrations reach https:// backends with. sslContext, when
-    // given, adds the extra CAs in floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the
-    // JVM's roots.
-    private static HttpClient backendClient(SSLContext sslContext) {
-        HttpClient.Builder builder = HttpClient.newBuilder();
-        if (sslContext != null) {
-            builder.sslContext(sslContext);
-        }
-        return builder.build();
     }
 
     @FunctionalInterface

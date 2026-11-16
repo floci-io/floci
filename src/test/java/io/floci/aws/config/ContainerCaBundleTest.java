@@ -5,6 +5,7 @@ import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ExtraCaConfigs;
 import io.floci.aws.testing.LocalHttpsServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -494,9 +495,7 @@ class ContainerCaBundleTest {
     }
 
     private EmulatorConfig config(boolean tlsEnabled, Optional<String> extraCaPath) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.tls().enabled()).thenReturn(tlsEnabled);
-        when(config.tls().extraCaPath()).thenReturn(extraCaPath);
+        EmulatorConfig config = ExtraCaConfigs.config(tlsEnabled, extraCaPath);
         when(config.storage().persistentPath()).thenReturn(tempDir.toString());
         return config;
     }
