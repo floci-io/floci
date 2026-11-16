@@ -30,6 +30,9 @@
 | `GetDefaultKeyReplicationRegions` | The Regions the account replicates a new key to |
 | `EnableDefaultKeyReplicationRegions` | Replicate every new key to the Regions named |
 | `DisableDefaultKeyReplicationRegions` | Stop replicating every new key to the Regions named |
+| `AssociateMpaTeam` | Associate a Multi-Party Approval team with a protected operation |
+| `GetMpaTeamAssociation` | The Multi-Party Approval team of a protected operation |
+| `DisassociateMpaTeam` | Remove the Multi-Party Approval team of a protected operation |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
@@ -87,9 +90,9 @@
   summary the model names: its identifier, its state, its attributes, its check value,
   its two flags and, for a key that is replicated, the kind of key it is and the region
   it is the primary of.
-- **The members a request may name that the service does not read:** `ImportKey` takes
-  `RequesterComment`, and the service reads none of it. No approval is recorded, because
-  the multi-party approval is not emulated.
+- **The members a request may name that the service does not read:** `ImportKey`,
+  `AssociateMpaTeam` and `DisassociateMpaTeam` take `RequesterComment`, and the service
+  reads none of it.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
@@ -269,8 +272,7 @@
   to start or stop: the reference does not publish the answer for that case, so the
   request is refused with `ConflictException`, which is the code the service uses for a
   request that conflicts with the state of a key.
-- **Not yet emulated:** the multi-party approval operations and the certificate signing
-  request.
+- **Not yet emulated:** the certificate signing request.
 
 ## Configuration
 

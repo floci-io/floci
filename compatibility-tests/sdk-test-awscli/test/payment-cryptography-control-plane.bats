@@ -168,3 +168,26 @@ create_key() {
     assert_success
     [ "$(json_get "$output" '.Key.DeriveKeyUsage')" = "TR31_K1_KEY_BLOCK_PROTECTION_KEY" ]
 }
+
+@test "Payment Cryptography control plane: a Multi-Party Approval team is associated and removed" {
+    # The team's ARN is kept as the request names it: the emulator has no Multi-Party
+    # Approval service to check it against.
+    local team="arn:aws:mpa:us-east-1:000000000000:approval-team/team-alpha"
+
+    run aws_cmd payment-cryptography associate-mpa-team \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE \
+        --mpa-team-arn "$team"
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.MpaTeamArn')" = "$team" ]
+    [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "ACTIVE" ]
+
+    run aws_cmd payment-cryptography get-mpa-team-association \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.MpaTeamArn')" = "$team" ]
+
+    run aws_cmd payment-cryptography disassociate-mpa-team \
+        --action IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE
+    assert_success
+    [ "$(json_get "$output" '.MpaTeamAssociation.AssociationState')" = "DELETE_PENDING" ]
+}
