@@ -1,7 +1,6 @@
 package io.floci.aws.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.iot.model.IotV2LoggingOptions;
 import jakarta.inject.Inject;
@@ -42,14 +41,9 @@ public class IotLoggingController {
     @GET
     public Response getV2LoggingOptions(@Context HttpHeaders headers) {
         IotV2LoggingOptions options = loggingService.getV2LoggingOptions(regionResolver.resolveRegion(headers));
-        ObjectNode response = objectMapper.createObjectNode();
-        if (options.roleArn() != null) {
-            response.put("roleArn", options.roleArn());
-        }
-        if (options.defaultLogLevel() != null) {
-            response.put("defaultLogLevel", options.defaultLogLevel());
-        }
-        response.put("disableAllLogs", options.disableAllLogs());
-        return Response.ok(response).build();
+        return Response.ok(objectMapper.createObjectNode()
+                .put("roleArn", options.roleArn())
+                .put("defaultLogLevel", options.defaultLogLevel())
+                .put("disableAllLogs", options.disableAllLogs())).build();
     }
 }

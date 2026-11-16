@@ -10,6 +10,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.Map;
+import java.util.Optional;
 
 @ApplicationScoped
 public class IotLoggingService {
@@ -27,8 +28,18 @@ public class IotLoggingService {
     }
 
     public void setV2LoggingOptions(JsonNode request, String region) {
-        store.put(region, new IotV2LoggingOptions(request.path("roleArn").textValue(),
-                request.path("defaultLogLevel").textValue(), request.path("disableAllLogs").asBoolean(false)));
+        String roleArn = request.path("roleArn").textValue();
+        String defaultLogLevel = request.path("defaultLogLevel").textValue();
+        JsonNode disableAllLogs = request.path("disableAllLogs");
+        Optional<IotV2LoggingOptions> current = store.get(region);
+        if (current.isEmpty() && (roleArn == null || defaultLogLevel == null)) {
+            throw new AwsException("InvalidRequestException",
+                    "roleArn and defaultLogLevel are required for the initial setup.", 400);
+        }
+        IotV2LoggingOptions prior = current.orElse(new IotV2LoggingOptions(null, null, false));
+        store.put(region, new IotV2LoggingOptions(roleArn != null ? roleArn : prior.roleArn(),
+                defaultLogLevel != null ? defaultLogLevel : prior.defaultLogLevel(),
+                disableAllLogs.isBoolean() ? disableAllLogs.booleanValue() : prior.disableAllLogs()));
     }
 
     public IotV2LoggingOptions getV2LoggingOptions(String region) {

@@ -179,7 +179,8 @@ Status: control plane only.
 `SetV2LoggingOptions` and `GetV2LoggingOptions` (`/v2LoggingOptions`) are served on the REST-JSON path the AWS SDKs use:
 
 - There is one configuration per account and region. `GetV2LoggingOptions` before the first `SetV2LoggingOptions` fails with `NotConfiguredException` (404).
-- `SetV2LoggingOptions` replaces the stored `roleArn`, `defaultLogLevel` and `disableAllLogs`; `disableAllLogs` defaults to `false`.
+- The first `SetV2LoggingOptions` must carry `roleArn` and `defaultLogLevel`, or it fails with `InvalidRequestException`; `disableAllLogs` defaults to `false`.
+- A later `SetV2LoggingOptions` changes only the options it carries and keeps the others.
 - The options are stored only: Floci writes no IoT logs to CloudWatch Logs.
 
 ## IoT Data API {#iot-data}

@@ -5,6 +5,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.iot.model.IotV2LoggingOptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -13,12 +15,17 @@ class IotLoggingServiceTest {
 
     private static final String REGION = "us-east-1";
     private static final String ROLE_ARN = "arn:aws:iam::123456789012:role/iot-logging";
+    private static final String OTHER_ROLE_ARN = "arn:aws:iam::123456789012:role/iot-logging-2";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final IotLoggingService service = new IotLoggingService(new InMemoryStorage<>());
 
     private void set(String body, String region) throws Exception {
         service.setV2LoggingOptions(objectMapper.readTree(body), region);
+    }
+
+    private String failure(String body) {
+        return assertThrows(AwsException.class, () -> set(body, REGION)).getErrorCode();
     }
 
     @Test
@@ -38,15 +45,47 @@ class IotLoggingServiceTest {
     }
 
     @Test
-    void setReplacesTheWholeConfiguration() throws Exception {
+    void initialSetupDefaultsDisableAllLogsToFalse() throws Exception {
         set("""
-            {"roleArn": "%s", "defaultLogLevel": "DEBUG", "disableAllLogs": true}
+            {"roleArn": "%s", "defaultLogLevel": "WARN"}
             """.formatted(ROLE_ARN), REGION);
+
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "WARN", false), service.getV2LoggingOptions(REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{\"defaultLogLevel\": \"ERROR\"}",
+        "{\"roleArn\": \"arn:aws:iam::123456789012:role/iot-logging\"}",
+        "{\"disableAllLogs\": true}",
+        "{}"
+    })
+    void initialSetupRequiresRoleArnAndDefaultLogLevel(String body) {
+        assertEquals("InvalidRequestException", failure(body));
+        assertEquals("NotConfiguredException",
+                assertThrows(AwsException.class, () -> service.getV2LoggingOptions(REGION)).getErrorCode());
+    }
+
+    @Test
+    void laterSetsKeepTheOptionsTheyOmit() throws Exception {
+        set("""
+            {"roleArn": "%s", "defaultLogLevel": "INFO"}
+            """.formatted(ROLE_ARN), REGION);
+
+        set("""
+            {"disableAllLogs": true}
+            """, REGION);
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", true), service.getV2LoggingOptions(REGION));
+
         set("""
             {"defaultLogLevel": "ERROR"}
             """, REGION);
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "ERROR", true), service.getV2LoggingOptions(REGION));
 
-        assertEquals(new IotV2LoggingOptions(null, "ERROR", false), service.getV2LoggingOptions(REGION));
+        set("""
+            {"roleArn": "%s", "disableAllLogs": false}
+            """.formatted(OTHER_ROLE_ARN), REGION);
+        assertEquals(new IotV2LoggingOptions(OTHER_ROLE_ARN, "ERROR", false), service.getV2LoggingOptions(REGION));
     }
 
     @Test
@@ -57,5 +96,8 @@ class IotLoggingServiceTest {
 
         assertEquals("NotConfiguredException",
                 assertThrows(AwsException.class, () -> service.getV2LoggingOptions("eu-west-1")).getErrorCode());
+        assertEquals("InvalidRequestException", assertThrows(AwsException.class, () -> set("""
+            {"defaultLogLevel": "ERROR"}
+            """, "eu-west-1")).getErrorCode());
     }
 }

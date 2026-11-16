@@ -11,7 +11,11 @@ import static org.hamcrest.Matchers.equalTo;
 class IotLoggingIntegrationTest {
 
     private static String auth(String account) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20260215/us-east-1/iot/aws4_request, "
+        return auth(account, "us-east-1");
+    }
+
+    private static String auth(String account, String region) {
+        return "AWS4-HMAC-SHA256 Credential=" + account + "/20260215/" + region + "/iot/aws4_request, "
                 + "SignedHeaders=host, Signature=abc";
     }
 
@@ -55,13 +59,48 @@ class IotLoggingIntegrationTest {
     }
 
     @Test
-    void setWithoutOptionalMembersReportsLogsEnabled() {
+    void initialSetupWithoutARoleIsRejected() {
         String auth = auth("111100000103");
         given()
             .header("Authorization", auth)
             .contentType("application/json")
             .body("""
                 {"defaultLogLevel": "ERROR"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("InvalidRequestException"));
+
+        given()
+            .header("Authorization", auth)
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    void laterSetsKeepTheOptionsTheyOmit() {
+        String auth = auth("111100000104");
+        String roleArn = "arn:aws:iam::111100000104:role/iot-logging";
+        given()
+            .header("Authorization", auth)
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "%s", "defaultLogLevel": "DEBUG"}
+                """.formatted(roleArn))
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", auth)
+            .contentType("application/json")
+            .body("""
+                {"disableAllLogs": true}
                 """)
         .when()
             .post("/v2LoggingOptions")
@@ -74,8 +113,36 @@ class IotLoggingIntegrationTest {
             .get("/v2LoggingOptions")
         .then()
             .statusCode(200)
-            .body("$", aMapWithSize(2))
-            .body("defaultLogLevel", equalTo("ERROR"))
-            .body("disableAllLogs", equalTo(false));
+            .body("roleArn", equalTo(roleArn))
+            .body("defaultLogLevel", equalTo("DEBUG"))
+            .body("disableAllLogs", equalTo(true));
+    }
+
+    @Test
+    void eachAccountAndRegionKeepsItsOwnOptions() {
+        given()
+            .header("Authorization", auth("111100000105"))
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "arn:aws:iam::111100000105:role/iot-logging", "defaultLogLevel": "INFO"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", auth("111100000106"))
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404);
+
+        given()
+            .header("Authorization", auth("111100000105", "eu-west-1"))
+        .when()
+            .get("/v2LoggingOptions")
+        .then()
+            .statusCode(404);
     }
 }
