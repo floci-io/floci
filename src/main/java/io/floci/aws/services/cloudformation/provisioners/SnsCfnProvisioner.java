@@ -1,6 +1,5 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -83,23 +82,17 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        String adopted = resource.getAttributes().get(ADOPTED_ATTR);
-        if (adopted != null) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, ADOPTED_ATTR);
+        if (snapshot != null) {
             // A topic the update adopted is not the stack's to keep changed: put its attributes back and
             // drop the subscriptions this update made, then let the replacement cleanup point back.
-            try {
-                JsonNode snapshot = MAPPER.readTree(adopted);
-                Map<String, String> prior = new HashMap<>();
-                snapshot.path("attributes").fields().forEachRemaining(e ->
-                        prior.put(e.getKey(), e.getValue().isNull() ? null : e.getValue().asText()));
-                List<String> added = new ArrayList<>();
-                snapshot.path("subscriptions").forEach(arn -> added.add(arn.asText()));
-                restoreAdoptedTopic(snapshot.path("topicArn").asText(), snapshot.path("region").asText(),
-                        prior, added);
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("Could not read the adopted SNS topic snapshot of "
-                        + resource.getLogicalId(), e);
-            }
+            Map<String, String> prior = new HashMap<>();
+            snapshot.path("attributes").fields().forEachRemaining(e ->
+                    prior.put(e.getKey(), CfnRollback.snapshotText(snapshot.path("attributes"), e.getKey())));
+            List<String> added = new ArrayList<>();
+            snapshot.path("subscriptions").forEach(arn -> added.add(arn.asText()));
+            restoreAdoptedTopic(CfnRollback.snapshotText(snapshot, "topicArn"),
+                    CfnRollback.snapshotText(snapshot, "region"), prior, added);
             resource.getAttributes().remove(ADOPTED_ATTR);
         }
         if (!ReplacementCleanup.rollback(resource, this::delete)) {

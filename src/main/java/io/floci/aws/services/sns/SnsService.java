@@ -739,7 +739,7 @@ public class SnsService implements Resettable, ResourceProvider {
         topicStore.put(key, topic);
     }
 
-    /** Removes an attribute the caller set earlier, for a rollback to a topic that never carried it. */
+    /** Exists for CloudFormation rollback: SetTopicAttributes cannot unset an attribute. */
     public synchronized void removeTopicAttribute(String topicArn, String attributeName, String region) {
         String key = topicKey(region, topicArn);
         Topic topic = topicStore.get(key)
