@@ -3,22 +3,17 @@ package io.floci.aws.services.stepfunctions;
 import com.dashjoin.jsonata.Jsonata;
 import com.dashjoin.jsonata.Parser;
 import com.dashjoin.jsonata.Utils;
-import io.quarkus.runtime.annotations.RegisterForReflection;
 
-import java.lang.reflect.Field;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Keeps indexed constructed-array paths consistent with JSONata 2.0.6's missing-value semantics. */
-@RegisterForReflection(targets = Parser.Symbol.class, fields = true)
-final class JsonataConstructedArrayPaths {
+import static io.floci.aws.services.stepfunctions.JsonataSymbolReader.read;
 
-    private static final Field TYPE = field("type");
-    private static final Field STEPS = field("steps");
-    private static final Field KEEP_ARRAY = field("keepArray");
+/** Keeps indexed constructed-array paths consistent with JSONata 2.0.6's missing-value semantics. */
+final class JsonataConstructedArrayPaths {
 
     private JsonataConstructedArrayPaths() {
     }
@@ -55,25 +50,11 @@ final class JsonataConstructedArrayPaths {
     }
 
     private static Parser.Symbol firstConstructedStep(Parser.Symbol expression) {
-        try {
-            if ("path".equals(TYPE.get(expression)) && STEPS.get(expression) instanceof List<?> steps
-                    && steps.size() > 1 && steps.getFirst() instanceof Parser.Symbol first
-                    && first.consarray && !KEEP_ARRAY.getBoolean(first)) {
-                return first;
-            }
-            return null;
-        } catch (IllegalAccessException e) {
-            throw new IllegalStateException("Cannot inspect JSONata constructed-array path", e);
+        if ("path".equals(read(expression, "type")) && read(expression, "steps") instanceof List<?> steps
+                && steps.size() > 1 && steps.getFirst() instanceof Parser.Symbol first
+                && first.consarray && !(boolean) read(first, "keepArray")) {
+            return first;
         }
-    }
-
-    private static Field field(String name) {
-        try {
-            Field field = Parser.Symbol.class.getDeclaredField(name);
-            field.setAccessible(true);
-            return field;
-        } catch (ReflectiveOperationException e) {
-            throw new ExceptionInInitializerError(e);
-        }
+        return null;
     }
 }
