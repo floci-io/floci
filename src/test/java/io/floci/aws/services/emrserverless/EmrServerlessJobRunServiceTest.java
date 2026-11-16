@@ -325,6 +325,27 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void aRunOfAnApplicationThatResolvedItsImageAsItStartedPullsThatImageByItsDigest() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String digest = "sha256:" + "c".repeat(64);
+        applications.ecrService = EmrServerlessServiceTest.ecrHolding("spark/custom", "7.5.0", digest);
+        CreateApplicationRequest custom = applicationRequest("resolved", "emr-7.5.0", "SPARK");
+        custom.setImageConfiguration(EmrServerlessServiceTest.image(
+                "000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0"));
+        String customId = applications.createApplication(custom).getApplicationId();
+
+        // The run starts the application, which resolves its image as it starts.
+        String jobRunId = service.startJobRun(customId, request(null, null)).getJobRunId();
+        runNext();
+
+        assertEquals("000000000000.dkr.ecr.us-east-1.amazonaws.com/spark/custom@" + digest,
+                runner.jobs.get(0).customImage());
+        assertEquals(digest, service.getJobRun(customId, jobRunId, null).getImageConfiguration()
+                .getResolvedImageDigest());
+    }
+
+    @Test
     void aRunReportsTheImageConfigurationsItAppliesEachWithTheDigestOfTheImageItsRunnerResolvedForIt() {
         FakeRunner runner = new FakeRunner();
         EmrServerlessJobRunService service = dockerService(runner, 2);
