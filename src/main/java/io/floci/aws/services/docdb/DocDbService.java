@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.docdb.container.DocDbContainerHandle;
@@ -1082,6 +1083,54 @@ public class DocDbService {
     private record TagTarget(String lockKey, Map<String, String> tags,
                              Consumer<Map<String, String>> save) {}
 
+    public Optional<String> findStoredSnapshotArn(String name, String region) {
+        String arn = AwsArnUtils.isArnFor(name, "rds") ? name
+                : regionResolver.buildArn("rds", region, "cluster-snapshot:" + name);
+        if (!AwsArnUtils.isArnFor(arn, "rds")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.accountId().equals(regionResolver.getAccountId()) || !parsed.region().equals(region)
+                || !parsed.partition().equals(regionResolver.partitionForRegion(region))
+                || !parsed.resource().startsWith("cluster-snapshot:")) {
+            return Optional.empty();
+        }
+        return readTagResource(snapshots, arn, parsed.resource().substring("cluster-snapshot:".length()),
+                DocDbClusterSnapshot::getDbClusterSnapshotArn).map(DocDbClusterSnapshot::getDbClusterSnapshotArn);
+    }
+
+    /** Exact stored tags for IAM, without legacy-record migration or resource creation. */
+    public Optional<Map<String, String>> storedResourceTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "rds")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        if (!regionResolver.partitionForRegion(arn.region()).equals(arn.partition())
+                || arn.resource().indexOf(':') < 0) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(resolveTagTarget(resourceArn, true))
+                .map(target -> new LinkedHashMap<>(target.tags()));
+    }
+
+    private <T> Optional<T> readTagResource(StorageBackend<String, T> store, String resourceArn,
+                                           String id, Function<T, String> identity) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        for (String candidate : List.of(key(arn.region(), id), id)) {
+            Optional<T> found;
+            if (store instanceof AccountAwareStorageBackend<T> aware) {
+                found = aware.getForAccount(arn.accountId(), candidate)
+                        .or(() -> aware.getLegacyForAccount(arn.accountId(), candidate));
+            } else {
+                found = store.get(candidate);
+            }
+            if (found.isPresent()) {
+                return found.filter(value -> resourceArn.equals(identity.apply(value)));
+            }
+        }
+        return Optional.empty();
+    }
+
     public Map<String, String> listTagsForResource(String resourceName) {
         return Map.copyOf(resolveTagTarget(resourceName).tags());
     }
@@ -1121,6 +1170,10 @@ public class DocDbService {
      * ARN naming another region would otherwise resolve this caller's cluster.
      */
     private TagTarget resolveTagTarget(String resourceName) {
+        return resolveTagTarget(resourceName, false);
+    }
+
+    private TagTarget resolveTagTarget(String resourceName, boolean storedOnly) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
@@ -1131,8 +1184,9 @@ public class DocDbService {
             throw new AwsException("InvalidParameterValue", "Invalid resource name:  " + resourceName, 400);
         }
         if (!"rds".equals(arn.service())
-                || !regionResolver.getRegion().equals(arn.region())
-                || !Objects.equals(regionResolver.getAccountId(), arn.accountId())) {
+                || !regionResolver.partitionForRegion(arn.region()).equals(arn.partition())
+                || !storedOnly && (!regionResolver.getRegion().equals(arn.region())
+                    || !Objects.equals(regionResolver.getAccountId(), arn.accountId()))) {
             // One message for both, which is what a live account answers.
             throw new AwsException("InvalidParameterValue",
                     "The specified resource name does not match an RDS resource in this region.", 400);
@@ -1153,7 +1207,11 @@ public class DocDbService {
         // rather than through the routing that matches the whole ARN.
         return switch (type) {
             case "cluster" -> {
-                DocDbCluster cluster = getDbCluster(id);
+                DocDbCluster cluster = readTagResource(clusters, resourceName, id, DocDbCluster::getDbClusterArn)
+                        .orElseGet(() -> storedOnly ? null : getDbCluster(id));
+                if (cluster == null) {
+                    yield null;
+                }
                 requireArnNamesRecord(resourceName, cluster.getDbClusterArn(),
                         "DBClusterNotFoundFault", "DocDB cluster " + id + " not found.");
                 yield new TagTarget("cluster:" + key(id), cluster.getTags(), updated -> {
@@ -1162,7 +1220,11 @@ public class DocDbService {
                 });
             }
             case "db" -> {
-                DocDbInstance instance = getDbInstance(id);
+                DocDbInstance instance = readTagResource(instances, resourceName, id, DocDbInstance::getDbInstanceArn)
+                        .orElseGet(() -> storedOnly ? null : getDbInstance(id));
+                if (instance == null) {
+                    yield null;
+                }
                 requireArnNamesRecord(resourceName, instance.getDbInstanceArn(),
                         "DBInstanceNotFound", "DocDB instance " + id + " not found.");
                 yield new TagTarget("instance:" + key(id), instance.getTags(), updated -> {
@@ -1170,8 +1232,24 @@ public class DocDbService {
                     instances.put(key(id), instance);
                 });
             }
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+            case "cluster-snapshot" -> {
+                if (!storedOnly) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+                }
+                yield readTagResource(snapshots, resourceName, id, DocDbClusterSnapshot::getDbClusterSnapshotArn)
+                        .map(snapshot -> new TagTarget("snapshot:" + key(arn.region(), id), snapshot.getTags(), updated -> {
+                            snapshot.setTags(updated);
+                            snapshots.put(key(arn.region(), id), snapshot);
+                        })).orElse(null);
+            }
+            default -> {
+                if (storedOnly) {
+                    yield null;
+                }
+                throw new AwsException("InvalidParameterValue",
+                        "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+            }
         };
     }
 }

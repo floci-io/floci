@@ -121,7 +121,8 @@ Beyond the members' names, botocore's shapes and documentation say what a member
   variable when it is the kind the variable is (a name, an id), and is found by the type's service otherwise
   (`find`: "The name of the stream processor" for its `${StreamprocessorId}`), the id open when it finds none;
   one whose documentation's head noun is an ARN ("The Amazon Resource Name (ARN) to which you want to add the tag")
-  holds an ARN, and so does one whose name ends in `ArnList`;
+  holds an ARN, as does a member documented with "This value is an Amazon Resource Name (ARN).",
+  and so does one whose name ends in `ArnList`;
 - a field of a top-level structure is a member too (`Budget.BudgetName`, `pipeline.name`, a bare field taking the
   structure's name), and so is a field of each element of a list or value of a map of structures named after a type
   (`PutEvents`' `Entries[].EventBusName`); a nested field named as an optional top-level member filling the same
@@ -278,7 +279,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "datasync", "ec2", "ecr", "ecs", "elasticloadbalancing", "elasticmapreduce", "emr-containers",
               "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
-              "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
+              "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
               "securityhub", "guardduty", "secretsmanager", "scheduler", "lambda", "cloudformation", "glue")
@@ -431,7 +432,6 @@ NOT_COVERED: dict[str, str] = {
     "mq": _REST,
     "network-firewall": _LATER,
     "organizations": _LATER,
-    "rds": _LATER,
     "rds-data": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
@@ -573,9 +573,18 @@ def resource_tag_keys(documents: list[dict], formats: dict[str, dict[str, str]])
         namespace = document["Name"]
         if namespace not in formats:
             continue
-        types = {resource["Name"]: sorted({match.group("prefix") for match in map(
-                 RESOURCE_TAG_KEY_RE.fullmatch, resource.get("ConditionKeys", [])) if match})
-                 for resource in document.get("Resources", []) if resource["Name"] in formats[namespace]}
+        types = {}
+        for resource in document.get("Resources", []):
+            kind = resource["Name"]
+            if kind not in formats[namespace]:
+                continue
+            keys = resource.get("ConditionKeys", [])
+            prefixes = {match.group("prefix") for match in map(RESOURCE_TAG_KEY_RE.fullmatch, keys) if match}
+            # RDS spells its resource-specific keys as the namespace and resource type, e.g. rds:pg-tag/${TagKey}.
+            typed_prefix = f"{namespace}:{kind}-tag/"
+            if typed_prefix + "${TagKey}" in keys or typed_prefix + "tag-key" in keys:
+                prefixes.add(typed_prefix)
+            types[kind] = sorted(prefixes)
         types = {kind: keys for kind, keys in types.items() if keys}
         if types:
             result[namespace] = dict(sorted(types.items()))
@@ -764,7 +773,7 @@ def doc_head(lead: str) -> tuple[str, str | None]:
     of trail, event data store, dashboard, or channel arns" before "whose tags will be listed")."""
     rest = re.sub(r" (?:of|for)$", "", re.split(r" (?:to|from|whose|that|which|in which|with|associated) ", lead,
                                                maxsplit=1)[0])
-    match = re.match(r"^(.*?)(?: (?:of|for) (?:the |a |an )?(.*))?$", rest)
+    match = re.match(r"^(.*?)(?: (?:of|for|identifying) (?:the |a |an )?(.*))?$", rest)
     head, of = match.group(1).strip(), (match.group(2) or None)
     if re.search(r"(?:^|\s)list$", head) and of:
         return f"{head} of {of}", None
@@ -840,6 +849,9 @@ def documented_members(models: dict[str, dict], operation: str) -> dict[str, dic
                 element = model["shapes"][item_shape["member"]["shape"]] if item_shape["type"] == "list" else item_shape
                 found.setdefault(path, {"path": path + strings, "nested": "." in path,
                                         "lead": _lead(item.get("documentation") or item_shape.get("documentation")),
+                                        "arnValue": bool(re.search(
+                                            r"(?:^|\. )this value is an amazon resource name \(arn\)\.",
+                                            _lead_text(item.get("documentation") or item_shape.get("documentation")))),
                                         "pattern": element.get("pattern") or ""})
     return found
 
@@ -920,8 +932,13 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
     kinds = [kind for kind in types if kind in formats]
     resources = [dict(resource) for resource in resources]
     held = {resource["arn"] for resource in resources if "arn" in resource}
+    documented_arns = set()
     for path, fact in sorted(facts.items()):
         if fact["nested"] or fact["path"] in held or not kinds or re.search(r"arn(s|list)?$", path, re.IGNORECASE):
+            continue
+        if fact["arnValue"]:
+            resources.insert(0, {"types": kinds, "arn": fact["path"]})
+            documented_arns.add(fact["path"])
             continue
         head, of = doc_head(fact["lead"])
         if re.search(r"(?:arns?|amazon resource names? \(arns?\))$", head) \
@@ -930,6 +947,11 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                 or (of is not None and any(doc_names("the name of the " + part.strip(), kind, formats)
                                            for part in re.split(r",| or ", of) for kind in kinds))):
             resources.insert(0, {"types": kinds, "arn": fact["path"]})
+            if " identifying " in fact["lead"]:
+                documented_arns.add(fact["path"])
+    # A member documented as an ARN cannot also fill a name variable of that same target.
+    resources = [resource for resource in resources if not resource.get("fill")
+                 or not set(resource["fill"].values()) <= documented_arns]
     services = {formats[kind].split(":")[2] for kind in kinds}
     def foreign(path: str) -> bool:
         fact = facts.get(path.removesuffix("[]"))
@@ -974,7 +996,8 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
         kind_stem = stem(kind)
         candidates = []
         for path, fact in sorted(facts.items()):
-            if path in used or re.search(r"arns?$", path, re.IGNORECASE):
+            if path in used or re.search(r"arns?$", path, re.IGNORECASE) \
+                    or any(resource.get("through") == fact["path"] for resource in resources):
                 continue
             field = path.split(".")[-1]
             effective = stem(path.split(".")[0] if fact["nested"] and field.lower() in BARE else field)
@@ -985,6 +1008,9 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
                     candidates.append(("fill", fact["path"]))
             elif doc_names(fact["lead"], kind, formats):
                 said = doc_kind(fact["lead"]) or kind_of(field)
+                # "Identifier" can mean a name; an explicitly named member cannot fill a generated id.
+                if kind_of(field) == "name" and re.search(r"\bidentifiers?$", doc_head(fact["lead"])[0]):
+                    said = "name"
                 if (compatible(said, variable) or (kind_of(variable) == "identifier" and not creating)) \
                         and not (creating and not kind_of(variable)) \
                         and not (creating and said != kind_of(variable) and kind_of(variable) != "identifier"):
@@ -1717,7 +1743,15 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         in_slot = slot.group(1) if slot else None
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (v == in_slot, kind_of(v) == "", v)):
-            choice = _filling(variable, kind_stem, len(variables), {m: p for m, p in names.items() if m not in fill.values()},
+            # Reserve a member naming a more qualified variable for that type. A cluster parameter group
+            # cannot also fill the instance parameter group's shorter ParameterGroupName variable.
+            qualified = {v for other in types if other != kind for v in VARIABLE_RE.findall(formats.get(other, ""))
+                         if stem(variable) and v not in KNOWN_VARIABLES and stem(v) != stem(variable)
+                         and stem(v).endswith(stem(variable))}
+            eligible = {m: p for m, p in names.items() if m not in fill.values()
+                        and not ("." not in p and not p.endswith("[]")
+                                 and any(stem(m).endswith(stem(v)) and compatible(m, v) for v in qualified))}
+            choice = _filling(variable, kind_stem, len(variables), eligible,
                               bare=bare, aliased=aliased, word_stem=word_stem,
                               shapes=shapes if not held else None)
             if choice is not None:
@@ -1757,7 +1791,8 @@ ACCOUNT_SLOT_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:\$\{(\w+)}:")
 def with_made(resources: list[dict], operation: str, formats: dict[str, str]) -> list[dict]:
     """The resources, those a create makes marked `made` when it names others too (the pipeline a webhook connects
     to, the namespace a service is created in), so that its tags are checked on what it makes alone: of a type, or
-    with an ARN format's leading resource word, related to the operation's name past its verb. A member that may hold
+    with an ARN format's leading resource word, related to the operation's name past its verb, or with its sole
+    resource variable named after that operation's subject (`db:${DbInstanceName}`). A member that may hold
     an ARN of several types is made only when every one of them is: one that may name the parent too (a subscriber's
     `EventBusArn`) names a resource the create does not make."""
     name = operation.split(":", 1)[1]
@@ -1767,7 +1802,10 @@ def with_made(resources: list[dict], operation: str, formats: dict[str, str]) ->
 
     def is_created(kind: str) -> bool:
         word = RESOURCE_PART_RE.match(formats.get(kind, ""))
-        return related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+        variables = [variable for variable in VARIABLE_RE.findall(formats.get(kind, ""))
+                     if variable not in KNOWN_VARIABLES]
+        return (related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+                or len(variables) == 1 and stem(variables[0]) == created)
 
     def makes(resource: dict) -> bool:
         return all(is_created(kind) for kind in _kinds(resource))
@@ -2318,6 +2356,7 @@ def read_resources(operation: str, types: list[str], formats: dict[str, str], mo
                                             requested_members(models)),
                                  types, members, through_members(models, formats))
         resources = with_documented(operation, types, formats, models, resources)
+    resources = with_find_scope(resources, models, name, formats)
     resources = with_typed_targets(resources, formats, typed_target_fields(models, name))
     resources = with_integer_members(resources, formats, models, name)
     resources = with_minted_names(operation, resources, formats, models)
@@ -2849,6 +2888,41 @@ def with_found(resources: list[dict], types: list[str], formats: dict[str, str],
     return found + [{"type": kind, "fill": {}, "find": list(by)} for kind, by in by_kind.items()]
 
 
+def with_find_scope(resources: list[dict], models: dict[str, dict], operation: str,
+                    formats: dict[str, str]) -> list[dict]:
+    """A found name is scoped by a request member its record says is associated with that resource."""
+    members = request_members(models, operation)
+    found = []
+    for resource in resources:
+        if "find" not in resource:
+            found.append(resource)
+            continue
+        scope = set()
+        for model in models.values():
+            for shape_name, shape in model["shapes"].items():
+                fields = shape.get("members", {}) if shape.get("type") == "structure" else {}
+                if not stem(shape_name).endswith(stem(resource["type"])) \
+                        or any(stem(member) == stem(shape_name) for member in resource["find"]) \
+                        or not all(member in fields for member in resource["find"]):
+                    continue
+                for member, spec in fields.items():
+                    associated = re.search(r"\bassociated with (?:this|the) (.+)$", _lead(spec.get("documentation")))
+                    if member in members and member not in resource["find"] and associated \
+                            and stem(member) and stem(shape_name).startswith(stem(member)) \
+                            and stem(shape_name) != stem(member) \
+                            and doc_names("the name of the " + associated.group(1), resource["type"], formats):
+                        scope.add(member)
+        scoped = dict(resource, find=sorted(scope) + resource["find"])
+        if scope and len(resource["find"]) == 1 and resource["find"][0] in optional_members(models, operation):
+            absent = {resource["find"][0]: [None]}
+            found.append(dict(scoped, unless=absent))
+            # With no child name, the handler uses its default child of the explicitly named parent.
+            found.append(dict(resource, find=sorted(scope), when=absent))
+        else:
+            found.append(scoped)
+    return found
+
+
 def requested_members(models: dict[str, dict]) -> set[str]:
     """Every top-level member of every request of the clients given."""
     return {member for model in models.values() for spec in model["operations"].values() if "input" in spec
@@ -2917,6 +2991,15 @@ def through_members(models: dict[str, dict], formats: dict[str, str]) -> dict[st
                          for known, kind in stems.items() if related(stem(field), known)}
                 if kinds:
                     found.setdefault(member, set()).update(kinds)
+            source = fields.get("SourceArn")
+            if source is not None:
+                head, of = doc_head(_lead(source.get("documentation")))
+                if of and re.search(r"(?:arn|amazon resource name \(arn\))$", head):
+                    kinds = {kind for kind in formats for phrase in re.split(r",| or ", of)
+                             if doc_names("the name of the " + phrase.strip(), kind, formats)}
+                    for member in fields:
+                        if kinds and kind_of(member) == "identifier" and stem(member) == stem(shape_name):
+                            found.setdefault(member, set()).update(kinds)
     for member, kinds in documented_through(models, formats).items():
         found.setdefault(member, set()).update(kinds)
     return {member: sorted(kinds) for member, kinds in sorted(found.items())}
@@ -3257,7 +3340,8 @@ def validate(document: dict) -> list[str]:
     if not isinstance(tag_keys, dict) or any(
             not isinstance(kinds, dict) or any(kind not in formats.get(namespace, {})
                 or not isinstance(keys, list) or not all(isinstance(key, str) for key in keys) or keys != sorted(set(keys))
-                or any(not isinstance(key, str) or not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key) for key in keys)
+                or any(not isinstance(key, str) or (not re.fullmatch(r"[a-z0-9-]+:(?i:ResourceTag)/", key)
+                    and key != f"{namespace}:{kind}-tag/") for key in keys)
                 for kind, keys in kinds.items()) for namespace, kinds in tag_keys.items()):
         problems.append("resourceTagKeys is not stored-tag prefixes for supported resource types")
     resource_keys_document = document.get("resourceKeys", {})

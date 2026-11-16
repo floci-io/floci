@@ -2254,6 +2254,58 @@ def test_eip_operations_read_scalar_targets_from_models(operation, members, kind
     assert entry["resources"] == [{"type": kind, "fill": {variables[kind]: variables[kind]}} for kind in kinds]
 
 
+@pytest.mark.parametrize("documentation,expected", [
+    ("<p>The resource to tag. This value is an Amazon Resource Name (ARN).</p>", True),
+    ("<p>This value is an Amazon Resource Name (ARN).</p>", True),
+    ("<p>The resource to tag. This value is an Amazon Resource Name (ARN) or a name.</p>", False),
+    ("<p>The resource to tag. This value can be an Amazon Resource Name (ARN).</p>", False),
+    ("<p>The resource to tag. Its parent is an Amazon Resource Name (ARN).</p>", False),
+])
+def test_an_explicit_arn_value_sentence_identifies_the_request_resource(documentation, expected):
+    modeled = model({"AddTagsToResource": {"ResourceName": "String"}}, protocol="query")
+    modeled["shapes"]["AddTagsToResourceIn"]["members"]["ResourceName"]["documentation"] = documentation
+    result = r.with_documented("svc:AddTagsToResource", ["thing", "pool"], FORMATS, {"svc": modeled}, [])
+    assert result == ([{"types": ["thing", "pool"], "arn": "ResourceName"}] if expected else [])
+
+
+def test_a_creates_subject_can_be_its_sole_arn_variable_for_an_abbreviated_type():
+    formats = {"db": "arn:${Partition}:svc:${Region}:${Account}:db:${DbInstanceName}",
+               "pg": "arn:${Partition}:svc:${Region}:${Account}:pg:${ParameterGroupName}"}
+    database = {"type": "db", "fill": {"DbInstanceName": "DBInstanceIdentifier"}}
+    group = {"type": "pg", "fill": {"ParameterGroupName": "DBParameterGroupName"}}
+    assert r.with_made([database, group], "svc:CreateDBInstance", formats) == [dict(database, made=True), group]
+    assert r.with_made([database, group], "svc:ModifyDBInstance", formats) == [database, group]
+
+
+def test_resource_type_tag_prefixes_require_the_documented_namespace_and_type():
+    formats = {"rds": {"pg": "arn:${Partition}:rds:${Region}:${Account}:pg:${PgName}"}}
+    documents = [{"Name": "rds", "Resources": [{"Name": "pg", "ConditionKeys": [
+        "aws:ResourceTag/${TagKey}", "rds:pg-tag/${TagKey}", "rds:pg-tag/tag-key",
+        "rds:req-tag/${TagKey}", "rds:db-tag/${TagKey}", "other:pg-tag/${TagKey}", "rds:pg-tag/Owner"]}]}]
+    assert r.resource_tag_keys(documents, formats) == {"rds": {"pg": ["aws:ResourceTag/", "rds:pg-tag/"]}}
+
+
+def test_distinct_qualified_parameter_groups_do_not_collapse_to_one_ambiguous_member():
+    formats = {"cluster-pg": "arn:${Partition}:rds:${Region}:${Account}:cluster-pg:${ClusterParameterGroupName}",
+               "pg": "arn:${Partition}:rds:${Region}:${Account}:pg:${ParameterGroupName}"}
+    assert r.resources_for("rds:ModifyDBCluster", ["cluster-pg", "pg"], formats,
+            members("DBClusterParameterGroupName", "DBInstanceParameterGroupName")) == [
+        {"type": "cluster-pg", "fill": {"ClusterParameterGroupName": "DBClusterParameterGroupName"}},
+        {"type": "pg", "fill": {"ParameterGroupName": "DBInstanceParameterGroupName"}}]
+    assert r.resources_for("rds:ModifyDBCluster", ["cluster-pg", "pg"], formats,
+            members("DBClusterParameterGroupName")) == [
+        {"type": "cluster-pg", "fill": {"ClusterParameterGroupName": "DBClusterParameterGroupName"}}]
+
+
+def test_a_shorter_member_is_not_reserved_for_a_more_qualified_variable():
+    formats = {"subnet": "arn:${Partition}:ec2:${Region}:${Account}:subnet/${SubnetId}",
+               "secondary-subnet": "arn:${Partition}:ec2:${Region}:${Account}:secondary-subnet/${SecondarySubnetId}"}
+    assert r.resources_for("ec2:RunInstances", ["subnet", "secondary-subnet"], formats,
+            members("SubnetId", "SecondarySubnetId")) == [
+        {"type": "subnet", "fill": {"SubnetId": "SubnetId"}},
+        {"type": "secondary-subnet", "fill": {"SecondarySubnetId": "SecondarySubnetId"}}]
+
+
 QUALIFIED_FORMATS = {"function": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}",
                      "function alias": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Alias}",
                      "function version": "arn:${Partition}:svc:${Region}:${Account}:function:${FunctionName}:${Version}"}
@@ -2427,3 +2479,60 @@ def test_a_create_acting_on_other_types_alone_tags_what_it_makes_when_it_names_i
     # One whose request does not name every variable of what it makes leaves it to the action's own resources.
     formats["widget"] = "arn:${Partition}:svc:${Region}:${Account}:widget/${WidgetName}/${WidgetId}"
     assert r.makes_for("svc:CreateWidget", ["kind"], formats, members("KindName"), models=widget_model(True)) == []
+
+
+def test_an_arn_identifying_a_type_is_not_read_as_its_name():
+    modeled = model({"RemoveFromPool": {"ThingIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["RemoveFromPoolIn"]["members"]["ThingIdentifier"]["documentation"] = (
+        "<p>The Amazon Resource Name (ARN) identifying the thing that was detached from the pool.</p>")
+    result = r.with_documented("svc:RemoveFromPool", ["thing"], FORMATS, {"svc": modeled}, [])
+    assert result == [{"types": ["thing"], "arn": "ThingIdentifier"}]
+
+
+def test_a_name_documented_as_an_identifier_finds_a_generated_id():
+    formats = {"proxy": "arn:${Partition}:svc:${Region}:${Account}:proxy:${ProxyId}"}
+    modeled = model({"ModifyProxy": {"ProxyName": "String"}}, protocol="query")
+    modeled["shapes"]["ModifyProxyIn"]["members"]["ProxyName"]["documentation"] = (
+        "<p>The identifier for the proxy to modify.</p>")
+    assert r.with_documented("svc:ModifyProxy", ["proxy"], formats, {"svc": modeled}, []) == [
+        {"type": "proxy", "fill": {}, "find": ["ProxyName"]}]
+
+
+def test_an_arn_identifying_a_type_replaces_the_identifier_name_mapping():
+    modeled = model({"RemoveFromPool": {"ThingIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["RemoveFromPoolIn"]["members"]["ThingIdentifier"]["documentation"] = (
+        "<p>The Amazon Resource Name (ARN) identifying the thing that was detached from the pool.</p>")
+    modeled["shapes"]["RemoveFromPoolIn"]["required"] = ["ThingIdentifier"]
+    assert r.read_resources("svc:RemoveFromPool", ["thing"], FORMATS, {"svc": modeled}) == [
+        {"types": ["thing"], "arn": "ThingIdentifier"}]
+
+
+def test_a_found_child_name_is_scoped_by_its_records_associated_parent():
+    formats = {"group": "arn:${Partition}:svc:${Region}:${Account}:group:${GroupId}"}
+    modeled = model({"ModifyGroup": {"ProxyName": "String", "GroupName": "String"}}, protocol="query")
+    modeled["shapes"]["ProxyGroup"] = {"type": "structure", "members": {
+        "GroupName": {"shape": "String"}, "ProxyName": {"shape": "String", "documentation":
+            "<p>The identifier for the proxy associated with this group.</p>"}}}
+    modeled["shapes"]["ModifyGroupIn"]["required"] = ["GroupName", "ProxyName"]
+    resources = [{"type": "group", "fill": {}, "find": ["GroupName"]}]
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == [
+        {"type": "group", "fill": {}, "find": ["ProxyName", "GroupName"]}]
+    modeled["shapes"]["ModifyGroupIn"]["required"] = ["ProxyName"]
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == [
+        {"type": "group", "fill": {}, "find": ["ProxyName", "GroupName"], "unless": {"GroupName": [None]}},
+        {"type": "group", "fill": {}, "find": ["ProxyName"], "when": {"GroupName": [None]}}]
+    # A fully named record, such as a proxy endpoint, already has its independent key.
+    modeled["shapes"]["ProxyGroup"]["members"]["ProxyGroupName"] = {"shape": "String"}
+    independently_named = [{"type": "group", "fill": {}, "find": ["ProxyGroupName"]}]
+    assert r.with_find_scope(independently_named, {"svc": modeled}, "ModifyGroup", formats) == independently_named
+    modeled["shapes"]["OtherGroup"] = modeled["shapes"].pop("ProxyGroup")
+    assert r.with_find_scope(resources, {"svc": modeled}, "ModifyGroup", formats) == resources
+
+
+def test_a_task_identifier_reaches_the_source_arn_its_record_documents():
+    modeled = model({"DescribeExports": {"ExportTaskIdentifier": "String"}}, protocol="query")
+    modeled["shapes"]["ExportTask"] = {"type": "structure", "members": {
+        "ExportTaskIdentifier": {"shape": "String"}, "SourceArn": {"shape": "String", "documentation":
+            "<p>The Amazon Resource Name (ARN) of the thing that was exported to storage.</p>"}}}
+    assert r.read_resources("svc:DescribeExports", ["thing"], FORMATS, {"svc": modeled}) == [
+        {"types": ["thing"], "through": "ExportTaskIdentifier"}]
