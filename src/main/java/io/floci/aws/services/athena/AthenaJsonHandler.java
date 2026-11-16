@@ -94,7 +94,16 @@ public class AthenaJsonHandler {
                     resultConfiguration = mapper.treeToValue(request.get("ResultConfiguration"), ResultConfiguration.class);
                 }
 
-                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration);
+                List<String> executionParameters = new ArrayList<>();
+                JsonNode parameters = request.get("ExecutionParameters");
+                if (parameters != null && parameters.isArray()) {
+                    for (JsonNode parameter : parameters) {
+                        executionParameters.add(parameter.asText());
+                    }
+                }
+
+                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration,
+                        executionParameters);
                 yield Response.ok(Map.of("QueryExecutionId", id)).build();
             }
             case "GetQueryExecution" -> {

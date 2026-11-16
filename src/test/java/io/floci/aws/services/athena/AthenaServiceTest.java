@@ -282,6 +282,26 @@ class AthenaServiceTest {
         verify(duckClient).execute(eq("SELECT 1 AS a -- done\n"), any(), any(), any());
     }
 
+    @Test
+    void aQueryRunsWithItsExecutionParametersBoundAndIsRecordedWithItsPlaceholders() throws Exception {
+        String id = service.startQueryExecution("SELECT ? AS region, ? AS n", "primary", null,
+                new ResultConfiguration("s3://athena-results/"), List.of("'eu'", "10"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+
+        assertEquals("SELECT ? AS region, ? AS n", service.getQueryExecution(id).getQuery());
+        verify(duckClient).execute(eq("SELECT 'eu' AS region, 10 AS n\n"), any(), any(), any());
+    }
+
+    @Test
+    void aParameterCountThatDoesNotMatchFailsTheQueryWithAthenasMessage() throws Exception {
+        String id = service.startQueryExecution("SELECT ? AS a, ? AS b", "primary", null, null, List.of("1"));
+        awaitState(id, QueryExecutionState.FAILED);
+
+        assertEquals("INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 2 but found 1",
+                service.getQueryExecution(id).getStatus().getStateChangeReason());
+        verifyNoInteractions(duckClient);
+    }
+
     private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
         return results(query, csv).getMetadata().getColumnInfo();
     }

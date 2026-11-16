@@ -1,5 +1,7 @@
 package io.floci.aws.services.athena;
 
+import io.floci.aws.core.common.AwsException;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -33,7 +35,8 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>It also reads a query string's statement, by the same lexical rules, for
- * {@code StartQueryExecution}: where it ends ({@link #holdsSeveralStatements} and {@link #recordedForm}).
+ * {@code StartQueryExecution}: where it ends ({@link #holdsSeveralStatements} and {@link #recordedForm})
+ * and its {@code ?} placeholders ({@link #bindParameters}).
  */
 final class TrinoSqlCompatibility {
 
@@ -137,18 +140,146 @@ final class TrinoSqlCompatibility {
     }
 
     /**
+     * {@code statement}, in its {@link #recordedForm}, with its {@code ?} placeholders bound to a query's
+     * {@code ExecutionParameters}, as Athena (engine v3) binds them.
+     *
+     * <p>Athena reads the values as the SQL text of an {@code EXECUTE ... USING} list: joined with commas,
+     * then read as expressions, one per placeholder in order. So a string arrives quoted ({@code 'eu'}) and
+     * a number bare ({@code 10}); {@code 1 + 1} is one expression, so {@code SELECT ? * 2} gives 4; and a
+     * line comment in a value runs on over the values after it, so {@code 1 -- x} and {@code 2} count as
+     * one. A value that is not one expression is read as a string instead (see {@link #usingListEntry}).
+     * Each expression replaces its placeholder in parentheses, with its comments blanked, so it keeps its
+     * precedence inside the statement; a lone literal goes in bare, so the statement reads as if it had been
+     * written there, a JSON path for {@link #translate} included.
+     *
+     * <p>A statement without placeholders runs as written, whatever parameters it is given, as on Athena.
+     * Otherwise the counts must match. If they don't, with no parameters at all included, Athena fails the
+     * query with Trino's error at where the statement starts:
+     *
+     * <pre>INVALID_PARAMETER_USAGE: line 1:1: Incorrect number of parameters: expected 2 but found 1</pre>
+     *
+     * A {@code ?} in a literal, a quoted identifier or a comment is not a placeholder.
+     *
+     * <p>TODO: named prepared statements ({@code PREPARE} / {@code EXECUTE ... USING}) bind the same way
+     * but are not supported.
+     *
+     * @throws AwsException when the counts differ, which fails the query
+     */
+    static String bindParameters(String statement, List<String> parameters) {
+        if (statement == null) {
+            return null;
+        }
+        List<Integer> placeholders = new ArrayList<>();
+        int i = 0;
+        while (i < statement.length()) {
+            int skipped = skipLiteralOrComment(statement, i);
+            if (skipped > i) {
+                i = skipped;
+                continue;
+            }
+            if (statement.charAt(i) == '?') {
+                placeholders.add(i);
+            }
+            i++;
+        }
+        if (placeholders.isEmpty()) {
+            return statement;
+        }
+        List<String> values = parameters == null || parameters.isEmpty()
+                ? List.of()
+                : splitTopLevel(String.join(", ", parameters.stream().map(TrinoSqlCompatibility::usingListEntry)
+                        .toList()), true);
+        if (values.size() != placeholders.size()) {
+            throw new AwsException("InvalidRequestException", "INVALID_PARAMETER_USAGE: " + statementPosition(statement)
+                    + ": Incorrect number of parameters: expected " + placeholders.size() + " but found " + values.size(),
+                    400);
+        }
+        StringBuilder bound = new StringBuilder(statement.length());
+        int last = 0;
+        for (int k = 0; k < placeholders.size(); k++) {
+            int at = placeholders.get(k);
+            String expression = withoutComments(values.get(k)).strip();
+            boolean literal = !expression.isEmpty() && (skipLiteralOrComment(expression, 0) == expression.length()
+                    || expression.chars().allMatch(c -> Character.isDigit(c) || c == '.'));
+            bound.append(statement, last, at).append(literal ? expression : "(" + expression + ")");
+            last = at + 1;
+        }
+        return bound.append(statement, last, statement.length()).toString();
+    }
+
+    /**
+     * {@code value} as Athena (engine v3) puts it in the {@code USING} list: as written when it is one
+     * expression, and otherwise as a string of its tokens, whitespace and comments dropped. Athena returns
+     * {@code 1); SELECT (2} as the string {@code 1);SELECT(2}, {@code 1; SELECT 2} as {@code 1;SELECT2} and
+     * {@code 1, 2} as the one parameter {@code 1,2}, so a value can neither end the statement nor add a
+     * parameter. A value is taken for more than one expression when, outside its literals and comments, it
+     * holds a semicolon or a comma outside brackets, or its brackets don't balance.
+     *
+     * <p>TODO: Athena also reads a value naming a column ({@code x}) as the string {@code 'x'}; it is bound
+     * as an expression here.
+     */
+    private static String usingListEntry(String value) {
+        StringBuilder tokens = new StringBuilder(value.length());
+        int depth = 0;
+        boolean expression = true;
+        int i = 0;
+        while (i < value.length()) {
+            char c = value.charAt(i);
+            int skipped = skipLiteralOrComment(value, i);
+            if (skipped > i) {
+                if (c == '\'' || c == '"') {
+                    tokens.append(value, i, skipped);
+                }
+                i = skipped;
+                continue;
+            }
+            if (c == '(' || c == '[') {
+                depth++;
+            } else if (c == ')' || c == ']') {
+                expression &= --depth >= 0;
+            } else if (c == ';' || c == ',' && depth == 0) {
+                expression = false;
+            }
+            if (!Character.isWhitespace(c)) {
+                tokens.append(c);
+            }
+            i++;
+        }
+        return expression && depth == 0 ? value : "'" + tokens.toString().replace("'", "''") + "'";
+    }
+
+    /**
+     * Where {@code statement} starts, as Trino locates an error on it: {@code line L:C}, both counted from 1,
+     * at its first token that is not a comment. {@code -- lead\nSELECT ?} is at {@code line 2:1}.
+     */
+    private static String statementPosition(String statement) {
+        int at = Math.max(bounds(statement, false).codeStart(), 0);
+        int line = 1;
+        int lineStart = 0;
+        for (int i = 0; i < at; i++) {
+            if (statement.charAt(i) == '\n') {
+                line++;
+                lineStart = i + 1;
+            }
+        }
+        return "line " + line + ":" + (at - lineStart + 1);
+    }
+
+    /**
      * Where the statement of a query string lies. {@code start} is its first character that is neither
      * whitespace nor a semicolon, -1 when there is none, and {@code end} is just past its last such token: a
-     * trailing comment included, the line break that ends a line comment not. {@code several} is whether such
-     * a token follows a semicolon that follows one. With {@code nestedComments}, block comments are read as
-     * DuckDB reads them (see {@link #skipLiteralOrComment(String, int, boolean)}).
+     * trailing comment included, the line break that ends a line comment not. {@code codeStart} is its first
+     * token that is not a comment either, -1 when it is all comments. {@code several} is whether such a token
+     * follows a semicolon that follows one. With {@code nestedComments}, block comments are read as DuckDB
+     * reads them (see {@link #skipLiteralOrComment(String, int, boolean)}).
      */
-    private record StatementBounds(int start, int end, boolean several) {
+    private record StatementBounds(int start, int end, int codeStart, boolean several) {
     }
 
     private static StatementBounds bounds(String sql, boolean nestedComments) {
         int start = -1;
         int end = 0;
+        int codeStart = -1;
         boolean semicolonAfterStatement = false;
         boolean several = false;
         int i = 0;
@@ -170,6 +301,9 @@ final class TrinoSqlCompatibility {
             if (next == i) {
                 next = i + 1;
             }
+            if (!comment && codeStart < 0) {
+                codeStart = i;
+            }
             // A line comment runs to its line break, which is whitespace after the statement, not part of it.
             end = next;
             while (comment && end > i && Character.isWhitespace(sql.charAt(end - 1))) {
@@ -177,7 +311,7 @@ final class TrinoSqlCompatibility {
             }
             i = next;
         }
-        return new StatementBounds(start, end, several);
+        return new StatementBounds(start, end, codeStart, several);
     }
 
     private static String translateCast(String inner) {

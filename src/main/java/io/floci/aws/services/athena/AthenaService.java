@@ -158,6 +158,19 @@ public class AthenaService {
                                       String workGroup,
                                       QueryExecutionContext context,
                                       ResultConfiguration resultConfiguration) {
+        return startQueryExecution(submitted, workGroup, context, resultConfiguration, List.of());
+    }
+
+    /**
+     * Starts a query, binding {@code executionParameters} to its {@code ?} placeholders when it runs on the
+     * engine. They are not kept on the execution: AWS documents that "the list of parameters is not returned
+     * in the response".
+     */
+    public String startQueryExecution(String submitted,
+                                      String workGroup,
+                                      QueryExecutionContext context,
+                                      ResultConfiguration resultConfiguration,
+                                      List<String> executionParameters) {
         // Athena takes one statement per query and rejects any other before an execution exists, with the
         // AthenaErrorCode its InvalidRequestException carries for malformed SQL. The engine would otherwise run
         // every statement of one that returns no rows, so a query that failed could still have written a table.
@@ -168,6 +181,8 @@ public class AthenaService {
         // Athena records, returns and runs the statement without the semicolons around it, so everything below,
         // the execution's record included, reads that form.
         String query = TrinoSqlCompatibility.recordedForm(submitted);
+        // Read when the query runs, on another thread, so a caller changing its list later changes nothing.
+        List<String> parameters = executionParameters == null ? List.of() : List.copyOf(executionParameters);
         String id = UUID.randomUUID().toString();
         String database = context != null && context.getDatabase() != null ? context.getDatabase() : "default";
         QueryExecutionContext resolvedContext = context != null ? context : new QueryExecutionContext();
@@ -273,6 +288,11 @@ public class AthenaService {
                         icebergStatements.vacuum(vacuum.ref(), database);
                         return null;
                     }
+                    // The parameters are bound into the statement, so the Iceberg rewrite and the engine both read
+                    // literals. A count that doesn't match fails the query here, before the checks below, as Trino
+                    // checks parameters before it analyzes a statement. Hive DDL never gets this far, and binds none.
+                    // The checks read the unbound query, where `col = ?` already counts as a static equality.
+                    String statement = TrinoSqlCompatibility.bindParameters(query, parameters);
                     List<Table> projectionTables = tablesForProjectionCheck(database);
                     PartitionProjection.assertLocationTemplatesComplete(query, projectionTables);
                     PartitionProjection.assertInjectedColumnsFiltered(query, projectionTables);
@@ -282,13 +302,13 @@ public class AthenaService {
                             resolvedContext.getCatalog(), database);
                     AthenaIcebergStatements.IcebergWrite icebergWrite = null;
                     try {
-                        icebergWrite = icebergStatements.write(query, resolvedContext.getCatalog(), database);
+                        icebergWrite = icebergStatements.write(statement, resolvedContext.getCatalog(), database);
                         String setupDdl = (s3Tables != null ? s3Tables.attachSql() : "")
                                 + (icebergWrite != null ? icebergWrite.setupSql() : "")
                                 + TrinoSqlCompatibility.FUNCTION_MACROS + ddlBuilder.build(database, query)
                                 + (s3Tables != null ? s3Tables.searchPathSql() : "");
                         String duckQuery = TrinoSqlCompatibility.translate(
-                                icebergWrite != null ? icebergWrite.query() : query);
+                                icebergWrite != null ? icebergWrite.query() : statement);
                         if (outputLocation != null) {
                             ensureOutputBucket(outputLocation);
                         }
