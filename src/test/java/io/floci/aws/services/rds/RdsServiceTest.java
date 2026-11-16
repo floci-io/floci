@@ -233,6 +233,60 @@ class RdsServiceTest {
     }
 
     @Test
+    void storedProxySelectorsAreAccountAndRegionScopedAndDoNotMigrateLegacyKeys() {
+        String account = "123456789012";
+        InMemoryStorage<String, DbProxy> rawProxies = new InMemoryStorage<>();
+        InMemoryStorage<String, DbProxyTargetGroup> rawGroups = new InMemoryStorage<>();
+        DbProxy proxy = persistedProxy("one", "us-east-1", account, "one", 5432);
+        proxy.setTags(new LinkedHashMap<>(Map.of("Owner", "team-a")));
+        DbProxyTargetGroup one = persistedTargetGroup("one", "us-east-1", account, "one");
+        DbProxyTargetGroup two = persistedTargetGroup("two", "us-east-1", account, "two");
+        rawProxies.put("one", proxy);
+        rawGroups.put("one", one);
+        rawGroups.put(account + "/us-east-1::two", two);
+        RdsService service = proxyStoreService(regionResolver, config,
+                new AccountAwareStorageBackend<>(rawProxies, null, account),
+                new AccountAwareStorageBackend<>(rawGroups, null, account),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        assertEquals(Optional.of(proxy.getDbProxyArn()), service.findStoredArn("proxy", List.of("one"), "us-east-1"));
+        assertEquals(Optional.of(one.getTargetGroupArn()),
+                service.findStoredArn("target-group", List.of("one", "default"), "us-east-1"));
+        assertEquals(Optional.of(two.getTargetGroupArn()),
+                service.findStoredArn("target-group", List.of("two", "default"), "us-east-1"));
+        assertEquals(Optional.empty(), service.findStoredArn("target-group", List.of("default"), "us-east-1"));
+        assertEquals(Optional.empty(), service.findStoredArn("proxy", List.of("one"), "us-west-2"));
+        assertEquals(Map.of("Owner", "team-a"), service.storedTags(proxy.getDbProxyArn()));
+        assertEquals(Map.of(), service.storedTags(proxy.getDbProxyArn().replace(account, "999999999999")));
+        assertEquals(Set.of("one"), rawProxies.keys());
+        assertEquals(Set.of("one", account + "/us-east-1::two"), rawGroups.keys());
+        RdsService foreign = proxyStoreService(new RegionResolver("us-east-1", "999999999999"), config,
+                new AccountAwareStorageBackend<>(rawProxies, null, account),
+                new AccountAwareStorageBackend<>(rawGroups, null, account),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        assertEquals(Optional.empty(), foreign.findStoredArn("proxy", List.of("one"), "us-east-1"));
+    }
+
+    @Test
+    void storedIamTagsReadLegacyRecordsWithoutMigratingOrMutatingThem() {
+        String arn = "arn:aws:rds:us-east-1:123456789012:cluster:legacy-tags";
+        InMemoryStorage<String, DbCluster> records = new InMemoryStorage<>();
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("legacy-tags");
+        cluster.setDbClusterArn(arn);
+        cluster.setTags(new LinkedHashMap<>(Map.of("Owner", "fixture")));
+        records.put("legacy-tags", cluster);
+        RdsService service = newService(containerManager, proxyManager, new InMemoryStorage<>(),
+                new AccountAwareStorageBackend<>(records, null, "123456789012"),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        Map<String, String> read = service.storedTags(arn);
+        assertEquals(Map.of("Owner", "fixture"), read);
+        read.put("Owner", "changed-copy");
+        assertEquals(Map.of("Owner", "fixture"), cluster.getTags());
+        assertEquals(Set.of("legacy-tags"), records.keys());
+        assertEquals(Map.of(), service.storedTags(arn.replace("123456789012", "999999999999")));
+    }
+
+    @Test
     void createDbInstanceGeneratesMissingFields() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -5103,6 +5157,7 @@ class RdsServiceTest {
                 List.of(), List.of(), true, Map.of("env", "original")).getEventSubscriptionArn();
         assertEquals("arn:aws-cn:rds:" + region + ":123456789012:es:events", arn);
         assertEquals(Map.of("env", "original"), rdsService.listTagsForResource(arn, region));
+        assertEquals(Map.of("env", "original"), rdsService.storedTags(arn));
         rdsService.addTagsToResource(arn, Map.of("env", "changed"), region);
         assertEquals(Map.of("env", "changed"), rdsService.listTagsForResource(arn, region));
         String wrongPartition = arn.replace("arn:aws-cn:", "arn:aws:");
@@ -5115,6 +5170,7 @@ class RdsServiceTest {
         assertEquals(Map.of("env", "changed"), rdsService.listTagsForResource(arn, region));
         rdsService.removeTagsFromResource(arn, List.of("env"), region);
         assertEquals(Map.of(), rdsService.listTagsForResource(arn, region));
+        assertEquals(Map.of(), rdsService.storedTags(arn));
     }
 
     @ParameterizedTest

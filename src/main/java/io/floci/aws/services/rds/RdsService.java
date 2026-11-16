@@ -94,6 +94,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
@@ -3090,6 +3091,106 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /** Stored tags are read by exact ARN, without resource creation or legacy-record migration. */
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "rds")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        if (!regionResolver.partitionForRegion(arn.region()).equals(arn.partition())
+                || arn.resource().indexOf(':') < 0) {
+            return Map.of();
+        }
+        TagHandle handle = resolveTagHandle(resourceArn, arn.region(), true);
+        return handle == null ? Map.of() : new LinkedHashMap<>(handle.tags());
+    }
+
+    /** Finds generated identities by the names supplied in the generated request-resource table. */
+    public Optional<String> findStoredArn(String type, List<String> names, String region) {
+        if (names.isEmpty() || names.stream().anyMatch(name -> name == null || name.isBlank())) {
+            return Optional.empty();
+        }
+        String account = currentAccountId();
+        String effectiveRegion = effectiveRegion(region);
+        String selector = names.getFirst();
+        String snapshotName = AwsArnUtils.isArnFor(selector, "rds")
+                ? AwsArnUtils.parse(selector).resource().substring(AwsArnUtils.parse(selector).resource().indexOf(':') + 1)
+                : selector;
+        Optional<String> found = switch (type) {
+            case "proxy" -> names.size() == 1
+                    ? readScopedResource(proxies, account, effectiveRegion, names.getFirst()).map(DbProxy::getDbProxyArn)
+                    : Optional.empty();
+            case "proxy-endpoint" -> names.size() == 1
+                    ? readScopedResource(proxyEndpoints, account, effectiveRegion, names.getFirst())
+                            .map(DbProxyEndpoint::getDbProxyEndpointArn) : Optional.empty();
+            case "target-group" -> names.size() == 1 || names.size() == 2
+                    ? readScopedResource(proxyTargetGroups, account, effectiveRegion, names.getFirst())
+                            .filter(group -> (names.size() == 1 ? "default" : names.get(1)).equals(group.getTargetGroupName()))
+                            .map(DbProxyTargetGroup::getTargetGroupArn) : Optional.empty();
+            case "snapshot" -> names.size() == 1
+                    ? readScopedResource(clusterSnapshots, account, effectiveRegion, snapshotName)
+                            .map(DbClusterSnapshot::getDbClusterSnapshotArn)
+                            .or(() -> readScopedResource(snapshots, account, effectiveRegion, snapshotName)
+                                    .map(DbSnapshot::getDbSnapshotArn))
+                            .filter(value -> !AwsArnUtils.looksLikeArn(selector) || selector.equals(value))
+                    : Optional.empty();
+            default -> Optional.empty();
+        };
+        return found.filter(value -> AwsArnUtils.isArnFor(value, "rds"))
+                .filter(value -> {
+                    AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
+                    return account.equals(arn.accountId()) && effectiveRegion.equals(arn.region())
+                            && regionResolver.partitionForRegion(effectiveRegion).equals(arn.partition());
+                });
+    }
+
+    private <T> Optional<T> readScopedResource(StorageBackend<String, T> store, String account,
+                                              String region, String name) {
+        return readResourceKeys(store, account, List.of(dbResourceKey(region, name), name));
+    }
+
+    private <T> Optional<T> readResourceKeys(StorageBackend<String, T> store, String account, List<String> keys) {
+        for (String key : keys) {
+            Optional<T> found = store instanceof AccountAwareStorageBackend<T> aware
+                    ? aware.getForAccount(account, key).or(() -> aware.getLegacyForAccount(account, key))
+                    : store.get(key);
+            if (found.isPresent()) {
+                return found;
+            }
+        }
+        return Optional.empty();
+    }
+
+    private <T> Optional<T> readTagResource(StorageBackend<String, T> store, String resourceArn,
+                                           String name, Function<T, String> identity) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        return readScopedResource(store, arn.accountId(), arn.region(), name)
+                .filter(value -> resourceArn.equals(identity.apply(value)));
+    }
+
+    private <T> Optional<T> readTagResource(StorageBackend<String, T> store, String resourceArn,
+                                           String name, Function<T, String> identity, String key) {
+        return readResourceKeys(store, AwsArnUtils.parse(resourceArn).accountId(), List.of(key, name))
+                .filter(value -> resourceArn.equals(identity.apply(value)));
+    }
+
+    private <T> Optional<T> readTagResourceByArn(StorageBackend<String, T> store, String resourceArn,
+                                                Function<T, String> name, Function<T, String> identity) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        Predicate<String> inRegion = key -> key.startsWith(arn.region() + "::") || !key.contains("::");
+        List<T> candidates;
+        if (store instanceof AccountAwareStorageBackend<T> aware) {
+            String prefix = arn.accountId() + "/";
+            candidates = aware.scanRaw(key -> key.startsWith(prefix) && inRegion.test(key.substring(prefix.length()))
+                    || arn.accountId().equals(defaultAccountId()) && !key.contains("/") && inRegion.test(key));
+        } else {
+            candidates = store.scan(inRegion);
+        }
+        return candidates.stream().filter(value -> resourceArn.equals(identity.apply(value)))
+                .map(value -> readTagResource(store, resourceArn, name.apply(value), identity))
+                .flatMap(Optional::stream).findFirst();
+    }
+
     public Map<String, String> listTagsForResource(String resourceName) {
         return listTagsForResource(resourceName, resourceRegionOrDefault(resourceName));
     }
@@ -3133,11 +3234,15 @@ public class RdsService implements Resettable, ResourceProvider {
      * A bare resource name (no ARN) is treated as a DB instance identifier for backwards compatibility.
      */
     private TagHandle resolveTagHandle(String resourceName, String region) {
+        return resolveTagHandle(resourceName, region, false);
+    }
+
+    private TagHandle resolveTagHandle(String resourceName, String region, boolean storedOnly) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
 
-        String effectiveRegion = effectiveRegion(region);
+        String effectiveRegion = storedOnly ? region : effectiveRegion(region);
         String type = "db";
         String id = resourceName;
         if (AwsArnUtils.looksLikeArn(resourceName)) {
@@ -3157,7 +3262,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidParameterValue",
                         "ResourceName is not in region " + effectiveRegion + ": " + resourceName, 400);
             }
-            if (!Objects.equals(regionResolver.getAccountId(), arn.accountId())) {
+            if (!storedOnly && !Objects.equals(regionResolver.getAccountId(), arn.accountId())) {
                 throw new AwsException("InvalidParameterValue",
                         "ResourceName is not in the current account: " + resourceName, 400);
             }
@@ -3173,9 +3278,15 @@ public class RdsService implements Resettable, ResourceProvider {
         // A bare (non-ARN) resource name is treated as a DB instance identifier for backwards compatibility.
 
         String resourceId = id;
+        String targetArn = AwsArnUtils.isArn(resourceName) ? resourceName
+                : regionResolver.buildArn("rds", effectiveRegion, type + ":" + resourceId);
         return switch (type) {
             case "db" -> {
-                DbInstance instance = getDbInstance(resourceId, effectiveRegion);
+                DbInstance instance = readTagResource(instances, targetArn, resourceId, DbInstance::getDbInstanceArn)
+                        .orElseGet(() -> storedOnly ? null : getDbInstance(resourceId, effectiveRegion));
+                if (instance == null) {
+                    yield null;
+                }
                 yield new TagHandle(instance.getTags(), updated -> {
                     instance.setTags(updated);
                     putInstanceForScope(currentAccountId(), effectiveRegion,
@@ -3183,7 +3294,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "cluster" -> {
-                DbCluster cluster = getDbCluster(resourceId, effectiveRegion);
+                DbCluster cluster = readTagResource(clusters, targetArn, resourceId, DbCluster::getDbClusterArn)
+                        .orElseGet(() -> storedOnly ? null : getDbCluster(resourceId, effectiveRegion));
+                if (cluster == null) {
+                    yield null;
+                }
                 yield new TagHandle(cluster.getTags(), updated -> {
                     cluster.setTags(updated);
                     putClusterForScope(currentAccountId(), effectiveRegion,
@@ -3191,7 +3306,11 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "subgrp" -> {
-                DbSubnetGroup group = getDbSubnetGroup(resourceId, effectiveRegion);
+                DbSubnetGroup group = readTagResource(subnetGroups, targetArn, resourceId, DbSubnetGroup::getDbSubnetGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getDbSubnetGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putSubnetGroupForScope(
@@ -3199,24 +3318,39 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "cluster-snapshot" -> {
-                DbClusterSnapshot snapshot = requireClusterSnapshot(currentAccountId(), effectiveRegion, resourceId);
+                DbClusterSnapshot snapshot = readTagResource(clusterSnapshots, targetArn, resourceId,
+                        DbClusterSnapshot::getDbClusterSnapshotArn)
+                        .orElseGet(() -> storedOnly ? null
+                                : requireClusterSnapshot(currentAccountId(), effectiveRegion, resourceId));
+                if (snapshot == null) {
+                    yield null;
+                }
                 yield new TagHandle(snapshot.getTags(), updated -> {
                     snapshot.setTags(updated);
                     putClusterSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
             case "snapshot" -> {
-                DbSnapshot snapshot = Optional.ofNullable(
+                DbSnapshot snapshot = readTagResource(snapshots, targetArn, resourceId, DbSnapshot::getDbSnapshotArn)
+                        .orElseGet(() -> storedOnly ? null : Optional.ofNullable(
                         findSnapshotForScope(currentAccountId(), effectiveRegion, resourceId))
                         .orElseThrow(() -> new AwsException("DBSnapshotNotFound",
-                                "DBSnapshot " + resourceId + " not found.", 404));
+                                "DBSnapshot " + resourceId + " not found.", 404)));
+                if (snapshot == null) {
+                    yield null;
+                }
                 yield new TagHandle(snapshot.getTags(), updated -> {
                     snapshot.setTags(updated);
                     putSnapshotForScope(currentAccountId(), effectiveRegion, resourceId, snapshot);
                 });
             }
             case "cluster-endpoint" -> {
-                DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, resourceId);
+                DbClusterEndpoint endpoint = readTagResource(clusterEndpoints, targetArn, resourceId,
+                        DbClusterEndpoint::getDbClusterEndpointArn, clusterEndpointKey(effectiveRegion, resourceId))
+                        .orElseGet(() -> storedOnly ? null : requireClusterEndpoint(effectiveRegion, resourceId));
+                if (endpoint == null) {
+                    yield null;
+                }
                 yield new TagHandle(endpoint.getTags(), updated -> {
                     endpoint.setTags(updated);
                     clusterEndpoints.put(clusterEndpointKey(effectiveRegion,
@@ -3224,43 +3358,55 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "es" -> {
-                EventSubscription subscription = eventSubscriptions
+                EventSubscription subscription = readTagResource(eventSubscriptions, targetArn, resourceId,
+                        EventSubscription::getEventSubscriptionArn, eventSubscriptionKey(effectiveRegion, resourceId))
+                        .orElseGet(() -> storedOnly ? null : eventSubscriptions
                         .get(eventSubscriptionKey(effectiveRegion, resourceId))
                         .orElseThrow(() -> new AwsException("SubscriptionNotFound",
-                                "Subscription " + resourceId + " not found.", 404));
+                                "Subscription " + resourceId + " not found.", 404)));
+                if (subscription == null) {
+                    yield null;
+                }
                 yield new TagHandle(subscription.getTags(), updated -> {
                     subscription.setTags(updated);
                     eventSubscriptions.put(eventSubscriptionKey(effectiveRegion, resourceId), subscription);
                 });
             }
             case "deployment" -> {
-                BlueGreenDeployment deployment = requireBlueGreenDeployment(effectiveRegion, resourceId);
+                BlueGreenDeployment deployment = readTagResource(blueGreenDeployments, targetArn, resourceId,
+                        BlueGreenDeployment::getBlueGreenDeploymentArn, blueGreenDeploymentKey(effectiveRegion, resourceId))
+                        .orElseGet(() -> storedOnly ? null : requireBlueGreenDeployment(effectiveRegion, resourceId));
+                if (deployment == null) {
+                    yield null;
+                }
                 yield new TagHandle(deployment.getTags(), updated -> {
                     deployment.setTags(updated);
                     blueGreenDeployments.put(blueGreenDeploymentKey(effectiveRegion, resourceId), deployment);
                 });
             }
             case "db-proxy-endpoint" -> {
-                DbProxyEndpoint endpoint = proxyEndpoints.scan(k -> k.startsWith(effectiveRegion + "::")).stream()
-                        .filter(candidate -> resourceName.equals(candidate.getDbProxyEndpointArn()))
-                        .findFirst()
-                        .orElseThrow(() -> proxyEndpointNotFound(resourceId));
+                DbProxyEndpoint endpoint = readTagResourceByArn(proxyEndpoints, targetArn,
+                        DbProxyEndpoint::getDbProxyEndpointName, DbProxyEndpoint::getDbProxyEndpointArn).orElse(null);
+                if (endpoint == null) {
+                    if (storedOnly) {
+                        yield null;
+                    }
+                    throw proxyEndpointNotFound(resourceId);
+                }
                 yield new TagHandle(endpoint.getTags(), updated -> {
                     endpoint.setTags(updated);
                     proxyEndpoints.put(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()), endpoint);
                 });
             }
             case "db-proxy" -> {
-                DbProxy proxy = proxies.scan(k -> true).stream()
-                        .filter(candidate -> effectiveRegion.equals(regionFromArn(candidate.getDbProxyArn())))
-                        .filter(candidate -> resourceName.equals(candidate.getDbProxyArn()))
-                        .findFirst()
-                        .orElseThrow(() -> new AwsException("DBProxyNotFoundFault",
-                                "DB proxy " + resourceId + " not found.", 404));
-                proxy = findDbProxy(proxy.getDbProxyName(), effectiveRegion)
-                        .filter(candidate -> resourceName.equals(candidate.getDbProxyArn()))
-                        .orElseThrow(() -> new AwsException("DBProxyNotFoundFault",
-                                "DB proxy " + resourceId + " not found.", 404));
+                DbProxy proxy = readTagResourceByArn(proxies, targetArn,
+                        DbProxy::getDbProxyName, DbProxy::getDbProxyArn).orElse(null);
+                if (proxy == null) {
+                    if (storedOnly) {
+                        yield null;
+                    }
+                    throw new AwsException("DBProxyNotFoundFault", "DB proxy " + resourceId + " not found.", 404);
+                }
                 DbProxy resolvedProxy = proxy;
                 yield new TagHandle(proxy.getTags(), updated -> {
                     DbProxy updatedProxy = copyDbProxy(resolvedProxy);
@@ -3269,43 +3415,53 @@ public class RdsService implements Resettable, ResourceProvider {
                 });
             }
             case "pg" -> {
-                DbParameterGroup group = getDbParameterGroup(resourceId, effectiveRegion);
+                DbParameterGroup group = readTagResource(parameterGroups, targetArn, resourceId,
+                        DbParameterGroup::getDbParameterGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getDbParameterGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putParameterGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
             case "cluster-pg" -> {
-                DbClusterParameterGroup group =
-                        getDbClusterParameterGroup(resourceId, effectiveRegion);
+                DbClusterParameterGroup group = readTagResource(clusterParameterGroups, targetArn, resourceId,
+                        DbClusterParameterGroup::getDbClusterParameterGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getDbClusterParameterGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putClusterParameterGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
             case "og" -> {
-                if (managedOptionGroup(resourceId) != null) {
+                if (!storedOnly && managedOptionGroup(resourceId) != null) {
                     throw new AwsException("InvalidOptionGroupStateFault",
                             "The default option group " + resourceId + " cannot be tagged.", 400);
                 }
-                OptionGroup group = getOptionGroup(resourceId, effectiveRegion);
+                OptionGroup group = readTagResource(optionGroups, targetArn, resourceId, OptionGroup::getOptionGroupArn)
+                        .orElseGet(() -> storedOnly ? null : getOptionGroup(resourceId, effectiveRegion));
+                if (group == null) {
+                    yield null;
+                }
                 yield new TagHandle(group.getTags(), updated -> {
                     group.setTags(updated);
                     putOptionGroupForRegion(resourceId, effectiveRegion, group);
                 });
             }
             case "target-group" -> {
-                DbProxyTargetGroup targetGroup = proxyTargetGroups.scan(k -> true).stream()
-                        .filter(candidate -> effectiveRegion.equals(
-                                regionFromArn(candidate.getTargetGroupArn())))
-                        .filter(candidate -> resourceName.equals(candidate.getTargetGroupArn()))
-                        .findFirst()
-                        .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
-                                "DB proxy target group " + resourceId + " not found.", 404));
-                targetGroup = findProxyTargetGroup(targetGroup.getDbProxyName(), effectiveRegion)
-                        .filter(candidate -> resourceName.equals(candidate.getTargetGroupArn()))
-                        .orElseThrow(() -> new AwsException("DBProxyTargetGroupNotFoundFault",
-                                "DB proxy target group " + resourceId + " not found.", 404));
+                DbProxyTargetGroup targetGroup = readTagResourceByArn(proxyTargetGroups, targetArn,
+                        DbProxyTargetGroup::getDbProxyName, DbProxyTargetGroup::getTargetGroupArn).orElse(null);
+                if (targetGroup == null) {
+                    if (storedOnly) {
+                        yield null;
+                    }
+                    throw new AwsException("DBProxyTargetGroupNotFoundFault", "DB proxy target group " + resourceId + " not found.", 404);
+                }
                 DbProxyTargetGroup resolvedTargetGroup = targetGroup;
                 yield new TagHandle(targetGroup.getTags(), updated -> {
                     DbProxyTargetGroup updatedTargetGroup = copyProxyTargetGroup(resolvedTargetGroup);
@@ -3318,8 +3474,13 @@ public class RdsService implements Resettable, ResourceProvider {
             // Valid RDS resource types Floci does not model yet (snapshot, ri, es, secgrp, ...):
             // taggable on real AWS, so the message states the Floci limitation rather than AWS
             // semantics.
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+            default -> {
+                if (storedOnly) {
+                    yield null;
+                }
+                throw new AwsException("InvalidParameterValue",
+                        "Tagging for resource type '" + type + "' is not yet implemented by Floci: " + resourceName, 400);
+            }
         };
     }
 
