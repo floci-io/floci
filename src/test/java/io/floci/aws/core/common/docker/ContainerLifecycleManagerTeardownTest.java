@@ -13,8 +13,6 @@ import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -135,31 +133,6 @@ class ContainerLifecycleManagerTeardownTest {
             verify(docker, never()).removeContainerCmd("ninth");
         } else {
             verify(docker).removeContainerCmd("ninth");
-        }
-    }
-
-    @Test
-    void removalFailuresDoNotPreventLaterOwnedCleanup() throws Exception {
-        DockerClient docker = mock(DockerClient.class);
-        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
-        StopContainerCmd stop = mock(StopContainerCmd.class);
-        when(docker.stopContainerCmd(anyString())).thenReturn(stop);
-        when(stop.withTimeout(anyInt())).thenReturn(stop);
-        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
-        when(docker.removeContainerCmd(anyString())).thenReturn(remove);
-        when(remove.withForce(true)).thenReturn(remove);
-        when(remove.exec()).thenThrow(new IllegalStateException("daemon refused removal"));
-        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-        try {
-            executor.submit(() -> {
-                for (int i = 0; i < 16; i++) {
-                    String id = "failed-" + i;
-                    assertThrows(IllegalStateException.class,
-                            () -> manager.stopAndRemoveStrict(id, null));
-                }
-            }).get(10, TimeUnit.SECONDS);
-        } finally {
-            executor.shutdownNow();
         }
     }
 

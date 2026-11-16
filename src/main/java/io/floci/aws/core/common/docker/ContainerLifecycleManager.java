@@ -615,11 +615,7 @@ public class ContainerLifecycleManager {
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
      */
     public void stopAndRemove(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        stopAndRemoveAdmitted(containerId, logStream, stopTimeoutSeconds);
-    }
-
-    private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        boolean stoppedOrMissing = stopAdmitted(containerId, stopTimeoutSeconds);
+        boolean stoppedOrMissing = stop(containerId, stopTimeoutSeconds);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -646,12 +642,9 @@ public class ContainerLifecycleManager {
      *
      * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
      *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     * @return whether the container is stopped or already missing
      */
-    public void stop(String containerId, int stopTimeoutSeconds) {
-        stopAdmitted(containerId, stopTimeoutSeconds);
-    }
-
-    private boolean stopAdmitted(String containerId, int stopTimeoutSeconds) {
+    public boolean stop(String containerId, int stopTimeoutSeconds) {
         LOG.infov("Stopping container {0}", containerId);
         try {
             dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
@@ -702,11 +695,6 @@ public class ContainerLifecycleManager {
     /** Strict teardown that can also reclaim the container's anonymous volumes. */
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
                                      boolean removeAnonymousVolumes) {
-        stopAndRemoveStrictAdmitted(containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes);
-    }
-
-    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds,
-                                             boolean removeAnonymousVolumes) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
