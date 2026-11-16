@@ -452,7 +452,7 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Verify index is gone
+        // Verify index is gone, with S3 Vectors' message (measured on AWS)
         given()
             .contentType(JSON_CONTENT_TYPE)
             .body("""
@@ -464,7 +464,9 @@ class S3VectorsIntegrationTest {
         .when()
             .post("/GetIndex")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", equalTo("The specified index could not be found"));
     }
 
     @Test
@@ -482,7 +484,7 @@ class S3VectorsIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Verify bucket is gone
+        // Verify bucket is gone, with S3 Vectors' message (measured on AWS)
         given()
             .contentType(JSON_CONTENT_TYPE)
             .body("""
@@ -493,7 +495,9 @@ class S3VectorsIntegrationTest {
         .when()
             .post("/GetVectorBucket")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", equalTo("The specified vector bucket could not be found"));
     }
 
     // Self-contained: each test below creates its own bucket/index so it doesn't depend on the

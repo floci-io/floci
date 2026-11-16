@@ -86,6 +86,39 @@ class S3VectorsServiceTest {
         assertEquals(Set.of(REGION + "::legacy"), raw.keys());
     }
 
+    /**
+     * A bucket and an index an older Floci stored under names S3 Vectors' rules refuse, which the create calls now
+     * refuse too, stay reachable by those names and by their ARNs, since every other call reads a name as given.
+     */
+    @Test
+    void aBucketAndAnIndexStoredUnderNamesTheRulesRefuseStayReachable() {
+        AccountAwareStorageBackend<VectorBucket> stored = AccountAwareStorageBackend.inMemory("000000000000");
+        String bucketArn = "arn:aws:s3vectors:us-east-1:000000000000:bucket/Legacy_Bucket";
+        VectorBucket legacy = new VectorBucket("Legacy_Bucket", bucketArn, Map.of("sseType", "AES256"));
+        legacy.setCreationTime(CREATION_TIME);
+        legacy.getIndexes().put("My_Index",
+                new VectorIndex("My_Index", bucketArn + "/index/My_Index", "Legacy_Bucket", 2, "float32", "cosine"));
+        stored.put("us-east-1::Legacy_Bucket", legacy);
+        S3VectorsService upgraded = new S3VectorsService(new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                                                            TypeReference<Map<String, V>> typeReference) {
+                return (AccountAwareStorageBackend<V>) stored;
+            }
+        }, new RegionResolver(REGION, "000000000000"), Clock.fixed(CREATION_TIME, ZoneOffset.UTC));
+
+        assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, null),
+                upgraded.bucketTarget("Legacy_Bucket", null, REGION));
+        assertEquals(new S3VectorsService.ResolvedBucket("Legacy_Bucket", REGION, "000000000000"),
+                upgraded.bucketTarget(null, bucketArn, REGION));
+        assertEquals(new S3VectorsService.ResolvedIndex("Legacy_Bucket", "My_Index", REGION),
+                upgraded.resolveIndexTarget(null, null, bucketArn + "/index/My_Index", REGION));
+        assertEquals("My_Index", upgraded.getIndex("Legacy_Bucket", "My_Index", REGION).getIndexName());
+        assertEquals(List.of("My_Index"), upgraded.listIndexes("Legacy_Bucket", REGION).stream()
+                .map(VectorIndex::getIndexName).toList());
+    }
+
     @Test
     void persistsCreationTimesConfigurationAndCreationTags() throws Exception {
         Map<String, String> encryption = Map.of("sseType", "aws:kms", "kmsKeyArn", "key");

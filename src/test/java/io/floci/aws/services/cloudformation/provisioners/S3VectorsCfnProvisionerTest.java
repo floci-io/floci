@@ -220,7 +220,7 @@ class S3VectorsCfnProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"", " ", "\t", "Uppercase", "under_score", "dot.name", "ab", "-bucket", "bucket-",
+    @ValueSource(strings = {"", " ", "\t", "Uppercase", "under_score", "dot..name", "ab", "-bucket", "bucket-",
             "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkl"})
     void invalidBucketNamesAreRejectedForBothSelectors(String name) throws Exception {
         for (String selector : List.of("VectorBucketName", "VectorBucketArn")) {
