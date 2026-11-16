@@ -113,8 +113,9 @@ starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
 # EmrDockerRunnerDockerIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
 # default template names (EmrServerlessSparkRunner), 3.5 GB, so it is queued last, behind the Lambda runtimes;
-# EmrHiveStepsDockerIntegrationTest runs a cluster's other steps in it.
-starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest \
+# EmrHiveStepsDockerIntegrationTest runs a cluster's other steps in it, and the nightly
+# EmrServerlessCustomImageNightlyIntegrationTest builds its custom image on it.
+starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsDockerIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its

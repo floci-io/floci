@@ -254,7 +254,7 @@ Guidelines:
 - Unit tests: `*ServiceTest.java`
 - Integration tests: `*IntegrationTest.java`
 - Nightly checks: `*NightlyIntegrationTest.java`, for a check too heavy for every pull request's shards
-  (multi-gigabyte images, long runs). It skips unless the JVM has `-Dfloci.nightly=true`, which
+  (multi-gigabyte images, long runs). It skips unless the JVM has `-Dnightly.checks.enabled=true`, which
   `.github/workflows/nightly-checks.yml` sets once a day and on a pull request that adds or changes one.
   Its images go in `.github/ci/prefetch-images.sh` keyed on its own class name, which only that
   workflow's list carries
