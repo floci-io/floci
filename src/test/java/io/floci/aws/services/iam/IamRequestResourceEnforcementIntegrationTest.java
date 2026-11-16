@@ -1903,6 +1903,38 @@ class IamRequestResourceEnforcementIntegrationTest {
                         equalTo(arn));
     }
 
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags Redshift holds on the parameter group a request names, so an
+     * allow on one team's tag lets the caller read that team's group and not another's.
+     */
+    @Test
+    void aRedshiftResourceTagConditionReadsTheTagsOfTheParameterGroup() {
+        String tagged = redshiftParameterGroup("res-tag-pg-" + suffix(), "data");
+        String other = redshiftParameterGroup("res-tag-pg-" + suffix(), "web");
+
+        User user = user("res-redshift-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"redshift:DescribeClusterParameters\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeClusterParameters(user, tagged).statusCode(200);
+        refused(describeClusterParameters(user, other), "redshift:DescribeClusterParameters");
+    }
+
+    /** A Redshift parameter group of the name, tagged with the team, deleted afterwards. */
+    private String redshiftParameterGroup(String name, String team) {
+        admin("redshift").formParam("Action", "CreateClusterParameterGroup").formParam("Version", "2012-12-01")
+                .formParam("ParameterGroupName", name).formParam("ParameterGroupFamily", "redshift-1.0")
+                .formParam("Description", "d").formParam("Tags.Tag.1.Key", "team").formParam("Tags.Tag.1.Value", team)
+                .post("/").then().statusCode(200);
+        cleanup.register(() -> admin("redshift").formParam("Action", "DeleteClusterParameterGroup")
+                .formParam("Version", "2012-12-01").formParam("ParameterGroupName", name).post("/"));
+        return name;
+    }
+
+    private static ValidatableResponse describeClusterParameters(User user, String group) {
+        return user.query("redshift", "DescribeClusterParameters").formParam("Version", "2012-12-01")
+                .formParam("ParameterGroupName", group).post("/").then();
+    }
+
     /** A Redshift cluster is checked on {@code cluster:<identifier>}, before the cluster is looked up. */
     @Test
     void aRedshiftClusterIsCheckedOnItsIdentifier() {

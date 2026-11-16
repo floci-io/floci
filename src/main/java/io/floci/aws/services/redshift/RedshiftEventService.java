@@ -424,6 +424,12 @@ public class RedshiftEventService {
                         && (values == null || values.isEmpty() || values.contains(tag.getValue())));
     }
 
+    /** The tags of the subscription {@code name} in an account's Region, read in place; null for none. */
+    public Map<String, String> storedTags(String accountId, String region, String name) {
+        return AccountAwareStorageBackend.readInAccount(subscriptions, accountId, key(region, name))
+                .map(EventSubscription::getTags).orElse(null);
+    }
+
     private EventSubscription requireSubscription(String name) {
         if (blankToNull(name) == null) {
             throw new AwsException("InvalidParameterValue", "SubscriptionName is required", 400);
