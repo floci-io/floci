@@ -123,10 +123,25 @@ public class DockerDsqlBackend implements DsqlBackend {
     }
 
     private static void awaitReady(DsqlDatabases.Backend backend) throws SQLException {
-        Instant deadline = Instant.now().plus(READY_TIMEOUT);
+        awaitReady(() -> DsqlDatabases.superuser(backend), READY_TIMEOUT);
+    }
+
+    /** Opens a connection to the database {@link #awaitReady(Connector, Duration)} waits for. */
+    @FunctionalInterface
+    public interface Connector {
+        Connection open() throws SQLException;
+    }
+
+    /**
+     * Runs {@code SELECT 1} through a connection from {@code connector} every 250 ms until it
+     * succeeds or {@code timeout} has passed, as a PostgreSQL that is still starting refuses
+     * connections. Public for the tests' throwaway PostgreSQL servers, which wait the same way.
+     */
+    public static void awaitReady(Connector connector, Duration timeout) throws SQLException {
+        Instant deadline = Instant.now().plus(timeout);
         SQLException last = null;
         while (Instant.now().isBefore(deadline)) {
-            try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
+            try (Connection connection = connector.open(); Statement statement = connection.createStatement()) {
                 statement.execute("SELECT 1");
                 return;
             } catch (SQLException e) {
@@ -139,11 +154,11 @@ public class DockerDsqlBackend implements DsqlBackend {
                 }
             }
         }
-        throw new SQLException("The database did not start within " + READY_TIMEOUT.toSeconds() + " s", last);
+        throw new SQLException("The database did not start within " + timeout.toSeconds() + " s", last);
     }
 
     private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException {
-        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, DsqlEndpoint.ADMIN);
+        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, DsqlEndpoint.ADMIN, "", "", false);
         try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
             statement.execute(script);
         }
