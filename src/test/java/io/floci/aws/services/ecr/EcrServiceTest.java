@@ -552,6 +552,25 @@ class EcrServiceTest {
     }
 
     @Test
+    void deleteRepository_withoutForceRefusesWhileAnUntaggedImageRemains() throws Exception {
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(http.listTagsStrict(anyString())).thenReturn(List.of());
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        withMeta.createRepository(REPO, null, null, null, null, null, null, REGION);
+        withMeta.recordImagePush(ACCOUNT, REGION, REPO, DELETE_DIGEST, Instant.now());
+
+        AwsException ex = assertThrows(AwsException.class, () -> withMeta.deleteRepository(REPO, null, false, REGION));
+        assertEquals("RepositoryNotEmptyException", ex.getErrorCode());
+
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(null);
+        assertEquals(REPO, withMeta.deleteRepository(REPO, null, false, REGION).getRepositoryName());
+    }
+
+    @Test
     void deleteRepository_keepsSharedRegistryStorageForRemainingRepositories() {
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         service.createRepository("other", null, null, null, null, null, null, REGION);

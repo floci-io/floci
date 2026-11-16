@@ -309,9 +309,38 @@ class EcrImagePushApiDockerIntegrationTest {
         assertEquals(pushTime, retaggedPushTime);
     }
 
-    /** Last, since every class on this profile shares one registry. */
     @Test
     @Order(11)
+    void anUntaggedImageKeepsItsRepositoryFromBeingDeletedWithoutForce() {
+        String untaggedRepo = repo + "-untagged";
+        call("CreateRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(200);
+        String upload = initiate(untaggedRepo);
+        part(untaggedRepo, upload, 0, config).statusCode(200);
+        complete(untaggedRepo, upload, configDigest).statusCode(200);
+        String bare = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "%s",
+                  "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": %d, "digest": "%s"},
+                  "layers": []
+                }""".formatted(DOCKER_MANIFEST, config.length, configDigest);
+        String bareDigest = "sha256:" + Digests.sha256Hex(bare.getBytes(StandardCharsets.UTF_8));
+        call("PutImage", "{\"repositoryName\":\"" + untaggedRepo + "\",\"imageManifest\":" + Json.encode(bare) + "}")
+                .statusCode(200).body("image.imageId.imageDigest", equalTo(bareDigest));
+        String byDigest = "{\"repositoryName\":\"" + untaggedRepo + "\",\"imageIds\":"
+                + "[{\"imageDigest\":\"" + bareDigest + "\"}]}";
+
+        call("DeleteRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(400)
+                .body("__type", equalTo("RepositoryNotEmptyException"));
+        call("BatchGetImage", byDigest).statusCode(200).body("images", hasSize(1)).body("failures", hasSize(0));
+
+        call("BatchDeleteImage", byDigest).statusCode(200).body("failures", hasSize(0));
+        call("DeleteRepository", "{\"repositoryName\":\"" + untaggedRepo + "\"}").statusCode(200);
+    }
+
+    /** Last, since every class on this profile shares one registry. */
+    @Test
+    @Order(12)
     void cleanUp() {
         call("DeleteRepository", "{\"repositoryName\":\"" + repo + "\",\"force\":true}").statusCode(200);
         call("DeleteRepository", "{\"repositoryName\":\"" + immutableRepo + "\",\"force\":true}").statusCode(200);
