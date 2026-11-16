@@ -16492,6 +16492,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         requireIpv6Source(named, count);
         ensureDefaultResources(region);
+        return withResourceLock(instanceGroupLocks, ipv6LockKey(region, networkInterfaceId),
+                () -> assignIpv6AddressesLocked(region, networkInterfaceId, requested, count));
+    }
+
+    /**
+     * Stores the addresses first, which keeps them from every other interface, then gives them to the interface's
+     * firewall; a firewall that refuses them gets them back out of the store, so what is stored is what the caller
+     * is told.
+     */
+    private List<String> assignIpv6AddressesLocked(String region, String networkInterfaceId, List<String> requested,
+                                                   Integer count) {
+        boolean named = requested != null && !requested.isEmpty();
+        Ipv6Change change;
         synchronized (attachmentTopologyLock(region)) {
             synchronized (privateIpAllocationLock) {
                 Ipv6Holder holder = ipv6Holder(region, networkInterfaceId);
@@ -16505,14 +16518,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         ? claimRequestedIpv6(region, subnet, requested, held).stream()
                                 .filter(address -> !held.contains(address)).toList()
                         : allocateIpv6(region, subnet, count);
+                List<String> updated = new ArrayList<>(held);
+                updated.addAll(added);
                 if (!added.isEmpty()) {
-                    List<String> updated = new ArrayList<>(held);
-                    updated.addAll(added);
                     holder.store(updated);
                 }
-                return added;
+                change = new Ipv6Change(added, updated, held);
             }
         }
+        try {
+            publishIpv6Change(networkInterfaceId, change);
+        } catch (RuntimeException e) {
+            if (!change.changed().isEmpty()) {
+                restoreIpv6Addresses(region, networkInterfaceId, change.before());
+            }
+            throw e;
+        }
+        return change.changed();
     }
 
     /** UnassignIpv6Addresses: returns only the named addresses the interface held, which it no longer does. */
@@ -16521,19 +16543,67 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("MissingParameter", "The request must contain the parameter Ipv6Addresses", 400);
         }
         ensureDefaultResources(region);
+        return withResourceLock(instanceGroupLocks, ipv6LockKey(region, networkInterfaceId),
+                () -> unassignIpv6AddressesLocked(region, networkInterfaceId, addresses));
+    }
+
+    /** The firewall first, as a group change does: if it refuses the smaller identity, nothing is stored. */
+    private List<String> unassignIpv6AddressesLocked(String region, String networkInterfaceId,
+                                                     List<String> addresses) {
+        Ipv6Change change;
         synchronized (attachmentTopologyLock(region)) {
             synchronized (privateIpAllocationLock) {
-                Ipv6Holder holder = ipv6Holder(region, networkInterfaceId);
-                List<String> held = holder.addresses();
+                List<String> held = ipv6Holder(region, networkInterfaceId).addresses();
                 List<String> removed = addresses.stream().map(address -> canonicalIpv6(address).orElse(address))
                         .filter(held::contains).distinct().toList();
-                if (!removed.isEmpty()) {
-                    List<String> updated = new ArrayList<>(held);
-                    updated.removeAll(removed);
-                    holder.store(updated);
-                }
-                return removed;
+                List<String> updated = new ArrayList<>(held);
+                updated.removeAll(removed);
+                change = new Ipv6Change(removed, updated, held);
             }
+        }
+        publishIpv6Change(networkInterfaceId, change);
+        if (!change.changed().isEmpty()) {
+            synchronized (attachmentTopologyLock(region)) {
+                synchronized (privateIpAllocationLock) {
+                    ipv6Holder(region, networkInterfaceId).store(change.held());
+                }
+            }
+        }
+        return change.changed();
+    }
+
+    /**
+     * IPv6 changes to one interface take this lock through their firewall update, so two of them reach the firewall
+     * in the order they were stored.
+     */
+    private String ipv6LockKey(String region, String networkInterfaceId) {
+        return "ipv6::" + callerAccountId() + "::" + key(region, networkInterfaceId);
+    }
+
+    /** Puts back the addresses an interface held before a change its firewall refused; nothing if it is gone. */
+    private void restoreIpv6Addresses(String region, String networkInterfaceId, List<String> before) {
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (privateIpAllocationLock) {
+                try {
+                    ipv6Holder(region, networkInterfaceId).store(before);
+                } catch (AwsException gone) {
+                    LOG.debugv("Not restoring IPv6 addresses of {0}: {1}", networkInterfaceId, gone.getMessage());
+                }
+            }
+        }
+    }
+
+    /** What an IPv6 call changed, the addresses the interface holds after it, and those it held before. */
+    private record Ipv6Change(List<String> changed, List<String> held, List<String> before) {
+    }
+
+    /**
+     * Gives the interface's security-group firewall the addresses it holds now, outside the stores' locks as group
+     * changes reach it, so peers' rules naming an IPv6 range match it on them. Nothing when nothing changed.
+     */
+    private void publishIpv6Change(String networkInterfaceId, Ipv6Change change) {
+        if (!change.changed().isEmpty() && securityGroupEnforcementEnabled() && !config.services().ec2().mock()) {
+            containerManager.updateIpv6Addresses(networkInterfaceId, change.held());
         }
     }
 

@@ -1370,8 +1370,9 @@ public class EcsContainerManager {
                                 .stream().map(PrefixListEntry::getCidr).toList()));
             }
             firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
-                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(),
-                    namespace.transportAddress(), Set.copyOf(groupIds), groups), namespace.helperId(), prefixLists);
+                    region, eni.getVpcId(), eniId, eni.getPrivateIpAddress(), eni.getIpv6Addresses(),
+                    namespace.transportAddress(), namespace.transportIpv6Address(), Set.copyOf(groupIds), groups),
+                    namespace.helperId(), prefixLists);
             task.setNetworkInterfaceId(eniId);
             task.setPrivateIpAddress(eni.getPrivateIpAddress());
             return new PreparedNetwork(eni, namespace);

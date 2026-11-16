@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Info;
 import io.floci.aws.config.EmulatorConfig;
@@ -33,6 +34,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /** Owns the protected namespace and the Floci-only nftables table for each managed ENI. */
 @ApplicationScoped
@@ -147,12 +149,13 @@ public class SecurityGroupFirewallManager {
         String helperId = null;
         try {
             helperId = lifecycleManager.createAndStart(spec).containerId();
-            String ip = dockerClient.inspectContainerCmd(helperId).exec().getNetworkSettings()
-                    .getNetworks().values().stream().map(n -> n.getIpAddress())
-                    .filter(address -> address != null && !address.isBlank())
-                    .findFirst().orElseThrow(() -> new IllegalStateException("Firewall helper has no Docker IP"));
+            Map<String, ContainerNetwork> networks = dockerClient.inspectContainerCmd(helperId).exec()
+                    .getNetworkSettings().getNetworks();
+            String ip = firstAddress(networks, ContainerNetwork::getIpAddress)
+                    .orElseThrow(() -> new IllegalStateException("Firewall helper has no Docker IP"));
             apply(helperId, SecurityGroupNftCompiler.initialRuleset());
-            return new Namespace(helperId, ip);
+            return new Namespace(helperId, ip, firstAddress(networks, ContainerNetwork::getGlobalIPv6Address)
+                    .orElse(null));
         } catch (Exception e) {
             if (helperId != null) {
                 lifecycleManager.removeIfExists(helperId);
@@ -223,11 +226,29 @@ public class SecurityGroupFirewallManager {
             quarantine(current.helperId());
             throw new IllegalArgumentException("Protected endpoint needs valid security groups");
         }
-        SecurityGroupNftCompiler.Endpoint updated = new SecurityGroupNftCompiler.Endpoint(
-                identity.accountId(), identity.region(), identity.vpcId(), identity.eniId(),
-                identity.logicalAddress(), identity.transportAddress(), Set.copyOf(groupIds), attached);
+        SecurityGroupNftCompiler.Endpoint updated = identity.withPolicy(Set.copyOf(groupIds), attached);
         endpoints.put(eniId, new ProtectedEndpoint(updated, current.helperId(), Map.copyOf(prefixLists)));
         reconcileAll();
+    }
+
+    /**
+     * Gives a protected ENI the IPv6 addresses it holds now, after AssignIpv6Addresses or UnassignIpv6Addresses,
+     * so peers' rules naming an IPv6 range match it on those addresses. Does nothing for an ENI not protected.
+     */
+    public synchronized void updateIpv6Addresses(String eniId, List<String> addresses) {
+        ProtectedEndpoint current = endpoints.get(eniId);
+        if (current == null) {
+            return;
+        }
+        endpoints.put(eniId, new ProtectedEndpoint(current.endpoint().withIpv6Addresses(addresses),
+                current.helperId(), current.prefixLists()));
+        try {
+            reconcileAll();
+        } catch (RuntimeException e) {
+            // The ENI keeps the addresses the caller is told it still holds.
+            endpoints.computeIfPresent(eniId, (id, updated) -> current);
+            throw e;
+        }
     }
 
     public synchronized void reconcileAll() {
@@ -273,9 +294,7 @@ public class SecurityGroupFirewallManager {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
                 throw new IllegalStateException("A protected endpoint's security group disappeared");
             }
-            SecurityGroupNftCompiler.Endpoint updated = new SecurityGroupNftCompiler.Endpoint(
-                    identity.accountId(), identity.region(), identity.vpcId(), identity.eniId(),
-                    identity.logicalAddress(), identity.transportAddress(), identity.groupIds(), attached);
+            SecurityGroupNftCompiler.Endpoint updated = identity.withPolicy(identity.groupIds(), attached);
             endpoints.put(entry.getKey(), new ProtectedEndpoint(updated, current.helperId(),
                     Map.copyOf(prefixLists)));
         }
@@ -373,7 +392,19 @@ public class SecurityGroupFirewallManager {
         }
     }
 
-    public record Namespace(String helperId, String transportAddress) {}
+    /** The address on any attached Docker network that {@code pick} gives, the first one set. */
+    static Optional<String> firstAddress(Map<String, ContainerNetwork> networks,
+                                         Function<ContainerNetwork, String> pick) {
+        return networks == null ? Optional.empty() : networks.values().stream().map(pick)
+                .filter(address -> address != null && !address.isBlank()).findFirst();
+    }
+
+    /** {@code transportIpv6Address} is null when the helper's Docker network has no IPv6. */
+    public record Namespace(String helperId, String transportAddress, String transportIpv6Address) {
+        public Namespace(String helperId, String transportAddress) {
+            this(helperId, transportAddress, null);
+        }
+    }
     private record ProtectedEndpoint(SecurityGroupNftCompiler.Endpoint endpoint, String helperId,
                                      Map<String, List<String>> prefixLists) {}
 }
