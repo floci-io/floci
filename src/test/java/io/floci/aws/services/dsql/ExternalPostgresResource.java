@@ -32,17 +32,25 @@ import java.util.concurrent.TimeUnit;
 public final class ExternalPostgresResource implements QuarkusTestResourceLifecycleManager {
 
     public static final String PASSWORD = "floci-test";
+    /** A resource argument: the password Floci is configured with, when it should not be the server's. */
+    public static final String FLOCI_PASSWORD = "flociPassword";
     private static final String IMAGE = "postgres:16-alpine";
 
     private DockerClient dockerClient;
     private String containerId;
+    private String flociPassword = PASSWORD;
+
+    @Override
+    public void init(Map<String, String> initArgs) {
+        flociPassword = initArgs.getOrDefault(FLOCI_PASSWORD, PASSWORD);
+    }
 
     @Override
     public Map<String, String> start() {
         Map<String, String> overrides = new HashMap<>(new DsqlDatabasesProfile().getConfigOverrides());
         overrides.put("floci.services.dsql.backend", "external");
         overrides.put("floci.services.dsql.external.host", "127.0.0.1");
-        overrides.put("floci.services.dsql.external.password", PASSWORD);
+        overrides.put("floci.services.dsql.external.password", flociPassword);
         int port;
         try {
             port = startServer();

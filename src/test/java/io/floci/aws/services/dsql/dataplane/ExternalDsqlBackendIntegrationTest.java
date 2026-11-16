@@ -229,6 +229,75 @@ class ExternalDsqlBackendIntegrationTest {
     }
 
     @Test
+    void deletionFinishesFromPersistedListWhenDatabaseIsGone() throws Exception {
+        String id = "ghijklmnopqrstuvwxyzabcdef";
+        String admin = "d" + id + "_admin";
+        ExternalDsqlBackend backend = new ExternalDsqlBackend(config());
+        DsqlCluster cluster = new DsqlCluster();
+        cluster.setIdentifier(id);
+        DsqlDatabases.Backend started = backend.start(cluster);
+        try (Connection login = DriverManager.getConnection(started.jdbcUrl(), admin,
+                started.credentials().passwordFor(admin)); Statement statement = login.createStatement()) {
+            statement.execute("CALL sys.run_role_ddl($$CREATE ROLE d" + id + "_app$$)");
+        }
+        List<String> roles = backend.rolesToDrop(cluster);
+        // What DsqlDataPlane persists with the cluster before it drops anything.
+        cluster.setPendingBackendRoles(roles);
+        try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+            // A deletion interrupted after its DROP DATABASE.
+            statement.execute("DROP DATABASE dsql_" + id + " WITH (FORCE)");
+        }
+        assertEquals("3", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
+                + "%' OR rolname = 'dsqlowner_" + id + "'"));
+
+        assertEquals(roles, backend.rolesToDrop(cluster), "with the database gone, the persisted list");
+        backend.stop(cluster, true);
+
+        assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname LIKE 'd" + id
+                + "%' OR rolname = 'dsqlowner_" + id + "'"), "the role created in the cluster is dropped too");
+    }
+
+    @Test
+    void failedBootstrapCleansUpWhatItCreated() throws Exception {
+        String id = "qrstuvwxyzabcdefghijklmnop";
+        String database = "dsql_" + id;
+        try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+            statement.execute("CREATE ROLE someone_else NOLOGIN");
+            statement.execute("CREATE DATABASE " + database + " OWNER someone_else");
+        }
+        try {
+            try (Connection existing = connect(database); Statement statement = existing.createStatement()) {
+                statement.execute("CREATE SCHEMA sys AUTHORIZATION someone_else");
+                statement.execute("CREATE TABLE sys.backend_roles (unexpected int)");
+                statement.execute("ALTER TABLE sys.backend_roles OWNER TO someone_else");
+            }
+            DsqlCluster cluster = new DsqlCluster();
+            cluster.setIdentifier(id);
+
+            boolean failed = false;
+            try {
+                new ExternalDsqlBackend(config()).start(cluster);
+            } catch (SQLException e) {
+                failed = true;
+            }
+
+            assertTrue(failed, "the bootstrap fails on a sys it does not own");
+            assertEquals("someone_else", single("postgres", "SELECT datdba::regrole::text FROM pg_database"
+                    + " WHERE datname = '" + database + "'"), "the database is left as it was");
+            assertEquals("someone_else", single(database, "SELECT nspowner::regrole::text FROM pg_namespace"
+                    + " WHERE nspname = 'sys'"));
+            assertEquals("0", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname IN ('d" + id
+                    + "_admin', 'dsqlowner_" + id + "')"), "the admin and owner this attempt created are dropped");
+            assertEquals("1", single("postgres", "SELECT count(*)::text FROM pg_roles WHERE rolname = 'someone_else'"));
+        } finally {
+            try (Connection server = connect("postgres"); Statement statement = server.createStatement()) {
+                statement.execute("DROP DATABASE IF EXISTS " + database + " WITH (FORCE)");
+                statement.execute("DROP ROLE IF EXISTS someone_else");
+            }
+        }
+    }
+
+    @Test
     void aLoginStillRecordsItsSessionWhenAnotherPurgesTheSameEndedOne() throws Exception {
         String id = "stuvwxyzabcdefghijklmnopqr";
         String database = "dsql_" + id;
