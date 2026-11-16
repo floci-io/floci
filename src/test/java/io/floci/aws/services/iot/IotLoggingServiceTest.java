@@ -88,6 +88,44 @@ class IotLoggingServiceTest {
         assertEquals(new IotV2LoggingOptions(OTHER_ROLE_ARN, "ERROR", false), service.getV2LoggingOptions(REGION));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"DEBUG", "INFO", "ERROR", "WARN", "DISABLED"})
+    void acceptsEveryLogLevel(String level) throws Exception {
+        set("""
+            {"roleArn": "%s", "defaultLogLevel": "%s"}
+            """.formatted(ROLE_ARN, level), REGION);
+
+        assertEquals(level, service.getV2LoggingOptions(REGION).defaultLogLevel());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TRACE", "info", ""})
+    void rejectsAnUnknownLogLevelAndKeepsTheStoredOptions(String level) throws Exception {
+        set("""
+            {"roleArn": "%s", "defaultLogLevel": "INFO"}
+            """.formatted(ROLE_ARN), REGION);
+
+        assertEquals("InvalidRequestException", failure("""
+            {"defaultLogLevel": "%s", "disableAllLogs": true}
+            """.formatted(level)));
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", false), service.getV2LoggingOptions(REGION));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{\"roleArn\": 42}",
+        "{\"defaultLogLevel\": []}",
+        "{\"disableAllLogs\": \"true\"}"
+    })
+    void rejectsAMemberOfTheWrongTypeAndKeepsTheStoredOptions(String body) throws Exception {
+        set("""
+            {"roleArn": "%s", "defaultLogLevel": "INFO"}
+            """.formatted(ROLE_ARN), REGION);
+
+        assertEquals("SerializationException", failure(body));
+        assertEquals(new IotV2LoggingOptions(ROLE_ARN, "INFO", false), service.getV2LoggingOptions(REGION));
+    }
+
     @Test
     void eachRegionKeepsItsOwnOptions() throws Exception {
         set("""

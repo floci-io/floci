@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.aMapWithSize;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -79,6 +80,38 @@ class IotLoggingIntegrationTest {
             .get("/v2LoggingOptions")
         .then()
             .statusCode(404);
+    }
+
+    @Test
+    void anUnknownLogLevelIsRejected() {
+        given()
+            .header("Authorization", auth("111100000107"))
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "arn:aws:iam::111100000107:role/iot-logging", "defaultLogLevel": "TRACE"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("InvalidRequestException"))
+            .body("message", containsString("defaultLogLevel"));
+    }
+
+    @Test
+    void aMemberOfTheWrongTypeIsASerializationError() {
+        given()
+            .header("Authorization", auth("111100000108"))
+            .contentType("application/json")
+            .body("""
+                {"roleArn": "arn:aws:iam::111100000108:role/iot-logging", "defaultLogLevel": "INFO",
+                 "disableAllLogs": "true"}
+                """)
+        .when()
+            .post("/v2LoggingOptions")
+        .then()
+            .statusCode(400)
+            .header("x-amzn-ErrorType", equalTo("SerializationException"));
     }
 
     @Test

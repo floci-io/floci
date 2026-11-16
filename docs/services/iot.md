@@ -181,6 +181,7 @@ Status: control plane only.
 - There is one configuration per account and region. `GetV2LoggingOptions` before the first `SetV2LoggingOptions` fails with `NotConfiguredException` (404).
 - The first `SetV2LoggingOptions` must carry `roleArn` and `defaultLogLevel`, or it fails with `InvalidRequestException`; `disableAllLogs` defaults to `false`.
 - A later `SetV2LoggingOptions` changes only the options it carries and keeps the others.
+- A `defaultLogLevel` other than `DEBUG`, `INFO`, `ERROR`, `WARN` or `DISABLED` fails with `InvalidRequestException`, and a member of the wrong JSON type with `SerializationException`; neither changes the stored options.
 - The options are stored only: Floci writes no IoT logs to CloudWatch Logs.
 
 ## IoT Data API {#iot-data}
