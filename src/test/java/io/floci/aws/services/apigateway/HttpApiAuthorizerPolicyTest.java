@@ -32,6 +32,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -116,6 +117,38 @@ class HttpApiAuthorizerPolicyTest {
                 + "{\"Effect\":\"Deny\",\"Action\":\"*\",\"Resource\":\"*\","
                 + "\"Condition\":{\"IpAddress\":{\"aws:SourceIp\":\"" + sourceIp + "\"}}}]";
         assertPolicy("2.0", statements, 403);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "1.0, 203.0.113.42, /requestContext/identity/sourceIp",
+            "1.0, 2001:db8::42, /requestContext/identity/sourceIp",
+            "2.0, 203.0.113.42, /requestContext/http/sourceIp",
+            "2.0, 2001:db8::42, /requestContext/http/sourceIp"
+    })
+    void authorizerAndProxyEventsCarryTransportAddress(String version, String sourceIp, String authorizerField) {
+        when(remoteAddress.hostAddress()).thenReturn(sourceIp);
+        when(headers.getHeaderString("X-Forwarded-For")).thenReturn("198.51.100.42");
+        AtomicReference<JsonNode> authorizerEvent = new AtomicReference<>();
+        AtomicReference<JsonNode> backendEvent = new AtomicReference<>();
+        when(lambda.invokeTarget(eq("us-east-1"), eq("arn:aws:lambda:us-east-1:000000000000:function:" + "authorizer"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    authorizerEvent.set(mapper.readTree((byte[]) invocation.getArgument(2)));
+                    return result("{\"principalId\":\"user\",\"policyDocument\":{\"Version\":\"2012-10-17\","
+                            + "\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}}");
+                });
+        when(lambda.invokeTarget(eq("us-east-1"), eq("arn:aws:lambda:us-east-1:000000000000:function:" + "backend"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    backendEvent.set(mapper.readTree((byte[]) invocation.getArgument(2)));
+                    return result("{\"statusCode\":200,\"body\":\"allowed\"}");
+                });
+
+        try (Response response = controller(version, false).handleGet(headers, uri, "api", "test", "items")) {
+            assertEquals(200, response.getStatus(), "payload version " + version);
+        }
+
+        assertEquals(sourceIp, authorizerEvent.get().at(authorizerField).asText());
+        assertEquals(sourceIp, backendEvent.get().at("/requestContext/http/sourceIp").asText());
     }
 
     @ParameterizedTest

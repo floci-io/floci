@@ -867,6 +867,10 @@ query names are case-sensitive. No configured sources produces an empty array
 or string. A missing or empty configured value returns `401` without invoking
 Lambda in either format. Repeated request values use each event's delivered
 representation: last value in format `1.0`, comma-joined values in format `2.0`.
+The authorizer event's source IP (`requestContext.http.sourceIp` in format `2.0`,
+`requestContext.identity.sourceIp` in format `1.0`) and the Lambda proxy event's
+`requestContext.http.sourceIp` are the address of the TCP connection to Floci, as in
+`$context.identity.sourceIp`; a client's `X-Forwarded-For` header does not change them.
 
 HTTP API `HTTP_PROXY` integrations can map values from a successful Lambda
 authorizer's context into request headers, query strings, and paths. For a returned
