@@ -750,7 +750,8 @@ class SnsCfnProvisionerTest {
         provisioner.provision(existingSubscription(), props("""
                 {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
                 """), subscriptionUpdate(props("""
-                {"FilterPolicy":{"kind":["created"]},"RawMessageDelivery":true,
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e",
+                 "FilterPolicy":{"kind":["created"]},"RawMessageDelivery":true,
                  "FilterPolicyScope":"MessageBody","RedrivePolicy":{"deadLetterTargetArn":"arn:dlq"}}
                 """)));
 
@@ -769,7 +770,9 @@ class SnsCfnProvisionerTest {
 
         provisioner.provision(existingSubscription(), props("""
                 {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
-                """), subscriptionUpdate(props("{}")));
+                """), subscriptionUpdate(props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """)));
 
         verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
         verify(sns, never()).subscribe(anyString(), anyString(), anyString(), anyString(), anyMap());
@@ -785,7 +788,9 @@ class SnsCfnProvisionerTest {
 
         provisioner.provision(resource, props("""
                 {"TopicArn":"t","Protocol":"sqs","Endpoint":"replacement","RawMessageDelivery":true}
-                """), subscriptionUpdate(null));
+                """), subscriptionUpdate(props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """)));
 
         assertEquals("arn:replacement", resource.getPhysicalId());
         verify(sns).subscribe("t", "sqs", "replacement", REGION, Map.of("RawMessageDelivery", "true"));
@@ -819,7 +824,8 @@ class SnsCfnProvisionerTest {
         AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource, props("""
                 {"TopicArn":"t","Protocol":"firehose","Endpoint":"e","RawMessageDelivery":true}
                 """), subscriptionUpdate(props("""
-                {"SubscriptionRoleArn":"arn:aws:iam::000000000000:role/previous"}
+                {"TopicArn":"t","Protocol":"firehose","Endpoint":"e",
+                 "SubscriptionRoleArn":"arn:aws:iam::000000000000:role/previous"}
                 """))));
 
         assertEquals("InvalidParameter", error.getErrorCode());
