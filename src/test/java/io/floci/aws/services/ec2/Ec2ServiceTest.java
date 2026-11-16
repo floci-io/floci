@@ -163,6 +163,49 @@ import static org.mockito.Mockito.withSettings;
 class Ec2ServiceTest {
 
     @ParameterizedTest
+    @CsvSource({"false, us-east-1", "true, us-east-1", "false, eu-west-1", "true, eu-west-1"})
+    void ipv6AllocationWaitsForThePreviousVpcPublication(boolean associate, String secondRegion) throws Exception {
+        AccountAwareStorageBackend<Vpc> vpcStore = spy(AccountAwareStorageBackend.<Vpc>inMemory("000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-vpcs.json", vpcStore)));
+        Vpc existing = service.createVpc(secondRegion, "10.112.0.0/16", false);
+        CountDownLatch publishing = new CountDownLatch(1);
+        CountDownLatch resume = new CountDownLatch(1);
+        doAnswer(call -> {
+            Vpc publishingVpc = call.getArgument(1);
+            if ("10.111.0.0/16".equals(publishingVpc.getCidrBlock())) {
+                publishing.countDown();
+                assertTrue(resume.await(15, TimeUnit.SECONDS));
+            }
+            return call.callRealMethod();
+        }).when(vpcStore).put(anyString(), any(Vpc.class));
+        AtomicReference<Thread> allocating = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<Vpc> first = workers.submit(() -> service.createVpc("us-east-1", "10.111.0.0/16", false, true));
+            assertTrue(publishing.await(5, TimeUnit.SECONDS));
+            Future<String> second = workers.submit(() -> {
+                allocating.set(Thread.currentThread());
+                return associate
+                        ? service.associateAmazonProvidedIpv6CidrBlock(secondRegion, existing.getVpcId()).getIpv6CidrBlock()
+                        : service.createVpc(secondRegion, "10.113.0.0/16", false, true)
+                                .getIpv6CidrBlockAssociationSet().getFirst().getIpv6CidrBlock();
+            });
+            awaitBlockedOrDone(allocating, second);
+            assertFalse(second.isDone(), "A new allocation must wait until the previous block is visible in storage");
+            resume.countDown();
+            String firstBlock = first.get(5, TimeUnit.SECONDS).getIpv6CidrBlockAssociationSet().getFirst()
+                    .getIpv6CidrBlock();
+            assertNotEquals(firstBlock, second.get(5, TimeUnit.SECONDS));
+        } finally {
+            resume.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource({
             "false, aws:autoscaling:groupName", "true, aws:autoscaling:groupName",
             "false, AWS:custom", "true, AWS:custom",
