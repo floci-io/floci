@@ -455,6 +455,9 @@ public class DsqlEndpoint {
              PreparedStatement record = connection.prepareStatement("INSERT INTO sys.session_identity"
                      + " (pid, iam_session_user, session_id) VALUES (?, ?, ?) ON CONFLICT (pid) DO UPDATE"
                      + " SET iam_session_user = EXCLUDED.iam_session_user, session_id = EXCLUDED.session_id")) {
+            // Not the database's repeatable read, where two logins purging the same ended session
+            // fail one another with a serialization error.
+            connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
             purge.executeUpdate();
             record.setInt(1, pid);
             record.setString(2, principal);
