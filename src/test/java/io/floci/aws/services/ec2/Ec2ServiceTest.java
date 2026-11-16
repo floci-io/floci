@@ -113,7 +113,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
-import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -2881,7 +2880,7 @@ class Ec2ServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> privateNatGateway(fixture.service(), fixture.subnetId(), "31"));
         assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
-        verify(fixture.vpcNetworks()).releasePrivateIp("us-east-1", fixture.subnetId(), "10.60.0.5");
+        verify(fixture.vpcNetworks()).releasePrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.60.0.5");
         assertTrue(fixture.service().describeNatGateways("us-east-1", List.of(), Map.of()).isEmpty());
     }
 
@@ -2895,7 +2894,7 @@ class Ec2ServiceTest {
         AwsException e = assertThrows(AwsException.class, () -> fixture.service().updateNatGatewaySecondaryAddresses(
                 "us-east-1", nat.getNatGatewayId(), List.of(), List.of(), "31"));
         assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
-        verify(fixture.vpcNetworks()).releasePrivateIp("us-east-1", fixture.subnetId(), "10.60.0.7");
+        verify(fixture.vpcNetworks()).releasePrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.60.0.7");
         assertEquals(List.of("10.60.0.6"), natGatewayPrivateIps(fixture.service().describeNatGateways("us-east-1",
                 List.of(nat.getNatGatewayId()), Map.of()).getFirst()), "the gateway keeps only its primary address");
     }
@@ -3001,7 +3000,7 @@ class Ec2ServiceTest {
         Ec2Service service = mockedVpcNetworkService(stores, vpcNetworks);
         String subnetId = privateSubnet(service, "us-east-1", cidr);
         Iterator<String> next = List.of(picked).iterator();
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+        when(vpcNetworks.allocatePrivateIp("000000000000", "us-east-1", subnetId))
                 .thenAnswer(invocation -> next.hasNext() ? Optional.of(next.next()) : Optional.empty());
         return new MockedNetworkFixture(vpcNetworks, service, subnetId, cidr);
     }
@@ -3011,14 +3010,14 @@ class Ec2ServiceTest {
 
         /** Has the network report the whole subnet as its Docker-backed range, where addresses are leased. */
         MockedNetworkFixture withDockerBackedRange() {
-            when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of(cidr));
+            when(vpcNetworks.effectiveSubnetCidr("000000000000", "us-east-1", subnetId)).thenReturn(Optional.of(cidr));
             return this;
         }
 
         /** Every address whose lease was given back to the VPC network, in the order it was. */
         List<String> released() {
             ArgumentCaptor<String> addresses = ArgumentCaptor.forClass(String.class);
-            verify(vpcNetworks, atLeast(0)).releasePrivateIp(eq("us-east-1"), eq(subnetId), addresses.capture());
+            verify(vpcNetworks, atLeast(0)).releasePrivateIp(eq("000000000000"), eq("us-east-1"), eq(subnetId), addresses.capture());
             return addresses.getAllValues();
         }
     }
@@ -5078,14 +5077,14 @@ class Ec2ServiceTest {
     @Test
     void aRequestedPrivateIpIsLeasedOnTheVpcNetworkInsteadOfTheNextFreeAddress() {
         MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24").withDockerBackedRange();
-        when(fixture.vpcNetworks().claimPrivateIp("us-east-1", fixture.subnetId(), "10.50.1.50")).thenReturn(true);
+        when(fixture.vpcNetworks().claimPrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.50.1.50")).thenReturn(true);
 
         assertEquals("10.50.1.50", launchWithPrivateIp(fixture.service(), fixture.subnetId(), 1, "10.50.1.50")
                 .getInstances().getFirst().getPrivateIpAddress());
 
-        verify(fixture.vpcNetworks()).claimPrivateIp("us-east-1", fixture.subnetId(), "10.50.1.50");
-        verify(fixture.vpcNetworks(), never()).reservePrivateIp(anyString(), anyString(), anyString());
-        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString());
+        verify(fixture.vpcNetworks()).claimPrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.50.1.50");
+        verify(fixture.vpcNetworks(), never()).reservePrivateIp(anyString(), anyString(), anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString(), anyString());
     }
 
     @Test
@@ -5099,9 +5098,7 @@ class Ec2ServiceTest {
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
-        String stale = fixture.vpcNetworks().allocatePrivateIp("us-east-1", subnetId).orElseThrow();
-
-        context.setAccountId("000000000000");
+        String stale = fixture.vpcNetworks().allocatePrivateIp("111122223333", "us-east-1", subnetId).orElseThrow();
 
         assertEquals(stale, launchWithPrivateIp(service, subnetId, 1, stale)
                 .getInstances().getFirst().getPrivateIpAddress());
@@ -5109,10 +5106,10 @@ class Ec2ServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"instance", "network-interface", "nat-gateway"})
-    void aRequestedPrivateIpAnotherAccountHoldsOnASharedVpcNetworkIsInUse(String holder) {
-        // Default VPC and subnet ids are the same in every account, so their Docker network and
-        // lease table are shared while the stored-resource check sees only the caller's account.
-        // Claiming the address anyway would give the other account's lease away.
+    void aRequestedPrivateIpAnotherAccountHoldsOnItsOwnDefaultVpcIsFreeInThisOne(String holder) {
+        // Default VPC and subnet ids are the same in every account, but each account's VPC has its own
+        // Docker network and lease table, as each account's VPC is its own on AWS: what the other
+        // account holds on its network does not hold this account's address.
         RequestContext context = new RequestContext();
         Ec2Service service = realVpcNetworkService(context);
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
@@ -5125,21 +5122,17 @@ class Ec2ServiceTest {
             default -> service.createNatGateway("us-east-1", subnetId, null, "private", List.of())
                     .getNatGatewayAddresses().getFirst().getPrivateIp();
         };
-        assertEquals("172.31.0.10", held, "the shared network's first address, leased by the other account");
+        assertEquals("172.31.0.10", held, "the first address of the other account's network");
 
         context.setAccountId("000000000000");
-        AwsException error = assertThrows(AwsException.class,
-                () -> launchWithPrivateIp(service, subnetId, 1, held));
 
-        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
-        assertEquals("Address " + held + " is in use.", error.getMessage());
-        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+        assertEquals(held, launchWithPrivateIp(service, subnetId, 1, held)
+                .getInstances().getFirst().getPrivateIpAddress());
     }
 
     @Test
-    void anAddressAnotherAccountsInterfaceWasCreatedWithIsInUseOnASharedVpcNetwork() {
-        // CreateNetworkInterface with its own address takes no lease, so only the stored
-        // interface says the shared network's address is held.
+    void anAddressAnotherAccountsInterfaceWasCreatedWithIsFreeInThisAccountsDefaultVpc() {
+        // The other account's interface holds the address on that account's network alone.
         RequestContext context = new RequestContext();
         Ec2Service service = realVpcNetworkService(context);
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
@@ -5149,17 +5142,15 @@ class Ec2ServiceTest {
                 List.of(), List.of(), List.of());
 
         context.setAccountId("000000000000");
-        AwsException error = assertThrows(AwsException.class,
-                () -> launchWithPrivateIp(service, subnetId, 1, "172.31.0.50"));
 
-        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
-        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+        assertEquals("172.31.0.50", launchWithPrivateIp(service, subnetId, 1, "172.31.0.50")
+                .getInstances().getFirst().getPrivateIpAddress());
     }
 
     @Test
-    void anotherAccountsNatGatewayStillHoldsItsAddressAfterARestartEmptiesTheLeaseTable() {
-        // A restart re-leases only instances' addresses, so a persisted NAT gateway's address is
-        // held by the stored gateway alone.
+    void anotherAccountsNatGatewayDoesNotHoldThisAccountsAddressAfterARestart() {
+        // The other account's persisted NAT gateway holds its address in that account's default VPC,
+        // whose network is its own.
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
         NatGatewayAddress address = new NatGatewayAddress();
         address.setPrivateIp("172.31.0.10");
@@ -5174,11 +5165,8 @@ class Ec2ServiceTest {
         context.setAccountId("000000000000");
         Ec2Service service = realVpcNetworkService(context, Map.of("ec2-nat-gateways.json", natGatewayStore));
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> launchWithPrivateIp(service, subnetId, 1, "172.31.0.10"));
-
-        assertEquals("InvalidIPAddress.InUse", error.getErrorCode());
-        assertTrue(instancesIn(service, subnetId).isEmpty(), "a rejected launch must store nothing");
+        assertEquals("172.31.0.10", launchWithPrivateIp(service, subnetId, 1, "172.31.0.10")
+                .getInstances().getFirst().getPrivateIpAddress());
     }
 
     @Test
@@ -5190,7 +5178,7 @@ class Ec2ServiceTest {
         instanceStore.putForAccount("111122223333", "us-east-1::i-other",
                 defaultSubnetInstance("i-other", "172.31.0.50", InstanceState.running()));
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.240.0.0/20"));
+        when(vpcNetworks.effectiveSubnetCidr("000000000000", "us-east-1", subnetId)).thenReturn(Optional.of("10.240.0.0/20"));
         Ec2Service service = mockedVpcNetworkService(Map.of("ec2-instances.json", instanceStore), vpcNetworks);
 
         assertEquals("172.31.0.50", launchWithPrivateIp(service, subnetId, 1, "172.31.0.50")
@@ -5232,7 +5220,7 @@ class Ec2ServiceTest {
                         null, null, true, null, null, null, false, "10.50.1.50"));
 
         assertEquals("DryRunOperation", dryRun.getErrorCode());
-        verify(fixture.vpcNetworks(), never()).claimPrivateIp(anyString(), anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).claimPrivateIp(anyString(), anyString(), anyString(), anyString());
         assertTrue(instancesIn(fixture.service(), fixture.subnetId()).isEmpty());
     }
 
@@ -5258,16 +5246,16 @@ class Ec2ServiceTest {
 
         assertEquals("10.50.1.10", fixture.service().createNatGateway("us-east-1", fixture.subnetId(), null,
                 "private", "10.50.1.10", List.of()).getNatGatewayAddresses().getFirst().getPrivateIp());
-        verify(fixture.vpcNetworks(), never()).claimPrivateIp(anyString(), anyString(), anyString());
-        verify(fixture.vpcNetworks(), never()).reservePrivateIp(anyString(), anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).claimPrivateIp(anyString(), anyString(), anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).reservePrivateIp(anyString(), anyString(), anyString(), anyString());
 
         assertEquals(List.of("10.50.1.11"), launchAddresses(fixture.service(), fixture.subnetId(), 1));
     }
 
     @Test
-    void anAddressAnotherAccountsInterfaceWasCreatedWithIsNotHandedOutOnASharedVpcNetwork() {
-        // Default subnet ids are the same in every account, so their Docker network is shared, and
-        // only the other account's stored interface says its address is held.
+    void anAddressAnotherAccountsInterfaceWasCreatedWithIsHandedOutInThisAccountsDefaultVpc() {
+        // The other account's interface holds its address on that account's network, so this
+        // account's own default VPC network hands the same address out.
         RequestContext context = new RequestContext();
         Ec2Service service = realVpcNetworkService(context);
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
@@ -5278,7 +5266,7 @@ class Ec2ServiceTest {
 
         context.setAccountId("000000000000");
 
-        assertEquals(List.of("172.31.0.11"), launchAddresses(service, subnetId, 1));
+        assertEquals(List.of("172.31.0.10"), launchAddresses(service, subnetId, 1));
     }
 
     @Test
@@ -5349,7 +5337,7 @@ class Ec2ServiceTest {
         assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> fixture.service()
                 .createNetworkInterface("us-east-1", fixture.subnetId(), "clash", null, List.of("10.50.1.70"),
                         List.of(), List.of())).getErrorCode());
-        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString(), anyString());
     }
 
     @Test
@@ -5390,9 +5378,8 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void anAddressAnotherAccountHoldsIsNotHandedOutWhenTheWalkRunsTheNetworkDry() {
-        // The walk skips the only address the shared network still offers, which another account's
-        // interface holds, and the synthesised fallback's own scan sees only the caller's account.
+    void anAddressAnotherAccountHoldsIsHandedOutOnThisAccountsOwnNetwork() {
+        // The other account's interface holds the address on that account's network, not on this one's.
         RequestContext context = new RequestContext();
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         Ec2Service service = mockedVpcNetworkService(context, Map.of(), vpcNetworks);
@@ -5401,12 +5388,12 @@ class Ec2ServiceTest {
         service.describeSubnets("us-east-1", List.of(), Map.of());
         service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
                 List.of(), List.of(), List.of());
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+        when(vpcNetworks.allocatePrivateIp("000000000000", "us-east-1", subnetId))
                 .thenReturn(Optional.of("172.31.0.10"), Optional.empty());
 
         context.setAccountId("000000000000");
 
-        assertEquals(List.of("172.31.0.11"), launchAddresses(service, subnetId, 1));
+        assertEquals(List.of("172.31.0.10"), launchAddresses(service, subnetId, 1));
     }
 
     @Test
@@ -5418,11 +5405,11 @@ class Ec2ServiceTest {
         service.describeSubnets("us-east-1", List.of(), Map.of());
         service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
                 List.of(), List.of(), List.of());
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+        when(vpcNetworks.allocatePrivateIp("000000000000", "us-east-1", subnetId))
                 .thenReturn(Optional.of("172.31.0.10"), Optional.of("172.31.0.11"));
 
-        assertEquals(Optional.of("172.31.0.11"), service.allocateVpcPrivateIp("us-east-1", subnetId));
-        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "172.31.0.10");
+        assertEquals(Optional.of("172.31.0.11"), service.allocateVpcPrivateIp("000000000000", "us-east-1", subnetId));
+        verify(vpcNetworks).releasePrivateIp("000000000000", "us-east-1", subnetId, "172.31.0.10");
     }
 
     @Test
@@ -5431,9 +5418,9 @@ class Ec2ServiceTest {
         Ec2Service service = mockedVpcNetworkService(new RequestContext(), Map.of(), vpcNetworks);
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
         service.describeSubnets("us-east-1", List.of(), Map.of());
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+        when(vpcNetworks.allocatePrivateIp("000000000000", "us-east-1", subnetId))
                 .thenReturn(Optional.of("172.31.0.10"), Optional.empty());
-        service.allocateVpcPrivateIp("us-east-1", subnetId);
+        service.allocateVpcPrivateIp("000000000000", "us-east-1", subnetId);
 
         AwsException inUse = assertThrows(AwsException.class, () -> service.createNetworkInterface("us-east-1",
                 subnetId, "named", "172.31.0.10", List.of(), List.of(), List.of()));
@@ -5442,7 +5429,7 @@ class Ec2ServiceTest {
         assertEquals("172.31.0.11", service.createNetworkInterface("us-east-1", subnetId, "automatic", null,
                 List.of(), List.of(), List.of()).getPrivateIpAddress());
 
-        service.releaseVpcPrivateIp("us-east-1", subnetId, "172.31.0.10");
+        service.releaseVpcPrivateIp("000000000000", "us-east-1", subnetId, "172.31.0.10");
         assertEquals("172.31.0.10", service.createNetworkInterface("us-east-1", subnetId, "named", "172.31.0.10",
                 List.of(), List.of(), List.of()).getPrivateIpAddress());
     }
@@ -5458,7 +5445,7 @@ class Ec2ServiceTest {
         MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/28", leased.toArray(String[]::new));
         Ec2Service service = fixture.service();
         for (int i = 0; i < leased.size(); i++) {
-            service.allocateVpcPrivateIp("us-east-1", fixture.subnetId());
+            service.allocateVpcPrivateIp("000000000000", "us-east-1", fixture.subnetId());
         }
         String vpcId = service.describeSubnets("us-east-1", List.of(fixture.subnetId()), Map.of())
                 .getFirst().getVpcId();
@@ -5480,7 +5467,7 @@ class Ec2ServiceTest {
         // address that launch's instance holds.
         MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.50", "10.50.1.51")
                 .withDockerBackedRange();
-        when(fixture.vpcNetworks().claimPrivateIp("us-east-1", fixture.subnetId(), "10.50.1.50")).thenReturn(false);
+        when(fixture.vpcNetworks().claimPrivateIp("000000000000", "us-east-1", fixture.subnetId(), "10.50.1.50")).thenReturn(false);
         launchWithPrivateIp(fixture.service(), fixture.subnetId(), 1, "10.50.1.50");
 
         assertEquals(List.of("10.50.1.51"), launchAddresses(fixture.service(), fixture.subnetId(), 1));
@@ -6840,8 +6827,8 @@ class Ec2ServiceTest {
 
         service.restoreMetadataRegistrations();
 
-        verify(vpcNetworks).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.10");
-        verify(vpcNetworks, never()).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.11");
+        verify(vpcNetworks).reservePrivateIp("000000000000", "us-east-1", "subnet-a", "10.0.1.10");
+        verify(vpcNetworks, never()).reservePrivateIp("000000000000", "us-east-1", "subnet-a", "10.0.1.11");
     }
 
     @Test
@@ -6875,14 +6862,14 @@ class Ec2ServiceTest {
 
         service.restoreMetadataRegistrations();
 
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<BiPredicate<String, String>> stillDeclared = ArgumentCaptor.forClass(BiPredicate.class);
+        ArgumentCaptor<VpcNetworkManager.DeclaredVpcs> stillDeclared =
+                ArgumentCaptor.forClass(VpcNetworkManager.DeclaredVpcs.class);
         verify(vpcNetworks).reconcileOrphans(stillDeclared.capture());
-        assertTrue(stillDeclared.getValue().test("us-east-1", "vpc-a"));
-        assertFalse(stillDeclared.getValue().test("us-east-1", "vpc-gone"));
-        verify(vpcNetworks).declareVpc("us-east-1", "vpc-a", "10.20.0.0/16");
-        verify(vpcNetworks).declareSubnet("us-east-1", "vpc-a", "subnet-a", "10.20.1.0/24");
-        verify(vpcNetworks).reservePrivateIp("us-east-1", "subnet-a", "10.20.1.10");
+        assertEquals(Set.of("111122223333"), stillDeclared.getValue().accountsDeclaring("us-east-1", "vpc-a"));
+        assertEquals(Set.of(), stillDeclared.getValue().accountsDeclaring("us-east-1", "vpc-gone"));
+        verify(vpcNetworks).declareVpc("111122223333", "us-east-1", "vpc-a", "10.20.0.0/16");
+        verify(vpcNetworks).declareSubnet("111122223333", "us-east-1", "vpc-a", "subnet-a", "10.20.1.0/24");
+        verify(vpcNetworks).reservePrivateIp("111122223333", "us-east-1", "subnet-a", "10.20.1.10");
     }
 
     @Test
@@ -6908,9 +6895,9 @@ class Ec2ServiceTest {
         service.restoreMetadataRegistrations();
 
         InOrder declared = inOrder(vpcNetworks);
-        declared.verify(vpcNetworks).declareVpc("us-east-1", "vpc-x", "10.0.0.0/16");
-        declared.verify(vpcNetworks).declareVpc("us-east-1", "vpc-y", "10.0.0.0/16");
-        declared.verify(vpcNetworks).declareVpc("us-east-1", "vpc-z", "10.0.0.0/16");
+        declared.verify(vpcNetworks).declareVpc("555555555555", "us-east-1", "vpc-x", "10.0.0.0/16");
+        declared.verify(vpcNetworks).declareVpc("111122223333", "us-east-1", "vpc-y", "10.0.0.0/16");
+        declared.verify(vpcNetworks).declareVpc("999999999999", "us-east-1", "vpc-z", "10.0.0.0/16");
     }
 
     @Test
@@ -7027,7 +7014,7 @@ class Ec2ServiceTest {
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         when(vpcNetworks.enabled()).thenReturn(true);
         // Second claim on the same address is refused; startup must not abort over it.
-        when(vpcNetworks.reservePrivateIp(anyString(), anyString(), anyString()))
+        when(vpcNetworks.reservePrivateIp(anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(true).thenReturn(false);
         Ec2Service service = new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
@@ -7035,7 +7022,7 @@ class Ec2ServiceTest {
                 new InMemoryStorageFactory(Map.of("ec2-instances.json", instanceStore)), vpcNetworks);
 
         assertDoesNotThrow(service::restoreMetadataRegistrations);
-        verify(vpcNetworks, times(2)).reservePrivateIp("us-east-1", "subnet-a", "10.0.1.10");
+        verify(vpcNetworks, times(2)).reservePrivateIp("000000000000", "us-east-1", "subnet-a", "10.0.1.10");
     }
 
     @Test
