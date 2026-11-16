@@ -12,8 +12,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -150,13 +148,7 @@ public class DockerDsqlBackend implements DsqlBackend {
     }
 
     private static void bootstrap(DsqlDatabases.Backend backend) throws SQLException, IOException {
-        String script;
-        try (InputStream in = DockerDsqlBackend.class.getResourceAsStream("/dsql/bootstrap.sql")) {
-            if (in == null) {
-                throw new IOException("dsql/bootstrap.sql is missing from the classpath");
-            }
-            script = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        }
+        String script = DsqlBootstrap.render(DATABASE, SUPERUSER, "admin");
         try (Connection connection = DsqlDatabases.superuser(backend); Statement statement = connection.createStatement()) {
             statement.execute(script);
         }
