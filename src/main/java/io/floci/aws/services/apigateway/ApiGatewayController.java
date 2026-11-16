@@ -275,13 +275,21 @@ public class ApiGatewayController {
         return Response.ok(toAuthorizerNode(service.getAuthorizer(region, apiId, authorizerId)).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    /**
+     * The {@code limit} query parameter is bound as a string: RESTEasy Reactive answers a non-numeric
+     * value for an {@code Integer} binding with a 404 before the resource method runs.
+     */
+    private static Integer pageLimit(String limit) {
+        return Pagination.parseMaxResults(limit, "limit", "BadRequestException");
+    }
+
     @GET
     @Path("/restapis/{apiId}/authorizers")
     public Response getAuthorizers(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
-                                   @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
+                                   @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
         // Authorizer clashes with the imported API Gateway v2 model
-        PaginatedResult<io.floci.aws.services.apigateway.model.Authorizer> page = service.getAuthorizerPage(region, apiId, limit, position);
+        PaginatedResult<io.floci.aws.services.apigateway.model.Authorizer> page = service.getAuthorizerPage(region, apiId, pageLimit(limit), position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         page.items().forEach(a -> items.add(toAuthorizerNode(a)));
@@ -994,11 +1002,11 @@ public class ApiGatewayController {
                              @QueryParam("startDate") String startDate,
                              @QueryParam("endDate") String endDate,
                              @QueryParam("keyId") String keyId,
-                             @QueryParam("limit") Integer limit,
+                             @QueryParam("limit") String limit,
                              @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
         ApiGatewayService.UsageReport report =
-                service.getUsage(region, usagePlanId, startDate, endDate, keyId, limit, position);
+                service.getUsage(region, usagePlanId, startDate, endDate, keyId, pageLimit(limit), position);
 
         ObjectNode root = objectMapper.createObjectNode();
         // The wire key is "values", not "items": the Usage shape models this map with
@@ -1251,10 +1259,10 @@ public class ApiGatewayController {
                                           @QueryParam("type") String type, @QueryParam("name") String name,
                                           @QueryParam("path") String path,
                                           @QueryParam("locationStatus") String locationStatus,
-                                          @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
+                                          @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
         PaginatedResult<DocumentationPart> page = service.getDocumentationParts(region, apiId, type, name,
-                path, locationStatus, limit, position);
+                path, locationStatus, pageLimit(limit), position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         page.items().forEach(part -> items.add(objectMapper.valueToTree(part)));
