@@ -34,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -118,6 +119,19 @@ class AslExecutorEcsRunTaskModeTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("AmazonECS.Unknown", execution.getError());
+    }
+
+    @Test
+    void syncTwoIsRefusedBeforeAnyTaskIsLaunched() {
+        launchOneTask();
+
+        Execution execution = run("arn:aws:states:::ecs:runTask.sync:2",
+                "{\"TaskDefinition\":\"my-task-def\"}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.TaskFailed", execution.getError());
+        assertEquals("Unsupported resource: arn:aws:states:::ecs:runTask.sync:2", execution.getCause());
+        verify(ecsService, never()).runTask(any(), any(), anyInt(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
