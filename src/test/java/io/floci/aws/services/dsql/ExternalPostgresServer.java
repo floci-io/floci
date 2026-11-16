@@ -7,17 +7,14 @@ import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.PortBinding;
 import com.github.dockerjava.api.model.Ports;
-import com.github.dockerjava.core.DefaultDockerClientConfig;
-import com.github.dockerjava.core.DockerClientImpl;
-import com.github.dockerjava.httpclient5.ApacheDockerHttpClient;
+import io.floci.aws.services.dsql.dataplane.DockerDsqlBackend;
+import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.TestDockerClients;
 
 import java.io.IOException;
-import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -53,15 +50,18 @@ public final class ExternalPostgresServer implements AutoCloseable {
     /**
      * Starts a container named {@code name} plus a random suffix, with {@code env} besides
      * {@code POSTGRES_USER=postgres}, and waits until {@code postgres} logs in with
-     * {@code password} (empty where the server trusts its connections). A refused login fails at once.
+     * {@code password} (empty where the server trusts its connections), through the readiness loop
+     * the Docker backend waits for a cluster's database with.
      */
     public static ExternalPostgresServer start(String name, String password, String... env)
             throws DockerUnavailableException, SQLException, InterruptedException {
-        DockerClient dockerClient = client();
+        DockerClient dockerClient = TestDockerClients.local();
         String containerId = null;
         try {
+            if (!DockerAvailability.answers(dockerClient)) {
+                throw new DockerUnavailableException("Docker does not answer", null);
+            }
             try {
-                dockerClient.pingCmd().exec();
                 dockerClient.pullImageCmd(IMAGE).start().awaitCompletion(120, TimeUnit.SECONDS);
             } catch (RuntimeException e) {
                 throw new DockerUnavailableException("Docker or " + IMAGE + " is not available: " + e.getMessage(), e);
@@ -80,7 +80,8 @@ public final class ExternalPostgresServer implements AutoCloseable {
             InspectContainerResponse inspected = dockerClient.inspectContainerCmd(containerId).exec();
             int port = Integer.parseInt(
                     inspected.getNetworkSettings().getPorts().getBindings().get(exposed)[0].getHostPortSpec());
-            awaitReady(port, password);
+            DockerDsqlBackend.awaitReady(() -> DriverManager.getConnection(jdbcUrl(port, "postgres"), "postgres",
+                    password), READY_TIMEOUT);
             return new ExternalPostgresServer(dockerClient, containerId, port);
         } catch (DockerUnavailableException | SQLException | InterruptedException | RuntimeException e) {
             close(dockerClient, containerId, e);
@@ -103,16 +104,6 @@ public final class ExternalPostgresServer implements AutoCloseable {
     @Override
     public void close() {
         close(dockerClient, containerId, null);
-    }
-
-    private static DockerClient client() {
-        DefaultDockerClientConfig clientConfig = DefaultDockerClientConfig.createDefaultConfigBuilder().build();
-        ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
-                .dockerHost(clientConfig.getDockerHost())
-                .connectionTimeout(Duration.ofSeconds(10))
-                .responseTimeout(Duration.ofMinutes(5))
-                .build();
-        return DockerClientImpl.getInstance(clientConfig, httpClient);
     }
 
     /** Removes the container, if any, then closes the client whatever the removal did. */
@@ -139,25 +130,5 @@ public final class ExternalPostgresServer implements AutoCloseable {
         } else {
             System.err.println(what + ": " + e.getMessage());
         }
-    }
-
-    private static void awaitReady(int port, String password) throws SQLException, InterruptedException {
-        Instant deadline = Instant.now().plus(READY_TIMEOUT);
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try (Connection connection = DriverManager.getConnection(jdbcUrl(port, "postgres"), "postgres",
-                    password); Statement statement = connection.createStatement()) {
-                statement.execute("SELECT 1");
-                return;
-            } catch (SQLException e) {
-                if (e.getSQLState() != null && e.getSQLState().startsWith("28")) {
-                    // A refused login: waiting would not change the password.
-                    throw e;
-                }
-                last = e;
-                Thread.sleep(250);
-            }
-        }
-        throw new SQLException("PostgreSQL did not start within " + READY_TIMEOUT.toSeconds() + " s", last);
     }
 }
