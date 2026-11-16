@@ -231,6 +231,81 @@ class RdsParameterGroupEngineIntegrationTest {
         }
     }
 
+    @Test
+    void auroraPostgresqlClusterWithLogicalReplicationRunsWithLogicalWal() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String group = "engine-pg-cpg-" + suffix;
+        String clusterId = "engine-pg-cluster-" + suffix;
+        rds("CreateDBClusterParameterGroup")
+                .formParam("DBClusterParameterGroupName", group)
+                .formParam("DBParameterGroupFamily", "aurora-postgresql16")
+                .formParam("Description", "engine parameters")
+        .when().post("/").then().statusCode(200);
+        try {
+            rds("ModifyDBClusterParameterGroup")
+                    .formParam("DBClusterParameterGroupName", group)
+                    .formParam("Parameters.member.1.ParameterName", "rds.logical_replication")
+                    .formParam("Parameters.member.1.ParameterValue", "1")
+                    .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
+            .when().post("/").then().statusCode(200);
+
+            int port = rds("CreateDBCluster")
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("DBClusterParameterGroupName", group)
+                    .formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD)
+            .when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getInt("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.Port");
+
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+        } finally {
+            rds("DeleteDBCluster")
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("SkipFinalSnapshot", "true")
+            .when().post("/");
+            rds("DeleteDBClusterParameterGroup")
+                    .formParam("DBClusterParameterGroupName", group)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void postgresInstanceTurnsOnLogicalReplicationWhenRebooted() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String group = "engine-pg-pg-" + suffix;
+        String instanceId = "engine-pg-db-" + suffix;
+        createParameterGroup(group, "postgres16", "rds.logical_replication", "0");
+        try {
+            int port = rds("CreateDBInstance")
+                    .formParam("DBInstanceIdentifier", instanceId)
+                    .formParam("Engine", "postgres")
+                    .formParam("DBInstanceClass", "db.t3.micro")
+                    .formParam("AllocatedStorage", "20")
+                    .formParam("DBParameterGroupName", group)
+                    .formParam("MasterUsername", MASTER_USER)
+                    .formParam("MasterUserPassword", MASTER_PASSWORD)
+            .when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("replica"));
+
+            rds("ModifyDBParameterGroup")
+                    .formParam("DBParameterGroupName", group)
+                    .formParam("Parameters.member.1.ParameterName", "rds.logical_replication")
+                    .formParam("Parameters.member.1.ParameterValue", "1")
+                    .formParam("Parameters.member.1.ApplyMethod", "pending-reboot")
+            .when().post("/").then().statusCode(200);
+            rebootInstance(instanceId);
+
+            assertThat(postgresQuery(port, "SHOW wal_level"), equalTo("logical"));
+        } finally {
+            deleteInstance(instanceId);
+            rds("DeleteDBParameterGroup")
+                    .formParam("DBParameterGroupName", group)
+            .when().post("/");
+        }
+    }
+
     private static int createMysqlInstance(String instanceId, String parameterGroup) {
         return rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", instanceId)
@@ -312,6 +387,25 @@ class RdsParameterGroupEngineIntegrationTest {
         while (true) {
             try {
                 return queryOnce(port, sql);
+            } catch (SQLException e) {
+                if (System.nanoTime() > deadline) {
+                    throw e;
+                }
+                Thread.sleep(1000);
+            }
+        }
+    }
+
+    private static String postgresQuery(int port, String sql) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
+        while (true) {
+            try (Connection connection = DriverManager.getConnection("jdbc:postgresql://127.0.0.1:" + port
+                         + "/postgres?sslmode=disable&connectTimeout=5&socketTimeout=10",
+                         MASTER_USER, MASTER_PASSWORD);
+                 Statement statement = connection.createStatement();
+                 ResultSet rows = statement.executeQuery(sql)) {
+                rows.next();
+                return rows.getString(1);
             } catch (SQLException e) {
                 if (System.nanoTime() > deadline) {
                     throw e;
