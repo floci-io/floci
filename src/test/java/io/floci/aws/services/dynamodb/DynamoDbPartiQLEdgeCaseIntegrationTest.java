@@ -791,33 +791,6 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     }
 
     @Test
-    @Order(32)
-    void refusesAKeyReadWhoseFilterNamesAKey() {
-        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
-        String refused = "Filter Expression can only contain non-primary key attributes: Primary key attribute: ";
-
-        for (String where : List.of("pk='ranges' AND (NOT sk='1' OR flag='one')",
-                "pk='ranges' AND NOT (sk='1' AND flag='one')",
-                "pk='ranges' AND NOT NOT sk='1'",
-                "pk='ranges' AND NOT size(sk) = 1",
-                "pk='ranges' AND (size(sk) = 1 OR flag='one')",
-                "pk IN ['ranges','ranges-other'] AND (NOT sk='1' OR flag='one')",
-                "pk='ranges' AND (NOT pk='ranges-other' OR NOT sk='1')")) {
-            statement(select + where).statusCode(400).body("message", equalTo(refused + "sk"));
-        }
-        statement(select + "pk='ranges' AND (NOT pk='ranges-other' OR flag='one')")
-            .statusCode(400)
-            .body("message", equalTo(refused + "pk"));
-        for (String where : List.of("pk='ranges' AND NOT sk='1'",
-                "pk='ranges' AND size(sk) = 1",
-                "pk='ranges' AND (sk<>'1' OR flag='one')",
-                "(pk='ranges' AND (NOT sk='1' OR flag='one')) OR (pk='ranges-other' AND flag='two')",
-                "NOT sk='1' OR flag='one'")) {
-            statement(select + where).statusCode(200);
-        }
-    }
-
-    @Test
     @Order(33)
     void refusesAReadOfAMultiAttributeIndexBeforeItsTerms() {
         request("DynamoDB_20120810.CreateTable", """
@@ -883,6 +856,39 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}
                 """.formatted(TABLE, pk))
             .statusCode(200);
+    }
+
+    @Test
+    @Order(34)
+    void refusesAKeyReadWhoseFilterNamesAKey() {
+        String select = "SELECT sk FROM " + QUOTED_TABLE + " WHERE ";
+        String refused = "Filter Expression can only contain non-primary key attributes: Primary key attribute: ";
+
+        for (String where : List.of("pk='ranges' AND (NOT sk='1' OR flag='one')",
+                "pk='ranges' AND NOT (sk='1' AND flag='one')",
+                "pk='ranges' AND NOT NOT sk='1'",
+                "pk='ranges' AND NOT size(sk) = 1",
+                "pk='ranges' AND (size(sk) = 1 OR flag='one')",
+                "pk IN ['ranges','ranges-other'] AND (NOT sk='1' OR flag='one')",
+                "pk='ranges' AND (NOT pk='ranges-other' OR NOT sk='1')",
+                "pk='ranges' AND ((sk='1' AND NOT size(sk) = 1) OR (sk='2' AND NOT size(sk) = 1))",
+                "(pk='ranges' AND NOT size(pk) = 1) OR (pk='ranges-other' AND NOT size(sk) = 1)")) {
+            statement(select + where).statusCode(400).body("message", equalTo(refused + "sk"));
+        }
+        for (String where : List.of("pk='ranges' AND (NOT pk='ranges-other' OR flag='one')",
+                "pk='ranges' AND ((sk='1' AND NOT size(sk) = 1) OR (sk='2' AND NOT size(pk) = 1))",
+                "pk='ranges' AND ((sk='2' AND NOT size(pk) = 1) OR (sk='1' AND NOT size(sk) = 1))")) {
+            statement(select + where).statusCode(400).body("message", equalTo(refused + "pk"));
+        }
+        for (String where : List.of("pk='ranges' AND NOT sk='1'",
+                "pk='ranges' AND size(sk) = 1",
+                "pk='ranges' AND (sk<>'1' OR flag='one')",
+                "(pk='ranges' AND (NOT sk='1' OR flag='one')) OR (pk='ranges-other' AND flag='two')",
+                "pk='ranges' AND ((sk='1' AND NOT size(sk) = 1) OR sk='2')",
+                "pk='ranges' AND ((sk='1' AND flag='one') OR (sk='2' AND NOT size(sk) = 1))",
+                "NOT sk='1' OR flag='one'")) {
+            statement(select + where).statusCode(200);
+        }
     }
 
     private static void putItem(String pk, String attributes) {
