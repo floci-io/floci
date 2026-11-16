@@ -84,7 +84,6 @@ AWS::AutoScaling::AutoScalingGroup	NotificationConfigurations	accepted and ignor
 AWS::AutoScaling::AutoScalingGroup	PlacementGroup	accepted and ignored
 AWS::AutoScaling::AutoScalingGroup	SkipZonalShiftValidation	accepted and ignored
 AWS::AutoScaling::AutoScalingGroup	TrafficSources	accepted and ignored
-AWS::AutoScaling::LaunchConfiguration	BlockDeviceMappings	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCId	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCSecurityGroups	accepted and ignored
 AWS::AutoScaling::LaunchConfiguration	EbsOptimized	accepted and ignored

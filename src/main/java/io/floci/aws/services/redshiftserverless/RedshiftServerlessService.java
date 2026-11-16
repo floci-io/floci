@@ -51,6 +51,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
@@ -1090,6 +1091,48 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
                 .filter(snapshot -> arn.equals(snapshot.getSnapshotArn()))
                 .map(RedshiftServerlessSnapshot::getKmsKeyId)
                 .filter(key -> key != null && !key.isBlank() && !AWS_OWNED_KMS_KEY.equals(key))
+                .findFirst();
+    }
+
+    /**
+     * The tags of the namespace, the workgroup or the snapshot stored under {@code arn} in the account and Region it
+     * names, a pre-multi-account one of the default account included, read in place and matched on the whole ARN;
+     * empty for an ARN naming nothing stored. A tag change is stored on a copy, so the tags read are one whole set.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String account = parsed.accountId();
+        String region = parsed.region();
+        Map<String, String> tags = tagsIn(namespaces, account, region, arn, Namespace::getNamespaceArn,
+                        Namespace::getTags)
+                .or(() -> tagsIn(workgroups, account, region, arn, Workgroup::getWorkgroupArn, Workgroup::getTags))
+                .or(() -> tagsIn(snapshots, account, region, arn, RedshiftServerlessSnapshot::getSnapshotArn,
+                        RedshiftServerlessSnapshot::getTags))
+                .orElse(Map.of());
+        Map<String, String> copy = new LinkedHashMap<>();
+        tags.forEach((key, value) -> {
+            if (value != null) {
+                copy.put(key, value);
+            }
+        });
+        return copy;
+    }
+
+    private static <V> Optional<Map<String, String>> tagsIn(AccountAwareStorageBackend<V> store, String account,
+                                                            String region, String arn, Function<V, String> arnOf,
+                                                            Function<V, Map<String, String>> tagsOf) {
+        List<V> held = new ArrayList<>(store.scanForAccount(account, key -> key.startsWith(region + "::")));
+        if (account.equals(store.defaultAccountId())) {
+            held.addAll(store.scanUnscopedLegacy(stored -> arn.equals(arnOf.apply(stored))));
+        }
+        return held.stream()
+                .filter(stored -> arn.equals(arnOf.apply(stored)))
+                .map(tagsOf)
+                .filter(Objects::nonNull)
                 .findFirst();
     }
 

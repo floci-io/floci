@@ -414,6 +414,25 @@ list-typed `Paths` holds a single entry; read it with `Fn::Select` as you would 
 Deleting the stack removes the resources in dependency order and finally the organization itself.
 Deleting a resource that is already gone is tolerated.
 
+## Auto Scaling Launch Configurations
+
+CloudFormation preserves an unchanged launch configuration and replaces it when its resolved
+properties change. An unnamed replacement receives a new name; replacing a custom-named
+configuration requires a new `LaunchConfigurationName`. The old configuration remains available
+until dependent groups switch and the stack update commits. A failed update restores the prior
+configuration. `BlockDeviceMappings` and `MetadataOptions` are passed to Auto Scaling.
+
+The shared CloudFormation change detector compares create-only properties using each stack
+version's parameters and resource references. This also covers configurations created before
+replacement support: unchanged references retain their identity, while added or changed values
+or a removed `InstanceId` require replacement. No separate launch-configuration input snapshot
+is needed.
+
+Group creation and updates coordinate with launch-configuration deletion, so a concurrent
+attachment cannot bypass the in-use check. A configuration already deleted cannot be attached.
+Out-of-band deletion remains stack drift; this replacement behavior does not promise automatic
+recreation under a missing configuration's former custom name.
+
 ## Auto Scaling Launch Template Resolution
 
 `AWS::AutoScaling::AutoScalingGroup` resolves its launch template through any of the shapes AWS
