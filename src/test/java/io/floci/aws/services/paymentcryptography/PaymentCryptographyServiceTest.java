@@ -1104,6 +1104,32 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
+        // The model gives an import the same replication regions a creation does, so a key
+        // that comes in can be replicated as soon as it lands.
+        PaymentCryptographyKey protection = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE));
+        PaymentCryptographyKey key = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE));
+        String block = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock", Map.of(
+                "WrappingKeyIdentifier", protection.getKeyId(),
+                "WrappedKeyBlock", block), "", true, Map.of(), List.of("us-west-2"));
+
+        assertEquals("PRIMARY", imported.getMultiRegionKeyType());
+        assertEquals("us-east-1", imported.getPrimaryRegion());
+        assertEquals(List.of("us-west-2"), imported.getReplicationRegions());
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", imported.getKeyId());
+        assertNotNull(replica, "the key was not replicated");
+        assertEquals("REPLICA", replica.getMultiRegionKeyType());
+        assertEquals(imported.getKeyMaterialHex(), replica.getKeyMaterialHex());
+    }
+
+    @Test
     void aKeyIsCreatedInEveryRegionItIsReplicatedTo() {
         PaymentCryptographyKey primary = createReplicatedKey(service, "us-east-1", List.of("us-west-2"));
 
