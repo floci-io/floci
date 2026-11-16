@@ -148,6 +148,8 @@ public class PostgresProtocolHandler {
      * StartupMessage parameters ({@code options}, {@code application_name} and any run-time
      * parameter) apply as they would on the server itself: they open the backend session, or,
      * for an IAM login handed over to the token's role, are set once the role owns the session.
+     * {@code replication} opens the backend session in both cases, since it can only be chosen
+     * at connection start.
      */
     public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
                                       String masterUsername, String masterPassword, String dbName,
@@ -345,9 +347,10 @@ public class PostgresProtocolHandler {
             // An IAM login for any role but the master runs on a session opened as the master and
             // handed over below, so PostgreSQL would apply the client's parameters with the
             // master's privileges: a "-c role=<master>" would outlive the handover and RESET ROLE
-            // would regain the master. Those logins open without them, and their parameters are
-            // applied once the session belongs to the role (Phase 5c). The proxy reads that
-            // session's results and sends it SQL of its own, so it fixes the encoding to UTF-8.
+            // would regain the master. Those logins open with only "replication", which cannot be
+            // chosen later, and their other parameters are applied once the session belongs to the
+            // role (Phase 5c). The proxy reads that session's results and sends it SQL of its own,
+            // so it fixes the encoding to UTF-8.
             Map<String, String> backendParameters;
             if (!forwardStartupParameters) {
                 backendParameters = Map.of();

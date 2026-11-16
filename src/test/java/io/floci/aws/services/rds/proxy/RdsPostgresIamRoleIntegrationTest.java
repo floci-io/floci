@@ -220,8 +220,7 @@ class RdsPostgresIamRoleIntegrationTest {
             replication.setProperty("replication", "database");
             replication.setProperty("assumeMinServerVersion", "10");
             replication.setProperty("preferQueryMode", "simple");
-            SQLException refused = assertThrows(SQLException.class, () -> connect(port, replication).close());
-            assertEquals("42501", refused.getSQLState());
+            refused(port, replication, "42501");
 
             asMaster(port, "GRANT rds_replication TO app_user");
             try (Connection connection = connect(port, replication);
@@ -234,11 +233,8 @@ class RdsPostgresIamRoleIntegrationTest {
                     assertTrue(rows.next());
                     assertEquals("app_slot", rows.getString("slot_name"));
                 }
-                try (ResultSet rows = statement.executeQuery("SELECT session_user")) {
-                    assertTrue(rows.next());
-                    assertEquals("app_user", rows.getString(1));
-                }
             }
+            assertUser(port, replication, "app_user");
         } finally {
             deleteInstance(id);
         }
@@ -279,8 +275,12 @@ class RdsPostgresIamRoleIntegrationTest {
     }
 
     private static void refused(int port, Properties properties) {
+        refused(port, properties, "28P01");
+    }
+
+    private static void refused(int port, Properties properties, String sqlState) {
         SQLException exception = assertThrows(SQLException.class, () -> connect(port, properties).close());
-        assertEquals("28P01", exception.getSQLState());
+        assertEquals(sqlState, exception.getSQLState());
     }
 
     private static void assertUser(int port, Properties properties, String user) throws SQLException {
