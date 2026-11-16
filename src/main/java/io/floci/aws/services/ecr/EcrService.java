@@ -14,6 +14,7 @@ import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.concurrent.KeyedWriteLocks;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -54,7 +55,7 @@ import java.util.function.Function;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class EcrService implements ResourceProvider {
+public class EcrService implements ResourceProvider, Resettable {
 
     /**
      * A private ECR registry host in any partition, {@code <account>.dkr.ecr.<region>.<dnsSuffix>},
@@ -93,6 +94,8 @@ public class EcrService implements ResourceProvider {
 
     private final StorageBackend<String, Repository> repoStore;
     private final StorageBackend<String, ImageMetadata> imageMetaStore;
+    // Keep the first timestamp across write failures. Access is guarded by imageMetaStore.
+    private final Map<String, ImageMetadata> pendingImagePushes = new HashMap<>();
     private final StorageBackend<String, PullThroughCacheRule> pullThroughCacheRuleStore;
     private final StorageBackend<String, RegistrySettings> registrySettingsStore;
     private final Map<String, Object> registryLocks = new ConcurrentHashMap<>();
@@ -693,8 +696,11 @@ public class EcrService implements ResourceProvider {
         repoStore.delete(key);
         // Drop cached image metadata for this repo.
         String metaPrefix = key + "::";
-        for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
-            imageMetaStore.delete(metaPrefix + meta.getDigest());
+        synchronized (imageMetaStore) {
+            pendingImagePushes.keySet().removeIf(k -> k.startsWith(metaPrefix));
+            for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
+                imageMetaStore.delete(metaPrefix + meta.getDigest());
+            }
         }
         if (!hasRepositories()) {
             registryManager.pruneStorage();
@@ -801,8 +807,7 @@ public class EcrService implements ResourceProvider {
                 d.setImageManifestMediaType(m.mediaType());
                 d.setArtifactMediaType(RegistryHttpClient.artifactMediaTypeFromManifest(m.body()));
 
-                ImageMetadata meta = recordImagePush(repo.getRegistryId(), region, repositoryName,
-                        m.digest(), Instant.now());
+                ImageMetadata meta = describeImagePush(repo.getRegistryId(), region, repositoryName, m.digest());
                 d.setImagePushedAt(meta.getPushedAt());
                 details.add(d);
             } catch (Exception e) {
@@ -933,7 +938,7 @@ public class EcrService implements ResourceProvider {
                 return;
             }
             deleted.add(new ImageIdentifier(id.getImageTag(), digest));
-            imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
+            removeImagePush(repo.getRegistryId(), region, repositoryName, digest);
             return;
         }
         RegistryHttpClient.ManifestResult manifest = http.getManifest(internal, digest, null);
@@ -986,7 +991,7 @@ public class EcrService implements ResourceProvider {
                 deleted.add(new ImageIdentifier(removedTag, digest));
             }
         }
-        imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
+        removeImagePush(repo.getRegistryId(), region, repositoryName, digest);
     }
 
     /**
@@ -1806,23 +1811,49 @@ public class EcrService implements ResourceProvider {
             Optional<ImageMetadata> existing = imageMetaStore instanceof AccountAwareStorageBackend<ImageMetadata> aware
                     ? aware.getForAccountMigratingLegacy(account, key, metadata -> digest.equals(metadata.getDigest()))
                     : imageMetaStore.get(key);
-            return existing.orElseGet(() -> {
-                ImageMetadata metadata = new ImageMetadata(digest, pushedAt);
-                AccountAwareStorageBackend.putInAccount(imageMetaStore, account, key, metadata);
-                return metadata;
+            ImageMetadata metadata = existing.orElseGet(() -> {
+                ImageMetadata pending = pendingImagePushes.computeIfAbsent(key,
+                        ignored -> new ImageMetadata(digest, pushedAt));
+                AccountAwareStorageBackend.putInAccount(imageMetaStore, account, key, pending);
+                return pending;
             });
+            pendingImagePushes.remove(key);
+            return metadata;
+        }
+    }
+
+    private ImageMetadata describeImagePush(String account, String region, String repositoryName, String digest) {
+        synchronized (imageMetaStore) {
+            try {
+                return recordImagePush(account, region, repositoryName, digest, Instant.now());
+            } catch (RuntimeException storageFailure) {
+                ImageMetadata pending = pendingImagePushes.get(imageMetaKey(region, account, repositoryName, digest));
+                if (pending == null) {
+                    throw storageFailure;
+                }
+                LOG.debugv(storageFailure, "Using pending ECR push time for {0} in {1}", digest, repositoryName);
+                return pending;
+            }
         }
     }
 
     public void removeImagePush(String account, String region, String repositoryName, String digest) {
         String key = imageMetaKey(region, account, repositoryName, digest);
         synchronized (imageMetaStore) {
+            pendingImagePushes.remove(key);
             if (imageMetaStore instanceof AccountAwareStorageBackend<ImageMetadata> aware) {
                 aware.getForAccountMigratingLegacy(account, key, metadata -> digest.equals(metadata.getDigest()));
                 aware.deleteForAccount(account, key);
             } else {
                 imageMetaStore.delete(key);
             }
+        }
+    }
+
+    @Override
+    public void clear() {
+        synchronized (imageMetaStore) {
+            pendingImagePushes.clear();
         }
     }
 

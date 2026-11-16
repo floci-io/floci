@@ -870,6 +870,54 @@ class EcrServiceTest {
     }
 
     @Test
+    void describeKeepsAcceptedPushTimeWhileMetadataWritesFail() throws Exception {
+        String repo = "batch-delete/push-recovery";
+        String internal = ACCOUNT + "/" + REGION + "/" + repo;
+        AtomicBoolean unavailable = new AtomicBoolean(true);
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, ImageMetadata metadata) {
+                if (unavailable.get()) {
+                    throw new IllegalStateException("metadata store unavailable");
+                }
+                super.put(key, metadata);
+            }
+        };
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "stable")) {
+            when(registryManager.httpClient()).thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            withMeta.createRepository(repo, null, null, null, null, null, null, REGION);
+            Instant pushedAt = Instant.parse("2026-01-01T00:00:00Z");
+            assertThrows(IllegalStateException.class,
+                    () -> withMeta.recordImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST, pushedAt));
+
+            List<ImageIdentifier> images = List.of(new ImageIdentifier("stable", null));
+            EcrService.DescribeImagesResult duringOutage = withMeta.describeImages(repo, images, null, REGION);
+            assertEquals(1, duringOutage.imageDetails().size());
+            assertEquals(pushedAt, duringOutage.imageDetails().getFirst().getImagePushedAt());
+            assertTrue(metaStore.scan(key -> true).isEmpty());
+
+            unavailable.set(false);
+            assertEquals(pushedAt, withMeta.describeImages(repo, images, null, REGION)
+                    .imageDetails().getFirst().getImagePushedAt());
+            assertEquals(pushedAt, metaStore.scan(key -> true).getFirst().getPushedAt());
+
+            withMeta.removeImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST);
+            unavailable.set(true);
+            assertThrows(IllegalStateException.class,
+                    () -> withMeta.recordImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST, pushedAt));
+            withMeta.removeImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST);
+
+            unavailable.set(false);
+            Instant repushedAt = pushedAt.plusSeconds(1);
+            assertEquals(repushedAt,
+                    withMeta.recordImagePush(ACCOUNT, REGION, repo, DELETE_DIGEST, repushedAt).getPushedAt());
+        }
+    }
+
+    @Test
     void batchDeleteImageByTagKeepsTheImagePushedAtOfTheSurvivingTag() throws Exception {
         String repositoryName = "batch-delete/pushed-at";
         String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
