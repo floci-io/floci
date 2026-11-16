@@ -207,8 +207,9 @@ holding the driver and its executors, or a command or a script. The cluster itse
   runs in the release's image, and says what EMR's does without Hive, "Hive isn't installed.", and the step fails. An
   `emr-spark-*` release includes neither ("This release includes the following applications: AmazonCloudWatchAgent,
   Delta, Hudi, Iceberg, JupyterEnterpriseGateway, Livy, and Spark."), so a cluster of one has neither, whatever its
-  `Applications` name: no image with Hive, no metastore service. `pig-script`, which the image does not have, is
-  `FAILED` without running.
+  `Applications` name: no image with Hive, no metastore service. A Pig step runs only where Floci adds Pig (see
+  **Pig steps**); on a cluster that does not install it, EMR's `pig-script`, which the image has, says "Pig isn't
+  installed.", and the step fails.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
@@ -417,6 +418,41 @@ holding the driver and its executors, or a command or a script. The cluster itse
   the Glue Data Catalog. What the bootstrap actions installed is there for every step, Hive's included. A script or
   command that starts `hive` itself gets none of these settings: only a Hive step runs Hive. Hive's own log stays in
   the container.
+* **Pig steps**: no AWS image carries Pig, so Floci adds Apache Pig to a cluster whose `Applications` name it only
+  with `pig.enabled` on (`FLOCI_SERVICES_EMR_PIG_ENABLED=true`), off by default. The cluster's image (see **Hive
+  steps**) then gets the Tez of its EMR Serverless Hive image, which Pig runs its scripts on, with the HDFS, MapReduce
+  and YARN every cluster's has, and Apache Pig in `/usr/lib/pig`, where EMR keeps it, with a `/usr/bin/pig` that runs
+  it: Floci downloads Apache's binary distribution, about 470 MB, to a temporary file, from the first of `pig.urls`
+  that gives it whole with the checksum `pig.sha256` names, Apache's download CDN then its archive, a URL that cannot
+  be reached, answers otherwise, sends nothing for a minute or gives another checksum passing to the next. It then
+  writes the 200 MB Pig runs from into the image as it makes it, leaving out the docs, the sources and the jars of Pig
+  on Spark, and removes the file. No URL giving it fails the step that needed the image ("The step could not start:
+  Could not download Apache Pig: ...", with what each URL gave), and nothing goes into an image unchecked. The image's
+  name holds the checksum, so a cluster with Pig has an image of its own, made once for its release and kept, as one
+  with Hive has. EMR's releases ship Pig 0.17.0, whose Apache build is "compatible with Hadoop 2.5+ releases", so
+  Floci's default is Pig 0.18.0, whose `pig-0.18.0.tar.gz` "is compatible with Hadoop 3, Spark 3, Hive 3 and HBase 2",
+  the Hadoop the images hold; a script that relies on what changed between the two can behave otherwise. Pig runs on
+  the image's Tez, as EMR's runs on EMR's, in place of the Tez its distribution bundles, whose classes need another
+  protobuf. Then the AWS CLI's `Type=PIG` step, `command-runner.jar` running `pig-script --run-pig-script --args` and
+  the step's `Args`, runs EMR's own `pig-script`, which the image has: it runs `pig` with the arguments after
+  `--args`, as the image's `hadoop` user in `/home/hadoop`, on the cluster's storage, so `-f s3://...` reads its
+  script from Floci's S3 and `-p` sets its parameters. "Pig 0.16.0 and later use Apache Tez", so Pig runs on Tez, on
+  the cluster's YARN with the stock Tez classes and the sizes Hive's Tez gets (see **Hive steps**), or, where it runs
+  none, in local mode in its JVM; `-x mapreduce`, or `exectype=mapreduce` in `pig-properties`, as the Release Guide's
+  Pig considerations put it, runs MapReduce instead (see **Hadoop streaming and MapReduce**). Pig reads a
+  configuration of its own, a copy of its `conf` folder whose `pig.properties` ends with Floci's `exectype=tez` and
+  `mapreduce.job.working.dir=/user/${user.name}`, then the cluster's `tez-site` and `pig-properties`, a later key
+  winning, Pig passing the Hadoop and Tez ones on to its jobs. Pig sets the working directory of each input's file
+  system to it, which S3A, Floci's `s3://`, refuses when it names another file system, as Hadoop's own default, the
+  HDFS home with its scheme, does; without a scheme, it is the same HDFS folder. The cluster runs no MapReduce
+  JobHistory server, which a job client asks about a job whose application master has ended, as Pig does for each
+  MapReduce job's task reports and counters, so Floci's lines also set `pig.stats.notaskreport=true` and
+  `yarn.app.mapreduce.client.max-retries=1`: Pig asks for no task reports, and asks once for the counters, which costs
+  about ten seconds a job. A `pig-log4j` adds its lines to the `log4j.properties` Pig then reads, and the exports of
+  `pig-env` start its `pig-env.sh`. Any command a step runs on such a cluster, `command-runner.jar pig ...` or a
+  script's, gets the same. With `pig.enabled` off, a Pig step on a cluster whose `Applications` name Pig is `FAILED`
+  without running ("Floci does not run this step: Pig is not in the image steps run in. floci.services.emr.pig.enabled
+  adds Apache Pig to it.").
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -622,7 +658,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `container:<id>`, YARN's daemons would listen on every interface of the namespace, and with `none` the steps could not
   reach them, so the cluster's Spark runs in local mode.
 - **MapReduce and Tez in local mode where there is no YARN.** Only a cluster that runs YARN (see **YARN**) runs them on
-  it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's Tez run in the step's container.
+  it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's and Pig's Tez run in the step's
+  container.
+- **No MapReduce JobHistory server.** EMR runs one (a release's `mapred-site` classification "Restarts Hadoop
+  MapReduce-HistoryServer"); Floci's primary node does not, so a client asking about a MapReduce job whose application
+  master has ended waits for it, and gets no counters or task reports. Pig, which asks after each of its MapReduce
+  jobs, is set to ask once (see **Pig steps**).
+- **Pig is Apache's 0.18.0, and only with `pig.enabled`.** EMR's 7.x releases ship Pig 0.17.0, whose Apache build is
+  for Hadoop 2; no AWS image carries Pig, so Floci downloads Apache's 0.18.0, for Hadoop 3, when it is enabled, and
+  runs it on the image's Tez (see **Pig steps**).
 - **Tez's intermediate data is not compressed on YARN.** The images name the LZO codec for it, whose native library they
   lack, so Floci turns that compression off, which a `tez-site` classification can turn back on with a codec they have.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
@@ -686,6 +730,9 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_YARN_NODE_MEMORY_MB` | `4096` | The memory a `docker` cluster's NodeManager offers the YARN containers its Spark executors run in (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_YARN_NODE_VCORES` | `4` | The virtual cores it offers them |
 | `FLOCI_SERVICES_EMR_YARN_MAX_WORKER_NODES` | `4` | The most core and task nodes a `docker` cluster runs as containers of their own, core nodes first; 0 keeps a cluster on its primary node |
+| `FLOCI_SERVICES_EMR_PIG_ENABLED` | `false` | Add Apache Pig, downloaded once per release's image, to a `docker` cluster whose `Applications` name Pig, so its Pig steps run (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_PIG_URLS` | `https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz` | Where Floci downloads Pig's binary distribution from, the first that answers; a mirror names its own |
+| `FLOCI_SERVICES_EMR_PIG_SHA256` | `6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a`, `pig-0.18.0.tar.gz`'s | The SHA-256 the download must have; set it with another distribution |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue
