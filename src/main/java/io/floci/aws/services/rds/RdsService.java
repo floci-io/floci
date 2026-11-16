@@ -11170,19 +11170,21 @@ public class RdsService implements Resettable, ResourceProvider {
     private Map<String, String> relayEngineParameters(String arn, String resource) {
         String accountId = accountIdFromArn(arn);
         String region = effectiveRegion(regionFromArn(arn));
+        DbCluster cluster;
         if (resource.startsWith("cluster:")) {
-            DbCluster cluster = findClusterByArn(accountId, arn);
-            return cluster == null ? Map.of() : clusterEngineParameters(cluster);
+            cluster = findClusterByArn(accountId, arn);
+        } else {
+            DbInstance instance = findInstanceByArnOrNull(accountId, region, arn);
+            if (instance == null) {
+                return Map.of();
+            }
+            if (instance.getDbClusterIdentifier() == null) {
+                return instanceEngineParameters(instance);
+            }
+            cluster = findClusterForScope(accountId, region, instance.getDbClusterIdentifier());
         }
-        DbInstance instance = findInstanceByArnOrNull(accountId, region, arn);
-        if (instance == null) {
-            return Map.of();
-        }
-        if (instance.getDbClusterIdentifier() == null) {
-            return instanceEngineParameters(instance);
-        }
-        DbCluster cluster = findClusterForScope(accountId, region, instance.getDbClusterIdentifier());
-        return cluster == null ? Map.of() : clusterEngineParameters(cluster);
+        return cluster == null ? Map.of()
+                : clusterEngineParameters(accountId, region, cluster.getParameterGroupName());
     }
 
     private Collection<DbCluster> allClusters() {

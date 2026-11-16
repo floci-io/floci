@@ -700,7 +700,10 @@ With `rds.force_ssl` set to `1` in a PostgreSQL instance's DB parameter group, o
 PostgreSQL cluster's DB cluster parameter group, the auth proxy refuses a connection that does not
 negotiate TLS, as AWS does, with `FATAL: no pg_hba.conf entry for host "...", user "...",
 database "...", no encryption` (SQLSTATE `28000`). The value is read for each new connection, so
-a change to the group applies without a reboot, as the parameter is dynamic on AWS. Floci's
+a change to the group applies without a reboot, as the parameter is dynamic on AWS. Floci keeps no
+pending-reboot state, so a change made with `ApplyMethod=pending-reboot`, or a newly associated
+group, also applies from the next connection, where AWS waits for a reboot. An Aurora cluster and
+its members read the value from the DB cluster parameter group only. Floci's
 default parameter groups hold no values, so a database without the override accepts plaintext
 connections even on PostgreSQL 15 and later, where AWS's default groups set `rds.force_ssl` to `1`.
 

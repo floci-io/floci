@@ -38,17 +38,12 @@ class RdsPostgresForceSslIntegrationTest {
     }
 
     @Test
-    void instanceParameterGroupForceSslRefusesPlaintextAndFollowsGroupChanges() throws Exception {
+    void instanceParameterGroupForceSslFollowsGroupChangesOnARunningInstance() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String group = "force-ssl-" + suffix;
         String dbId = "force-ssl-" + suffix;
-        rds("CreateDBParameterGroup")
-                .formParam("DBParameterGroupName", group)
-                .formParam("DBParameterGroupFamily", "postgres16")
-                .formParam("Description", "force ssl")
-        .when().post("/").then().statusCode(200);
+        createInstanceParameterGroup(group, "postgres16");
         try {
-            setInstanceForceSsl(group, "1");
             int port = rds("CreateDBInstance")
                     .formParam("DBInstanceIdentifier", dbId)
                     .formParam("Engine", "postgres")
@@ -61,6 +56,9 @@ class RdsPostgresForceSslIntegrationTest {
             .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
 
+            assertThat(selectOne(port, "disable"), equalTo(1));
+
+            setInstanceForceSsl(group, "1");
             assertPlaintextRefused(port);
             assertThat(selectOne(port, "require"), equalTo(1));
 
@@ -68,49 +66,77 @@ class RdsPostgresForceSslIntegrationTest {
             assertThat(selectOne(port, "disable"), equalTo(1));
         } finally {
             deleteInstance(dbId);
-            rds("DeleteDBParameterGroup")
-                    .formParam("DBParameterGroupName", group)
-            .when().post("/");
+            deleteInstanceParameterGroup(group);
         }
     }
 
     @Test
-    void auroraClusterParameterGroupForceSslRefusesPlaintext() throws Exception {
+    void auroraClusterParameterGroupForceSslRefusesPlaintextOnClusterAndMemberEndpoints() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
-        String group = "force-ssl-cpg-" + suffix;
+        String clusterGroup = "force-ssl-cpg-" + suffix;
+        String memberGroup = "force-ssl-mpg-" + suffix;
         String clusterId = "force-ssl-cluster-" + suffix;
+        String memberId = clusterId + "-member";
         rds("CreateDBClusterParameterGroup")
-                .formParam("DBClusterParameterGroupName", group)
+                .formParam("DBClusterParameterGroupName", clusterGroup)
                 .formParam("DBParameterGroupFamily", "aurora-postgresql16")
                 .formParam("Description", "force ssl")
         .when().post("/").then().statusCode(200);
+        createInstanceParameterGroup(memberGroup, "aurora-postgresql16");
         try {
             rds("ModifyDBClusterParameterGroup")
-                    .formParam("DBClusterParameterGroupName", group)
+                    .formParam("DBClusterParameterGroupName", clusterGroup)
                     .formParam("Parameters.member.1.ParameterName", "rds.force_ssl")
                     .formParam("Parameters.member.1.ParameterValue", "1")
                     .formParam("Parameters.member.1.ApplyMethod", "immediate")
             .when().post("/").then().statusCode(200);
-            int port = rds("CreateDBCluster")
+            setInstanceForceSsl(memberGroup, "0");
+            int clusterPort = rds("CreateDBCluster")
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("Engine", "aurora-postgresql")
-                    .formParam("DBClusterParameterGroupName", group)
+                    .formParam("DBClusterParameterGroupName", clusterGroup)
                     .formParam("MasterUsername", MASTER_USER)
                     .formParam("MasterUserPassword", MASTER_PASSWORD)
             .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getInt("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.Port");
+            int memberPort = rds("CreateDBInstance")
+                    .formParam("DBInstanceIdentifier", memberId)
+                    .formParam("DBClusterIdentifier", clusterId)
+                    .formParam("DBInstanceClass", "db.r5.large")
+                    .formParam("Engine", "aurora-postgresql")
+                    .formParam("DBParameterGroupName", memberGroup)
+            .when().post("/").then().statusCode(200).extract().xmlPath()
+                    .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
 
-            assertPlaintextRefused(port);
-            assertThat(selectOne(port, "require"), equalTo(1));
+            assertPlaintextRefused(clusterPort);
+            assertThat(selectOne(clusterPort, "require"), equalTo(1));
+            assertPlaintextRefused(memberPort);
+            assertThat(selectOne(memberPort, "require"), equalTo(1));
         } finally {
+            deleteInstance(memberId);
             rds("DeleteDBCluster")
                     .formParam("DBClusterIdentifier", clusterId)
                     .formParam("SkipFinalSnapshot", "true")
             .when().post("/");
             rds("DeleteDBClusterParameterGroup")
-                    .formParam("DBClusterParameterGroupName", group)
+                    .formParam("DBClusterParameterGroupName", clusterGroup)
             .when().post("/");
+            deleteInstanceParameterGroup(memberGroup);
         }
+    }
+
+    private static void createInstanceParameterGroup(String group, String family) {
+        rds("CreateDBParameterGroup")
+                .formParam("DBParameterGroupName", group)
+                .formParam("DBParameterGroupFamily", family)
+                .formParam("Description", "force ssl")
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static void deleteInstanceParameterGroup(String group) {
+        rds("DeleteDBParameterGroup")
+                .formParam("DBParameterGroupName", group)
+        .when().post("/");
     }
 
     private static void setInstanceForceSsl(String group, String value) {
