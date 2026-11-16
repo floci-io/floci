@@ -106,6 +106,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final StorageBackend<String, Cluster> storage;
     private final StorageBackend<String, Nodegroup> nodeGroupStorage;
     private final StorageBackend<String, FargateProfile> fargateProfileStorage;
+    private final StorageBackend<String, String> deletedFargateArns;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final EksClusterManager clusterManager;
@@ -140,6 +141,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         this.fargateProfileStorage = storageFactory.create("eks", "eks-fargate-profiles.json",
                 new TypeReference<Map<String, FargateProfile>>() {
                 });
+        this.deletedFargateArns = storageFactory.create("eks", "eks-deleted-fargate-arns.json",
+                new TypeReference<Map<String, String>>() {});
         this.config = config;
         this.regionResolver = regionResolver;
         this.clusterManager = clusterManager;
@@ -956,7 +959,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
      * cluster {@code clusterName} when {@code collection} is null, or else the node group, Fargate profile,
      * add-on, access entry or Pod Identity association {@code name} in that cluster, by the route's
      * collection segment, or for the update {@code name} the add-on it was made to. Empty when there is none,
-     * or the handler would refuse the lookup.
+     * or the handler would refuse the lookup. Deleted add-ons and Fargate profiles retain their ARN for scoped IAM deletion waiters.
      */
     public Optional<String> findResourceArn(String clusterName, String collection, String name) {
         Optional<Cluster> cluster = storage.get(requestClusterKey(clusterName));
@@ -966,8 +969,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         try {
             return Optional.ofNullable(switch (collection) {
                 case "node-groups" -> describeNodeGroup(clusterName, name).getNodegroupArn();
-                case "fargate-profiles" -> describeFargateProfile(clusterName, name).getFargateProfileArn();
-                case "addons" -> addons.describe(cluster.get(), name).addonArn();
+                case "fargate-profiles" -> fargateAuthorizationArn(cluster.get(), name).orElse(null);
+                case "addons" -> addons.authorizationArn(cluster.get(), name).orElse(null);
                 case "access-entries" -> accessEntries.describe(cluster.get(), name).accessEntryArn();
                 case "pod-identity-associations" -> podIdentityAssociations.describe(cluster.get(), name).associationArn();
                 case "updates" -> {
@@ -1149,6 +1152,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             if (addons != null) {
                 addons.deleteClusterAddons(cluster);
             }
+            String deletedPrefix = deletedFargatePrefix(cluster);
+            deletedFargateArns.keys().stream().filter(key -> key.startsWith(deletedPrefix))
+                    .toList().forEach(deletedFargateArns::delete);
             synchronized (clustersBeingDeleted) {
                 storage.delete(clusterKey(cluster));
                 clearAppliedClusterUserData(cluster, name);
@@ -1455,7 +1461,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
-    public FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
+    public synchronized FargateProfile createFargateProfile(String clusterName, CreateFargateProfileRequest request) {
         Cluster cluster = describeCluster(clusterName);
 
         String fargateProfileName = request.getFargateProfileName();
@@ -1492,6 +1498,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         profile.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
         fargateProfileStorage.put(storageKey, profile);
+        deletedFargateArns.delete(deletedFargatePrefix(cluster) + fargateProfileName);
         return profile;
     }
 
@@ -1510,8 +1517,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 .collect(Collectors.toList());
     }
 
-    public FargateProfile deleteFargateProfile(String clusterName, String fargateProfileName) {
+    private static String deletedFargatePrefix(Cluster cluster) {
+        return cluster.getArn() + "/" + Objects.toString(cluster.getCreatedAt()) + "/";
+    }
+
+    private synchronized Optional<String> fargateAuthorizationArn(Cluster cluster, String name) {
+        return fargateProfileStorage.get(fargateProfileKey(clusterKey(cluster), name))
+                .map(FargateProfile::getFargateProfileArn)
+                .or(() -> deletedFargateArns.get(deletedFargatePrefix(cluster) + name));
+    }
+
+    public synchronized FargateProfile deleteFargateProfile(String clusterName, String fargateProfileName) {
         FargateProfile profile = describeFargateProfile(clusterName, fargateProfileName);
+        deletedFargateArns.put(deletedFargatePrefix(describeCluster(clusterName)) + fargateProfileName,
+                profile.getFargateProfileArn());
         profile.setStatus(FargateProfileStatus.DELETING);
         fargateProfileStorage.delete(fargateProfileKey(requestClusterKey(clusterName), fargateProfileName));
         return profile;

@@ -25,6 +25,15 @@ boolean or the text `true` or `false`, such as `"endpointPublicAccess": 1`, is r
 no value. A structure, list or map of the wrong kind is refused the same way. EKS's own wording
 for this error has not been measured; Floci answers as the REST JSON services it was measured on do.
 
+## Deletion waiters and IAM
+
+After deleting an add-on or Fargate profile, a principal with resource-scoped describe
+permission receives `ResourceNotFoundException` from its deletion waiter. Floci retains
+only the deleted ARN for authorization, so unrelated resource grants and explicit denies
+still return `AccessDeniedException`. This metadata follows the configured EKS storage mode;
+it is cleared on resource recreation or cluster deletion and is not returned by describe
+or list operations. Resource tags are not retained for post-deletion policy conditions.
+
 ## Supported Operations
 
 | Operation | Description |
