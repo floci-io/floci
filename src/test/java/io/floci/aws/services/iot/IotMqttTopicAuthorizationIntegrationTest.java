@@ -5,13 +5,10 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.eclipse.paho.client.mqttv3.MqttClient;
-import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
-import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.eclipse.paho.mqttv5.client.IMqttToken;
 import org.eclipse.paho.mqttv5.client.MqttAsyncClient;
 import org.eclipse.paho.mqttv5.client.MqttCallback;
-import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
@@ -26,6 +23,9 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.connect;
+import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.connectTls;
+import static io.floci.aws.services.iot.IotMqttMutualTlsIntegrationTest.mqtt5Options;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,7 +56,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
         IotDeviceIdentity device = thingDevice(thing);
         byte[] payload = "own".getBytes(StandardCharsets.UTF_8);
 
-        MqttClient client = connectV3(device, thing);
+        MqttClient client = connectTls(device, thing);
         try {
             CompletableFuture<byte[]> received = new CompletableFuture<>();
             client.subscribe("things/" + thing + "/#", 1, (topic, message) -> received.complete(message.getPayload()));
@@ -71,7 +71,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
     @Test
     void mqtt3SubscribeToAnotherThingsTopicClosesTheConnection() throws Exception {
         String thing = "a" + System.nanoTime();
-        MqttClient client = connectV3(thingDevice(thing), thing);
+        MqttClient client = connectTls(thingDevice(thing), thing);
         try {
             assertThrows(MqttException.class, () -> client.subscribe("things/b" + thing + "/#", 1));
             assertFalse(client.isConnected());
@@ -85,7 +85,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
         String thing = "a" + System.nanoTime();
         String otherTopic = "things/b" + thing + "/telemetry";
         MqttClient listener = connectPlain("listener-" + System.nanoTime());
-        MqttClient client = connectV3(thingDevice(thing), thing);
+        MqttClient client = connectTls(thingDevice(thing), thing);
         try {
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
             listener.subscribe(otherTopic, 1, (topic, message) -> received.add(topic));
@@ -143,7 +143,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
         String prefix = "receive/" + System.nanoTime();
         IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
         device.attachNewPolicy(receiveOnly(prefix + "/ok"), cleanup);
-        MqttClient subscriber = connectV3(device, "sub-" + System.nanoTime());
+        MqttClient subscriber = connectTls(device, "sub-" + System.nanoTime());
         MqttClient publisher = connectPlain("pub-" + System.nanoTime());
         try {
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
@@ -171,7 +171,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
         try {
             publisher.publish(prefix + "/denied", "x".getBytes(StandardCharsets.UTF_8), 1, true);
             publisher.publish(prefix + "/ok", "x".getBytes(StandardCharsets.UTF_8), 1, true);
-            subscriber = connectV3(device, "sub-" + System.nanoTime());
+            subscriber = connectTls(device, "sub-" + System.nanoTime());
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
             subscriber.subscribe(prefix + "/+", 1, (topic, message) -> received.add(topic));
 
@@ -190,7 +190,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
         String prefix = "revoke/" + System.nanoTime();
         IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
         String policy = device.attachNewPolicy(receiveOnly("*"), cleanup);
-        MqttClient subscriber = connectV3(device, "sub-" + System.nanoTime());
+        MqttClient subscriber = connectTls(device, "sub-" + System.nanoTime());
         MqttClient publisher = connectPlain("pub-" + System.nanoTime());
         try {
             BlockingQueue<String> received = new LinkedBlockingQueue<>();
@@ -220,43 +220,12 @@ class IotMqttTopicAuthorizationIntegrationTest {
     private IotDeviceIdentity thingDevice(String thing) {
         IotDeviceIdentity device = IotDeviceIdentity.provision(true, cleanup);
         device.attachNewPolicy(THING_TOPICS_ONLY, cleanup);
-        given().contentType("application/json").body("{}").when().post("/things/" + thing).then().statusCode(200);
-        cleanup.register(() -> given().when().delete("/things/" + thing).then().statusCode(200));
-        given().header("x-amzn-principal", device.certificateArn).when().put("/things/" + thing + "/principals").then().statusCode(200);
-        cleanup.register(() -> given().header("x-amzn-principal", device.certificateArn)
-                .when().delete("/things/" + thing + "/principals").then().statusCode(200));
+        device.attachNewThing(thing, cleanup);
         return device;
     }
 
-    private static MqttClient connectV3(IotDeviceIdentity device, String clientId) throws Exception {
-        MqttConnectOptions options = v3Options();
-        options.setSocketFactory(device.sslContext(TLS_DIR).getSocketFactory());
-        return connect("ssl://127.0.0.1:" + IotMqttTlsProfile.TLS_PORT, clientId, options);
-    }
-
     private static MqttClient connectPlain(String clientId) throws Exception {
-        return connect("tcp://127.0.0.1:" + IotMqttTlsProfile.PLAIN_PORT, clientId, v3Options());
-    }
-
-    private static MqttClient connect(String uri, String clientId, MqttConnectOptions options) throws Exception {
-        MqttClient client = new MqttClient(uri, clientId, new MemoryPersistence());
-        client.setTimeToWait(10_000);
-        try {
-            client.connect(options);
-        } catch (MqttException e) {
-            client.close();
-            throw e;
-        }
-        return client;
-    }
-
-    private static MqttConnectOptions v3Options() {
-        MqttConnectOptions options = new MqttConnectOptions();
-        options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
-        options.setCleanSession(true);
-        options.setConnectionTimeout(10);
-        options.setAutomaticReconnect(false);
-        return options;
+        return connect("tcp://127.0.0.1:" + IotMqttTlsProfile.PLAIN_PORT, clientId, null);
     }
 
     private static void closeV3(MqttClient client) {
@@ -273,12 +242,7 @@ class IotMqttTopicAuthorizationIntegrationTest {
         MqttAsyncClient client = new MqttAsyncClient("ssl://127.0.0.1:" + IotMqttTlsProfile.TLS_PORT, clientId,
                 new org.eclipse.paho.mqttv5.client.persist.MemoryPersistence());
         client.setCallback(callback);
-        MqttConnectionOptions options = new MqttConnectionOptions();
-        options.setCleanStart(true);
-        options.setConnectionTimeout(10);
-        options.setAutomaticReconnect(false);
-        options.setSocketFactory(device.sslContext(TLS_DIR).getSocketFactory());
-        client.connect(options).waitForCompletion(10_000);
+        client.connect(mqtt5Options(device.sslContext(TLS_DIR).getSocketFactory())).waitForCompletion(10_000);
         return client;
     }
 

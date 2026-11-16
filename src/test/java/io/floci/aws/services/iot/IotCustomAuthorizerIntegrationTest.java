@@ -403,15 +403,17 @@ class IotCustomAuthorizerIntegrationTest {
                 + "{\"Effect\":\"Allow\",\"Action\":\"iot:Subscribe\",\"Resource\":\"arn:aws:iot:us-east-1:000000000000:topicfilter/" + prefix + "/*\"},"
                 + "{\"Effect\":\"Allow\",\"Action\":[\"iot:Publish\",\"iot:Receive\"],"
                 + "\"Resource\":\"arn:aws:iot:us-east-1:000000000000:topic/" + prefix + "/${iot:ClientId}/*\"}]}";
-        String answer = "{\"isAuthenticated\": true, \"principalId\": \"itprincipal\", \"policyDocuments\": ["
-                + MAPPER.valueToTree(policy) + "]}";
         when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new InvokeResult(200, null, answer.getBytes(StandardCharsets.UTF_8), null, "id"));
+                .thenReturn(new InvokeResult(200, null, allowWith(policy).getBytes(StandardCharsets.UTF_8), null, "id"));
     }
 
     private static String allow(String clientId) {
+        return allowWith(policy(clientId));
+    }
+
+    private static String allowWith(String policyDocument) {
         return "{\"isAuthenticated\": true, \"principalId\": \"itprincipal\", \"policyDocuments\": ["
-                + MAPPER.valueToTree(policy(clientId)) + "]}";
+                + MAPPER.valueToTree(policyDocument) + "]}";
     }
 
     private static String policy(String clientId) {

@@ -488,9 +488,10 @@ public class IotMqttBrokerService implements Resettable {
 
     /**
      * A CONNECT naming a custom authorizer is admitted only when the authorizer's function allows
-     * it and the policies it returns allow {@code iot:Connect} for the client id. The function runs
-     * off the event loop. A refusal closes an MQTT 3.1.1 connection without a CONNACK and answers
-     * MQTT 5 with reason code 0x87, as AWS IoT does.
+     * it and the policies it returns allow {@code iot:Connect} for the client id; those policies then
+     * decide the session's publish, subscribe and receive. The function runs off the event loop. A
+     * refusal closes an MQTT 3.1.1 connection without a CONNACK and answers MQTT 5 with reason code
+     * 0x87, as AWS IoT does.
      */
     private void authorizeCustom(MqttEndpoint endpoint, String authorizerName, IotCustomAuthorizer.WebSocketUpgrade upgrade,
                                  String sourceIp, int sourcePort, long connectNanos) {
@@ -532,7 +533,8 @@ public class IotMqttBrokerService implements Resettable {
     /**
      * {@code device} is the registered device a TLS client was admitted as, null otherwise; its
      * certificate id is the session's principal, and its account and region the session's.
-     * {@code clientIp} and {@code clientPort} are the address the client connected from: the
+     * {@code policies} decide the session's publish, subscribe and receive, null for a session that
+     * named no custom authorizer on the plaintext listener, which is unrestricted. {@code clientIp} and {@code clientPort} are the address the client connected from: the
      * socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as the
      * bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
      * the keep-alive runs from.
@@ -843,8 +845,9 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     /**
-     * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription, at the
-     * lower of {@code qos} and the highest QoS among its matching subscriptions. Netty encodes
+     * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription whose
+     * policies allow {@code iot:Receive} on {@code topic}, at the lower of {@code qos} and the highest
+     * QoS among its matching subscriptions. Netty encodes
      * {@code properties} only for an MQTT 5 subscriber.
      */
     private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties) {

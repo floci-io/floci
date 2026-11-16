@@ -367,7 +367,7 @@ Implementation notes:
 
 Current accepted limitation:
 
-- Certificate and `iot:Connect` checks are enforced on 8883 only; topic-level authorization is not enforced on either port yet.
+- Certificate and `iot:Connect` checks are enforced on 8883 only. Topic-level authorization applies to sessions a certificate or a custom authorizer admitted, see [Topic authorization](#topic-authorization).
 - Persistent offline sessions are not modeled yet.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 - At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
