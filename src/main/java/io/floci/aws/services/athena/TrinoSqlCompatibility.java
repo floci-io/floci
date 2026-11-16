@@ -28,6 +28,9 @@ import java.util.regex.Pattern;
  *       keeps its JSONPath form, and the macros still turn a computed path's bracketed members
  *       ({@code $["a b"]}) into DuckDB's {@code $."a b"}.</li>
  * </ul>
+ *
+ * <p>It also reads a query string's statement, by the same lexical rules, for
+ * {@code StartQueryExecution}: where it ends ({@link #holdsSeveralStatements} and {@link #recordedForm}).
  */
 final class TrinoSqlCompatibility {
 
@@ -85,6 +88,77 @@ final class TrinoSqlCompatibility {
             i = close + 1;
         }
         return out.toString();
+    }
+
+    // ---- the statement a query string holds ----
+
+    /**
+     * Whether {@code sql} holds more than one statement: anything but whitespace on both sides of a
+     * semicolon, a comment included. Athena (engine v3) rejects such a query at submission, so
+     * {@code SELECT 1; -- done} fails as {@code SELECT 1; SELECT 2} does, while {@code SELECT 1;;} and
+     * {@code ;SELECT 1} run. A semicolon in a literal, a quoted identifier or a comment separates nothing.
+     * Athena reads Hive DDL by the same rules here, so a semicolon after a Hive {@code \'} escape in a
+     * literal separates statements on Athena too.
+     */
+    static boolean holdsSeveralStatements(String sql) {
+        return sql != null && bounds(sql).several();
+    }
+
+    /**
+     * {@code sql} as Athena (engine v3) records, returns and runs it: without the whitespace and semicolons
+     * around it. {@code SELECT 1 ;\n} and {@code ;SELECT 1} become {@code SELECT 1}, for DDL and DML as for
+     * queries. A comment at either end stays, as does a semicolon in a literal. A query holding nothing else
+     * is returned as given.
+     */
+    static String recordedForm(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        StatementBounds bounds = bounds(sql);
+        return bounds.start() >= 0 ? sql.substring(bounds.start(), bounds.end()) : sql;
+    }
+
+    /**
+     * Where the statement of a query string lies. {@code start} is its first character that is neither
+     * whitespace nor a semicolon, -1 when there is none, and {@code end} is just past its last such token: a
+     * trailing comment included, the line break that ends a line comment not. {@code several} is whether such
+     * a token follows a semicolon that follows one.
+     */
+    private record StatementBounds(int start, int end, boolean several) {
+    }
+
+    private static StatementBounds bounds(String sql) {
+        int start = -1;
+        int end = 0;
+        boolean semicolonAfterStatement = false;
+        boolean several = false;
+        int i = 0;
+        while (i < sql.length()) {
+            char c = sql.charAt(i);
+            if (Character.isWhitespace(c)) {
+                i++;
+                continue;
+            }
+            if (c == ';') {
+                semicolonAfterStatement |= start >= 0;
+                i++;
+                continue;
+            }
+            several |= semicolonAfterStatement;
+            start = start < 0 ? i : start;
+            int next = skipLiteralOrComment(sql, i);
+            boolean comment = sql.startsWith("--", i) || sql.startsWith("/*", i);
+            if (next == i) {
+                next = i + 1;
+            }
+            // A line comment runs to its line break, which is whitespace after the statement, not part of it.
+            end = next;
+            while (comment && end > i && Character.isWhitespace(sql.charAt(end - 1))) {
+                end--;
+            }
+            i = next;
+        }
+        return new StatementBounds(start, end, several);
     }
 
     private static String translateCast(String inner) {
@@ -341,8 +415,12 @@ final class TrinoSqlCompatibility {
             return skipQuoted(sql, i);
         }
         if (sql.startsWith("--", i)) {
-            int end = sql.indexOf('\n', i);
-            return end < 0 ? sql.length() : end + 1;
+            // A line comment ends at a carriage return as at a line feed, in Trino as in DuckDB.
+            int end = i + 2;
+            while (end < sql.length() && sql.charAt(end) != '\n' && sql.charAt(end) != '\r') {
+                end++;
+            }
+            return end < sql.length() ? end + 1 : sql.length();
         }
         if (sql.startsWith("/*", i)) {
             int end = sql.indexOf("*/", i + 2);
