@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.floci.aws.testing.AwsTestClients;
@@ -93,6 +94,10 @@ class IamRequestResourceEnforcementIntegrationTest {
     /** A serverless workgroup's PostgreSQL container is not needed to check a request on it, so none starts. */
     @InjectMock
     RedshiftServerlessRuntime runtime;
+
+    /** ECR's backing registry is not needed to check a request on a repository's metadata, so none starts. */
+    @InjectMock
+    EcrRegistryManager ecrRegistry;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -634,6 +639,39 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(user.json("ecr", "AmazonEC2ContainerRegistry_V20150921.TagResource", "1.1")
                 .body("{\"resourceArn\":\"" + protectedArn.replace(REGION, "eu-west-1")
                         + "\",\"tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}").post("/").then(), "ecr:TagResource");
+    }
+
+    /**
+     * An {@code ecr:ResourceTag} or {@code aws:ResourceTag} condition reads the tags ECR holds on the repository a
+     * request names, so an allow on one team's tag lets the caller read that team's repository and not another's.
+     */
+    @Test
+    void anEcrResourceTagConditionReadsTheTagsOfTheRepository() {
+        String tagged = ecrRepository("res-tag-repo-" + suffix(), "data");
+        String other = ecrRepository("res-tag-repo-" + suffix(), "web");
+        String arns = "arn:aws:ecr:" + REGION + ":" + ACCOUNT + ":repository/";
+
+        User user = user("res-ecr-tags");
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"ecr:DescribeRepositories\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"ecr:ResourceTag/team\":\"data\"}}},"
+                + "{\"Effect\":\"Allow\",\"Action\":\"ecr:ListTagsForResource\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+        describeRepositories(user, tagged).statusCode(200);
+        refusedJson(describeRepositories(user, other), "ecr:DescribeRepositories");
+        send(user, "ecr", "AmazonEC2ContainerRegistry_V20150921.ListTagsForResource", "1.1",
+                "{\"resourceArn\":\"" + arns + tagged + "\"}").statusCode(200);
+        refusedJson(send(user, "ecr", "AmazonEC2ContainerRegistry_V20150921.ListTagsForResource", "1.1",
+                "{\"resourceArn\":\"" + arns + other + "\"}"), "ecr:ListTagsForResource");
+    }
+
+    /** An ECR repository of the name, tagged with the team, deleted afterwards. */
+    private String ecrRepository(String name, String team) {
+        adminJson("ecr", "AmazonEC2ContainerRegistry_V20150921.CreateRepository").body("{\"repositoryName\":\""
+                + name + "\",\"tags\":[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]}").post("/").then()
+                .statusCode(200);
+        cleanup.register(() -> adminJson("ecr", "AmazonEC2ContainerRegistry_V20150921.DeleteRepository")
+                .body("{\"repositoryName\":\"" + name + "\",\"force\":true}").post("/"));
+        return name;
     }
 
     @Test

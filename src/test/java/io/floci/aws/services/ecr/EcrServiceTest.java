@@ -339,6 +339,25 @@ class EcrServiceTest {
     }
 
     @Test
+    void storedTagsAreTheTagsOfTheRepositoryTheArnNamesAndTaggingPutsANewMapInPlaceOfTheHeldOne() {
+        String arn = service.createRepository(REPO, null, null, null, null, null, Map.of("team", "data"), REGION)
+                .getRepositoryArn();
+        Map<String, String> held = service.listTagsForResource(REPO, null, REGION);
+
+        assertEquals(Map.of("team", "data"), service.storedTags(arn));
+        assertEquals(Map.of(), service.storedTags(arn + "-other"));
+        assertEquals(Map.of(), service.storedTags(arn.replace(ACCOUNT, "111111111111")));
+        assertEquals(Map.of(), service.storedTags(arn.replace(REGION, "us-west-2")));
+        assertEquals(Map.of(), service.storedTags(arn.replace("arn:aws:", "arn:aws-cn:")));
+
+        service.tagResource(REPO, null, Map.of("stage", "prod"), REGION);
+        service.untagResource(REPO, null, List.of("team"), REGION);
+
+        assertEquals(Map.of("stage", "prod"), service.storedTags(arn));
+        assertEquals(Map.of("team", "data"), held);
+    }
+
+    @Test
     void immutableRepositoryIsMarkedForDataPlaneTagProtection() {
         service.createRepository(REPO, null, "IMMUTABLE", null, null, null, null, REGION);
 
