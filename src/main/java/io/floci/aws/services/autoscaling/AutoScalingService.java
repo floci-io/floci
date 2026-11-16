@@ -370,18 +370,20 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void deleteLaunchConfiguration(String region, String name) {
-        String key = lcKey(region, name);
-        if (!launchConfigs.containsKey(key)) {
-            throw new AwsException("ValidationError",
-                    "Launch configuration '" + name + "' not found.", 400);
+        synchronized (lockFor(region)) {
+            String key = lcKey(region, name);
+            if (!launchConfigs.containsKey(key)) {
+                throw new AwsException("ValidationError",
+                        "Launch configuration '" + name + "' not found.", 400);
+            }
+            boolean inUse = groups.values().stream().anyMatch(group -> region.equals(group.getRegion())
+                    && name.equals(group.getLaunchConfigurationName()));
+            if (inUse) {
+                throw new AwsException("ResourceInUse",
+                        "Launch configuration '" + name + "' is in use by an Auto Scaling group.", 400);
+            }
+            launchConfigs.remove(key);
         }
-        boolean inUse = groups.values().stream().anyMatch(group -> region.equals(group.getRegion())
-                && name.equals(group.getLaunchConfigurationName()));
-        if (inUse) {
-            throw new AwsException("ResourceInUse",
-                    "Launch configuration '" + name + "' is in use by an Auto Scaling group.", 400);
-        }
-        launchConfigs.remove(key);
     }
 
     // ── Auto Scaling Groups ────────────────────────────────────────────────────
@@ -400,43 +402,45 @@ public class AutoScalingService implements PassedRoleLookup {
                                                     Map<String, String> tags,
                                                     Map<String, Boolean> tagPropagateAtLaunch,
                                                     AsgOptionalFields optionalFields) {
-        String key = asgKey(region, name);
-        if (groups.containsKey(key)) {
-            throw new AwsException("AlreadyExists",
-                    "Auto Scaling group '" + name + "' already exists.", 400);
-        }
-        validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
-        if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null
-                && mixedInstancesPolicy == null) {
-            throw new AwsException("ValidationError",
-                    "Valid requests must contain either LaunchTemplate, LaunchConfigurationName, "
-                            + "InstanceId or MixedInstancesPolicy parameter.", 400);
-        }
-        validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
-                launchTemplateVersion, mixedInstancesPolicy);
-        validateOptionalFields(optionalFields);
-        validateDesiredCapacityType(
-                optionalFields != null ? optionalFields.desiredCapacityType() : null,
-                mixedInstancesPolicy);
+        synchronized (lockFor(region)) {
+            String key = asgKey(region, name);
+            if (groups.containsKey(key)) {
+                throw new AwsException("AlreadyExists",
+                        "Auto Scaling group '" + name + "' already exists.", 400);
+            }
+            validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+            if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null
+                    && mixedInstancesPolicy == null) {
+                throw new AwsException("ValidationError",
+                        "Valid requests must contain either LaunchTemplate, LaunchConfigurationName, "
+                                + "InstanceId or MixedInstancesPolicy parameter.", 400);
+            }
+            validateEffectiveLaunchImage(region, launchConfigName, launchTemplateId, launchTemplateName,
+                    launchTemplateVersion, mixedInstancesPolicy);
+            validateOptionalFields(optionalFields);
+            validateDesiredCapacityType(
+                    optionalFields != null ? optionalFields.desiredCapacityType() : null,
+                    mixedInstancesPolicy);
 
-        AutoScalingGroup asg = newGroup(region, name, minSize, maxSize, desiredCapacity,
-                resolveAvailabilityZones(region, availabilityZones, subnetIds), subnetIds, terminationPolicies,
-                tags, tagPropagateAtLaunch);
-        asg.setLaunchConfigurationName(launchConfigName);
-        asg.setLaunchTemplateId(launchTemplateId);
-        asg.setLaunchTemplateName(launchTemplateName);
-        asg.setLaunchTemplateVersion(launchTemplateVersion);
-        asg.setMixedInstancesPolicy(mixedInstancesPolicy);
-        asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
-        asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
-        asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
-        asg.setHealthCheckType(healthCheckType != null ? healthCheckType : "EC2");
-        asg.setHealthCheckGracePeriod(healthCheckGracePeriod);
-        if (optionalFields != null) {
-            optionalFields.applyToNewGroup(asg);
+            AutoScalingGroup asg = newGroup(region, name, minSize, maxSize, desiredCapacity,
+                    resolveAvailabilityZones(region, availabilityZones, subnetIds), subnetIds, terminationPolicies,
+                    tags, tagPropagateAtLaunch);
+            asg.setLaunchConfigurationName(launchConfigName);
+            asg.setLaunchTemplateId(launchTemplateId);
+            asg.setLaunchTemplateName(launchTemplateName);
+            asg.setLaunchTemplateVersion(launchTemplateVersion);
+            asg.setMixedInstancesPolicy(mixedInstancesPolicy);
+            asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
+            asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
+            asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
+            asg.setHealthCheckType(healthCheckType != null ? healthCheckType : "EC2");
+            asg.setHealthCheckGracePeriod(healthCheckGracePeriod);
+            if (optionalFields != null) {
+                optionalFields.applyToNewGroup(asg);
+            }
+            groups.put(key, asg);
+            return asg;
         }
-        groups.put(key, asg);
-        return asg;
     }
 
     /**
@@ -479,68 +483,70 @@ public class AutoScalingService implements PassedRoleLookup {
                                         String healthCheckType, Integer healthCheckGracePeriod,
                                         List<String> terminationPolicies,
                                         AsgOptionalFields optionalFields) {
-        // Under the group's lock, which EnterStandby, ExitStandby and the reconciler hold while they read and
-        // change the group's capacity.
-        String key = asgKey(region, name);
-        synchronized (lockFor(key)) {
-            AutoScalingGroup asg = requireGroup(region, name);
-            validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
-            if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
-                throw new AwsException("ValidationError",
-                        "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+        synchronized (lockFor(region)) {
+            // Under the group's lock, which EnterStandby, ExitStandby and the reconciler hold while they read and
+            // change the group's capacity.
+            String key = asgKey(region, name);
+            synchronized (lockFor(key)) {
+                AutoScalingGroup asg = requireGroup(region, name);
+                validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+                if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
+                    throw new AwsException("ValidationError",
+                            "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+                }
+                validateOptionalFields(optionalFields);
+                rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
+                        launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
+                LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
+                        launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
+                validateEffectiveLaunchImage(region,
+                        effectiveIdentity.launchConfigurationName(),
+                        effectiveIdentity.launchTemplateId(),
+                        effectiveIdentity.launchTemplateName(),
+                        effectiveIdentity.launchTemplateVersion(),
+                        effectiveIdentity.mixedInstancesPolicy());
+                validateDesiredCapacityType(
+                        effectiveDesiredCapacityType(asg, optionalFields),
+                        effectiveIdentity.mixedInstancesPolicy());
+                List<String> updatedZones = availabilityZones;
+                if (subnetIds != null && !subnetIds.isEmpty()) {
+                    updatedZones = resolveAvailabilityZones(region, availabilityZones, subnetIds);
+                }
+                if (launchConfigName != null) {
+                    asg.setLaunchConfigurationName(launchConfigName);
+                    asg.setLaunchTemplateId(null);
+                    asg.setLaunchTemplateName(null);
+                    asg.setLaunchTemplateVersion(null);
+                    asg.setMixedInstancesPolicy(null);
+                }
+                if (launchTemplateId != null || launchTemplateName != null) {
+                    asg.setLaunchConfigurationName(null);
+                    asg.setLaunchTemplateId(launchTemplateId);
+                    asg.setLaunchTemplateName(launchTemplateName);
+                    asg.setLaunchTemplateVersion(launchTemplateVersion);
+                    asg.setMixedInstancesPolicy(null);
+                }
+                if (mixedInstancesPolicy != null) {
+                    asg.setLaunchConfigurationName(null);
+                    asg.setLaunchTemplateId(null);
+                    asg.setLaunchTemplateName(null);
+                    asg.setLaunchTemplateVersion(null);
+                    asg.setMixedInstancesPolicy(mixedInstancesPolicy);
+                }
+                if (minSize != null) { asg.setMinSize(minSize); }
+                if (maxSize != null) { asg.setMaxSize(maxSize); }
+                if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
+                if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
+                if (updatedZones != null) { asg.setAvailabilityZones(new ArrayList<>(updatedZones)); }
+                if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
+                if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
+                if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
+                if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
+                if (optionalFields != null) {
+                    optionalFields.applyToExistingGroup(asg);
+                }
+                groups.put(key, asg);
             }
-            validateOptionalFields(optionalFields);
-            rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
-                    launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
-            LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
-                    launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
-            validateEffectiveLaunchImage(region,
-                    effectiveIdentity.launchConfigurationName(),
-                    effectiveIdentity.launchTemplateId(),
-                    effectiveIdentity.launchTemplateName(),
-                    effectiveIdentity.launchTemplateVersion(),
-                    effectiveIdentity.mixedInstancesPolicy());
-            validateDesiredCapacityType(
-                    effectiveDesiredCapacityType(asg, optionalFields),
-                    effectiveIdentity.mixedInstancesPolicy());
-            List<String> updatedZones = availabilityZones;
-            if (subnetIds != null && !subnetIds.isEmpty()) {
-                updatedZones = resolveAvailabilityZones(region, availabilityZones, subnetIds);
-            }
-            if (launchConfigName != null) {
-                asg.setLaunchConfigurationName(launchConfigName);
-                asg.setLaunchTemplateId(null);
-                asg.setLaunchTemplateName(null);
-                asg.setLaunchTemplateVersion(null);
-                asg.setMixedInstancesPolicy(null);
-            }
-            if (launchTemplateId != null || launchTemplateName != null) {
-                asg.setLaunchConfigurationName(null);
-                asg.setLaunchTemplateId(launchTemplateId);
-                asg.setLaunchTemplateName(launchTemplateName);
-                asg.setLaunchTemplateVersion(launchTemplateVersion);
-                asg.setMixedInstancesPolicy(null);
-            }
-            if (mixedInstancesPolicy != null) {
-                asg.setLaunchConfigurationName(null);
-                asg.setLaunchTemplateId(null);
-                asg.setLaunchTemplateName(null);
-                asg.setLaunchTemplateVersion(null);
-                asg.setMixedInstancesPolicy(mixedInstancesPolicy);
-            }
-            if (minSize != null) { asg.setMinSize(minSize); }
-            if (maxSize != null) { asg.setMaxSize(maxSize); }
-            if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
-            if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
-            if (updatedZones != null) { asg.setAvailabilityZones(new ArrayList<>(updatedZones)); }
-            if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
-            if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
-            if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
-            if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
-            if (optionalFields != null) {
-                optionalFields.applyToExistingGroup(asg);
-            }
-            groups.put(key, asg);
         }
     }
 
@@ -2456,6 +2462,10 @@ public class AutoScalingService implements PassedRoleLookup {
                                               String launchTemplateVersion,
                                               MixedInstancesPolicy mixedInstancesPolicy) {
         if (launchConfigName != null) {
+            if (!launchConfigs.containsKey(lcKey(region, launchConfigName))) {
+                throw new AwsException("ValidationError",
+                        "Launch configuration '" + launchConfigName + "' not found.", 400);
+            }
             return;
         }
         if (launchTemplateId != null || launchTemplateName != null) {

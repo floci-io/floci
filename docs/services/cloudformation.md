@@ -423,8 +423,15 @@ until dependent groups switch and the stack update commits. A failed update rest
 configuration. `BlockDeviceMappings` and `MetadataOptions` are passed to Auto Scaling.
 
 For legacy configurations without saved input properties, an unchanged literal `InstanceId`
-template can be recovered from the prior stack template. Missing prior inputs or an unresolved
-prior instance reference cannot establish equality and still require replacement.
+template can be recovered from the prior stack template. References in scalar inputs and
+`SecurityGroups` are compared with the persisted configuration, without resolving prior
+references using new stack parameters. Removing `InstanceId` requires replacement.
+Missing prior inputs or an unresolved prior instance reference cannot establish equality.
+
+Group creation and updates coordinate with launch-configuration deletion, so a concurrent
+attachment cannot bypass the in-use check. A configuration already deleted cannot be attached.
+Out-of-band deletion remains stack drift; this replacement behavior does not promise automatic
+recreation under a missing configuration's former custom name.
 
 ## Auto Scaling Launch Template Resolution
 

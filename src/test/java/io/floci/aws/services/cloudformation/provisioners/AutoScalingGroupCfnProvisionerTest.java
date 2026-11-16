@@ -455,6 +455,28 @@ class AutoScalingGroupCfnProvisionerTest {
         provisionLegacyInstance(legacyInstanceProperties(), previous, true);
     }
 
+    @Test
+    void legacyInstanceConfigurationReusesAReferenceMatchingThePersistedType() {
+        ObjectNode previous = legacyInstanceProperties();
+        previous.putObject("InstanceType").put("Ref", "InstanceType");
+        provisionLegacyInstance(legacyInstanceProperties(), previous, false);
+    }
+
+    @Test
+    void legacyInstanceConfigurationRejectsAReferenceWhoseValueChanged() {
+        ObjectNode previous = legacyInstanceProperties();
+        previous.putObject("InstanceType").put("Ref", "InstanceType");
+        provisionLegacyInstance(legacyInstanceProperties().put("InstanceType", "t3.small"), previous, true);
+    }
+
+    @Test
+    void legacyInstanceConfigurationRejectsRemovalOfTheInstanceSource() {
+        ObjectNode previous = legacyInstanceProperties().put("ImageId", "ami-original");
+        ObjectNode current = previous.deepCopy();
+        current.remove("InstanceId");
+        provisionLegacyInstance(current, previous, true);
+    }
+
     private ObjectNode legacyInstanceProperties() {
         return mapper.createObjectNode().put("LaunchConfigurationName", "my-lc")
                 .put("InstanceId", "i-original").put("InstanceType", "t3.micro");
@@ -463,6 +485,8 @@ class AutoScalingGroupCfnProvisionerTest {
     private StackResource provisionLegacyInstance(ObjectNode current, JsonNode previous, boolean rejected) {
         LaunchConfiguration lc = new LaunchConfiguration();
         lc.setLaunchConfigurationName("my-lc");
+        lc.setImageId("ami-original");
+        lc.setInstanceType("t3.micro");
         when(autoScaling.describeLaunchConfigurations(REGION, List.of("my-lc"))).thenReturn(List.of(lc));
         StackResource resource = resource(LAUNCH_CONFIGURATION, "Lc", "my-lc");
         ProvisionContext original = ctx("my-lc");

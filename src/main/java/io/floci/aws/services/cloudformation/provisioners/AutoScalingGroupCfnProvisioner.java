@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.autoscaling.AutoScalingService;
 import io.floci.aws.services.autoscaling.model.AsgOptionalFields;
@@ -264,11 +265,10 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
         if (prior == null) {
             return false;
         }
-        if (ctx.resolveOptional(props, "InstanceId") != null) {
+        if (ctx.resolveOptional(props, "InstanceId") != null || ctx.previouslyDeclared("InstanceId")) {
             JsonNode previous = ctx.priorProperties();
-            // A prior literal template proves the source without resolving old references using new parameters.
             return previous != null && previous.path("InstanceId").isTextual()
-                    && previous.equals(ctx.engine().resolveNode(props));
+                    && legacyInstanceInputsMatch(prior, previous, ctx.engine().resolveNode(props));
         }
         String publicIp = ctx.resolveOptional(props, "AssociatePublicIpAddress");
         Boolean associatePublicIp = publicIp == null || publicIp.isBlank() ? null : Boolean.parseBoolean(publicIp);
@@ -281,6 +281,28 @@ public class AutoScalingGroupCfnProvisioner implements CfnResourceProvisioner {
                 && Objects.equals(prior.getAssociatePublicIpAddress(), associatePublicIp)
                 && MAPPER.valueToTree(prior.getBlockDeviceMappings()).equals(MAPPER.valueToTree(mappings))
                 && MAPPER.valueToTree(prior.getMetadataOptions()).equals(MAPPER.valueToTree(metadata));
+    }
+
+    private boolean legacyInstanceInputsMatch(LaunchConfiguration prior, JsonNode previous, JsonNode resolved) {
+        // Read prior Ref values from the immutable configuration, never from current stack parameters.
+        // Keep omitted instance-derived inputs omitted and require the original literal InstanceId.
+        ObjectNode observed = MAPPER.createObjectNode()
+                .put("LaunchConfigurationName", prior.getLaunchConfigurationName())
+                .put("ImageId", prior.getImageId())
+                .put("InstanceType", prior.getInstanceType())
+                .put("KeyName", prior.getKeyName())
+                .put("UserData", prior.getUserData())
+                .put("IamInstanceProfile", prior.getIamInstanceProfile())
+                .put("AssociatePublicIpAddress", prior.getAssociatePublicIpAddress());
+        observed.set("SecurityGroups", MAPPER.valueToTree(prior.getSecurityGroups()));
+        ObjectNode comparable = previous.deepCopy();
+        for (Map.Entry<String, JsonNode> field : observed.properties()) {
+            JsonNode declared = previous.get(field.getKey());
+            if (declared != null && declared.isContainerNode()) {
+                comparable.set(field.getKey(), field.getValue());
+            }
+        }
+        return comparable.equals(resolved);
     }
 
     @Override
