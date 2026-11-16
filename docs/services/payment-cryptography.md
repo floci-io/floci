@@ -205,6 +205,17 @@
   not one to add or to take away, so a request that cannot be carried out is refused
   rather than answered as if it had named no Region at all. A refused request leaves no
   key behind.
+- **The default Regions are the ones of the Region they are read in:** each Region has its
+  own default Regions, so a key created in a Region takes the default Regions of that
+  Region and not the ones of another. A key's own replication takes precedence over the
+  default Regions of its Region.
+- **A replica is a complete copy of the key:** it carries the primary's material, so the
+  key leaves the service from the Region of a replica as well as from the primary's, and
+  it carries the primary's tags, so a change to them reaches it. The alias names are the
+  Region's own, and an alias that names a replica goes with it when the replica does.
+- **Not checked:** the permission to create a key in the Region a key is replicated to.
+  The permission is checked in the Region of the request, which is the Region the
+  replication is asked in.
 - **Not yet emulated:** the resource policy operations, the key usage operations, the key
   restore operation, the multi-party approval operations and the certificate signing
   request.

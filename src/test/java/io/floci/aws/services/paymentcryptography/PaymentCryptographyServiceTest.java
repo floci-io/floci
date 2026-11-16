@@ -803,10 +803,11 @@ class PaymentCryptographyServiceTest {
 
     @Test
     void theAccountHasDefaultReplicationRegions() {
-        assertEquals(List.of(), service.defaultReplicationRegions());
+        assertEquals(List.of(), service.defaultReplicationRegions("us-east-1"));
 
-        assertEquals(List.of("us-west-2"), service.enableDefaultReplicationRegions(List.of("us-west-2")));
-        assertEquals(List.of("us-west-2"), service.defaultReplicationRegions());
+        assertEquals(List.of("us-west-2"),
+                service.enableDefaultReplicationRegions("us-east-1", List.of("us-west-2")));
+        assertEquals(List.of("us-west-2"), service.defaultReplicationRegions("us-east-1"));
 
         // A key that is created with the default on is in the default region as well.
         PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of());
@@ -816,10 +817,27 @@ class PaymentCryptographyServiceTest {
 
         // Turning it off leaves the other regions alone.
         assertEquals(List.of("us-west-2", "us-east-2"),
-                service.enableDefaultReplicationRegions(List.of("us-east-2")));
+                service.enableDefaultReplicationRegions("us-east-1", List.of("us-east-2")));
         assertEquals(List.of("us-west-2"),
-                service.disableDefaultReplicationRegions(List.of("us-east-2")));
-        assertEquals(List.of(), service.disableDefaultReplicationRegions(List.of("us-west-2")));
+                service.disableDefaultReplicationRegions("us-east-1", List.of("us-east-2")));
+        assertEquals(List.of(),
+                service.disableDefaultReplicationRegions("us-east-1", List.of("us-west-2")));
+    }
+
+    @Test
+    void eachRegionHasItsOwnDefaultReplicationRegions() {
+        // The settings are the ones of the Region they are read in, so a Region whose keys
+        // are replicated is not the same as another Region whose keys are not.
+        service.enableDefaultReplicationRegions("us-east-1", List.of("us-west-2"));
+
+        assertEquals(List.of("us-west-2"), service.defaultReplicationRegions("us-east-1"));
+        assertEquals(List.of(), service.defaultReplicationRegions("us-west-2"));
+
+        // A key created in the other Region takes the settings of that Region, which are
+        // none, so it is not replicated.
+        PaymentCryptographyKey key = createReplicatedKey("us-west-2", List.of());
+        assertTrue(key.getReplicationRegions().isEmpty());
+        assertNull(key.getMultiRegionKeyType());
     }
 
     @Test
@@ -967,7 +985,7 @@ class PaymentCryptographyServiceTest {
     void aKeyThatIsNotExportableIsNotReplicatedToTheDefaultsEither() {
         // The defaults are the regions the key takes when the request names none, so a key
         // that may not leave is refused there as well.
-        service.enableDefaultReplicationRegions(List.of("us-west-2"));
+        service.enableDefaultReplicationRegions("us-east-1", List.of("us-west-2"));
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "AES_256");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
@@ -1071,6 +1089,25 @@ class PaymentCryptographyServiceTest {
                 "the key is in the list twice");
         assertNull(store.get(key.getKeyId()).orElse(null),
                 "the key is still under the name it was saved under");
+    }
+
+    @Test
+    void aReplicaIsUsableOnItsOwn() {
+        // A replica is a complete copy of the key, so the key leaves the service from the
+        // region the replica is in as well as from the primary's.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey protection = createWrappingKey("us-west-2");
+
+        Map<String, Object> answer = exportTr31Answer("us-west-2", key.getKeyId(),
+                protection.getKeyId());
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        String export = (String) wrapped.get("KeyMaterial");
+
+        assertTrue(export.length() > 32, "the block is only its header");
+        assertEquals(key.getKeyCheckValue(), wrapped.get("KeyCheckValue"));
+
+        PaymentCryptographyKey imported = importTr31("us-west-2", protection.getKeyId(), export);
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
     }
 
     private PaymentCryptographyKey createReplicatedKey(String region, List<String> regions) {
