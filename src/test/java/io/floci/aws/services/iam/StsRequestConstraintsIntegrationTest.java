@@ -49,10 +49,10 @@ class StsRequestConstraintsIntegrationTest {
     }
 
     /**
-     * {@code serialNumberType} and {@code tokenCodeType} are declared and were read by nothing, so
-     * a request naming either is now held to it. Both are reported together, in the order the model
-     * lists them, and a well-formed pair is still accepted and still unused: the MFA check itself
-     * is not built.
+     * {@code serialNumberType} and {@code tokenCodeType} are declared, so a request naming either
+     * is held to it. Both are reported together, in the order the model lists them, and the shapes
+     * are answered before any device is resolved: a pair that breaks them is a
+     * {@code ValidationError} rather than the refusal of a device that could not have existed.
      */
     @Test
     void theMfaMembersAreReadWhereNothingReadThemBefore() {
@@ -81,6 +81,11 @@ class StsRequestConstraintsIntegrationTest {
             .body(MESSAGE, containsString("Value 'abcdef' at 'tokenCode' failed to satisfy"
                     + " constraint: Member must satisfy regular expression pattern: [\\d]*"));
 
+        // A well-formed pair clears the declared shapes and reaches the device. This key is one
+        // IAM holds nowhere, so there is no identity behind it whose devices could be checked, and
+        // the claim is taken as made rather than refused: the same reading this emulator takes of
+        // such a key everywhere else. A key that does name an identity is held to its own devices,
+        // which is what StsMfaEnforcementIntegrationTest walks.
         sts("GetSessionToken")
             .formParam("SerialNumber", "arn:aws:iam::000000000000:mfa/user")
             .formParam("TokenCode", "123456")

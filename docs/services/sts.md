@@ -304,6 +304,59 @@ key or one that belongs to another account, or by an IAM user since deleted and 
 a valid credential: it is refused like an unknown access key. A key IAM does not know anywhere mints sessions that act
 as the account root, as the key itself does.
 
+## MFA
+
+`GetSessionToken` and `AssumeRole` read `SerialNumber` and `TokenCode`. AWS describes the pair on
+both: `SerialNumber` is "the identification number of the MFA device that is associated with the IAM
+user who is making the GetSessionToken call", and `TokenCode` is "the value provided by the MFA
+device", six digits. Floci holds the code to the seed of the virtual MFA device that serial names,
+with the one step of drift `EnableMFADevice` allows, and the device has to be enabled for the
+identity that signed the call: a serial naming a device enabled for somebody else authenticates
+nobody. The window is the wall clock's, as it is on the IAM actions that take codes, since the code
+comes from a device keeping time of its own rather than from the emulator's clock.
+
+A call that names neither parameter claims nothing and keeps whatever its own credentials carry, so
+a session minted behind a device assumes a role as an MFA-authenticated caller without naming the
+device again: "because temporary credentials returned by `GetSessionToken` include MFA information,
+you can check for MFA in individual API operations made by the credentials". A call that names
+either one is a claim of MFA and has to make it good, a code naming no device and a device with no
+code both proving nothing, and the code is spent once it authenticates: RFC 6238 has a verifier
+"MUST NOT accept the second attempt of the OTP generated for the same time step", so one code mints
+one session rather than every session its window allows. A key IAM holds nowhere is the one caller
+whose claim is taken as made, there being no identity behind it whose devices could be checked,
+which is the reading Floci already takes of such a key everywhere else. A claim that fails is
+refused with `AccessDenied` (403),
+which is the outcome AWS documents ("an incorrect MFA code causes the API to return an access denied
+error", and for `AssumeRole` "if the role being assumed requires MFA and if the TokenCode value is
+missing or expired, the AssumeRole call returns an access denied error"). The sentence Floci writes
+with it is its own, the one the IAM actions already write for a code that does not match, since AWS
+publishes no message for this refusal.
+
+What the authentication then buys differs by operation, and AWS draws the line itself. A
+`GetSessionToken` session carries it onward: a request signed with it has
+`aws:MultiFactorAuthPresent` as `true` and `aws:MultiFactorAuthAge` as the seconds since the device
+was used, which [IAM](iam.md#condition-keys-floci-populates) populates, "because temporary
+credentials returned by `GetSessionToken` include MFA information, you can check for MFA in
+individual API operations made by the credentials". An `AssumeRole` session does not: "the temporary
+credentials returned by `AssumeRole` do not include MFA information in the context, so you cannot
+check individual API operations for MFA", and "once the user has assumed the role, no further MFA
+checks are made". So a role session publishes the key as `false` whatever device got it issued, and
+Floci records none on it.
+
+The device a call presents is part of that request's own context, which is how a long-term key
+reaches an MFA-protected role at all. A trust policy may require it, AWS's own example being
+`"Condition": {"Bool": {"aws:MultiFactorAuthPresent": true}}`, and then "if the caller does not
+include valid MFA information, the request to assume the role is denied". The caller's own
+permission to make the call is read against that same context, since AWS denies such a request when
+"users have not been MFA authenticated, or if they provide an invalid MFA device identifier or
+invalid TOTP", so an identity policy conditioned on MFA for `sts:AssumeRole` is satisfied by the
+device the call carries.
+
+One difference from AWS is known and open: AWS says temporary credentials from a `GetSessionToken`
+request "can access IAM and AWS STS API operations *only* if you include MFA information in the
+request for credentials". Floci does not hold a session to that: one minted without a device reaches
+IAM and STS with whatever its user's policies allow.
+
 ## Trust Policy Enforcement
 
 `AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
