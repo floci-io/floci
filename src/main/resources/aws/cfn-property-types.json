@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_cfn_property_types.py",
     "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
-    "retrieved": "2026-11-14",
+    "retrieved": "2026-11-16",
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
@@ -13,7 +13,8 @@
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
-    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
+    "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion",
+    "AWS::SES::ConfigurationSetEventDestination": "AWS::SES::ConfigurationSetEventDestination"
   },
   "shapes": {
     "AWS::AutoScaling::LaunchConfiguration": {
@@ -2145,6 +2146,89 @@
       "required": [
         "S3Bucket",
         "S3Key"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination": {
+      "type": "structure",
+      "members": {
+        "Id": "String",
+        "ConfigurationSetName": "String",
+        "EventDestination": "AWS::SES::ConfigurationSetEventDestination/EventDestination"
+      },
+      "required": [
+        "ConfigurationSetName",
+        "EventDestination"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination": {
+      "type": "structure",
+      "members": {
+        "DimensionConfigurations": "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination.DimensionConfigurations"
+      }
+    },
+    "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination.DimensionConfigurations": {
+      "type": "list",
+      "member": "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration"
+    },
+    "AWS::SES::ConfigurationSetEventDestination/DimensionConfiguration": {
+      "type": "structure",
+      "members": {
+        "DimensionValueSource": "String",
+        "DefaultDimensionValue": "String",
+        "DimensionName": "String"
+      },
+      "required": [
+        "DimensionValueSource",
+        "DefaultDimensionValue",
+        "DimensionName"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination": {
+      "type": "structure",
+      "members": {
+        "EventBusArn": "String"
+      },
+      "required": [
+        "EventBusArn"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "Enabled": "Boolean",
+        "MatchingEventTypes": "AWS::SES::ConfigurationSetEventDestination/EventDestination.MatchingEventTypes",
+        "CloudWatchDestination": "AWS::SES::ConfigurationSetEventDestination/CloudWatchDestination",
+        "KinesisFirehoseDestination": "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination",
+        "SnsDestination": "AWS::SES::ConfigurationSetEventDestination/SnsDestination",
+        "EventBridgeDestination": "AWS::SES::ConfigurationSetEventDestination/EventBridgeDestination"
+      },
+      "required": [
+        "MatchingEventTypes"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/EventDestination.MatchingEventTypes": {
+      "type": "list",
+      "member": "String"
+    },
+    "AWS::SES::ConfigurationSetEventDestination/KinesisFirehoseDestination": {
+      "type": "structure",
+      "members": {
+        "IAMRoleARN": "String",
+        "DeliveryStreamARN": "String"
+      },
+      "required": [
+        "IAMRoleARN",
+        "DeliveryStreamARN"
+      ]
+    },
+    "AWS::SES::ConfigurationSetEventDestination/SnsDestination": {
+      "type": "structure",
+      "members": {
+        "TopicARN": "String"
+      },
+      "required": [
+        "TopicARN"
       ]
     },
     "Boolean": {

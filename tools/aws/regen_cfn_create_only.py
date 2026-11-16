@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate src/main/resources/cloudformation/create-only-properties.json from CloudFormation's resource schemas.
+"""Regenerate CloudFormation create-only property metadata from the published resource schemas.
 
 `CfnCreateOnlyProperties` answers, for a change set, whether editing a property replaces the resource.
 For a resource type with an entry the answer is the type's `createOnlyProperties` in the CloudFormation
@@ -12,6 +12,10 @@ Types are sorted, each list keeps the order the schema gives it, and an empty li
 no create-only property (the class treats an empty entry as authoritative, not as a missing one). A type
 with no schema in the archive has no entry and is declared in SCHEMALESS, which is the set
 `regen_cfn_schema_surface.py` holds; any other inventory type without a schema fails the run by name.
+
+`conditional-create-only-properties.json` keeps conditional pointers separately for provisioners
+that implement their replacement semantics. Other conditional schema pointers do not automatically
+force replacement in Floci.
 
 The schemas are the ones AWS publishes for us-east-1, the same `describe-type` returns:
 
@@ -40,17 +44,21 @@ from regen_cfn_schema_surface import SCHEMALESS, file_name, inventory_types
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = REPO_ROOT / "src/main/resources/cloudformation/create-only-properties.json"
+CONDITIONAL_OUTPUT = REPO_ROOT / "src/main/resources/cloudformation/conditional-create-only-properties.json"
 INVENTORY = REPO_ROOT / "src/test/resources/cloudformation/supported-resource-types.tsv"
 ARCHIVE_URL = "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip"
 FETCH_TIMEOUT_SECONDS = 60
 POINTER_PREFIX = "/properties/"
+# Conditional pointers require resource-specific replacement semantics. Only this type has
+# a provisioner that treats its named destination's change as replacement.
+CONDITIONAL_REPLACEMENT_TYPES = {"AWS::SES::ConfigurationSetEventDestination"}
 
 
-def create_only(schema: dict) -> list[str]:
-    """The schema's `createOnlyProperties` without the `/properties/` prefix, in the schema's order."""
-    pointers = schema.get("createOnlyProperties", [])
+def property_paths(schema: dict, key: str) -> list[str]:
+    """The schema's property pointers without the `/properties/` prefix, in schema order."""
+    pointers = schema.get(key, [])
     if not isinstance(pointers, list):
-        raise ValueError("'createOnlyProperties' is not a list")
+        raise ValueError(f"{key!r} is not a list")
     names = []
     for pointer in pointers:
         if not isinstance(pointer, str) or not pointer.startswith(POINTER_PREFIX) \
@@ -58,6 +66,10 @@ def create_only(schema: dict) -> list[str]:
             raise ValueError(f"expected a '{POINTER_PREFIX}<name>' pointer, found {pointer!r}")
         names.append(pointer[len(POINTER_PREFIX):])
     return names
+
+
+def create_only(schema: dict) -> list[str]:
+    return property_paths(schema, "createOnlyProperties")
 
 
 def check_schema(resource_type: str, schema: object) -> None:
@@ -93,6 +105,12 @@ def render(schemas: dict[str, dict]) -> str:
     return json.dumps(document, indent=2) + "\n"
 
 
+def render_conditional(schemas: dict[str, dict]) -> str:
+    document = {resource_type: property_paths(schemas[resource_type], "conditionalCreateOnlyProperties")
+                for resource_type in sorted(schemas) if resource_type in CONDITIONAL_REPLACEMENT_TYPES}
+    return json.dumps(document, indent=2) + "\n"
+
+
 def _shown(path: Path) -> Path:
     try:
         return path.resolve().relative_to(REPO_ROOT)
@@ -106,8 +124,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-dir", type=Path, default=None,
                         help="read saved aws-<service>-<type>.json schemas instead of fetching the archive")
     parser.add_argument("--output", type=Path, default=OUTPUT, help=argparse.SUPPRESS)
+    parser.add_argument("--conditional-output", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--inventory", type=Path, default=INVENTORY, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    conditional_output = args.conditional_output or args.output.with_name(CONDITIONAL_OUTPUT.name)
 
     resource_types = inventory_types(args.inventory)
     try:
@@ -127,19 +147,24 @@ def main(argv: list[str] | None = None) -> int:
         for resource_type in sorted(schemas):
             check_schema(resource_type, schemas[resource_type])
         document = render(schemas)
+        conditional_document = render_conditional(schemas)
     except (AttributeError, TypeError, ValueError) as e:
         print(f"error: could not read the CloudFormation resource schemas ({e})", file=sys.stderr)
         return 2
 
     if args.verify:
-        if not args.output.exists() or args.output.read_text(encoding="utf-8") != document:
-            print(f"error: {_shown(args.output)} no longer matches {provenance}; run "
+        if (not args.output.exists() or args.output.read_text(encoding="utf-8") != document
+                or not conditional_output.exists()
+                or conditional_output.read_text(encoding="utf-8") != conditional_document):
+            print(f"error: {_shown(args.output)} or {_shown(conditional_output)} no longer matches "
+                  f"{provenance}; run "
                   f"'make cfn-create-only-sync' and commit the result.", file=sys.stderr)
             return 1
         print(f"{_shown(args.output)} matches {provenance}.")
         return 0
 
     args.output.write_text(document, encoding="utf-8")
+    conditional_output.write_text(conditional_document, encoding="utf-8")
     print(f"wrote {_shown(args.output)} ({len(schemas)} types, from {provenance}); "
           f"no schema: {', '.join(schemaless) if schemaless else 'none'}")
     return 0

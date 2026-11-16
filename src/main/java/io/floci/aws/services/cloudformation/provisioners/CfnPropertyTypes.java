@@ -82,6 +82,35 @@ final class CfnPropertyTypes {
         return shape;
     }
 
+    /** Reject unmodeled members for a provisioner that passes the whole schema-shaped object to a service. */
+    static void rejectUnknownMembers(String resourceType, JsonNode properties) {
+        String shape = Holder.MODEL.operations().get(resourceType);
+        if (shape == null) {
+            throw notVendored(resourceType);
+        }
+        rejectUnknownMembers(properties, shape);
+    }
+
+    private static void rejectUnknownMembers(JsonNode value, String shapeName) {
+        if (value == null || value.isNull()) {
+            return;
+        }
+        Shape shape = Holder.MODEL.shapes().get(shapeName);
+        if ("structure".equals(shape.type()) && value.isObject()) {
+            value.properties().forEach(member -> {
+                String nested = shape.members().get(member.getKey());
+                if (nested == null) {
+                    throw new AwsException("ValidationError", "Unknown property: " + member.getKey(), 400);
+                }
+                rejectUnknownMembers(member.getValue(), nested);
+            });
+        } else if ("list".equals(shape.type()) && value.isArray()) {
+            value.forEach(element -> rejectUnknownMembers(element, shape.element()));
+        } else if ("map".equals(shape.type()) && value.isObject()) {
+            value.forEach(element -> rejectUnknownMembers(element, shape.element()));
+        }
+    }
+
     private static IllegalStateException notVendored(String what) {
         return new IllegalStateException(what + " is not in " + RESOURCE_NAME
                 + "; add the type to tools/aws/regen_cfn_property_types.py");

@@ -114,6 +114,7 @@ import io.floci.aws.services.cloudformation.provisioners.SchedulerScheduleGroupC
 import io.floci.aws.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SesCfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.SesEventDestinationCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SesReceiptRuleCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SignerCfnProvisioner;
 import io.floci.aws.services.cloudformation.provisioners.SnsCfnProvisioner;
@@ -173,6 +174,7 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3vectors.S3VectorsService;
 import io.floci.aws.services.scheduler.SchedulerService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
+import io.floci.aws.services.ses.SesConfigurationSetService;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.services.ses.SesService;
@@ -228,6 +230,7 @@ final class CfnProvisionerFixture {
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
         private SesService sesService;
+        private SesConfigurationSetService sesConfigurationSetService;
         private SesReceiptRuleService sesReceiptRuleService;
         private SesIdentityService sesIdentityService;
         private DynamoDbService dynamoDbService;
@@ -360,6 +363,9 @@ final class CfnProvisionerFixture {
             }
             if (sesService != null && sesIdentityService != null) {
                 discovered.add(new SesCfnProvisioner(sesService, sesIdentityService));
+            }
+            if (sesConfigurationSetService != null) {
+                discovered.add(new SesEventDestinationCfnProvisioner(sesConfigurationSetService));
             }
             if (sesReceiptRuleService != null && sesIdentityService != null) {
                 discovered.add(new SesReceiptRuleCfnProvisioner(sesReceiptRuleService, sesIdentityService));
@@ -602,6 +608,11 @@ final class CfnProvisionerFixture {
 
         public Builder ses(SesService v) {
             this.sesService = v;
+            return this;
+        }
+
+        public Builder sesConfigurationSets(SesConfigurationSetService v) {
+            this.sesConfigurationSetService = v;
             return this;
         }
 
