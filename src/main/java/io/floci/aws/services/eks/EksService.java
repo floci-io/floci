@@ -2,6 +2,7 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
@@ -1039,11 +1040,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private void validateInstanceRegion(Cluster cluster, Instance instance) {
         String clusterReg = resolveClusterRegion(cluster);
         String instReg = instance.getRegion();
-        if (instReg == null && instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
-            String az = instance.getPlacement().getAvailabilityZone();
-            if (az.length() > 1 && Character.isLetter(az.charAt(az.length() - 1))) {
-                instReg = az.substring(0, az.length() - 1);
-            }
+        if (instReg == null && instance.getPlacement() != null) {
+            instReg = AvailabilityZoneIds.regionOf(instance.getPlacement().getAvailabilityZone());
         }
         if (instReg != null && !instReg.equals(clusterReg)) {
             throw new AwsException("InvalidParameterException", "Cannot join instance " + instance.getInstanceId()
