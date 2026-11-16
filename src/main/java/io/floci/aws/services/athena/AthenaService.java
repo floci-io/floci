@@ -9,6 +9,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.athena.model.CreateWorkGroupConfigurationRequest;
@@ -430,6 +431,43 @@ public class AthenaService {
             return List.of();
         }
         return requireTaggedDataCatalog(arn.region(), name, resourceArn).getTags();
+    }
+
+    /**
+     * The tags of the workgroup or the data catalog stored under {@code arn} in the account and Region it names, read
+     * in place and matched on the whole ARN; empty for an ARN naming nothing stored, the built-in {@code primary}
+     * workgroup and {@code AwsDataCatalog} included, which carry none.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "athena")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (!arn.equals(AwsArnUtils.Arn.of("athena", parsed.region(), parsed.accountId(), resource).toString())) {
+            return Map.of();
+        }
+        List<WorkGroupTag> tags = null;
+        if (resource.startsWith(WORKGROUP_RESOURCE) && resource.indexOf('/', WORKGROUP_RESOURCE.length()) < 0) {
+            tags = AccountAwareStorageBackend.readInAccount(workGroupStore, parsed.accountId(),
+                            workGroupKey(parsed.region(), resource.substring(WORKGROUP_RESOURCE.length())))
+                    .map(WorkGroup::getTags)
+                    .orElse(null);
+        } else if (resource.startsWith(DATA_CATALOG_RESOURCE)) {
+            tags = AccountAwareStorageBackend.readInAccount(dataCatalogStore, parsed.accountId(),
+                            catalogKey(parsed.region(), resource.substring(DATA_CATALOG_RESOURCE.length())))
+                    .map(DataCatalog::getTags)
+                    .orElse(null);
+        }
+        Map<String, String> byKey = new LinkedHashMap<>();
+        if (tags != null) {
+            for (WorkGroupTag tag : tags) {
+                if (tag.getKey() != null && tag.getValue() != null) {
+                    byKey.put(tag.getKey(), tag.getValue());
+                }
+            }
+        }
+        return byKey;
     }
 
     public synchronized void tagResource(String resourceArn, List<WorkGroupTag> tags) {
