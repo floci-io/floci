@@ -452,9 +452,7 @@ class AutoScalingGroupCfnProvisionerTest {
     void launchConfigurationRejectsAddedCreateOnlyInputBeforeMutation() {
         ObjectNode previous = instanceProperties();
         ObjectNode current = previous.deepCopy().put("UserData", "IyEvYmluL3NoCmVjaG8gcmVhZHkK");
-        PropertyChanges changes = PropertyChanges.between(LAUNCH_CONFIGURATION, true, previous, current,
-                null, null, false);
-        provisionExistingInstance(current, previous, changes, true);
+        provisionExistingInstance(current, previous, null, true);
     }
 
     @ParameterizedTest
