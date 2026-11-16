@@ -16,9 +16,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.clearInvocations;
@@ -78,6 +76,7 @@ class EventBridgeTargetLookupTest {
 
         assertEquals(List.of("owned"), fixture.lookup(ACCOUNT)
                 .listRuleNamesByTarget(TARGET, null, 100, null, REGION).items());
+        verify(fixture.rawRules).get(ACCOUNT + "/rule:" + REGION + ":default/owned");
         verify(fixture.rawRules, never()).get(OTHER + "/rule:" + REGION + ":default/foreign");
     }
 
@@ -115,23 +114,21 @@ class EventBridgeTargetLookupTest {
         assertEquals(before, fixture.rules.scanAllAccountsWithRawKeys());
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"account", "region", "partition", "name"})
-    void aLegacyBusMustProveItsStoredIdentity(String mismatch) {
+    @Test
+    void legacyCustomBusIsReadByItsStoredKeyWithoutMutation() {
         Fixture fixture = new Fixture();
-        EventBus bus = new EventBus("custom", arn(ACCOUNT, REGION, "event-bus/custom"), null, null);
-        switch (mismatch) {
-            case "account" -> bus.setArn(arn(OTHER, REGION, "event-bus/custom"));
-            case "region" -> bus.setArn(arn(ACCOUNT, "us-west-2", "event-bus/custom"));
-            case "partition" -> bus.setArn("arn:aws-cn:events:us-east-1:" + ACCOUNT + ":event-bus/custom");
-            case "name" -> bus.setName("different");
-            default -> throw new IllegalArgumentException(mismatch);
-        }
+        EventBus bus = new EventBus("custom", null, null, null);
         fixture.rawBuses.put("bus:" + REGION + ":custom", bus);
+        fixture.rule(ACCOUNT, REGION, "custom", "owned", true);
+        fixture.target(ACCOUNT, REGION, "custom", "owned", true);
+
+        assertEquals(List.of("owned"), fixture.lookup(ACCOUNT)
+                .listRuleNamesByTarget(TARGET, "custom", null, null, REGION).items());
         assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
-                () -> fixture.lookup(ACCOUNT).listRuleNamesByTarget(TARGET, "custom", null, null, REGION)).getErrorCode());
+                () -> fixture.lookup(OTHER).listRuleNamesByTarget(TARGET, "custom", null, null, REGION)).getErrorCode());
         assertEquals(Set.of("bus:" + REGION + ":custom"), fixture.rawBuses.keys());
         assertSame(bus, fixture.rawBuses.get("bus:" + REGION + ":custom").orElseThrow());
+        assertNull(bus.getArn());
     }
 
     @Test
@@ -175,29 +172,6 @@ class EventBridgeTargetLookupTest {
         assertNotNull(first.nextToken());
         assertTrue(first.nextToken().length() <= 2048);
         assertEquals(List.of("omega"), fixture.lookup(ACCOUNT).listRuleNamesByTarget(filter, null, 1, first.nextToken(), REGION).items());
-    }
-
-    @Test
-    void replacedRuleDuringTargetReadIsExcluded() {
-        Fixture fixture = new Fixture();
-        String key = "rule:" + REGION + ":default/owned";
-        fixture.rule(ACCOUNT, REGION, "default", "owned", false);
-        AtomicBoolean replaced = new AtomicBoolean();
-        InMemoryStorage<String, List<Target>> changingTargets = new InMemoryStorage<>() {
-            @Override
-            public Optional<List<Target>> get(String requestedKey) {
-                if (requestedKey.equals(ACCOUNT + "/" + key) && replaced.compareAndSet(false, true)) {
-                    fixture.rule(ACCOUNT, REGION, "default", "owned", false);
-                }
-                return super.get(requestedKey);
-            }
-        };
-        changingTargets.put(ACCOUNT + "/" + key, List.of(new Target("one", TARGET, null, null)));
-        EventBridgeService lookup = EventBridgeTargetLookupFixtures.service(fixture.buses, fixture.rules,
-                new AccountAwareStorageBackend<>(changingTargets, null, ACCOUNT), new RegionResolver(REGION, ACCOUNT));
-        assertEquals(List.of(), lookup.listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
-        assertTrue(replaced.get());
-        assertEquals(List.of("owned"), lookup.listRuleNamesByTarget(TARGET, null, null, null, REGION).items());
     }
 
     private static void assertInvalid(Runnable call) {

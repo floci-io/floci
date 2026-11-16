@@ -78,8 +78,8 @@ permission boundaries and explicit denies still apply.
 
 The lookup reads existing bus, rule and target stores without writing rows or
 creating the logical default bus. Unprefixed legacy records are read in place
-only for the configured default account after checking the stored bus and rule
-identity. Explicit account records take precedence. Persisted legacy rule names
+only for the configured default account. Rules are checked against their stored
+key, bus, account and ARN. Explicit account records take precedence. Persisted legacy rule names
 remain discoverable even if they no longer pass creation-time validation. The lookup does not provide
 an atomic snapshot across concurrent rule and target updates.
 

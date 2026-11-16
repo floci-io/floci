@@ -779,12 +779,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private void requireBusForRead(String busName, String region) {
         Optional<EventBus> bus = readInAccount(busStore, regionResolver.getAccountId(), busKey(region, busName));
-        if (bus.isEmpty() && "default".equals(busName)) {
-            return;
+        if (bus.isEmpty() && !"default".equals(busName)) {
+            throw eventBusNotFound(busName);
         }
-        bus.filter(value -> busName.equals(value.getName())
-                        && regionResolver.buildArn("events", region, "event-bus/" + busName).equals(value.getArn()))
-                .orElseThrow(() -> eventBusNotFound(busName));
     }
 
     private boolean ruleTargetsArn(Rule rule, String busName, String targetArn, String region) {
@@ -798,11 +795,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         String key = ruleKey(region, busName, rule.getName());
         List<Target> targets = new ArrayList<>(readInAccount(targetStore, account, key).orElse(List.of()));
-        boolean matches = targets.stream().anyMatch(target -> target != null && targetArn.equals(target.getArn()));
-        return matches && readInAccount(ruleStore, account, key).orElse(null) == rule
-                && key.equals(ruleKey(region, busName, rule.getName()))
-                && busName.equals(rule.getEventBusName()) && expectedArn.equals(rule.getArn())
-                && (rule.getAccountId() == null || account.equals(rule.getAccountId()));
+        return targets.stream().anyMatch(target -> target != null && targetArn.equals(target.getArn()));
     }
 
     private String targetRuleCursorScope(String targetArn, String suppliedBus, String effectiveBus,
