@@ -331,7 +331,7 @@ public final class DsqlStatements {
         }
         Token role = tokens.get(3);
         String roleName = switch (role.type()) {
-            case WORD -> role.lower();
+            case WORD -> role.folded();
             case QUOTED_IDENTIFIER -> role.value();
             default -> null;
         };
@@ -862,8 +862,18 @@ public final class DsqlStatements {
             return text.toUpperCase(Locale.ROOT);
         }
 
-        String lower() {
-            return text.toLowerCase(Locale.ROOT);
+        /**
+         * The word as PostgreSQL folds an unquoted identifier in a UTF-8 database: only the ASCII
+         * letters {@code A}-{@code Z} are lowered, so {@code Émile} stays {@code Émile}, the same
+         * name as the quoted {@code "Émile"}.
+         */
+        String folded() {
+            StringBuilder folded = new StringBuilder(text.length());
+            for (int i = 0; i < text.length(); i++) {
+                char c = text.charAt(i);
+                folded.append(c >= 'A' && c <= 'Z' ? (char) (c + ('a' - 'A')) : c);
+            }
+            return folded.toString();
         }
     }
 
@@ -1021,7 +1031,7 @@ public final class DsqlStatements {
     private static String identifier(Token token) {
         return switch (token.type()) {
             case QUOTED_IDENTIFIER -> token.value();
-            case WORD -> token.lower();
+            case WORD -> token.folded();
             default -> token.text();
         };
     }

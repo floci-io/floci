@@ -224,6 +224,18 @@ class DsqlRoleNamesTest {
     }
 
     @Test
+    void anUnquotedNameFoldsOnlyItsAsciiLettersAsPostgresqlDoes() {
+        String created = DsqlStatements.rewriteQuery("CREATE ROLE \u00c9MILE", NAMES).sql();
+        String quoted = DsqlStatements.rewriteQuery("DROP ROLE \"\u00c9mile\"", NAMES).sql();
+        String unquoted = DsqlStatements.rewriteQuery("SET ROLE \u00c9mile", NAMES).sql();
+
+        assertEquals("CALL sys.run_role_ddl($dsql$CREATE ROLE \"dx_\u00c9mile\"$dsql$)", created);
+        assertEquals("CALL sys.drop_roles(ARRAY['dx_\u00c9mile']::text[], false)", quoted);
+        assertEquals("SET ROLE \"dx_\u00c9mile\"", unquoted);
+        assertEquals("SET ROLE \"dx_\u00e9mile\"", DsqlStatements.rewriteQuery("SET ROLE \u00e9MILE", NAMES).sql());
+    }
+
+    @Test
     void prefixedNamesRoundTrip() {
         assertEquals("App", NAMES.toLogical(NAMES.toBackend("App")));
         assertEquals("dx_app", NAMES.toBackend("app"));

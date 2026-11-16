@@ -283,6 +283,18 @@ class DsqlBootstrapExternalIntegrationTest {
     }
 
     @Test
+    void anUnquotedNonAsciiNameAndItsQuotedSpellingNameOneRole() throws SQLException {
+        RoleNames names = new PrefixedRoleNames("abc");
+        try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+            statement.execute(DsqlStatements.rewriteQuery("CREATE ROLE \u00c9MILE", names).sql());
+            assertEquals(List.of(PREFIX + "\u00c9mile"), query("postgres", "SELECT rolname FROM pg_roles WHERE rolname LIKE '"
+                    + PREFIX + "%mile'"));
+            statement.execute(DsqlStatements.rewriteQuery("DROP ROLE \"\u00c9mile\"", names).sql());
+        }
+        assertFalse(backendRoles().containsValue(PREFIX + "\u00c9mile"));
+    }
+
+    @Test
     void theImplicitGrantOfARoleToItsCreatorIsMadeByTheBootstrapSuperuser() throws SQLException {
         try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
             statement.execute("CALL sys.run_role_ddl($$CREATE ROLE " + PREFIX + "made$$)");
