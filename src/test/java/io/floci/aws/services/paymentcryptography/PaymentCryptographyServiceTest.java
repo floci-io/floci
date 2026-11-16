@@ -794,11 +794,57 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void aRegionTheServiceDoesNotServeIsRefused() {
+    void aNameThatIsNotARegionIsRefused() {
+        // A Region a request names has to be a name of a Region this service serves, and a
+        // name that is not one of those is refused.
         AwsException refused = assertThrows(AwsException.class,
                 () -> createReplicatedKey("us-east-1", List.of("moon-west-1")));
 
         assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void theRegionOfTheRequestIsNotARegionToReplicateTo() {
+        // The key is in the region of the request already, so naming that region is a request
+        // that cannot be carried out.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createReplicatedKey("us-east-1", List.of("us-east-1")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("us-east-1"), refused.getMessage());
+        assertEquals(0, service.listKeys("us-east-1", null, 10, null).items().size(),
+                "the refused key is in the store");
+    }
+
+    @Test
+    void theRegionOfTheRequestIsNotADefaultReplicationRegion() {
+        // The default regions of a region are the regions the keys made there are replicated
+        // to, and the region itself is where they are primary.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.enableDefaultReplicationRegions("us-east-1", List.of("us-east-1")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals(List.of(), service.defaultReplicationRegions("us-east-1"));
+    }
+
+    @Test
+    void aKeyWhoseRegionsAreChangedHasAConfigurationOfItsOwn() {
+        // A key that took the account's default regions says so, and a key whose regions are
+        // changed afterwards has a configuration of its own, so it says the other thing.
+        service.enableDefaultReplicationRegions("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of());
+        assertTrue(key.isUsingDefaultReplicationRegions());
+
+        PaymentCryptographyKey added = service.addKeyReplicationRegions("us-east-1", key.getKeyId(),
+                List.of("us-west-1"));
+
+        assertFalse(added.isUsingDefaultReplicationRegions());
+        assertEquals(List.of("us-west-2", "us-west-1"), added.getReplicationRegions());
+
+        // The replica carries the primary's answer, so it does not say the key takes the
+        // account's defaults either.
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+        assertFalse(replica.isUsingDefaultReplicationRegions());
     }
 
     @Test

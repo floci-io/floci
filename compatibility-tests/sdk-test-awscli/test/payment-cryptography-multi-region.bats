@@ -127,9 +127,22 @@ create_replicated_key() {
     [[ "$output" == *"exportable"* ]]
 }
 
-@test "Payment Cryptography multi-region: a region the service does not serve is refused" {
+@test "Payment Cryptography multi-region: a name that is not a region is refused" {
+    # A Region a request names has to be a name of a Region this service serves, and a name
+    # that is not one of those is refused.
     run aws_cmd_in "$SETTINGS_REGION" payment-cryptography enable-default-key-replication-regions \
         --replication-regions moon-west-1
     assert_failure
     [[ "$output" == *"moon-west-1"* ]]
+}
+
+@test "Payment Cryptography multi-region: the region of the request is not a region to replicate to" {
+    # The key is in the region of the request already, so naming that region is a request
+    # that cannot be carried out.
+    run aws_cmd payment-cryptography create-key \
+        --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
+        --exportable \
+        --replication-regions us-east-1
+    assert_failure
+    [[ "$output" == *"us-east-1"* ]]
 }

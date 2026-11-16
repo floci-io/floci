@@ -226,6 +226,8 @@ class PaymentCryptographyTest {
                 .keyIdentifier(key.keyArn())
                 .replicationRegions("us-west-2")))
                 .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
                 .hasMessageContaining("already replicates into");
     }
 
@@ -247,11 +249,14 @@ class PaymentCryptographyTest {
                 .keyIdentifier(key.keyArn())
                 .replicationRegions("us-west-1")))
                 .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
                 .hasMessageContaining("does not replicate into");
     }
 
     @Test
-    void takingTheLastReplicaAwayEndsTheReplication() {        // Taking the replica regions away is how the replication is turned off for a key, so
+    void takingTheLastReplicaAwayEndsTheReplication() {
+        // Taking the replica regions away is how the replication is turned off for a key, so
         // a key that replicates nowhere is not a multi-region key and says so by carrying no
         // type at all.
         Key key = client.createKey(r -> r
@@ -287,15 +292,63 @@ class PaymentCryptographyTest {
                 .exportable(false)
                 .replicationRegions("us-west-2")))
                 .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
                 .hasMessageContaining("exportable");
     }
 
     @Test
-    void aRegionTheServiceDoesNotServeIsRefused() {
+    void aNameThatIsNotARegionIsRefused() {
+        // A Region a request names has to be a name of a Region this service serves, and a
+        // name that is not one of those is refused.
         assertThatThrownBy(() -> client.enableDefaultKeyReplicationRegions(r -> r
                 .replicationRegions("moon-west-1")))
                 .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
                 .hasMessageContaining("moon-west-1");
+    }
+
+    @Test
+    void theRegionOfTheRequestIsNotARegionToReplicateTo() {
+        // The key is in the region of the request already, so naming that region is a request
+        // that cannot be carried out.
+        assertThatThrownBy(() -> client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-east-1")))
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"))
+                .hasMessageContaining("us-east-1");
+    }
+
+    @Test
+    void aKeyWhoseRegionsAreChangedHasAConfigurationOfItsOwn() {
+        // A key that took the account's default regions says so, and a key whose regions are
+        // changed afterwards has a configuration of its own, so it says the other thing.
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-west-2"))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThat(key.usingDefaultReplicationRegions()).isFalse();
+
+        AddKeyReplicationRegionsResponse added = client.addKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-1"));
+
+        assertThat(added.key().usingDefaultReplicationRegions()).isFalse();
     }
 
     /**
