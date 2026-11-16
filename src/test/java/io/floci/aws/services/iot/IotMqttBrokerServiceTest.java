@@ -853,6 +853,31 @@ class IotMqttBrokerServiceTest {
     }
 
     @Test
+    void aSessionResumedAsItsExpiryRunsOutKeepsItsMessagesAndSubscriptions() throws Exception {
+        startBrokerRecordingPublishes();
+        String topic = "devices/expiring/commands";
+        MqttEndpoint first = mqtt5Endpoint("resumed-expiring", 1);
+        broker.handleEndpoint(first, false);
+        subscribeQos1(first, topic);
+        broker.disconnectClient("resumed-expiring", false);
+        broker.publish(topic, "stored".getBytes(StandardCharsets.UTF_8), 1);
+        MqttEndpoint resuming = mqtt5Endpoint("resumed-expiring", 1);
+        when(resuming.accept(anyBoolean(), any())).thenAnswer(invocation -> {
+            Thread.sleep(1_500);
+            return resuming;
+        });
+
+        broker.handleEndpoint(resuming, false);
+        broker.publish(topic, "live".getBytes(StandardCharsets.UTF_8), 1);
+
+        verify(resuming).accept(eq(true), any(MqttProperties.class));
+        verify(resuming).publish(eq(topic), eq(Buffer.buffer("stored")), eq(MqttQoS.AT_LEAST_ONCE),
+                eq(false), eq(false), anyInt(), any(MqttProperties.class));
+        verify(resuming).publish(eq(topic), eq(Buffer.buffer("live")), eq(MqttQoS.AT_LEAST_ONCE),
+                eq(false), eq(false), anyInt(), any(MqttProperties.class));
+    }
+
+    @Test
     void aDisconnectSessionExpiryOfZeroEndsAPersistentSession() throws Exception {
         startBrokerRecordingPublishes();
         MqttEndpoint device = mqtt5Endpoint("disconnect-ends", 3600);

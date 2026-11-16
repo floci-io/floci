@@ -961,7 +961,7 @@ public class IotMqttBrokerService implements Resettable {
         long expiryTimer = vertx.setTimer(TimeUnit.SECONDS.toMillis(sessionExpirySeconds), timer -> {
             synchronized (sessionLock) {
                 StoredSession stored = storedSessions.get(clientId);
-                if (stored != null && stored.expiryTimer() == timer) {
+                if (stored != null && stored.expiryTimer() == timer && !sessionsByClient.containsKey(clientId)) {
                     storedSessions.remove(clientId);
                     subscriptionsByClient.remove(clientId);
                 }
