@@ -3,6 +3,7 @@ package io.floci.aws.services.iot;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.containsString;
@@ -12,19 +13,10 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class IotLoggingIntegrationTest {
 
-    private static String auth(String account) {
-        return auth(account, "us-east-1");
-    }
-
-    private static String auth(String account, String region) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20260215/" + region + "/iot/aws4_request, "
-                + "SignedHeaders=host, Signature=abc";
-    }
-
     @Test
     void getBeforeAnySetIsNotConfigured() {
         given()
-            .header("Authorization", auth("111100000101"))
+            .header("Authorization", auth("111100000101", "iot"))
         .when()
             .get("/v2LoggingOptions")
         .then()
@@ -34,7 +26,7 @@ class IotLoggingIntegrationTest {
 
     @Test
     void setThenGetRoundTripsTheOptions() {
-        String auth = auth("111100000102");
+        String auth = auth("111100000102", "iot");
         String roleArn = "arn:aws:iam::111100000102:role/iot-logging";
         given()
             .header("Authorization", auth)
@@ -62,7 +54,7 @@ class IotLoggingIntegrationTest {
 
     @Test
     void initialSetupWithoutARoleIsRejected() {
-        String auth = auth("111100000103");
+        String auth = auth("111100000103", "iot");
         given()
             .header("Authorization", auth)
             .contentType("application/json")
@@ -86,7 +78,7 @@ class IotLoggingIntegrationTest {
     @Test
     void anUnknownLogLevelIsRejected() {
         given()
-            .header("Authorization", auth("111100000107"))
+            .header("Authorization", auth("111100000107", "iot"))
             .contentType("application/json")
             .body("""
                 {"roleArn": "arn:aws:iam::111100000107:role/iot-logging", "defaultLogLevel": "TRACE"}
@@ -102,7 +94,7 @@ class IotLoggingIntegrationTest {
     @Test
     void aMemberOfTheWrongTypeIsASerializationError() {
         given()
-            .header("Authorization", auth("111100000108"))
+            .header("Authorization", auth("111100000108", "iot"))
             .contentType("application/json")
             .body("""
                 {"roleArn": "arn:aws:iam::111100000108:role/iot-logging", "defaultLogLevel": "INFO",
@@ -117,7 +109,7 @@ class IotLoggingIntegrationTest {
 
     @Test
     void laterSetsKeepTheOptionsTheyOmit() {
-        String auth = auth("111100000104");
+        String auth = auth("111100000104", "iot");
         String roleArn = "arn:aws:iam::111100000104:role/iot-logging";
         given()
             .header("Authorization", auth)
@@ -155,7 +147,7 @@ class IotLoggingIntegrationTest {
     @Test
     void eachAccountAndRegionKeepsItsOwnOptions() {
         given()
-            .header("Authorization", auth("111100000105"))
+            .header("Authorization", auth("111100000105", "iot"))
             .contentType("application/json")
             .body("""
                 {"roleArn": "arn:aws:iam::111100000105:role/iot-logging", "defaultLogLevel": "INFO"}
@@ -166,14 +158,14 @@ class IotLoggingIntegrationTest {
             .statusCode(200);
 
         given()
-            .header("Authorization", auth("111100000106"))
+            .header("Authorization", auth("111100000106", "iot"))
         .when()
             .get("/v2LoggingOptions")
         .then()
             .statusCode(404);
 
         given()
-            .header("Authorization", auth("111100000105", "eu-west-1"))
+            .header("Authorization", auth("111100000105", "eu-west-1", "iot"))
         .when()
             .get("/v2LoggingOptions")
         .then()
