@@ -682,9 +682,12 @@ matching how AWS itself responds.
 
 Two AWS-managed prefix lists exist in every region without being created —
 `com.amazonaws.<region>.s3` (`pl-63a5400a`) and `com.amazonaws.<region>.dynamodb`
-(`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. They are owned by `AWS`,
-read-only, and served by both `DescribePrefixLists` and `DescribeManagedPrefixLists`;
-modifying or deleting one returns `UnsupportedOperation`.
+(`pl-02cd2c6b`) — matching the gateway endpoint services on AWS. Every region of the
+commercial `aws` partition also has `com.amazonaws.global.cloudfront.origin-facing`
+(`pl-3b927c52`, `MaxEntries` 55), holding the CloudFront origin-facing ranges published in
+`ip-ranges.json`; like on AWS, it is absent from the China and GovCloud partitions. These
+lists are owned by `AWS`, read-only, and served by both `DescribePrefixLists` and
+`DescribeManagedPrefixLists`; modifying or deleting one returns `UnsupportedOperation`.
 
 Additional regional AWS-managed lists can be supplied through
 `FLOCI_SERVICES_EC2_MANAGED_PREFIX_LIST_CATALOG_PATH`. Set it to a readable JSON

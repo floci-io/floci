@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ListNetworksCmd;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
@@ -7717,7 +7718,7 @@ class Ec2ServiceTest {
         assertEquals(List.of("192.0.2.0/24"), service.describePrefixLists("eu-west-1", List.of(id), Map.of())
                 .getFirst().getCidrs());
         assertEquals("192.0.2.0/24", service.getManagedPrefixListEntries("eu-west-1", id, null).getFirst().getCidr());
-        assertEquals(3, service.describeManagedPrefixLists("eu-west-1", List.of(), Map.of()).size());
+        assertEquals(4, service.describeManagedPrefixLists("eu-west-1", List.of(), Map.of()).size());
         assertEquals("InvalidPrefixListID.NotFound", assertThrows(AwsException.class,
                 () -> service.describeManagedPrefixLists("us-east-1", List.of(id), Map.of())).getErrorCode());
         assertEquals("UnsupportedOperation", assertThrows(AwsException.class,
@@ -7745,6 +7746,11 @@ class Ec2ServiceTest {
             "{\"eu-west-1\": [{\"prefixListId\":\"pl-12345678\",\"prefixListName\":\"example\",\"cidrs\":[\"invalid\"]}]}",
             "{\"eu-west-1\": [{\"prefixListId\":\"pl-63a5400a\",\"prefixListName\":\"example\",\"cidrs\":[\"192.0.2.0/24\"]}]}",
             "{\"eu-west-1\": [{\"prefixListId\":\"pl-12345678\",\"prefixListName\":\"com.amazonaws.eu-west-1.s3\","
+                    + "\"cidrs\":[\"192.0.2.0/24\"]}]}",
+            "{\"eu-west-1\": [{\"prefixListId\":\"pl-3b927c52\",\"prefixListName\":\"example\","
+                    + "\"cidrs\":[\"192.0.2.0/24\"]}]}",
+            "{\"eu-west-1\": [{\"prefixListId\":\"pl-12345678\","
+                    + "\"prefixListName\":\"com.amazonaws.global.cloudfront.origin-facing\","
                     + "\"cidrs\":[\"192.0.2.0/24\"]}]}"
     })
     void invalidManagedPrefixListCatalogFailsStartup(String json, @TempDir Path temp) throws IOException {
@@ -7756,6 +7762,36 @@ class Ec2ServiceTest {
 
         IllegalStateException error = assertThrows(IllegalStateException.class, () -> prefixListService(config));
         assertTrue(error.getMessage().contains(catalog.toString()));
+    }
+
+    @Test
+    void legacyCloudFrontCatalogEntryGivesWayToTheBuiltIn(@TempDir Path temp) throws IOException {
+        Path catalog = temp.resolve("prefix-lists.json");
+        Files.writeString(catalog, """
+                {"eu-west-1": [
+                  {"prefixListId": "pl-3b927c52", "prefixListName": "com.amazonaws.global.cloudfront.origin-facing",
+                   "cidrs": ["192.0.2.0/24"]},
+                  {"prefixListId": "pl-0123456789abcdef0", "prefixListName": "example-managed-service",
+                   "cidrs": ["198.51.100.0/24"]}]}
+                """);
+        EmulatorConfig config = mockConfig(true);
+        when(config.services().ec2().enabled()).thenReturn(true);
+        when(config.services().ec2().managedPrefixListCatalogPath()).thenReturn(Optional.of(catalog.toString()));
+
+        Ec2Service service = assertDoesNotThrow(() -> prefixListService(config));
+
+        List<ManagedPrefixList> cloudFront = service.describeManagedPrefixLists("eu-west-1",
+                List.of("pl-3b927c52"), Map.of());
+        assertEquals(1, cloudFront.size());
+        assertEquals(55, cloudFront.getFirst().getMaxEntries());
+        List<String> cidrs = service.getManagedPrefixListEntries("eu-west-1", "pl-3b927c52", null).stream()
+                .map(PrefixListEntry::getCidr)
+                .toList();
+        assertFalse(cidrs.contains("192.0.2.0/24"), cidrs.toString());
+        assertTrue(cidrs.contains("130.176.0.0/18"), cidrs.toString());
+        assertEquals(List.of("198.51.100.0/24"), service.describePrefixLists("eu-west-1",
+                List.of("pl-0123456789abcdef0"), Map.of()).getFirst().getCidrs());
+        assertEquals(4, service.describeManagedPrefixLists("eu-west-1", List.of(), Map.of()).size());
     }
 
     @Test
@@ -7951,13 +7987,13 @@ class Ec2ServiceTest {
         service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5, List.of(), List.of());
 
         List<ManagedPrefixList> east = service.describeManagedPrefixLists("us-east-1", List.of(), Map.of());
-        assertEquals(3, east.size());
+        assertEquals(4, east.size());
         assertTrue(east.stream().anyMatch(l -> "com.amazonaws.us-east-1.s3".equals(l.getPrefixListName())));
         assertTrue(east.stream().anyMatch(l -> "corp".equals(l.getPrefixListName())));
 
-        // The customer list belongs to us-east-1; only the AWS-managed pair shows up elsewhere.
+        // The customer list belongs to us-east-1; only the AWS-managed lists show up elsewhere.
         List<ManagedPrefixList> west = service.describeManagedPrefixLists("us-west-2", List.of(), Map.of());
-        assertEquals(2, west.size());
+        assertEquals(3, west.size());
         assertTrue(west.stream().allMatch(ManagedPrefixList::isAwsManaged));
         assertTrue(west.stream().anyMatch(l -> "com.amazonaws.us-west-2.s3".equals(l.getPrefixListName())));
     }
@@ -8135,6 +8171,76 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void cloudFrontOriginFacingListExistsInEveryCommercialRegion() {
+        Ec2Service service = prefixListService();
+        Map<String, List<String>> byName = Map.of("prefix-list-name",
+                List.of("com.amazonaws.global.cloudfront.origin-facing"));
+
+        for (String region : List.of("us-east-1", "eu-west-1", "ap-southeast-2")) {
+            List<ManagedPrefixList> found = service.describeManagedPrefixLists(region, List.of(), byName);
+            assertEquals(1, found.size(), region);
+            ManagedPrefixList list = found.getFirst();
+            assertEquals("pl-3b927c52", list.getPrefixListId());
+            assertEquals("AWS", list.getOwnerId());
+            assertTrue(list.isAwsManaged());
+            assertEquals("IPv4", list.getAddressFamily());
+            assertEquals(55, list.getMaxEntries());
+            assertEquals("arn:aws:ec2:" + region + ":aws:prefix-list/pl-3b927c52", list.getPrefixListArn());
+        }
+
+        List<String> cidrs = service.getManagedPrefixListEntries("us-east-1", "pl-3b927c52", null).stream()
+                .map(PrefixListEntry::getCidr)
+                .toList();
+        assertTrue(cidrs.containsAll(List.of("130.176.0.0/18", "15.158.0.0/16", "64.252.64.0/18")), cidrs.toString());
+        assertTrue(cidrs.size() <= 55, cidrs.toString());
+    }
+
+    @Test
+    void cloudFrontOriginFacingListIsAbsentOutsideTheCommercialPartition() {
+        Ec2Service service = prefixListService();
+
+        for (String region : List.of("cn-north-1", "us-gov-west-1")) {
+            assertTrue(service.describeManagedPrefixLists(region, List.of(), Map.of()).stream()
+                    .noneMatch(l -> "pl-3b927c52".equals(l.getPrefixListId())), region);
+            assertEquals("InvalidPrefixListID.NotFound", assertThrows(AwsException.class,
+                    () -> service.getManagedPrefixListEntries(region, "pl-3b927c52", null)).getErrorCode());
+        }
+    }
+
+    @Test
+    void anUnknownRegionTakesTheDeploymentPartitionForTheCloudFrontList() {
+        String unknown = "polygondwanaland-west-1";
+        assertTrue(AwsPartitions.forRegion(unknown).isEmpty());
+        Map<String, String> expectedPartitions = Map.of(
+                "us-gov-west-1", "aws-us-gov",
+                "cn-north-1", "aws-cn",
+                "us-east-1", "aws");
+
+        for (Map.Entry<String, String> deployment : expectedPartitions.entrySet()) {
+            Ec2Service service = prefixListService();
+            service.regionResolver = new RegionResolver(deployment.getKey(), "000000000000");
+            List<ManagedPrefixList> lists = service.describeManagedPrefixLists(unknown, List.of(), Map.of());
+
+            boolean commercial = "aws".equals(deployment.getValue());
+            assertEquals(commercial, lists.stream().anyMatch(l -> "pl-3b927c52".equals(l.getPrefixListId())),
+                    deployment.getKey());
+            assertTrue(lists.stream().allMatch(l -> l.getPrefixListArn().startsWith(
+                    "arn:" + deployment.getValue() + ":ec2:" + unknown + ":aws:prefix-list/")), lists.toString());
+        }
+    }
+
+    @Test
+    void cloudFrontOriginFacingListCannotBeModifiedOrDeleted() {
+        Ec2Service service = prefixListService();
+
+        assertEquals("UnsupportedOperation", assertThrows(AwsException.class, () ->
+                service.modifyManagedPrefixList("us-east-1", "pl-3b927c52", null, "hijacked", null,
+                        List.of(), List.of())).getErrorCode());
+        assertEquals("UnsupportedOperation", assertThrows(AwsException.class, () ->
+                service.deleteManagedPrefixList("us-east-1", "pl-3b927c52")).getErrorCode());
+    }
+
+    @Test
     void deleteRemovesTheListFromDescribe() {
         Ec2Service service = prefixListService();
         ManagedPrefixList created = service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5,
@@ -8247,6 +8353,144 @@ class Ec2ServiceTest {
         // allow-all egress rule, so the check is for an ingress rule rather than for none.
         assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
                 .noneMatch(r -> !r.isEgress() || r.getPrefixListId() != null));
+    }
+
+    private static final String CLOUDFRONT_PREFIX_LIST = "pl-3b927c52";
+
+    /** One permission holding {@code count} distinct sources of one kind, each a separate rule. */
+    private static IpPermission sources(String kind, int count) {
+        IpPermission perm = basePermission();
+        for (int i = 0; i < count; i++) {
+            switch (kind) {
+                case "ipv4" -> perm.getIpRanges().add(new IpRange("10.0." + i + ".0/24", null));
+                case "ipv6" -> {
+                    Ipv6Range range = new Ipv6Range();
+                    range.setCidrIpv6("2001:db8:" + Integer.toHexString(i) + "::/48");
+                    perm.getIpv6Ranges().add(range);
+                }
+                default -> {
+                    UserIdGroupPair pair = new UserIdGroupPair();
+                    pair.setGroupId("sg-peer" + i);
+                    perm.getUserIdGroupPairs().add(pair);
+                }
+            }
+        }
+        return perm;
+    }
+
+    private static IpPermission prefixListPermission(String prefixListId) {
+        IpPermission perm = basePermission();
+        perm.getPrefixListIds().add(new PrefixListId(prefixListId, null));
+        return perm;
+    }
+
+    private static long ingressRuleCount(Ec2Service service, String groupId) {
+        return service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of()).stream()
+                .filter(rule -> !rule.isEgress())
+                .count();
+    }
+
+    @Test
+    void theSixtyFirstIngressRuleExceedsTheRuleQuota() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "full", "full", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 60)));
+
+        IpPermission extra = basePermission();
+        extra.getIpRanges().add(new IpRange("192.0.2.0/24", null));
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(extra)));
+
+        assertEquals("RulesPerSecurityGroupLimitExceeded", error.getErrorCode());
+        assertEquals("The maximum number of rules per security group has been reached.", error.getMessage());
+        assertEquals(60, ingressRuleCount(service, groupId));
+    }
+
+    @Test
+    void cloudFrontReferenceOnAGroupWithSixRulesIsRejectedAtomically() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 6)));
+
+        IpPermission cidr = basePermission();
+        cidr.getIpRanges().add(new IpRange("192.0.2.0/24", null));
+        AwsException error = assertThrows(AwsException.class, () -> service.authorizeSecurityGroupIngress(
+                "us-east-1", groupId, List.of(cidr, prefixListPermission(CLOUDFRONT_PREFIX_LIST))));
+
+        assertEquals("RulesPerSecurityGroupLimitExceeded", error.getErrorCode());
+        assertEquals(6, ingressRuleCount(service, groupId));
+        SecurityGroup group = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst();
+        assertEquals(6, group.getIpPermissions().stream().mapToInt(p -> p.getIpRanges().size()).sum());
+        assertTrue(group.getIpPermissions().stream().allMatch(p -> p.getPrefixListIds().isEmpty()));
+    }
+
+    @Test
+    void cloudFrontReferenceFitsBesideFiveRules() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 5)));
+
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)));
+
+        assertEquals(6, ingressRuleCount(service, groupId));
+    }
+
+    @Test
+    void ingressAndEgressHaveSeparateRuleQuotas() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv4", 59)));
+
+        // Egress holds only the default allow-all rule, so 55 more still fit there.
+        service.authorizeSecurityGroupEgress("us-east-1", groupId, List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)));
+
+        assertThrows(AwsException.class, () -> service.authorizeSecurityGroupEgress("us-east-1", groupId,
+                List.of(sources("ipv4", 5))));
+    }
+
+    @Test
+    void ipv4AndIpv6RulesHaveSeparateQuotas() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv6", 60)));
+
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)));
+
+        assertEquals(61, ingressRuleCount(service, groupId));
+        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv6", 1))))
+                .getErrorCode());
+    }
+
+    @Test
+    void aGroupReferenceCountsTowardBothAddressFamilies() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "origin", "origin", null).getGroupId();
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("group", 6)));
+
+        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                        List.of(prefixListPermission(CLOUDFRONT_PREFIX_LIST)))).getErrorCode());
+        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(sources("ipv6", 55))))
+                .getErrorCode());
+    }
+
+    @Test
+    void aCustomerPrefixListCountsAsItsMaxEntries() {
+        Ec2Service service = prefixListService();
+        String groupId = service.createSecurityGroup("us-east-1", "db", "db", null).getGroupId();
+        ManagedPrefixList fits = service.createManagedPrefixList("us-east-1", "fits", "IPv4", 60,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+        ManagedPrefixList tooBig = service.createManagedPrefixList("us-east-1", "too-big", "IPv4", 61,
+                List.of(new PrefixListEntry("10.0.0.0/8", null)), List.of());
+
+        assertEquals("RulesPerSecurityGroupLimitExceeded", assertThrows(AwsException.class,
+                () -> service.authorizeSecurityGroupIngress("us-east-1", groupId,
+                        List.of(prefixListPermission(tooBig.getPrefixListId())))).getErrorCode());
+        service.authorizeSecurityGroupIngress("us-east-1", groupId, List.of(prefixListPermission(fits.getPrefixListId())));
+        assertEquals(1, ingressRuleCount(service, groupId));
     }
 
     /** AWS emits one rule per source, so a permission naming both expands to two. */

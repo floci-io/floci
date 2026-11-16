@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -145,5 +146,60 @@ class Ec2SecurityGroupPrefixListIntegrationTest {
             .statusCode(200)
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.ipPermissions",
                     emptyOrNullString());
+    }
+
+    /**
+     * The CloudFront origin-facing list weighs 55 rules, so a group already holding six inbound
+     * rules cannot take it under the default quota of 60, and nothing of the request is stored.
+     */
+    @Test
+    @Order(7)
+    void cloudFrontReferenceOnAGroupWithSixRulesExceedsTheRuleQuota() {
+        String origin = given()
+            .formParam("Action", "CreateSecurityGroup")
+            .formParam("GroupName", "cloudfront-origin")
+            .formParam("GroupDescription", "six rules then CloudFront")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSecurityGroupResponse.groupId");
+
+        RequestSpecification sixRules = given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", origin)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "443")
+            .formParam("IpPermissions.1.ToPort", "443")
+            .header("Authorization", AUTH_HEADER);
+        for (int i = 1; i <= 6; i++) {
+            sixRules.formParam("IpPermissions.1.IpRanges." + i + ".CidrIp", "10.0." + i + ".0/24");
+        }
+        sixRules.when().post("/").then().statusCode(200);
+
+        given()
+            .formParam("Action", "AuthorizeSecurityGroupIngress")
+            .formParam("GroupId", origin)
+            .formParam("IpPermissions.1.IpProtocol", "tcp")
+            .formParam("IpPermissions.1.FromPort", "443")
+            .formParam("IpPermissions.1.ToPort", "443")
+            .formParam("IpPermissions.1.PrefixListIds.1.PrefixListId", "pl-3b927c52")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("RulesPerSecurityGroupLimitExceeded"));
+
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", origin)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.findAll { it.isEgress == 'false' }.size()",
+                    equalTo(6))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.findAll { it.prefixListId.text() != '' }.size()",
+                    equalTo(0));
     }
 }
