@@ -172,6 +172,16 @@ Current limitations:
 - `connectivity.sessionExpiry` and the socket information of `filter.connectivity.includeSocketInformation` are not reported.
 - `managedFields` and `customFields` sent in the thing group configuration are checked (the custom fields for their types only) but not stored: `GetIndexingConfiguration` reports the managed fields the mode selects and no custom fields.
 
+## Logging Options
+
+Status: control plane only.
+
+`SetV2LoggingOptions` and `GetV2LoggingOptions` (`/v2LoggingOptions`) are served on the REST-JSON path the AWS SDKs use:
+
+- There is one configuration per account and region. `GetV2LoggingOptions` before the first `SetV2LoggingOptions` fails with `NotConfiguredException` (404).
+- `SetV2LoggingOptions` replaces the stored `roleArn`, `defaultLogLevel` and `disableAllLogs`; `disableAllLogs` defaults to `false`.
+- The options are stored only: Floci writes no IoT logs to CloudWatch Logs.
+
 ## IoT Data API {#iot-data}
 
 The IoT Data plane answers on the same endpoint as the control plane. The notes under

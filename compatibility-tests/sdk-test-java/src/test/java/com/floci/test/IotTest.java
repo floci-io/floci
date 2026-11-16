@@ -63,6 +63,8 @@ import software.amazon.awssdk.services.iot.model.GetPolicyRequest;
 import software.amazon.awssdk.services.iot.model.GetPolicyResponse;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleResponse;
+import software.amazon.awssdk.services.iot.model.GetV2LoggingOptionsRequest;
+import software.amazon.awssdk.services.iot.model.GetV2LoggingOptionsResponse;
 import software.amazon.awssdk.services.iot.model.IndexNotReadyException;
 import software.amazon.awssdk.services.iot.model.IndexStatus;
 import software.amazon.awssdk.services.iot.model.InvalidRequestException;
@@ -85,6 +87,7 @@ import software.amazon.awssdk.services.iot.model.ListThingsRequest;
 import software.amazon.awssdk.services.iot.model.ListThingsResponse;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesRequest;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesResponse;
+import software.amazon.awssdk.services.iot.model.LogLevel;
 import software.amazon.awssdk.services.iot.model.NamedShadowIndexingMode;
 import software.amazon.awssdk.services.iot.model.RemoveThingFromThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.ResourceAlreadyExistsException;
@@ -93,6 +96,7 @@ import software.amazon.awssdk.services.iot.model.SearchIndexRequest;
 import software.amazon.awssdk.services.iot.model.SearchIndexResponse;
 import software.amazon.awssdk.services.iot.model.ServerCertificateStatus;
 import software.amazon.awssdk.services.iot.model.ServiceType;
+import software.amazon.awssdk.services.iot.model.SetV2LoggingOptionsRequest;
 import software.amazon.awssdk.services.iot.model.SqsAction;
 import software.amazon.awssdk.services.iot.model.Tag;
 import software.amazon.awssdk.services.iot.model.TagResourceRequest;
@@ -286,6 +290,22 @@ class IotTest {
                 .domainConfigurationName(name)
                 .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void v2LoggingOptions() {
+        String roleArn = TestFixtures.globalArn("iam", "000000000000", "role/iot-logging");
+        iot.setV2LoggingOptions(SetV2LoggingOptionsRequest.builder()
+                .roleArn(roleArn)
+                .defaultLogLevel(LogLevel.WARN)
+                .disableAllLogs(false)
+                .build());
+
+        GetV2LoggingOptionsResponse options = iot.getV2LoggingOptions(GetV2LoggingOptionsRequest.builder().build());
+
+        assertThat(options.roleArn()).isEqualTo(roleArn);
+        assertThat(options.defaultLogLevel()).isEqualTo(LogLevel.WARN);
+        assertThat(options.disableAllLogs()).isFalse();
     }
 
     @Test

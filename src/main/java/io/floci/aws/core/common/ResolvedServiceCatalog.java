@@ -55,6 +55,7 @@ import io.floci.aws.services.iot.IotController;
 import io.floci.aws.services.iot.IotDataController;
 import io.floci.aws.services.iot.IotDomainConfigurationController;
 import io.floci.aws.services.iot.IotFleetIndexingController;
+import io.floci.aws.services.iot.IotLoggingController;
 import io.floci.aws.services.lakeformation.LakeFormationController;
 import io.floci.aws.services.lambda.LambdaController;
 import io.floci.aws.services.lambda.durable.DurableExecutionController;
@@ -755,7 +756,8 @@ public class ResolvedServiceCatalog {
                         // signs under its own name while IotController serves its /things/*/jobs routes
                         Set.of(), Set.of("iot", "execute-api", "iot-jobs-data"), Set.of(),
                         Set.of(IotController.class, IotDomainConfigurationController.class,
-                                IotAuthorizerController.class, IotFleetIndexingController.class)),
+                                IotAuthorizerController.class, IotFleetIndexingController.class,
+                                IotLoggingController.class)),
                 descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
                         "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
