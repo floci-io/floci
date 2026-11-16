@@ -1,7 +1,7 @@
 package io.floci.aws.services.glue.schemaregistry;
 
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.glue.schemaregistry.model.Registry;
 import io.floci.aws.services.glue.schemaregistry.model.RegistryId;
 import io.floci.aws.services.glue.schemaregistry.model.Schema;
@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * Registries and schemas stored before they were keyed by Region, under their bare name and {@code registry:schema},
  * move at startup onto the key of the Region their ARN names, or the default Region's when they have no ARN. Each is
  * then listed and reached there, its versions with it, and a schema of another Region than its registry keeps a copy
- * of that registry in its own Region.
+ * of that registry in its own Region. The stores are account stores, as the storage factory gives the service.
  */
 class GlueSchemaRegistryLegacyKeysTest {
 
@@ -33,9 +33,9 @@ class GlueSchemaRegistryLegacyKeysTest {
 
     @Test
     void storedRegistriesAndSchemasMoveToTheRegionTheirArnNames() {
-        InMemoryStorage<String, Registry> registries = new InMemoryStorage<>();
-        InMemoryStorage<String, Schema> schemas = new InMemoryStorage<>();
-        InMemoryStorage<String, SchemaVersion> versions = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Registry> registries = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        AccountAwareStorageBackend<Schema> schemas = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        AccountAwareStorageBackend<SchemaVersion> versions = AccountAwareStorageBackend.inMemory(ACCOUNT);
         Registry frankfurt = new Registry("reg");
         frankfurt.setRegistryArn("arn:aws:glue:" + FRANKFURT + ":" + ACCOUNT + ":registry/reg");
         registries.put("reg", frankfurt);
@@ -61,11 +61,11 @@ class GlueSchemaRegistryLegacyKeysTest {
         versions.put("version-1", version);
 
         GlueSchemaRegistryService service = new GlueSchemaRegistryService(registries, schemas, versions,
-                new InMemoryStorage<>(), new RegionResolver(DEFAULT, ACCOUNT));
+                AccountAwareStorageBackend.inMemory(ACCOUNT), new RegionResolver(DEFAULT, ACCOUNT));
         service.afterCdiInit();
 
-        assertEquals(Set.of(FRANKFURT + "::reg", DEFAULT + "::bare"), Set.copyOf(registries.keys()));
-        assertEquals(Set.of(FRANKFURT + "::reg:users"), Set.copyOf(schemas.keys()));
+        assertEquals(Set.of(FRANKFURT + "::reg", DEFAULT + "::bare"), registries.keysForAccount(ACCOUNT));
+        assertEquals(Set.of(FRANKFURT + "::reg:users"), schemas.keysForAccount(ACCOUNT));
         assertEquals(List.of("reg"), service.listRegistries(FRANKFURT).stream().map(Registry::getRegistryName).toList());
         assertEquals(List.of("bare"), service.listRegistries(DEFAULT).stream().map(Registry::getRegistryName).toList());
         assertEquals(List.of("users"), service.listSchemas(new RegistryId("reg", null), FRANKFURT).stream()
@@ -80,8 +80,8 @@ class GlueSchemaRegistryLegacyKeysTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void aSchemaOfAnotherRegionThanItsRegistryKeepsACopyOfItsRegistryThere(boolean storedWithAnArn) {
-        InMemoryStorage<String, Registry> registries = new InMemoryStorage<>();
-        InMemoryStorage<String, Schema> schemas = new InMemoryStorage<>();
+        AccountAwareStorageBackend<Registry> registries = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        AccountAwareStorageBackend<Schema> schemas = AccountAwareStorageBackend.inMemory(ACCOUNT);
         Registry home = new Registry("orders");
         home.setRegistryArn(storedWithAnArn ? "arn:aws:glue:" + DEFAULT + ":" + ACCOUNT + ":registry/orders" : null);
         home.setDescription("orders");
@@ -95,11 +95,11 @@ class GlueSchemaRegistryLegacyKeysTest {
         schema.setDataFormat("AVRO");
         schemas.put("orders:o1", schema);
 
-        GlueSchemaRegistryService service = new GlueSchemaRegistryService(registries, schemas, new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new RegionResolver(DEFAULT, ACCOUNT));
+        GlueSchemaRegistryService service = new GlueSchemaRegistryService(registries, schemas, AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT), new RegionResolver(DEFAULT, ACCOUNT));
         service.afterCdiInit();
 
-        assertEquals(Set.of(DEFAULT + "::orders", FRANKFURT + "::orders"), Set.copyOf(registries.keys()));
+        assertEquals(Set.of(DEFAULT + "::orders", FRANKFURT + "::orders"), registries.keysForAccount(ACCOUNT));
         Registry copy = service.getRegistry(new RegistryId("orders", null), FRANKFURT);
         assertEquals("arn:aws:glue:" + FRANKFURT + ":" + ACCOUNT + ":registry/orders", copy.getRegistryArn());
         assertEquals("orders", copy.getDescription());

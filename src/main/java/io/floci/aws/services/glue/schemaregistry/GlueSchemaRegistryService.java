@@ -37,7 +37,6 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -1120,12 +1119,17 @@ public class GlueSchemaRegistryService {
      * which the schema then names, so it still has its registry there.
      */
     private void migrateLegacyKeys() {
+        // Records stored before are in the factory's account stores, the only stores production has.
+        if (!(registryStore instanceof AccountAwareStorageBackend<Registry> registryAccounts)
+                || !(schemaStore instanceof AccountAwareStorageBackend<Schema> schemaAccounts)) {
+            return;
+        }
         Map<String, AccountEntry<Registry>> registries = new HashMap<>();
-        for (AccountEntry<Registry> registry : legacyEntries(registryStore)) {
+        for (AccountEntry<Registry> registry : registryAccounts.scanAllAccountEntries(LEGACY_KEY)) {
             registries.put(registry.accountId() + "/" + registry.value().getRegistryName(), registry);
         }
         List<AccountEntry<Schema>> renamed = new ArrayList<>();
-        for (AccountEntry<Schema> entry : legacyEntries(schemaStore)) {
+        for (AccountEntry<Schema> entry : schemaAccounts.scanAllAccountEntries(LEGACY_KEY)) {
             Schema schema = entry.value();
             String region = regionOf(schema.getSchemaArn());
             AccountEntry<Registry> registry = registries.get(entry.accountId() + "/" + schema.getRegistryName());
@@ -1134,8 +1138,7 @@ public class GlueSchemaRegistryService {
             }
             String key = registryKey(region, schema.getRegistryName());
             Registry copy = getInAccount(registryStore, entry.accountId(), key)
-                    .orElseGet(() -> copyIn(registry.value(), region,
-                            entry.accountId() != null ? entry.accountId() : regionResolver.getAccountId()));
+                    .orElseGet(() -> copyIn(registry.value(), region, entry.accountId()));
             putInAccount(registryStore, entry.accountId(), key, copy);
             schema.setRegistryArn(copy.getRegistryArn());
             // A record already under the new key is the newer one, which the move keeps.
@@ -1143,9 +1146,9 @@ public class GlueSchemaRegistryService {
                 renamed.add(entry);
             }
         }
-        moveLegacyKeys(registryStore, registry -> registryKey(regionOf(registry.getRegistryArn()),
-                registry.getRegistryName()));
-        moveLegacyKeys(schemaStore, this::schemaKey);
+        registryAccounts.migrateLegacyEntriesInAllAccounts(LEGACY_KEY,
+                registry -> registryKey(regionOf(registry.getRegistryArn()), registry.getRegistryName()));
+        schemaAccounts.migrateLegacyEntriesInAllAccounts(LEGACY_KEY, this::schemaKey);
         // Written once moved, under the new key: a schema stored before accounts prefixed keys would otherwise
         // leave its unprefixed record beside a second legacy one.
         for (AccountEntry<Schema> entry : renamed) {
@@ -1153,54 +1156,14 @@ public class GlueSchemaRegistryService {
         }
     }
 
-    /**
-     * {@code registry} as a registry of {@code region}, its ARN naming that Region: in the account its own ARN names, or
-     * {@code accountId}, the account holding it, for one stored without an ARN.
-     */
-    private static Registry copyIn(Registry registry, String region, String accountId) {
+    /** {@code registry} as a registry of {@code region}, in {@code accountId}, its ARN naming that Region. */
+    private Registry copyIn(Registry registry, String region, String accountId) {
         Registry copy = StorageJson.copy(registry);
-        String arn = registry.getRegistryArn();
-        String account = AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).accountId() : accountId;
-        copy.setRegistryArn(AwsArnUtils.Arn.of("glue", region, account, "registry/" + registry.getRegistryName())
-                .toString());
+        copy.setRegistryArn(regionResolver.buildArn("glue", region, accountId, "registry/" + registry.getRegistryName()));
         return copy;
     }
 
     private static final Predicate<String> LEGACY_KEY = key -> !key.contains(KEY_SEPARATOR);
-
-    /** {@code store}'s entries stored without a Region in their key; a store of no account names none. */
-    private static <V> List<AccountEntry<V>> legacyEntries(StorageBackend<String, V> store) {
-        if (store instanceof AccountAwareStorageBackend<V> aware) {
-            return aware.scanAllAccountEntries(LEGACY_KEY);
-        }
-        List<AccountEntry<V>> entries = new ArrayList<>();
-        for (String key : store.keys()) {
-            if (LEGACY_KEY.test(key)) {
-                store.get(key).ifPresent(value -> entries.add(new AccountEntry<>(null, key, value)));
-            }
-        }
-        return entries;
-    }
-
-    /** Moves {@code store}'s legacy entries, in every account, onto the key {@code destination} gives. */
-    private static <V> void moveLegacyKeys(StorageBackend<String, V> store, Function<V, String> destination) {
-        if (store instanceof AccountAwareStorageBackend<V> aware) {
-            aware.migrateLegacyEntriesInAllAccounts(LEGACY_KEY, destination);
-            return;
-        }
-        // As migrateLegacyEntriesInAllAccounts does: a record already under the new key is kept.
-        for (String key : new ArrayList<>(store.keys())) {
-            if (LEGACY_KEY.test(key)) {
-                store.get(key).ifPresent(value -> {
-                    String moved = destination.apply(value);
-                    if (store.get(moved).isEmpty()) {
-                        store.put(moved, value);
-                    }
-                    store.delete(key);
-                });
-            }
-        }
-    }
 
     private void validateName(String name, String field) {
         if (name == null || name.isBlank()) {
