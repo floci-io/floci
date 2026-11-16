@@ -183,6 +183,13 @@ public class Ec2ContainerManager {
         }
     }
 
+    /** Gives a protected ENI's firewall the IPv6 addresses the ENI holds now; nothing when enforcement is off. */
+    public void updateIpv6Addresses(String eniId, List<String> addresses) {
+        if (firewallManager != null && firewallManager.enabled()) {
+            firewallManager.updateIpv6Addresses(eniId, addresses);
+        }
+    }
+
     public void updateSecurityGroups(String eniId, Set<String> groupIds,
                                      Map<String, SecurityGroup> groups,
                                      Map<String, List<String>> prefixLists) {
@@ -211,13 +218,14 @@ public class Ec2ContainerManager {
                 || !ALIASES.matches(labels, LABEL_OWNER, ownerIdentity())) {
             throw new IllegalStateException("EC2 workload network namespace is not Floci protected");
         }
-        String address = helper.getNetworkSettings().getNetworks().values().stream()
-                .map(network -> network.getIpAddress()).filter(ip -> ip != null && !ip.isBlank())
-                .findFirst().orElseThrow(() -> new IllegalStateException("EC2 firewall helper has no Docker IP"));
-        return new ProtectedNamespace(helperId, address);
+        Map<String, ContainerNetwork> networks = helper.getNetworkSettings().getNetworks();
+        String address = SecurityGroupFirewallManager.firstAddress(networks, ContainerNetwork::getIpAddress)
+                .orElseThrow(() -> new IllegalStateException("EC2 firewall helper has no Docker IP"));
+        return new ProtectedNamespace(helperId, address,
+                SecurityGroupFirewallManager.firstAddress(networks, ContainerNetwork::getGlobalIPv6Address).orElse(null));
     }
 
-    private record ProtectedNamespace(String helperId, String transportAddress) {}
+    private record ProtectedNamespace(String helperId, String transportAddress, String transportIpv6Address) {}
 
     /**
      * The container whose network namespace this one joined through a {@code container:} network
@@ -243,9 +251,9 @@ public class Ec2ContainerManager {
         String logical = instance.getLogicalPrivateIpAddress() != null
                 ? instance.getLogicalPrivateIpAddress() : eni.getPrivateIpAddress();
         firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(), region,
-                instance.getVpcId(), eni.getNetworkInterfaceId(), logical, address,
-                instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId)
-                        .collect(Collectors.toSet()), groups), helperId, prefixLists);
+                instance.getVpcId(), eni.getNetworkInterfaceId(), logical, eni.getIpv6Addresses(), address,
+                namespace.transportIpv6Address(), instance.getSecurityGroups().stream()
+                        .map(GroupIdentifier::getGroupId).collect(Collectors.toSet()), groups), helperId, prefixLists);
     }
 
     @Inject
@@ -666,8 +674,8 @@ public class Ec2ContainerManager {
                     namespace = firewallManager.createNamespace("ec2", instanceId,
                             regionResolver.getAccountId(), region, Optional.empty(), Map.of(22, sshHostPort));
                     firewallManager.register(new SecurityGroupNftCompiler.Endpoint(regionResolver.getAccountId(),
-                            region, instance.getVpcId(), eniId, eni.getPrivateIpAddress(),
-                            namespace.transportAddress(),
+                            region, instance.getVpcId(), eniId, eni.getPrivateIpAddress(), eni.getIpv6Addresses(),
+                            namespace.transportAddress(), namespace.transportIpv6Address(),
                             instance.getSecurityGroups().stream().map(g -> g.getGroupId())
                                     .collect(Collectors.toSet()), groups),
                             namespace.helperId(), prefixLists);
