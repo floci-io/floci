@@ -395,6 +395,49 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aResourcePolicyIsPutReadAndDeleted() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+        assertNull(key.getResourcePolicy(), "a key has a policy before one was put on it");
+
+        assertEquals(policy, service.putResourcePolicy(key, policy).getResourcePolicy());
+        assertEquals(policy, service.resourcePolicy(key).getResourcePolicy());
+
+        service.deleteResourcePolicy(key);
+
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.resourcePolicy(key));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+    }
+
+    @Test
+    void aResourcePolicyIsReplacedByTheNextOne() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        service.putResourcePolicy(key, "{\"Statement\":[]}");
+        service.putResourcePolicy(key, "{\"Statement\":[{\"Effect\":\"Allow\"}]}");
+
+        assertEquals("{\"Statement\":[{\"Effect\":\"Allow\"}]}",
+                service.resourcePolicy(key).getResourcePolicy());
+    }
+
+    @Test
+    void aDeletedKeyHasNoResourcePolicy() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.putResourcePolicy(key, "{\"Statement\":[]}");
+        service.deleteKey(key);
+
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.resourcePolicy(key));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+
+        AwsException deleted = assertThrows(AwsException.class,
+                () -> service.putResourcePolicy(key, "{\"Statement\":[]}"));
+        assertEquals("ResourceNotFoundException", deleted.getErrorCode());
+    }
+
+    @Test
     void theKeysAreListedAPageAtATime() {
         createKey("us-east-1");
         createKey("us-east-1");

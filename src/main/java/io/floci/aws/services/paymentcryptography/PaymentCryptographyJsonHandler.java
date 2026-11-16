@@ -1,6 +1,8 @@
 package io.floci.aws.services.paymentcryptography;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
@@ -27,6 +29,9 @@ public class PaymentCryptographyJsonHandler {
 
     /** The error a bad page size or a bad token is refused with. */
     private static final String PAGINATION_ERROR = "ValidationException";
+
+    /** The reader of a resource policy, which arrives as a JSON document in a string. */
+    private static final ObjectMapper POLICY_READER = new ObjectMapper();
 
     private final PaymentCryptographyService service;
 
@@ -65,6 +70,9 @@ public class PaymentCryptographyJsonHandler {
             case "TagResource" -> () -> tagResource(request, region);
             case "UntagResource" -> () -> untagResource(request, region);
             case "ListTagsForResource" -> () -> listTagsForResource(request, region);
+            case "PutResourcePolicy" -> () -> putResourcePolicy(request, region);
+            case "GetResourcePolicy" -> () -> getResourcePolicy(request, region);
+            case "DeleteResourcePolicy" -> () -> deleteResourcePolicy(request, region);
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported by floci", 400);
         };
@@ -265,6 +273,109 @@ public class PaymentCryptographyJsonHandler {
             out.put("NextToken", page.nextToken());
         }
         return out;
+    }
+
+    // ---- resource policies ----------------------------------------------------
+
+    /**
+     * Attaches or replaces the resource-based policy of a key.
+     *
+     * <p>The policy is a JSON document in a string, and a document that does not parse is
+     * refused before it is attached. A policy that hands the key to everyone is refused with
+     * the reference's own error, so the key is never left open by a policy no one bounds.
+     */
+    private Map<String, Object> putResourcePolicy(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
+        String policy = request.path("Policy").asText();
+        JsonNode document;
+        try {
+            document = POLICY_READER.readTree(policy);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("ValidationException",
+                    "Policy is not a valid JSON policy document: " + e.getOriginalMessage(), 400);
+        }
+        if (document == null || !document.isObject()) {
+            throw new AwsException("ValidationException",
+                    "Policy is not a valid JSON policy document", 400);
+        }
+        if (grantsPublicAccess(document)) {
+            throw new AwsException("PublicPolicyException",
+                    "The resource policy grants public access to the key", 400);
+        }
+        PaymentCryptographyKey updated = service.putResourcePolicy(key, policy);
+        return policyAnswer(updated);
+    }
+
+    /** The resource-based policy of a key, which a key without one does not have. */
+    private Map<String, Object> getResourcePolicy(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
+        return policyAnswer(service.resourcePolicy(key));
+    }
+
+    /** Removes the resource-based policy of a key. */
+    private Map<String, Object> deleteResourcePolicy(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
+        service.deleteResourcePolicy(key);
+        return Map.of();
+    }
+
+    private static Map<String, Object> policyAnswer(PaymentCryptographyKey key) {
+        return Map.of("ResourceArn", key.getArn(), "Policy", key.getResourcePolicy());
+    }
+
+    /**
+     * Whether a policy hands the key to every principal without a condition that bounds it.
+     *
+     * <p>The reference refuses such a policy, so the service does too: an Allow statement
+     * whose principal is everyone, and that no condition narrows, is public access.
+     */
+    private static boolean grantsPublicAccess(JsonNode policy) {
+        JsonNode statements = policy.path("Statement");
+        if (statements.isObject()) {
+            return statementGrantsPublicAccess(statements);
+        }
+        if (!statements.isArray()) {
+            return false;
+        }
+        for (JsonNode statement : statements) {
+            if (statementGrantsPublicAccess(statement)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean statementGrantsPublicAccess(JsonNode statement) {
+        if (!"Allow".equalsIgnoreCase(statement.path("Effect").asText())) {
+            return false;
+        }
+        if (!isEveryone(statement.path("Principal")) || statement.has("Condition")) {
+            return false;
+        }
+        return true;
+    }
+
+    /** Whether a principal names every principal: {@code *}, or a list or map that holds it. */
+    private static boolean isEveryone(JsonNode principal) {
+        if (principal.isTextual()) {
+            return "*".equals(principal.asText());
+        }
+        if (principal.isArray()) {
+            for (JsonNode entry : principal) {
+                if (isEveryone(entry)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if (principal.isObject()) {
+            for (Map.Entry<String, JsonNode> entry : principal.properties()) {
+                if (isEveryone(entry.getValue())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** The tags of a request, as the name and the value of each. */
