@@ -854,15 +854,40 @@ the shape. The length wording follows the captures of real IAM length violations
 bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit; extra documents beyond the first are ignored. Neither evaluates a resource-based policy
-(`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither returns
-`MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`: only the
-top-level `EvalDecision` is populated, so which policy allowed an action is not reported even where
-AWS names one, `PolicyInputList.1` in its own example for the principal simulator.
-`ResourceHandlingOption` is accepted and read by neither action, so none of the EC2 scenarios it
-names has its required resources enforced.
+(`ResourcePolicy`), and neither returns `MatchedStatements`, `ResourceSpecificResults`, or a
+`PermissionsBoundaryDecisionDetail`: only the top-level `EvalDecision` is populated, so which
+policy allowed an action is not reported even where AWS names one, `PolicyInputList.1` in its own
+example for the principal simulator.
 `ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
 entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
 not by the declared type.
+
+`OrderedOrganizationPolicyInputList` is read by both simulators, each member one level of an
+Organizations hierarchy from the root to the account, and the levels gate the simulation the way
+they gate the call it stands for: an action no level allows answers `implicitDeny`, a level that
+denies it answers `explicitDeny` whatever the levels below it allow, and a level carrying no
+statements is `FullAWSAccess` semantics and is skipped. A level whose document does not read as a
+policy is an `InvalidInput` naming the item's position. The levels a call hands in are the whole of
+the organization a simulation runs against: the SCPs the principal's own account sits under are not
+applied, matching the console, which includes SCPs only when "AWS Organizations SCPs" is ticked.
+One difference from AWS's simulator is known and open: AWS
+documents that "the policy simulator doesn't evaluate SCPs that have global conditions", while this
+walk evaluates a condition in an SCP exactly as the live evaluation does. So a simulation here can
+decide a level AWS's simulator passes over, and the published sentence does not say whether what
+AWS skips is the statement carrying the condition or the policy holding it.
+
+`ResourceHandlingOption` is read by both simulators, which hold a named scenario to the resources
+it requires, "to enforce the presence of the required resources to ensure reliable simulation
+results". All four published scenarios are VPC scenarios, so each needs an instance, an image, a
+security group and a network interface; the `EBS` forms need a volume as well, and the `-Subnet`
+forms a subnet. A resource `ResourceArns` does not name is an `InvalidInput` saying which type is
+missing.
+A value naming no published scenario is an `InvalidInput` as well, while a simulation that names no
+scenario is left alone, since "if your simulation does not match one of the following scenarios,
+then you can omit this parameter". Omitting the member is what is left alone rather than emptying
+it: a value of nothing but space names no scenario, and a value carried empty is answered by the
+member's declared minimum of one ahead of the operation. Both refusals are this emulator's wording:
+AWS publishes the requirement but no message for breaking it.
 
 `PolicyInputList` and `PermissionsBoundaryPolicyInputList` on `SimulatePrincipalPolicy` are read,
 the documents a simulation is handed beside the ones the principal holds. A `PolicyInputList`
