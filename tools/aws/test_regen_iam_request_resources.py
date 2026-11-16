@@ -372,7 +372,6 @@ def isolated(monkeypatch):
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "MEASURED", {})
-    monkeypatch.setattr(r, "FORWARDED", {})
     return monkeypatch
 
 
@@ -1233,7 +1232,7 @@ def forwarding_documents(tmp_path, record_member: str = "KeysKeyId", listed: boo
 
 
 def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_holds(isolated, tmp_path):
-    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    isolated.setattr(r, "MEASURED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
     document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
     # The member is the record's, named after the action's namespace and its type's variable, whatever its case.
     assert document["operations"]["svc:GetThing"]["forwarded"] == [
@@ -1266,14 +1265,14 @@ def test_a_forwarded_operation_is_also_checked_as_the_action_on_what_its_record_
 def test_a_forwarded_entry_is_refused_unless_it_cites_aws_for_what_the_metadata_does_not_say_and_is_read(
         isolated, tmp_path, forwarded, change, problem):
     (action, of), evidence = forwarded
-    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
+    isolated.setattr(r, "MEASURED", {"svc:GetThing": ([{"action": action, "of": of}], evidence)})
     with pytest.raises(ValueError, match=problem):
         r.build(forwarding_documents(tmp_path, **change), "test", tmp_path, "botocore test")
 
 
 def test_a_forwarded_entry_must_name_an_operation_the_file_reads(isolated, tmp_path):
-    isolated.setattr(r, "FORWARDED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
-    with pytest.raises(ValueError, match="FORWARDED gives svc:Gone, which the file does not read"):
+    isolated.setattr(r, "MEASURED", {"svc:Gone": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    with pytest.raises(ValueError, match="MEASURED gives svc:Gone, which the file does not read"):
         r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
 
 
@@ -1304,7 +1303,7 @@ def test_a_malformed_forwarded_entry_is_rejected(change, problem):
 
 
 def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists_it_for_the_operation(isolated):
-    isolated.setattr(r, "FORWARDED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    isolated.setattr(r, "MEASURED", {"svc:A": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
     document = forwarding_document()
     documents = [reference("svc", {"A": ["thing"]}, {"thing": FORMATS["thing"]}), keys_reference()]
     assert r.verify_forwarded(document, documents) == []
@@ -1313,16 +1312,16 @@ def test_verify_fails_when_aws_changes_what_it_gives_a_forwarded_action_or_lists
         '{"type": "key", "format": "' + KEY_FORMAT + '", "viaService": "keys:ViaService"}']
     documents[0]["Operations"][0]["AuthorizedActions"].append({"Service": "keys", "Name": "Decrypt"})
     assert r.verify_forwarded(document, documents) == [
-        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so FORWARDED should not give them"]
+        "AWS now lists ['keys:Decrypt'] for svc:A: a rule reads those, so MEASURED should not give them"]
 
 
 def test_check_fails_when_the_file_records_other_forwarded_actions_than_forwarded_names(isolated, tmp_path):
-    isolated.setattr(r, "FORWARDED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
+    isolated.setattr(r, "MEASURED", {"svc:GetThing": ([{"action": "keys:Decrypt", "of": "thing"}], GUIDE_SAYS)})
     document = r.build(forwarding_documents(tmp_path), "test", tmp_path, "botocore test")
-    isolated.setattr(r, "FORWARDED", {})
+    isolated.setattr(r, "MEASURED", {})
     document["operations"]["svc:GetThing"].pop("forwarded")
     assert r.derive(document, tmp_path) == [
-        "the file records ['keys:Decrypt'] as forwarded actions, FORWARDED names []"]
+        "the file records ['keys:Decrypt'] as forwarded actions, MEASURED names []"]
 
 
 def test_a_variable_no_member_fills_takes_the_one_value_of_its_enum_the_operations_name_gives():
