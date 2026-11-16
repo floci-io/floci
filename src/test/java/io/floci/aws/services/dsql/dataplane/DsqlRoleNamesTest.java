@@ -177,7 +177,7 @@ class DsqlRoleNamesTest {
     }
 
     @ParameterizedTest
-    @CsvSource(delimiter = '|', value = {
+    @CsvSource(delimiter = '|', quoteCharacter = '`', value = {
         "CALL sys.run_role_ddl('CREATE ROLE \"dother_x\"')|procedure sys.run_role_ddl(text) does not exist",
         "call SYS.Run_Role_Ddl($$GRANT a TO b$$)|procedure sys.run_role_ddl(text) does not exist",
         "CALL \"sys\".\"drop_roles\"(ARRAY['x'], true)|procedure sys.drop_roles(text[], boolean) does not exist",
@@ -188,6 +188,12 @@ class DsqlRoleNamesTest {
         "SELECT sys._strip_role_prefix(f(1, 2))|function sys._strip_role_prefix(unknown) does not exist",
         "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC CALL sys.run_role_ddl('x')"
                 + "|procedure sys.run_role_ddl(text) does not exist",
+        "CALL sys.U&\"run\\005frole\\005fddl\"('x')|procedure sys.run_role_ddl(text) does not exist",
+        "CALL u&\"\\0073ys\".drop_roles(ARRAY['x'], true)|procedure sys.drop_roles(text[], boolean) does not exist",
+        "CALL sys.U&\"run!005frole!+00005fddl\" UESCAPE '!'('x')|procedure sys.run_role_ddl(text) does not exist",
+        "CALL sys.U&\"aws_iam_grant\" /* c */ UESCAPE  '%' ('x', 'a')"
+                + "|procedure sys.aws_iam_grant(text, text) does not exist",
+        "SELECT sys.U&\"\\005freject\"('1', 'm')|function sys._reject(unknown, unknown) does not exist",
     })
     void clientCallsOfFlocisInternalRoutinesAreRefusedOnASharedServer(String sql, String message) {
         List<DsqlStatements.Statement> statements = DsqlStatements.rewrite(sql, NAMES);
@@ -233,6 +239,31 @@ class DsqlRoleNamesTest {
         assertEquals("CALL sys.drop_roles(ARRAY['dx_\u00c9mile']::text[], false)", quoted);
         assertEquals("SET ROLE \"dx_\u00c9mile\"", unquoted);
         assertEquals("SET ROLE \"dx_\u00e9mile\"", DsqlStatements.rewriteQuery("SET ROLE \u00e9MILE", NAMES).sql());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', value = {
+        "SET ROLE U&\"\\0061pp\"|SET ROLE \"dx_app\"",
+        "CREATE ROLE U&\"d!0061t\" UESCAPE '!'|CALL sys.run_role_ddl($dsql$CREATE ROLE \"dx_dat\"$dsql$)",
+        "SET ROLE U&'\\0061pp'|SET ROLE 'dx_app'",
+        "GRANT SELECT ON t TO U&\"a\\\\b\"|GRANT SELECT ON t TO \"dx_a\\b\"",
+    })
+    void unicodeEscapedNamesAreTranslatedByWhatTheyDecodeTo(String sql, String expected) {
+        assertEquals(expected, DsqlStatements.rewriteQuery(sql, NAMES).sql());
+    }
+
+    @Test
+    void unicodeEscapesDecodeAsPostgresqlDecodesThem() {
+        assertEquals("d\u00e4t", DsqlStatements.unicodeUnescaped("d\\00e4t", '\\'));
+        assertEquals("\ud83d\ude00", DsqlStatements.unicodeUnescaped("\\+01F600", '\\'));
+        assertEquals("\ud83d\ude00", DsqlStatements.unicodeUnescaped("\\D83D\\DE00", '\\'));
+        assertEquals("a!b", DsqlStatements.unicodeUnescaped("a!!b", '!'));
+        assertEquals("\\zz", DsqlStatements.unicodeUnescaped("\\zz", '\\'), "a malformed escape is kept");
+        assertEquals("x\\0061", DsqlStatements.unicodeUnescaped("x\\0061", '!'));
+        List<DsqlStatements.Token> tokens = DsqlStatements.tokenize("SELECT U&\"a\"\"b\" UESCAPE '!', 1");
+        assertEquals("a\"b", tokens.get(1).value());
+        assertEquals("U&\"a\"\"b\" UESCAPE '!'", tokens.get(1).text());
+        assertEquals(",", tokens.get(2).text());
     }
 
     @Test

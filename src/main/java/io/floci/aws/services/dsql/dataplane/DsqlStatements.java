@@ -172,6 +172,11 @@ public final class DsqlStatements {
      * routine that does not exist: {@code sys.run_role_ddl}, {@code sys.drop_roles},
      * {@code sys.aws_iam_grant} and {@code sys.aws_iam_revoke}, and any {@code sys._*} routine,
      * each qualified with {@code sys}: an unqualified name may be the client's own table or function. Read from the client's tokens, before Floci adds calls of its own.
+     * A name spelled with {@code U&} escapes is read as it decodes. An unqualified call PostgreSQL
+     * resolves through a {@code search_path} naming {@code sys}, or a call built inside a routine
+     * body, is not seen here; what untranslated role DDL can do there is bounded by PostgreSQL 16's
+     * CREATEROLE and by what {@code sys._record_backend_roles} records: only roles under the
+     * cluster's prefix, reached through ADMIN options its own roles were given.
      */
     private static Statement internalRoutineCall(List<Token> tokens) {
         for (int i = 0; i + 1 < tokens.size(); i++) {
@@ -904,6 +909,9 @@ public final class DsqlStatements {
                         i++;
                     }
                 }
+            } else if ((c == 'U' || c == 'u') && i + 2 < n && sql.charAt(i + 1) == '&'
+                    && (sql.charAt(i + 2) == '"' || sql.charAt(i + 2) == '\'')) {
+                i = unicodeEscaped(sql, i, tokens);
             } else if (c == '\'' || ((c == 'E' || c == 'e') && i + 1 < n && sql.charAt(i + 1) == '\'')) {
                 boolean escapes = c != '\'';
                 int start = i;
@@ -969,6 +977,136 @@ public final class DsqlStatements {
             }
         }
         return tokens;
+    }
+
+    /**
+     * The {@code U&"..."} identifier or {@code U&'...'} string at {@code start}, with the
+     * {@code UESCAPE 'c'} clause that may follow it, added to {@code tokens} as one token whose value
+     * has its escapes decoded, as PostgreSQL decodes them: so {@code sys.U&"run\005frole\005fddl"}
+     * names {@code sys.run_role_ddl}. The index after the token.
+     */
+    private static int unicodeEscaped(String sql, int start, List<Token> tokens) {
+        char quote = sql.charAt(start + 2);
+        int i = start + 3;
+        StringBuilder raw = new StringBuilder();
+        while (i < sql.length()) {
+            char d = sql.charAt(i);
+            if (d == quote && i + 1 < sql.length() && sql.charAt(i + 1) == quote) {
+                raw.append(quote);
+                i += 2;
+            } else if (d == quote) {
+                i++;
+                break;
+            } else {
+                raw.append(d);
+                i++;
+            }
+        }
+        char escape = '\\';
+        int clauseEnd = uescapeEnd(sql, i);
+        if (clauseEnd > 0) {
+            escape = sql.charAt(clauseEnd - 2);
+            i = clauseEnd;
+        }
+        Type type = quote == '"' ? Type.QUOTED_IDENTIFIER : Type.STRING;
+        tokens.add(new Token(type, sql.substring(start, i), unicodeUnescaped(raw.toString(), escape), start, i));
+        return i;
+    }
+
+    /** The index after a {@code UESCAPE 'c'} clause starting at or after {@code from}, or -1 if none does. */
+    private static int uescapeEnd(String sql, int from) {
+        int i = skipSpaceAndComments(sql, from);
+        String keyword = "UESCAPE";
+        if (!sql.regionMatches(true, i, keyword, 0, keyword.length())) {
+            return -1;
+        }
+        i += keyword.length();
+        if (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) {
+            return -1;
+        }
+        i = skipSpaceAndComments(sql, i);
+        if (i + 2 < sql.length() && sql.charAt(i) == '\'' && sql.charAt(i + 1) != '\'' && sql.charAt(i + 2) == '\'') {
+            return i + 3;
+        }
+        return -1;
+    }
+
+    private static int skipSpaceAndComments(String sql, int from) {
+        int i = from;
+        while (i < sql.length()) {
+            if (Character.isWhitespace(sql.charAt(i))) {
+                i++;
+            } else if (sql.startsWith("--", i)) {
+                while (i < sql.length() && sql.charAt(i) != '\n' && sql.charAt(i) != '\r') {
+                    i++;
+                }
+            } else if (sql.startsWith("/*", i)) {
+                int depth = 1;
+                i += 2;
+                while (i < sql.length() && depth > 0) {
+                    if (sql.startsWith("/*", i)) {
+                        depth++;
+                        i += 2;
+                    } else if (sql.startsWith("*/", i)) {
+                        depth--;
+                        i += 2;
+                    } else {
+                        i++;
+                    }
+                }
+            } else {
+                return i;
+            }
+        }
+        return i;
+    }
+
+    /**
+     * {@code raw} with {@code escape} followed by four hex digits, or by {@code +} and six, read as
+     * that code point, and a doubled {@code escape} as itself. A malformed escape, which PostgreSQL
+     * refuses with the statement, is kept as written.
+     */
+    static String unicodeUnescaped(String raw, char escape) {
+        StringBuilder value = new StringBuilder(raw.length());
+        int i = 0;
+        while (i < raw.length()) {
+            char c = raw.charAt(i);
+            if (c != escape) {
+                value.append(c);
+                i++;
+            } else if (i + 1 < raw.length() && raw.charAt(i + 1) == escape) {
+                value.append(escape);
+                i += 2;
+            } else if (i + 1 < raw.length() && raw.charAt(i + 1) == '+' && hexCodePoint(raw, i + 2, 6) >= 0) {
+                value.appendCodePoint(hexCodePoint(raw, i + 2, 6));
+                i += 8;
+            } else if (hexCodePoint(raw, i + 1, 4) >= 0) {
+                // A surrogate pair is two escapes, each appended as the UTF-16 unit it is.
+                value.append((char) hexCodePoint(raw, i + 1, 4));
+                i += 5;
+            } else {
+                value.append(c);
+                i++;
+            }
+        }
+        return value.toString();
+    }
+
+    /** The code point written as {@code digits} hex digits at {@code from}, or -1 if they are not that. */
+    private static int hexCodePoint(String raw, int from, int digits) {
+        if (from + digits > raw.length()) {
+            return -1;
+        }
+        int codePoint = 0;
+        for (int i = from; i < from + digits; i++) {
+            char d = raw.charAt(i);
+            int digit = d < 128 ? Character.digit(d, 16) : -1;
+            if (digit < 0) {
+                return -1;
+            }
+            codePoint = codePoint * 16 + digit;
+        }
+        return Character.isValidCodePoint(codePoint) ? codePoint : -1;
     }
 
     private static int dollarTagEnd(String sql, int at) {
