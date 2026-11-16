@@ -5561,7 +5561,8 @@ public class Ec2QueryHandler {
         Integer ipv6AddressCount = parseOptionalInt(p.getFirst("Ipv6AddressCount"), "Ipv6AddressCount");
 
         NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
-                privateIpAddress, privateIpAddresses, ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList);
+                privateIpAddress, privateIpAddresses, ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList,
+                intParam(p, "SecondaryPrivateIpAddressCount"));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateNetworkInterfaceResponse", AwsNamespaces.EC2)

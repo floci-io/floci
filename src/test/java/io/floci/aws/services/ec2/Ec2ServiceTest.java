@@ -5304,6 +5304,43 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void deletingAnInterfaceReleasesAllAutomaticallyAllocatedAddresses() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24",
+                "10.50.1.10", "10.50.1.11", "10.50.1.12");
+        NetworkInterface eni = fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), null,
+                null, List.of(), List.of(), List.of(), 2);
+
+        fixture.service().deleteNetworkInterface("us-east-1", eni.getNetworkInterfaceId());
+
+        assertEquals(List.of("10.50.1.10", "10.50.1.11", "10.50.1.12"), fixture.released());
+    }
+
+    @Test
+    void failedSecondaryAllocationReleasesEveryLeaseButNotAnExplicitPrimary() {
+        for (String primary : List.of("", "10.50.1.4")) {
+            MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/28", "10.50.1.10", "10.50.1.11");
+            AwsException error = assertThrows(AwsException.class, () -> fixture.service().createNetworkInterface(
+                    "us-east-1", fixture.subnetId(), null, primary, List.of(), List.of(), List.of(), 11));
+
+            assertEquals("InsufficientFreeAddressesInSubnet", error.getErrorCode());
+            assertTrue(fixture.released().containsAll(List.of("10.50.1.10", "10.50.1.11")));
+            assertFalse(fixture.released().contains(primary));
+        }
+    }
+
+    @Test
+    void invalidSecondaryCountRequestsNeverAllocateAnAddress() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10");
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), null,
+                        null, List.of(), List.of(), List.of(), -1)).getErrorCode());
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                () -> fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), null,
+                        null, List.of("10.50.1.20"), List.of(), List.of(), 2)).getErrorCode());
+        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString());
+    }
+
+    @Test
     void anInterfaceRefusedForAHeldSecondaryLeasesNoPrimaryOnTheVpcNetwork() {
         MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10");
         fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), "holder", "10.50.1.70",
