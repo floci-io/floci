@@ -703,8 +703,8 @@ public class EcrService implements ResourceProvider, Resettable {
         String metaPrefix = key + "::";
         synchronized (imageMetaStore) {
             pendingImagePushes.keySet().removeIf(k -> k.startsWith(metaPrefix));
-            for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
-                imageMetaStore.delete(metaPrefix + meta.getDigest());
+            for (ImageMetadata meta : storedImageRecords(account, metaPrefix)) {
+                removeImagePush(account, region, repositoryName, meta.getDigest());
             }
         }
         if (!hasRepositories()) {
@@ -1941,17 +1941,46 @@ public class EcrService implements ResourceProvider, Resettable {
     /**
      * Whether the registry still holds a manifest of the repository, for a repository with no tags.
      * The registry cannot list manifests, so candidates come from the push record every manifest
-     * write leaves in {@code imageMetaStore}; one counts only while the registry has its manifest.
+     * write leaves in {@code imageMetaStore}, plus a push whose record could not be written yet
+     * ({@code pendingImagePushes}); one counts only while the registry has its manifest.
      */
     private boolean holdsImage(String account, String region, String repositoryName, String internal)
             throws IOException, InterruptedException {
         String metaPrefix = key(region, account, repositoryName) + "::";
-        for (ImageMetadata meta : imageMetaStore.scan(k -> k.startsWith(metaPrefix))) {
-            if (registryManager.httpClient().headManifestDigestStrict(internal, meta.getDigest(), null) != null) {
+        Set<String> digests = new LinkedHashSet<>();
+        synchronized (imageMetaStore) {
+            storedImageRecords(account, metaPrefix).forEach(meta -> digests.add(meta.getDigest()));
+            pendingImagePushes.forEach((k, meta) -> {
+                if (k.startsWith(metaPrefix)) {
+                    digests.add(meta.getDigest());
+                }
+            });
+        }
+        for (String digest : digests) {
+            if (registryManager.httpClient().headManifestDigestStrict(internal, digest, null) != null) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * The push records of one repository in {@code account}. A record written before the store was
+     * account-aware sits under its bare key; its key names the account, so it is moved to the
+     * account's partition here, as {@link #recordImagePush} and {@link #removeImagePush} do for one digest.
+     */
+    private List<ImageMetadata> storedImageRecords(String account, String metaPrefix) {
+        synchronized (imageMetaStore) {
+            if (imageMetaStore instanceof AccountAwareStorageBackend<ImageMetadata> aware) {
+                for (ImageMetadata legacy : aware.scanRaw(
+                        k -> !AccountAwareStorageBackend.hasAccountPrefix(k) && k.startsWith(metaPrefix))) {
+                    String digest = legacy.getDigest();
+                    aware.getForAccountMigratingLegacy(account, metaPrefix + digest, m -> digest.equals(m.getDigest()));
+                }
+                return aware.scanForAccount(account, k -> k.startsWith(metaPrefix));
+            }
+            return imageMetaStore.scan(k -> k.startsWith(metaPrefix));
+        }
     }
 
     /**
