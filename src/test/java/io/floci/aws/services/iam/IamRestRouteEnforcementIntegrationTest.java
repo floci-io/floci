@@ -1,6 +1,7 @@
 package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.OrganizationsRequests;
@@ -15,8 +16,6 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eks.EksClient;
 import software.amazon.awssdk.services.eks.model.EksException;
@@ -260,9 +259,8 @@ class IamRestRouteEnforcementIntegrationTest {
         EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
                 cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
         policy(user, allow("eks:DescribeAddon", arn) + "," + allow("eks:DeleteAddon", arn));
-        try (EksClient client = EksClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
-                        credentials.accessKeyId(), credentials.secretAccessKey()))).build()) {
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
             assertEquals(arn, client.describeAddon(r -> r.clusterName(name).addonName("vpc-cni")).addon().addonArn());
             client.deleteAddon(r -> r.clusterName(name).addonName("vpc-cni"));
             assertThrows(ResourceNotFoundException.class,
@@ -288,9 +286,8 @@ class IamRestRouteEnforcementIntegrationTest {
         EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
                 cleanup, baseUri.getPort(), auth(ADMIN, "iam"), user);
         policy(user, allow("eks:DescribeFargateProfile", arn) + "," + allow("eks:DeleteFargateProfile", arn));
-        try (EksClient client = EksClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(
-                        credentials.accessKeyId(), credentials.secretAccessKey()))).build()) {
+        try (EksClient client = AwsTestClients.create(EksClient.builder(), credentials.accessKeyId(),
+                credentials.secretAccessKey(), Region.US_EAST_1, baseUri)) {
             assertEquals(arn, client.describeFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"))
                     .fargateProfile().fargateProfileArn());
             client.deleteFargateProfile(r -> r.clusterName(name).fargateProfileName("fp"));
