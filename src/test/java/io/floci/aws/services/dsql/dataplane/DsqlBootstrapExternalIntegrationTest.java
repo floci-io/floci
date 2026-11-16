@@ -50,6 +50,10 @@ class DsqlBootstrapExternalIntegrationTest {
     private static final String OWNER = "dsqlowner_abc";
     private static final String ADMIN = "dabc_admin";
     private static final String PREFIX = "dabc_";
+    private static final String OTHER_DATABASE = "dsql_xyz";
+    private static final String OTHER_OWNER = "dsqlowner_xyz";
+    private static final String OTHER_ADMIN = "dxyz_admin";
+    private static final String OTHER_PREFIX = "dxyz_";
     private static final String ARN = "arn:aws:iam::123456789012:role/app";
 
     private DockerClient dockerClient;
@@ -84,16 +88,24 @@ class DsqlBootstrapExternalIntegrationTest {
         port = Integer.parseInt(inspected.getNetworkSettings().getPorts().getBindings().get(exposed)[0].getHostPortSpec());
         awaitReady();
 
-        try (Connection connection = connect("postgres", "postgres"); Statement statement = connection.createStatement()) {
-            statement.execute("CREATE ROLE " + OWNER + " NOLOGIN");
-            statement.execute("CREATE DATABASE " + DATABASE + " OWNER " + OWNER);
-            statement.execute("REVOKE CONNECT ON DATABASE " + DATABASE + " FROM PUBLIC");
-        }
+        createClusterDatabase(DATABASE, OWNER);
+        createClusterDatabase(OTHER_DATABASE, OTHER_OWNER);
         String script = DsqlBootstrap.render(DATABASE, OWNER, ADMIN, PREFIX, true);
         for (int run = 0; run < 2; run++) {
             try (Connection connection = connect(DATABASE, "postgres"); Statement statement = connection.createStatement()) {
                 statement.execute(script);
             }
+        }
+        try (Connection connection = connect(OTHER_DATABASE, "postgres"); Statement statement = connection.createStatement()) {
+            statement.execute(DsqlBootstrap.render(OTHER_DATABASE, OTHER_OWNER, OTHER_ADMIN, OTHER_PREFIX, true));
+        }
+    }
+
+    private void createClusterDatabase(String database, String owner) throws SQLException {
+        try (Connection connection = connect("postgres", "postgres"); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE ROLE " + owner + " NOLOGIN");
+            statement.execute("CREATE DATABASE " + database + " OWNER " + owner);
+            statement.execute("REVOKE CONNECT ON DATABASE " + database + " FROM PUBLIC");
         }
     }
 
@@ -129,7 +141,7 @@ class DsqlBootstrapExternalIntegrationTest {
         assertTrue(hasConnect(PREFIX + "c"), "a recorded role may connect to its cluster's database");
 
         List<String> visible = query(ADMIN, "SELECT rolname FROM sys.roles ORDER BY rolname");
-        assertEquals(List.of("admin", "b", "c", OWNER), visible);
+        assertEquals(List.of("admin", "b", "c"), visible, "sys.roles lists the cluster's roles, not its owner");
 
         try (Connection b = connect(DATABASE, PREFIX + "b"); Statement statement = b.createStatement()) {
             statement.execute("CALL sys.drop_roles(ARRAY['" + PREFIX + "c']::text[], false)");
@@ -165,9 +177,41 @@ class DsqlBootstrapExternalIntegrationTest {
         }
     }
 
+    @Test
+    void aRoleGrantedToAnotherClustersAdminStaysItsOwnClusters() throws SQLException {
+        try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+            statement.execute("CALL sys.run_role_ddl($$CREATE ROLE " + PREFIX + "x$$)");
+            statement.execute("CALL sys.run_role_ddl($$GRANT " + PREFIX + "x TO " + OTHER_ADMIN + " WITH ADMIN OPTION$$)");
+        }
+        try (Connection superuser = connect(OTHER_DATABASE, "postgres"); Statement statement = superuser.createStatement()) {
+            statement.execute("CALL sys._record_backend_roles()");
+            assertFalse(backendRoles(OTHER_DATABASE).containsValue(PREFIX + "x"),
+                    "another cluster's role is not recorded through its admin's ADMIN option");
+            assertEquals(List.of("admin"), query(OTHER_DATABASE, OTHER_ADMIN, "SELECT rolname FROM sys.roles"));
+
+            // A role recorded before the prefix was required is forgotten, and loses its CONNECT.
+            statement.execute("INSERT INTO sys.backend_roles SELECT oid, rolname, rolname FROM pg_roles WHERE rolname = '"
+                    + PREFIX + "x'");
+            statement.execute("GRANT CONNECT ON DATABASE " + OTHER_DATABASE + " TO " + PREFIX + "x");
+            statement.execute("CALL sys._record_backend_roles()");
+            assertFalse(backendRoles(OTHER_DATABASE).containsValue(PREFIX + "x"));
+            assertEquals(List.of("false"), query(OTHER_DATABASE, "postgres",
+                    "SELECT has_database_privilege('" + PREFIX + "x', '" + OTHER_DATABASE + "', 'CONNECT')::text"));
+        }
+        assertEquals(PREFIX + "x", backendRoles().get("x"), "the role stays recorded by its own cluster");
+        assertEquals(OTHER_OWNER, backendRoles(OTHER_DATABASE).get(OTHER_OWNER), "the owner stays recorded");
+        try (Connection admin = connect(DATABASE, ADMIN); Statement statement = admin.createStatement()) {
+            statement.execute("CALL sys.drop_roles(ARRAY['" + PREFIX + "x']::text[], false)");
+        }
+    }
+
     private Map<String, String> backendRoles() throws SQLException {
+        return backendRoles(DATABASE);
+    }
+
+    private Map<String, String> backendRoles(String database) throws SQLException {
         Map<String, String> roles = new TreeMap<>();
-        try (Connection connection = connect(DATABASE, "postgres"); Statement statement = connection.createStatement();
+        try (Connection connection = connect(database, "postgres"); Statement statement = connection.createStatement();
              ResultSet rows = statement.executeQuery("SELECT logical_name, backend_name FROM sys.backend_roles")) {
             while (rows.next()) {
                 roles.put(rows.getString(1), rows.getString(2));
@@ -182,8 +226,12 @@ class DsqlBootstrapExternalIntegrationTest {
     }
 
     private List<String> query(String user, String sql) throws SQLException {
+        return query(DATABASE, user, sql);
+    }
+
+    private List<String> query(String database, String user, String sql) throws SQLException {
         List<String> values = new ArrayList<>();
-        try (Connection connection = connect(DATABASE, user); Statement statement = connection.createStatement();
+        try (Connection connection = connect(database, user); Statement statement = connection.createStatement();
              ResultSet rows = statement.executeQuery(sql)) {
             while (rows.next()) {
                 values.add(rows.getString(1));

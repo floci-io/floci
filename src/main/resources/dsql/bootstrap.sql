@@ -109,8 +109,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 -- The backend roles this cluster owns: its admin, its owner unless that is a superuser, and every role
 -- a recorded role holds the ADMIN option on, which PostgreSQL gives a role's creator. On a server
 -- Floci shares between clusters ({{external}} is true) each backend name is the client's name after
--- the prefix {{role_prefix}}; in a cluster's own container the prefix is empty. Deleting the cluster
--- drops what is recorded here.
+-- the prefix {{role_prefix}}, and only a role with that prefix is recorded through the ADMIN option;
+-- in a cluster's own container the prefix is empty. Deleting the cluster drops what is recorded here.
 CREATE TABLE IF NOT EXISTS sys.backend_roles (
     role_oid oid PRIMARY KEY,
     backend_name name NOT NULL,
@@ -139,34 +139,46 @@ LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = pg_catalog, pg_tem
                     sys._strip_role_prefix(role_name))
 $$;
 
--- Brings sys.backend_roles up to date: forgets dropped roles, follows renamed ones, and records the
--- admin, the owner and every role reached from them through the ADMIN option. On a shared server each
--- newly recorded role may connect to the cluster's database, which PUBLIC may not.
+-- Brings sys.backend_roles up to date. The cluster's roles are its admin, its owner unless that is a
+-- superuser, and every role reached from the admin or a role already recorded through the ADMIN option
+-- that, on a shared server, also carries the cluster's prefix: a role another cluster's admin was
+-- granted WITH ADMIN OPTION stays that cluster's. A recorded role that is no longer one of them, or no
+-- longer exists, is forgotten; a renamed one is followed. On a shared server each role recorded may
+-- connect to the cluster's database, which PUBLIC may not, and a role forgotten no longer may.
 CREATE OR REPLACE PROCEDURE sys._record_backend_roles()
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
-    added record;
+    cluster_roles oid[];
+    entry record;
 BEGIN
-    DELETE FROM sys.backend_roles b WHERE NOT EXISTS (SELECT 1 FROM pg_authid a WHERE a.oid = b.role_oid);
+    WITH RECURSIVE owned (oid) AS (
+        SELECT a.oid FROM pg_authid a WHERE a.rolname = {{admin_literal}}
+        UNION
+        SELECT a.oid FROM sys.backend_roles b JOIN pg_authid a ON a.oid = b.role_oid
+        WHERE a.rolname <> {{owner_literal}} AND (NOT {{external}} OR starts_with(a.rolname, {{role_prefix}}))
+        UNION
+        SELECT m.roleid FROM pg_auth_members m JOIN owned o ON m.member = o.oid JOIN pg_authid r ON r.oid = m.roleid
+        WHERE m.admin_option AND (NOT {{external}} OR starts_with(r.rolname, {{role_prefix}}))
+    )
+    SELECT coalesce(array_agg(a.oid), '{}') INTO cluster_roles FROM pg_authid a
+    WHERE (a.oid IN (SELECT oid FROM owned) OR a.rolname = {{owner_literal}}) AND NOT a.rolsuper;
+
+    FOR entry IN SELECT b.role_oid, a.rolname FROM sys.backend_roles b LEFT JOIN pg_authid a ON a.oid = b.role_oid
+                 WHERE NOT (b.role_oid = ANY (cluster_roles)) LOOP
+        DELETE FROM sys.backend_roles WHERE role_oid = entry.role_oid;
+        IF {{external}} AND entry.rolname IS NOT NULL THEN
+            EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM %I', current_database(), entry.rolname);
+        END IF;
+    END LOOP;
     UPDATE sys.backend_roles b SET backend_name = a.rolname, logical_name = sys._strip_role_prefix(a.rolname)
     FROM pg_authid a WHERE a.oid = b.role_oid AND a.rolname <> b.backend_name;
-    FOR added IN
-        WITH RECURSIVE owned (oid) AS (
-            SELECT a.oid FROM pg_authid a WHERE a.rolname = {{admin_literal}}
-            UNION
-            SELECT b.role_oid FROM sys.backend_roles b WHERE b.backend_name <> {{owner_literal}}
-            UNION
-            SELECT m.roleid FROM pg_auth_members m JOIN owned o ON m.member = o.oid WHERE m.admin_option
-        )
-        SELECT a.oid, a.rolname FROM pg_authid a
-        WHERE (a.oid IN (SELECT oid FROM owned) OR a.rolname = {{owner_literal}})
-          AND NOT a.rolsuper
-          AND NOT EXISTS (SELECT 1 FROM sys.backend_roles b WHERE b.role_oid = a.oid)
-        ORDER BY a.oid
-    LOOP
-        INSERT INTO sys.backend_roles VALUES (added.oid, added.rolname, sys._strip_role_prefix(added.rolname));
+    FOR entry IN SELECT a.oid, a.rolname FROM pg_authid a
+                 WHERE a.oid = ANY (cluster_roles)
+                   AND NOT EXISTS (SELECT 1 FROM sys.backend_roles b WHERE b.role_oid = a.oid)
+                 ORDER BY a.oid LOOP
+        INSERT INTO sys.backend_roles VALUES (entry.oid, entry.rolname, sys._strip_role_prefix(entry.rolname));
         IF {{external}} THEN
-            EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), added.rolname);
+            EXECUTE format('GRANT CONNECT ON DATABASE %I TO %I', current_database(), entry.rolname);
         END IF;
     END LOOP;
 END
@@ -190,6 +202,8 @@ BEGIN
 END
 $$;
 
+-- On a shared server, only the cluster's roles, by the names its clients know, and not its owner,
+-- which is Floci's own.
 CREATE OR REPLACE VIEW sys.roles AS
 SELECT sys._logical_role(rolname)::name AS rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
        rolcanlogin, rolreplication, rolconnlimit, '********'::text AS rolpassword, rolvaliduntil, rolbypassrls,
@@ -197,7 +211,8 @@ SELECT sys._logical_role(rolname)::name AS rolname, rolsuper, rolinherit, rolcre
 FROM pg_authid
 LEFT JOIN pg_db_role_setting s ON pg_authid.oid = s.setrole AND s.setdatabase = 0::oid
 WHERE pg_authid.rolname !~~ 'pg_%'
-  AND (NOT {{external}} OR pg_authid.oid IN (SELECT role_oid FROM sys.backend_roles));
+  AND (NOT {{external}} OR (pg_authid.oid IN (SELECT role_oid FROM sys.backend_roles)
+                            AND pg_authid.rolname <> {{owner_literal}}));
 GRANT SELECT ON sys.roles TO PUBLIC;
 
 -- ── A transaction's limits: one DDL statement, no DDL with DML, 3,000 rows ────
